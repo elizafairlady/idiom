@@ -1,4 +1,4 @@
-#include "ish/ports.h"
+#include "idiom/ports.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -43,21 +43,21 @@ static bool stage_own_temp(Stage *stage, const char *path) {
         stage->owned_temps = grown;
         stage->owned_temp_cap = cap;
     }
-    stage->owned_temps[stage->owned_temp_count] = ish_strdup(path);
+    stage->owned_temps[stage->owned_temp_count] = idm_strdup(path);
     if (!stage->owned_temps[stage->owned_temp_count]) return false;
     stage->owned_temp_count++;
     return true;
 }
 
-struct IshPort {
+struct IdmPort {
     Stage *stages;
     size_t stage_count;
     bool capture;
     bool pipefail;
     int out_fd;
     int err_fd;
-    IshBuffer out_buf;
-    IshBuffer err_buf;
+    IdmBuffer out_buf;
+    IdmBuffer err_buf;
     bool launched;
     char *launch_error;
     size_t capture_limit;
@@ -65,7 +65,7 @@ struct IshPort {
 };
 
 static size_t capture_limit_from_env(void) {
-    const char *text = getenv("ISH_CAPTURE_LIMIT");
+    const char *text = getenv("IDM_CAPTURE_LIMIT");
     if (text && *text) {
         char *end = NULL;
         unsigned long long value = strtoull(text, &end, 10);
@@ -74,38 +74,38 @@ static size_t capture_limit_from_env(void) {
     return 64u * 1024u * 1024u;
 }
 
-static bool value_is_atom(IshValue v, const char *name) {
-    return v.tag == ISH_VAL_ATOM && strcmp(ish_symbol_text(v.as.symbol), name) == 0;
+static bool value_is_atom(IdmValue v, const char *name) {
+    return v.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(v.as.symbol), name) == 0;
 }
 
-static bool list_to_array(IshValue list, IshValue **out_items, size_t *out_count) {
+static bool list_to_array(IdmValue list, IdmValue **out_items, size_t *out_count) {
     size_t count = 0;
-    IshValue cur = list;
-    while (ish_is_pair(cur)) {
+    IdmValue cur = list;
+    while (idm_is_pair(cur)) {
         count++;
-        IshError ignore;
-        ish_error_init(&ignore);
-        cur = ish_cdr(cur, &ignore);
-        ish_error_clear(&ignore);
+        IdmError ignore;
+        idm_error_init(&ignore);
+        cur = idm_cdr(cur, &ignore);
+        idm_error_clear(&ignore);
     }
-    IshValue *items = count == 0 ? NULL : calloc(count, sizeof(*items));
+    IdmValue *items = count == 0 ? NULL : calloc(count, sizeof(*items));
     if (count != 0 && !items) return false;
     cur = list;
     for (size_t i = 0; i < count; i++) {
-        IshError ignore;
-        ish_error_init(&ignore);
-        items[i] = ish_car(cur, &ignore);
-        cur = ish_cdr(cur, &ignore);
-        ish_error_clear(&ignore);
+        IdmError ignore;
+        idm_error_init(&ignore);
+        items[i] = idm_car(cur, &ignore);
+        cur = idm_cdr(cur, &ignore);
+        idm_error_clear(&ignore);
     }
     *out_items = items;
     *out_count = count;
     return true;
 }
 
-static char *dup_string_value(IshValue v) {
-    if (v.tag != ISH_VAL_STRING) return ish_strdup("");
-    return ish_strndup(ish_string_bytes(v), ish_string_length(v));
+static char *dup_string_value(IdmValue v) {
+    if (v.tag != IDM_VAL_STRING) return idm_strdup("");
+    return idm_strndup(idm_string_bytes(v), idm_string_length(v));
 }
 
 static bool argv_push(char ***argv, size_t *count, size_t *cap, char *item) {
@@ -120,13 +120,13 @@ static bool argv_push(char ***argv, size_t *count, size_t *cap, char *item) {
     return true;
 }
 
-static bool resolve_argv_part(IshValue part, const IshExec *exec_ctx, Stage *stage, char ***argv, size_t *count, size_t *cap) {
-    if (!ish_is_tuple(part) || ish_sequence_count(part) < 2) return false;
-    IshError ignore;
-    ish_error_init(&ignore);
-    IshValue tag = ish_sequence_item(part, 0, &ignore);
-    IshValue payload = ish_sequence_item(part, 1, &ignore);
-    ish_error_clear(&ignore);
+static bool resolve_argv_part(IdmValue part, const IdmExec *exec_ctx, Stage *stage, char ***argv, size_t *count, size_t *cap) {
+    if (!idm_is_tuple(part) || idm_sequence_count(part) < 2) return false;
+    IdmError ignore;
+    idm_error_init(&ignore);
+    IdmValue tag = idm_sequence_item(part, 0, &ignore);
+    IdmValue payload = idm_sequence_item(part, 1, &ignore);
+    idm_error_clear(&ignore);
     if (value_is_atom(tag, "lit")) {
         return argv_push(argv, count, cap, dup_string_value(payload));
     }
@@ -137,10 +137,10 @@ static bool resolve_argv_part(IshValue part, const IshExec *exec_ctx, Stage *sta
         return argv_push(argv, count, cap, path);
     }
     if (value_is_atom(tag, "env")) {
-        const char *name = payload.tag == ISH_VAL_STRING ? ish_string_bytes(payload) : "";
-        const char *value = ish_exec_env_get(exec_ctx, name);
+        const char *name = payload.tag == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
+        const char *value = idm_exec_env_get(exec_ctx, name);
         if (!value) value = getenv(name);
-        return argv_push(argv, count, cap, ish_strdup(value ? value : ""));
+        return argv_push(argv, count, cap, idm_strdup(value ? value : ""));
     }
     if (value_is_atom(tag, "glob")) {
         char *pattern = dup_string_value(payload);
@@ -150,7 +150,7 @@ static bool resolve_argv_part(IshValue part, const IshExec *exec_ctx, Stage *sta
         int rc = glob(pattern, 0, NULL, &g);
         if (rc == 0 && g.gl_pathc > 0) {
             bool ok = true;
-            for (size_t i = 0; i < g.gl_pathc && ok; i++) ok = argv_push(argv, count, cap, ish_strdup(g.gl_pathv[i]));
+            for (size_t i = 0; i < g.gl_pathc && ok; i++) ok = argv_push(argv, count, cap, idm_strdup(g.gl_pathv[i]));
             globfree(&g);
             free(pattern);
             return ok;
@@ -162,20 +162,20 @@ static bool resolve_argv_part(IshValue part, const IshExec *exec_ctx, Stage *sta
     return false;
 }
 
-static bool parse_stage(IshValue stage_value, const IshExec *exec_ctx, Stage *stage) {
+static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *stage) {
     memset(stage, 0, sizeof(*stage));
     stage->pid = -1;
-    if (!ish_is_tuple(stage_value) || ish_sequence_count(stage_value) < 4) return false;
-    IshError ignore;
-    ish_error_init(&ignore);
-    IshValue tag = ish_sequence_item(stage_value, 0, &ignore);
-    IshValue argv_list = ish_sequence_item(stage_value, 1, &ignore);
-    IshValue redir_list = ish_sequence_item(stage_value, 2, &ignore);
-    IshValue env_list = ish_sequence_item(stage_value, 3, &ignore);
-    ish_error_clear(&ignore);
+    if (!idm_is_tuple(stage_value) || idm_sequence_count(stage_value) < 4) return false;
+    IdmError ignore;
+    idm_error_init(&ignore);
+    IdmValue tag = idm_sequence_item(stage_value, 0, &ignore);
+    IdmValue argv_list = idm_sequence_item(stage_value, 1, &ignore);
+    IdmValue redir_list = idm_sequence_item(stage_value, 2, &ignore);
+    IdmValue env_list = idm_sequence_item(stage_value, 3, &ignore);
+    idm_error_clear(&ignore);
     if (!value_is_atom(tag, "stage")) return false;
 
-    IshValue *parts = NULL;
+    IdmValue *parts = NULL;
     size_t part_count = 0;
     if (!list_to_array(argv_list, &parts, &part_count)) return false;
     size_t cap = 0;
@@ -186,7 +186,7 @@ static bool parse_stage(IshValue stage_value, const IshExec *exec_ctx, Stage *st
     if (!argv_push(&stage->argv, &stage->argc, &cap, NULL)) return false;
     stage->argc--;
 
-    IshValue *redirs = NULL;
+    IdmValue *redirs = NULL;
     size_t redir_count = 0;
     if (!list_to_array(redir_list, &redirs, &redir_count)) return false;
     if (redir_count > 0) {
@@ -194,18 +194,18 @@ static bool parse_stage(IshValue stage_value, const IshExec *exec_ctx, Stage *st
         if (!stage->redirs) { free(redirs); return false; }
     }
     for (size_t i = 0; i < redir_count; i++) {
-        IshValue r = redirs[i];
-        if (!ish_is_tuple(r) || ish_sequence_count(r) < 3) { free(redirs); return false; }
-        IshValue rtag = ish_sequence_item(r, 0, &ignore);
+        IdmValue r = redirs[i];
+        if (!idm_is_tuple(r) || idm_sequence_count(r) < 3) { free(redirs); return false; }
+        IdmValue rtag = idm_sequence_item(r, 0, &ignore);
         Redir *out = &stage->redirs[stage->redir_count];
         if (value_is_atom(rtag, "redir")) {
-            if (ish_sequence_count(r) < 4) { free(redirs); return false; }
-            IshValue op = ish_sequence_item(r, 1, &ignore);
-            IshValue fd = ish_sequence_item(r, 2, &ignore);
-            IshValue target = ish_sequence_item(r, 3, &ignore);
+            if (idm_sequence_count(r) < 4) { free(redirs); return false; }
+            IdmValue op = idm_sequence_item(r, 1, &ignore);
+            IdmValue fd = idm_sequence_item(r, 2, &ignore);
+            IdmValue target = idm_sequence_item(r, 3, &ignore);
             out->kind = REDIR_FILE;
-            out->fd = fd.tag == ISH_VAL_INT ? (int)fd.as.i : 1;
-            const char *ops = op.tag == ISH_VAL_ATOM ? ish_symbol_text(op.as.symbol) : ">";
+            out->fd = fd.tag == IDM_VAL_INT ? (int)fd.as.i : 1;
+            const char *ops = op.tag == IDM_VAL_ATOM ? idm_symbol_text(op.as.symbol) : ">";
             out->op = strcmp(ops, "<") == 0 ? '<'
                     : strcmp(ops, ">>") == 0 ? 'a'
                     : strcmp(ops, "&>") == 0 ? 'b'
@@ -219,11 +219,11 @@ static bool parse_stage(IshValue stage_value, const IshExec *exec_ctx, Stage *st
             for (size_t j = 1; j < tac; j++) free(tav[j]);
             free(tav);
         } else if (value_is_atom(rtag, "dup")) {
-            IshValue a = ish_sequence_item(r, 1, &ignore);
-            IshValue b = ish_sequence_item(r, 2, &ignore);
+            IdmValue a = idm_sequence_item(r, 1, &ignore);
+            IdmValue b = idm_sequence_item(r, 2, &ignore);
             out->kind = REDIR_DUP;
-            out->fd = a.tag == ISH_VAL_INT ? (int)a.as.i : 2;
-            out->dup_to = b.tag == ISH_VAL_INT ? (int)b.as.i : 1;
+            out->fd = a.tag == IDM_VAL_INT ? (int)a.as.i : 2;
+            out->dup_to = b.tag == IDM_VAL_INT ? (int)b.as.i : 1;
         } else {
             free(redirs);
             return false;
@@ -232,7 +232,7 @@ static bool parse_stage(IshValue stage_value, const IshExec *exec_ctx, Stage *st
     }
     free(redirs);
 
-    IshValue *envs = NULL;
+    IdmValue *envs = NULL;
     size_t env_count = 0;
     if (!list_to_array(env_list, &envs, &env_count)) return false;
     if (env_count > 0) {
@@ -241,10 +241,10 @@ static bool parse_stage(IshValue stage_value, const IshExec *exec_ctx, Stage *st
         if (!stage->env_names || !stage->env_values) { free(envs); return false; }
     }
     for (size_t i = 0; i < env_count; i++) {
-        IshValue pair = envs[i];
-        if (!ish_is_tuple(pair) || ish_sequence_count(pair) < 2) { free(envs); return false; }
-        IshValue name = ish_sequence_item(pair, 0, &ignore);
-        IshValue valpart = ish_sequence_item(pair, 1, &ignore);
+        IdmValue pair = envs[i];
+        if (!idm_is_tuple(pair) || idm_sequence_count(pair) < 2) { free(envs); return false; }
+        IdmValue name = idm_sequence_item(pair, 0, &ignore);
+        IdmValue valpart = idm_sequence_item(pair, 1, &ignore);
         char **vav = NULL;
         size_t vac = 0, vcap = 0;
         if (!resolve_argv_part(valpart, exec_ctx, stage, &vav, &vac, &vcap) || vac < 1) { free(vav); free(envs); return false; }
@@ -276,14 +276,14 @@ static void stage_destroy(Stage *stage) {
     free(stage->env_values);
 }
 
-void ish_port_free(IshPort *port) {
+void idm_port_free(IdmPort *port) {
     if (!port) return;
     for (size_t i = 0; i < port->stage_count; i++) stage_destroy(&port->stages[i]);
     free(port->stages);
     if (port->out_fd >= 0) close(port->out_fd);
     if (port->err_fd >= 0) close(port->err_fd);
-    ish_buf_destroy(&port->out_buf);
-    ish_buf_destroy(&port->err_buf);
+    idm_buf_destroy(&port->out_buf);
+    idm_buf_destroy(&port->err_buf);
     free(port->launch_error);
     free(port);
 }
@@ -309,7 +309,7 @@ static void child_apply_redirs(const Stage *stage) {
             continue;
         }
         if (r->op == 'h') {
-            char tmpl[] = "/tmp/ish_heredoc_XXXXXX";
+            char tmpl[] = "/tmp/idm_heredoc_XXXXXX";
             int hf = mkstemp(tmpl);
             if (hf < 0) _exit(126);
             unlink(tmpl);
@@ -333,66 +333,66 @@ static void child_apply_redirs(const Stage *stage) {
     }
 }
 
-IshPort *ish_port_launch(IshRuntime *rt, IshValue graph, const IshExec *exec_ctx, IshError *err) {
+IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx, IdmError *err) {
     (void)rt;
     char saved_cwd[4096];
     bool restore_cwd = false;
-    const char *launch_cwd = ish_exec_cwd(exec_ctx);
+    const char *launch_cwd = idm_exec_cwd(exec_ctx);
     if (launch_cwd) {
         if (!getcwd(saved_cwd, sizeof(saved_cwd)) || chdir(launch_cwd) != 0) {
-            ish_error_set(err, ish_span_unknown(NULL), "cwd '%s' is not accessible: %s", launch_cwd, strerror(errno));
+            idm_error_set(err, idm_span_unknown(NULL), "cwd '%s' is not accessible: %s", launch_cwd, strerror(errno));
             return NULL;
         }
         restore_cwd = true;
     }
-    IshPort *port = calloc(1u, sizeof(*port));
-    if (!port) { ish_error_oom(err, ish_span_unknown(NULL)); return NULL; }
+    IdmPort *port = calloc(1u, sizeof(*port));
+    if (!port) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
     port->out_fd = -1;
     port->err_fd = -1;
     port->capture_limit = capture_limit_from_env();
-    ish_buf_init(&port->out_buf);
-    ish_buf_init(&port->err_buf);
+    idm_buf_init(&port->out_buf);
+    idm_buf_init(&port->err_buf);
 
-    if (!ish_is_tuple(graph) || ish_sequence_count(graph) < 3) { ish_error_set(err, ish_span_unknown(NULL), "invalid command graph"); if (restore_cwd && chdir(saved_cwd) != 0) {} ish_port_free(port); return NULL; }
-    IshError ignore;
-    ish_error_init(&ignore);
-    IshValue tag = ish_sequence_item(graph, 0, &ignore);
+    if (!idm_is_tuple(graph) || idm_sequence_count(graph) < 3) { idm_error_set(err, idm_span_unknown(NULL), "invalid command graph"); if (restore_cwd && chdir(saved_cwd) != 0) {} idm_port_free(port); return NULL; }
+    IdmError ignore;
+    idm_error_init(&ignore);
+    IdmValue tag = idm_sequence_item(graph, 0, &ignore);
     if (value_is_atom(tag, "exec")) {
-        IshValue stage = ish_sequence_item(graph, 1, &ignore);
-        IshValue cap = ish_sequence_item(graph, 2, &ignore);
+        IdmValue stage = idm_sequence_item(graph, 1, &ignore);
+        IdmValue cap = idm_sequence_item(graph, 2, &ignore);
         port->capture = value_is_atom(cap, "true");
         port->stage_count = 1;
         port->stages = calloc(1u, sizeof(*port->stages));
-        if (!port->stages || !parse_stage(stage, exec_ctx, &port->stages[0])) { ish_error_clear(&ignore); ish_error_set(err, ish_span_unknown(NULL), "invalid command stage"); if (restore_cwd && chdir(saved_cwd) != 0) {} ish_port_free(port); return NULL; }
+        if (!port->stages || !parse_stage(stage, exec_ctx, &port->stages[0])) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid command stage"); if (restore_cwd && chdir(saved_cwd) != 0) {} idm_port_free(port); return NULL; }
     } else if (value_is_atom(tag, "pipeline")) {
-        IshValue list = ish_sequence_item(graph, 1, &ignore);
-        IshValue cap = ish_sequence_item(graph, 2, &ignore);
-        IshValue pf = ish_sequence_item(graph, 3, &ignore);
+        IdmValue list = idm_sequence_item(graph, 1, &ignore);
+        IdmValue cap = idm_sequence_item(graph, 2, &ignore);
+        IdmValue pf = idm_sequence_item(graph, 3, &ignore);
         port->capture = value_is_atom(cap, "true");
         port->pipefail = value_is_atom(pf, "true");
-        IshValue *sv = NULL;
+        IdmValue *sv = NULL;
         size_t sc = 0;
-        if (!list_to_array(list, &sv, &sc) || sc == 0) { ish_error_clear(&ignore); ish_error_set(err, ish_span_unknown(NULL), "empty pipeline"); ish_port_free(port); return NULL; }
+        if (!list_to_array(list, &sv, &sc) || sc == 0) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "empty pipeline"); idm_port_free(port); return NULL; }
         port->stages = calloc(sc, sizeof(*port->stages));
-        if (!port->stages) { free(sv); ish_error_clear(&ignore); ish_error_oom(err, ish_span_unknown(NULL)); ish_port_free(port); return NULL; }
+        if (!port->stages) { free(sv); idm_error_clear(&ignore); idm_error_oom(err, idm_span_unknown(NULL)); idm_port_free(port); return NULL; }
         port->stage_count = sc;
         for (size_t i = 0; i < sc; i++) {
-            if (!parse_stage(sv[i], exec_ctx, &port->stages[i])) { free(sv); ish_error_clear(&ignore); ish_error_set(err, ish_span_unknown(NULL), "invalid pipeline stage"); if (restore_cwd && chdir(saved_cwd) != 0) {} ish_port_free(port); return NULL; }
+            if (!parse_stage(sv[i], exec_ctx, &port->stages[i])) { free(sv); idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid pipeline stage"); if (restore_cwd && chdir(saved_cwd) != 0) {} idm_port_free(port); return NULL; }
         }
         free(sv);
     } else {
-        ish_error_clear(&ignore);
-        ish_error_set(err, ish_span_unknown(NULL), "unknown command graph kind");
+        idm_error_clear(&ignore);
+        idm_error_set(err, idm_span_unknown(NULL), "unknown command graph kind");
         if (restore_cwd && chdir(saved_cwd) != 0) {}
-        ish_port_free(port);
+        idm_port_free(port);
         return NULL;
     }
-    ish_error_clear(&ignore);
+    idm_error_clear(&ignore);
 
     int cap_out[2] = {-1, -1};
     int cap_err[2] = {-1, -1};
     if (port->capture) {
-        if (pipe(cap_out) < 0 || pipe(cap_err) < 0) { ish_error_set(err, ish_span_unknown(NULL), "pipe failed: %s", strerror(errno)); if (restore_cwd && chdir(saved_cwd) != 0) {} ish_port_free(port); return NULL; }
+        if (pipe(cap_out) < 0 || pipe(cap_err) < 0) { idm_error_set(err, idm_span_unknown(NULL), "pipe failed: %s", strerror(errno)); if (restore_cwd && chdir(saved_cwd) != 0) {} idm_port_free(port); return NULL; }
     }
 
     int prev_read = -1;
@@ -401,10 +401,10 @@ IshPort *ish_port_launch(IshRuntime *rt, IshValue graph, const IshExec *exec_ctx
         int stage_pipe[2] = {-1, -1};
         bool last = i + 1u == port->stage_count;
         if (!last) {
-            if (pipe(stage_pipe) < 0) { ish_error_set(err, ish_span_unknown(NULL), "pipe failed: %s", strerror(errno)); failed = true; break; }
+            if (pipe(stage_pipe) < 0) { idm_error_set(err, idm_span_unknown(NULL), "pipe failed: %s", strerror(errno)); failed = true; break; }
         }
         pid_t pid = fork();
-        if (pid < 0) { ish_error_set(err, ish_span_unknown(NULL), "fork failed: %s", strerror(errno)); if (stage_pipe[0] >= 0) { close(stage_pipe[0]); close(stage_pipe[1]); } failed = true; break; }
+        if (pid < 0) { idm_error_set(err, idm_span_unknown(NULL), "fork failed: %s", strerror(errno)); if (stage_pipe[0] >= 0) { close(stage_pipe[0]); close(stage_pipe[1]); } failed = true; break; }
         if (pid == 0) {
             if (prev_read >= 0) { dup2(prev_read, 0); }
             if (!last) { dup2(stage_pipe[1], 1); }
@@ -417,10 +417,10 @@ IshPort *ish_port_launch(IshRuntime *rt, IshValue graph, const IshExec *exec_ctx
             if (cap_err[0] >= 0) close(cap_err[0]);
             if (cap_err[1] >= 0) close(cap_err[1]);
             child_apply_redirs(&port->stages[i]);
-            for (size_t e = 0; e < ish_exec_env_count(exec_ctx); e++) {
+            for (size_t e = 0; e < idm_exec_env_count(exec_ctx); e++) {
                 const char *ename = NULL;
                 const char *evalue = NULL;
-                if (ish_exec_env_entry(exec_ctx, e, &ename, &evalue)) setenv(ename, evalue, 1);
+                if (idm_exec_env_entry(exec_ctx, e, &ename, &evalue)) setenv(ename, evalue, 1);
             }
             for (size_t e = 0; e < port->stages[i].env_count; e++) setenv(port->stages[i].env_names[e], port->stages[i].env_values[e], 1);
             execvp(port->stages[i].argv[0], port->stages[i].argv);
@@ -443,28 +443,28 @@ IshPort *ish_port_launch(IshRuntime *rt, IshValue graph, const IshExec *exec_ctx
         }
     }
     if (restore_cwd && chdir(saved_cwd) != 0) {
-        ish_error_set(err, ish_span_unknown(NULL), "failed to restore working directory: %s", strerror(errno));
+        idm_error_set(err, idm_span_unknown(NULL), "failed to restore working directory: %s", strerror(errno));
         failed = true;
     }
     if (failed) {
         for (size_t i = 0; i < port->stage_count; i++) {
             if (port->stages[i].pid > 0) { kill(port->stages[i].pid, SIGKILL); waitpid(port->stages[i].pid, NULL, 0); port->stages[i].reaped = true; }
         }
-        ish_port_free(port);
+        idm_port_free(port);
         return NULL;
     }
     port->launched = true;
     return port;
 }
 
-size_t ish_port_live_fds(const IshPort *port, int *out_fds, size_t max) {
+size_t idm_port_live_fds(const IdmPort *port, int *out_fds, size_t max) {
     size_t n = 0;
     if (port->out_fd >= 0 && n < max) out_fds[n++] = port->out_fd;
     if (port->err_fd >= 0 && n < max) out_fds[n++] = port->err_fd;
     return n;
 }
 
-static void drain_fd(IshPort *port, int *fd, IshBuffer *buf) {
+static void drain_fd(IdmPort *port, int *fd, IdmBuffer *buf) {
     if (*fd < 0) return;
     char tmp[4096];
     for (;;) {
@@ -472,7 +472,7 @@ static void drain_fd(IshPort *port, int *fd, IshBuffer *buf) {
         if (r > 0) {
             size_t room = buf->len < port->capture_limit ? port->capture_limit - buf->len : 0;
             size_t take = (size_t)r < room ? (size_t)r : room;
-            if (take > 0) ish_buf_append_n(buf, tmp, take);
+            if (take > 0) idm_buf_append_n(buf, tmp, take);
             if ((size_t)r > room) port->overflow = true;
             continue;
         }
@@ -482,13 +482,13 @@ static void drain_fd(IshPort *port, int *fd, IshBuffer *buf) {
     }
 }
 
-void ish_port_drain(IshPort *port) {
+void idm_port_drain(IdmPort *port) {
     drain_fd(port, &port->out_fd, &port->out_buf);
     drain_fd(port, &port->err_fd, &port->err_buf);
 }
 
-bool ish_port_try_complete(IshPort *port) {
-    ish_port_drain(port);
+bool idm_port_try_complete(IdmPort *port) {
+    idm_port_drain(port);
     bool all_reaped = true;
     for (size_t i = 0; i < port->stage_count; i++) {
         if (port->stages[i].reaped) continue;
@@ -509,7 +509,7 @@ static int stage_exit_code(int status) {
     return 1;
 }
 
-IshValue ish_port_result(IshPort *port, IshRuntime *rt, IshError *err) {
+IdmValue idm_port_result(IdmPort *port, IdmRuntime *rt, IdmError *err) {
     int final_code = 0;
     bool any_failure = false;
     for (size_t i = 0; i < port->stage_count; i++) {
@@ -518,19 +518,19 @@ IshValue ish_port_result(IshPort *port, IshRuntime *rt, IshError *err) {
         if (i + 1u == port->stage_count) final_code = code;
     }
     bool ok = port->pipefail ? !any_failure : final_code == 0;
-    IshValue out_str = ish_string_n(rt, port->out_buf.data ? port->out_buf.data : "", port->out_buf.len, err);
-    if (err->present) return ish_nil();
-    IshValue err_str = ish_string_n(rt, port->err_buf.data ? port->err_buf.data : "", port->err_buf.len, err);
-    if (err->present) return ish_nil();
-    IshValue items[4];
+    IdmValue out_str = idm_string_n(rt, port->out_buf.data ? port->out_buf.data : "", port->out_buf.len, err);
+    if (err->present) return idm_nil();
+    IdmValue err_str = idm_string_n(rt, port->err_buf.data ? port->err_buf.data : "", port->err_buf.len, err);
+    if (err->present) return idm_nil();
+    IdmValue items[4];
     if (port->overflow) {
-        items[0] = ish_atom(rt, "error");
-        items[1] = ish_atom(rt, "capture-overflow");
+        items[0] = idm_atom(rt, "error");
+        items[1] = idm_atom(rt, "capture-overflow");
     } else {
-        items[0] = ish_atom(rt, ok ? "ok" : "error");
-        items[1] = ish_int(final_code);
+        items[0] = idm_atom(rt, ok ? "ok" : "error");
+        items[1] = idm_int(final_code);
     }
     items[2] = out_str;
     items[3] = err_str;
-    return ish_tuple(rt, items, 4u, err);
+    return idm_tuple(rt, items, 4u, err);
 }

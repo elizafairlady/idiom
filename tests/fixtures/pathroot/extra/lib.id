@@ -1,0 +1,2 @@
+package extra
+export defn quadruple x -> mul x 4

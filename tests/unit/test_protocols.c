@@ -1,8 +1,8 @@
 #include "test_util.h"
 
 static void test_protocol_methods_runtime_dispatch(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     check_value_written(&rt,
         "protocol ShowDefault do\n"
         "  method show x -> str \"default:\" x\n"
@@ -65,7 +65,7 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "extend int with DupExtend do\n"
         "end\n",
         "already extends protocol 'DupExtend'");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_protocol_method_expansion_boundaries(void) {
@@ -118,64 +118,64 @@ static void test_protocol_bytecode_roundtrip(void) {
         "extend int with RoundShow do\n"
         "end\n"
         "show 5\n";
-    IshRuntime rt1;
-    ish_runtime_init(&rt1);
-    IshError err;
-    ish_error_init(&err);
-    IshCore *core = NULL;
-    CHECK(ish_expand_string(&rt1, "<protocol-ishc>", src, &core, &err));
+    IdmRuntime rt1;
+    idm_runtime_init(&rt1);
+    IdmError err;
+    idm_error_init(&err);
+    IdmCore *core = NULL;
+    CHECK(idm_expand_string(&rt1, "<protocol-ishc>", src, &core, &err));
     CHECK(!err.present);
-    IshBytecodeModule m1;
-    ish_bc_init(&m1);
+    IdmBytecodeModule m1;
+    idm_bc_init(&m1);
     uint32_t main_fn = 0;
-    CHECK(ish_core_compile_main(core, &m1, &main_fn, &err));
+    CHECK(idm_core_compile_main(core, &m1, &main_fn, &err));
     CHECK(!err.present);
-    IshBuffer dis;
-    ish_buf_init(&dis);
-    CHECK(ish_bc_disassemble(&dis, &m1));
+    IdmBuffer dis;
+    idm_buf_init(&dis);
+    CHECK(idm_bc_disassemble(&dis, &m1));
     CHECK(strstr(dis.data, "DEFINE_PROTOCOL") != NULL);
     CHECK(strstr(dis.data, "EXTEND_PROTOCOL") != NULL);
     CHECK(strstr(dis.data, "CALL_METHOD") != NULL);
-    ish_buf_destroy(&dis);
-    IshValue out1 = ish_nil();
-    CHECK(ish_vm_run(&rt1, &m1, main_fn, &out1, &err));
+    idm_buf_destroy(&dis);
+    IdmValue out1 = idm_nil();
+    CHECK(idm_vm_run(&rt1, &m1, main_fn, &out1, &err));
     CHECK(!err.present);
-    IshBuffer written;
-    ish_buf_init(&written);
-    CHECK(ish_value_write(&written, out1));
+    IdmBuffer written;
+    idm_buf_init(&written);
+    CHECK(idm_value_write(&written, out1));
     CHECK_STR(written.data, "\"round:5\"");
-    ish_buf_destroy(&written);
-    IshBuffer blob;
-    ish_buf_init(&blob);
-    CHECK(ish_ishc_serialize(&m1, &blob, &err));
+    idm_buf_destroy(&written);
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(idm_ic_serialize(&m1, &blob, &err));
     CHECK(!err.present);
 
-    IshRuntime rt2;
-    ish_runtime_init(&rt2);
-    IshBytecodeModule m2;
-    ish_bc_init(&m2);
-    CHECK(ish_ishc_deserialize(&rt2, (const unsigned char *)blob.data, blob.len, &m2, &err));
+    IdmRuntime rt2;
+    idm_runtime_init(&rt2);
+    IdmBytecodeModule m2;
+    idm_bc_init(&m2);
+    CHECK(idm_ic_deserialize(&rt2, (const unsigned char *)blob.data, blob.len, &m2, &err));
     CHECK(!err.present);
-    IshValue out2 = ish_nil();
-    CHECK(ish_vm_run(&rt2, &m2, main_fn, &out2, &err));
+    IdmValue out2 = idm_nil();
+    CHECK(idm_vm_run(&rt2, &m2, main_fn, &out2, &err));
     CHECK(!err.present);
-    ish_buf_init(&written);
-    CHECK(ish_value_write(&written, out2));
+    idm_buf_init(&written);
+    CHECK(idm_value_write(&written, out2));
     CHECK_STR(written.data, "\"round:5\"");
-    ish_buf_destroy(&written);
+    idm_buf_destroy(&written);
 
-    ish_bc_destroy(&m2);
-    ish_runtime_destroy(&rt2);
-    ish_buf_destroy(&blob);
-    ish_bc_destroy(&m1);
-    ish_core_free(core);
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt1);
+    idm_bc_destroy(&m2);
+    idm_runtime_destroy(&rt2);
+    idm_buf_destroy(&blob);
+    idm_bc_destroy(&m1);
+    idm_core_free(core);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt1);
 }
 
 static void test_records_on_protocol_dispatch(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     check_value_written(&rt,
         "record Point do\n"
         "  field x\n"
@@ -218,7 +218,7 @@ static void test_records_on_protocol_dispatch(void) {
         "implements NeedsRecordExtend\n"
         "label (NeedsRecord 1)\n",
         "does not extend protocol 'NeedsRecordExtend'");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_record_expansion_boundaries(void) {
@@ -245,63 +245,63 @@ static void test_record_expansion_boundaries(void) {
 }
 
 static void test_record_ishc_roundtrip(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
-    IshDictEntry entries[1];
-    entries[0].key = ish_atom(&rt, "x");
-    entries[0].value = ish_int(42);
-    IshValue fields = ish_dict(&rt, entries, 1u, &err);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmDictEntry entries[1];
+    entries[0].key = idm_atom(&rt, "x");
+    entries[0].value = idm_int(42);
+    IdmValue fields = idm_dict(&rt, entries, 1u, &err);
     CHECK(!err.present);
-    IshValue record = ish_record(&rt, "ConstRecord", fields, &err);
+    IdmValue record = idm_record(&rt, "ConstRecord", fields, &err);
     CHECK(!err.present);
 
-    IshBytecodeModule m1;
-    ish_bc_init(&m1);
+    IdmBytecodeModule m1;
+    idm_bc_init(&m1);
     uint32_t main_fn = 0;
     uint32_t record_const = 0;
-    CHECK(ish_bc_add_function(&m1, "main", 0, 0, 0, &main_fn));
-    CHECK(ish_bc_add_const(&m1, record, &record_const));
-    CHECK(ish_bc_set_function_entry(&m1, main_fn, m1.code_count));
-    CHECK(ish_bc_emit_u32(&m1, ISH_OP_LOAD_CONST, record_const, NULL));
-    CHECK(ish_bc_emit_op(&m1, ISH_OP_RETURN, NULL));
-    IshValue out1 = ish_nil();
-    CHECK(ish_vm_run(&rt, &m1, main_fn, &out1, &err));
-    CHECK(ish_value_equal(record, out1));
+    CHECK(idm_bc_add_function(&m1, "main", 0, 0, 0, &main_fn));
+    CHECK(idm_bc_add_const(&m1, record, &record_const));
+    CHECK(idm_bc_set_function_entry(&m1, main_fn, m1.code_count));
+    CHECK(idm_bc_emit_u32(&m1, IDM_OP_LOAD_CONST, record_const, NULL));
+    CHECK(idm_bc_emit_op(&m1, IDM_OP_RETURN, NULL));
+    IdmValue out1 = idm_nil();
+    CHECK(idm_vm_run(&rt, &m1, main_fn, &out1, &err));
+    CHECK(idm_value_equal(record, out1));
     CHECK(!err.present);
-    IshBuffer blob;
-    ish_buf_init(&blob);
-    CHECK(ish_ishc_serialize(&m1, &blob, &err));
-    CHECK(!err.present);
-
-    IshRuntime rt2;
-    ish_runtime_init(&rt2);
-    IshBytecodeModule m2;
-    ish_bc_init(&m2);
-    CHECK(ish_ishc_deserialize(&rt2, (const unsigned char *)blob.data, blob.len, &m2, &err));
-    CHECK(!err.present);
-    IshValue out2 = ish_nil();
-    CHECK(ish_vm_run(&rt2, &m2, main_fn, &out2, &err));
-    CHECK(!err.present);
-    CHECK(out2.tag == ISH_VAL_RECORD);
-    CHECK_STR(ish_record_type(out2, &err), "ConstRecord");
-    IshValue field = ish_nil();
-    CHECK(ish_record_field(out2, ish_atom(&rt2, "x"), &field, &err));
-    CHECK(field.tag == ISH_VAL_INT && field.as.i == 42);
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(idm_ic_serialize(&m1, &blob, &err));
     CHECK(!err.present);
 
-    ish_bc_destroy(&m2);
-    ish_runtime_destroy(&rt2);
-    ish_buf_destroy(&blob);
-    ish_bc_destroy(&m1);
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt);
+    IdmRuntime rt2;
+    idm_runtime_init(&rt2);
+    IdmBytecodeModule m2;
+    idm_bc_init(&m2);
+    CHECK(idm_ic_deserialize(&rt2, (const unsigned char *)blob.data, blob.len, &m2, &err));
+    CHECK(!err.present);
+    IdmValue out2 = idm_nil();
+    CHECK(idm_vm_run(&rt2, &m2, main_fn, &out2, &err));
+    CHECK(!err.present);
+    CHECK(out2.tag == IDM_VAL_RECORD);
+    CHECK_STR(idm_record_type(out2, &err), "ConstRecord");
+    IdmValue field = idm_nil();
+    CHECK(idm_record_field(out2, idm_atom(&rt2, "x"), &field, &err));
+    CHECK(field.tag == IDM_VAL_INT && field.as.i == 42);
+    CHECK(!err.present);
+
+    idm_bc_destroy(&m2);
+    idm_runtime_destroy(&rt2);
+    idm_buf_destroy(&blob);
+    idm_bc_destroy(&m1);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_dsl_protocol_scoping(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     expect_expand_error_rt(&rt, "<html-needs-implements>",
         "h1 \"Title\"\n",
         "unbound identifier 'h1'");
@@ -316,7 +316,7 @@ static void test_dsl_protocol_scoping(void) {
         "implements tests/pkg/htmldsl\n"
         "div 10 2\n",
         "5");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 void run_protocol_suite(void) {

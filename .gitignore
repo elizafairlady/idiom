@@ -60,4 +60,4 @@ dkms.conf
 
 # debug information files
 *.dwo
-*.ishc
+*.ic

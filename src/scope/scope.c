@@ -1,23 +1,23 @@
-#include "ish/scope.h"
+#include "idiom/scope.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-void ish_scope_store_init(IshScopeStore *store) {
+void idm_scope_store_init(IdmScopeStore *store) {
     store->next_scope = 1u;
 }
 
-IshScopeId ish_scope_fresh(IshScopeStore *store) {
+IdmScopeId idm_scope_fresh(IdmScopeStore *store) {
     return store->next_scope++;
 }
 
-void ish_scope_set_init(IshScopeSet *set) {
+void idm_scope_set_init(IdmScopeSet *set) {
     set->items = NULL;
     set->count = 0;
     set->cap = 0;
 }
 
-void ish_scope_set_destroy(IshScopeSet *set) {
+void idm_scope_set_destroy(IdmScopeSet *set) {
     if (!set) return;
     free(set->items);
     set->items = NULL;
@@ -25,8 +25,8 @@ void ish_scope_set_destroy(IshScopeSet *set) {
     set->cap = 0;
 }
 
-bool ish_scope_set_copy(IshScopeSet *dst, const IshScopeSet *src) {
-    ish_scope_set_init(dst);
+bool idm_scope_set_copy(IdmScopeSet *dst, const IdmScopeSet *src) {
+    idm_scope_set_init(dst);
     if (src->count == 0) return true;
     dst->items = malloc(src->count * sizeof(*dst->items));
     if (!dst->items) return false;
@@ -36,7 +36,7 @@ bool ish_scope_set_copy(IshScopeSet *dst, const IshScopeSet *src) {
     return true;
 }
 
-static size_t lower_bound(const IshScopeSet *set, IshScopeId scope, bool *found) {
+static size_t lower_bound(const IdmScopeSet *set, IdmScopeId scope, bool *found) {
     size_t lo = 0;
     size_t hi = set->count;
     while (lo < hi) {
@@ -48,13 +48,13 @@ static size_t lower_bound(const IshScopeSet *set, IshScopeId scope, bool *found)
     return lo;
 }
 
-bool ish_scope_set_add(IshScopeSet *set, IshScopeId scope) {
+bool idm_scope_set_add(IdmScopeSet *set, IdmScopeId scope) {
     bool found = false;
     size_t index = lower_bound(set, scope, &found);
     if (found) return true;
     if (set->count == set->cap) {
         size_t cap = set->cap ? set->cap * 2u : 4u;
-        IshScopeId *items = realloc(set->items, cap * sizeof(*items));
+        IdmScopeId *items = realloc(set->items, cap * sizeof(*items));
         if (!items) return false;
         set->items = items;
         set->cap = cap;
@@ -65,7 +65,7 @@ bool ish_scope_set_add(IshScopeSet *set, IshScopeId scope) {
     return true;
 }
 
-bool ish_scope_set_remove(IshScopeSet *set, IshScopeId scope) {
+bool idm_scope_set_remove(IdmScopeSet *set, IdmScopeId scope) {
     bool found = false;
     size_t index = lower_bound(set, scope, &found);
     if (!found) return false;
@@ -74,18 +74,18 @@ bool ish_scope_set_remove(IshScopeSet *set, IshScopeId scope) {
     return true;
 }
 
-bool ish_scope_set_flip(IshScopeSet *set, IshScopeId scope) {
-    if (ish_scope_set_contains(set, scope)) return ish_scope_set_remove(set, scope);
-    return ish_scope_set_add(set, scope);
+bool idm_scope_set_flip(IdmScopeSet *set, IdmScopeId scope) {
+    if (idm_scope_set_contains(set, scope)) return idm_scope_set_remove(set, scope);
+    return idm_scope_set_add(set, scope);
 }
 
-bool ish_scope_set_contains(const IshScopeSet *set, IshScopeId scope) {
+bool idm_scope_set_contains(const IdmScopeSet *set, IdmScopeId scope) {
     bool found = false;
     (void)lower_bound(set, scope, &found);
     return found;
 }
 
-bool ish_scope_set_subset(const IshScopeSet *a, const IshScopeSet *b) {
+bool idm_scope_set_subset(const IdmScopeSet *a, const IdmScopeSet *b) {
     size_t i = 0;
     size_t j = 0;
     while (i < a->count && j < b->count) {
@@ -101,25 +101,25 @@ bool ish_scope_set_subset(const IshScopeSet *a, const IshScopeSet *b) {
     return i == a->count;
 }
 
-bool ish_scope_set_equal(const IshScopeSet *a, const IshScopeSet *b) {
+bool idm_scope_set_equal(const IdmScopeSet *a, const IdmScopeSet *b) {
     return a->count == b->count && (a->count == 0 || memcmp(a->items, b->items, a->count * sizeof(*a->items)) == 0);
 }
 
-bool ish_scope_set_write(IshBuffer *buf, const IshScopeSet *set) {
-    if (!ish_buf_append_char(buf, '{')) return false;
+bool idm_scope_set_write(IdmBuffer *buf, const IdmScopeSet *set) {
+    if (!idm_buf_append_char(buf, '{')) return false;
     for (size_t i = 0; i < set->count; i++) {
-        if (i != 0 && !ish_buf_append_char(buf, ' ')) return false;
-        if (!ish_buf_appendf(buf, "%u", set->items[i])) return false;
+        if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
+        if (!idm_buf_appendf(buf, "%u", set->items[i])) return false;
     }
-    return ish_buf_append_char(buf, '}');
+    return idm_buf_append_char(buf, '}');
 }
 
-void ish_scope_set_relocate(IshScopeSet *set, IshScopeId min_id, int64_t delta) {
+void idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta) {
     for (size_t i = 0; i < set->count; i++) {
-        if (set->items[i] >= min_id) set->items[i] = (IshScopeId)((int64_t)set->items[i] + delta);
+        if (set->items[i] >= min_id) set->items[i] = (IdmScopeId)((int64_t)set->items[i] + delta);
     }
     for (size_t i = 1; i < set->count; i++) {
-        IshScopeId key = set->items[i];
+        IdmScopeId key = set->items[i];
         size_t j = i;
         while (j > 0 && set->items[j - 1u] > key) {
             set->items[j] = set->items[j - 1u];
@@ -129,18 +129,18 @@ void ish_scope_set_relocate(IshScopeSet *set, IshScopeId min_id, int64_t delta) 
     }
 }
 
-void ish_binding_table_init(IshBindingTable *table) {
+void idm_binding_table_init(IdmBindingTable *table) {
     table->items = NULL;
     table->count = 0;
     table->cap = 0;
     table->next_id = 1u;
 }
 
-void ish_binding_table_destroy(IshBindingTable *table) {
+void idm_binding_table_destroy(IdmBindingTable *table) {
     if (!table) return;
     for (size_t i = 0; i < table->count; i++) {
         free(table->items[i].name);
-        ish_scope_set_destroy(&table->items[i].scopes);
+        idm_scope_set_destroy(&table->items[i].scopes);
     }
     free(table->items);
     table->items = NULL;
@@ -149,21 +149,21 @@ void ish_binding_table_destroy(IshBindingTable *table) {
     table->next_id = 1u;
 }
 
-bool ish_binding_table_add(IshBindingTable *table, const char *name, int phase, IshBindingSpace space, IshBindingKind kind, const IshScopeSet *scopes, uint32_t payload, uint32_t frame_id, IshBindingId *out_id) {
+bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id) {
     if (table->count == table->cap) {
         size_t cap = table->cap ? table->cap * 2u : 16u;
-        IshBinding *items = realloc(table->items, cap * sizeof(*items));
+        IdmBinding *items = realloc(table->items, cap * sizeof(*items));
         if (!items) return false;
         table->items = items;
         table->cap = cap;
     }
-    IshBinding *binding = &table->items[table->count];
-    binding->name = ish_strdup(name);
+    IdmBinding *binding = &table->items[table->count];
+    binding->name = idm_strdup(name);
     if (!binding->name) return false;
     binding->phase = phase;
     binding->space = space;
     binding->kind = kind;
-    if (!ish_scope_set_copy(&binding->scopes, scopes)) {
+    if (!idm_scope_set_copy(&binding->scopes, scopes)) {
         free(binding->name);
         return false;
     }
@@ -175,28 +175,28 @@ bool ish_binding_table_add(IshBindingTable *table, const char *name, int phase, 
     return true;
 }
 
-void ish_binding_table_truncate(IshBindingTable *table, size_t count) {
+void idm_binding_table_truncate(IdmBindingTable *table, size_t count) {
     while (table->count > count) {
         table->count--;
         free(table->items[table->count].name);
-        ish_scope_set_destroy(&table->items[table->count].scopes);
+        idm_scope_set_destroy(&table->items[table->count].scopes);
     }
 }
 
-IshResolveStatus ish_binding_resolve(const IshBindingTable *table, const char *name, int phase, IshBindingSpace space, const IshScopeSet *reference_scopes, const IshBinding **out_binding) {
-    const IshBinding *best = NULL;
+IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding) {
+    const IdmBinding *best = NULL;
     bool ambiguous = false;
     for (size_t i = 0; i < table->count; i++) {
-        const IshBinding *candidate = &table->items[i];
+        const IdmBinding *candidate = &table->items[i];
         if (candidate->phase != phase || candidate->space != space || strcmp(candidate->name, name) != 0) continue;
-        if (!ish_scope_set_subset(&candidate->scopes, reference_scopes)) continue;
+        if (!idm_scope_set_subset(&candidate->scopes, reference_scopes)) continue;
         if (!best) {
             best = candidate;
             ambiguous = false;
             continue;
         }
-        bool candidate_more_specific = ish_scope_set_subset(&best->scopes, &candidate->scopes);
-        bool best_more_specific = ish_scope_set_subset(&candidate->scopes, &best->scopes);
+        bool candidate_more_specific = idm_scope_set_subset(&best->scopes, &candidate->scopes);
+        bool best_more_specific = idm_scope_set_subset(&candidate->scopes, &best->scopes);
         if (candidate_more_specific && !best_more_specific) {
             best = candidate;
             ambiguous = false;
@@ -209,50 +209,50 @@ IshResolveStatus ish_binding_resolve(const IshBindingTable *table, const char *n
     }
     if (!best) {
         if (out_binding) *out_binding = NULL;
-        return ISH_RESOLVE_UNBOUND;
+        return IDM_RESOLVE_UNBOUND;
     }
     if (ambiguous) {
         if (out_binding) *out_binding = NULL;
-        return ISH_RESOLVE_AMBIGUOUS;
+        return IDM_RESOLVE_AMBIGUOUS;
     }
     if (out_binding) *out_binding = best;
-    return ISH_RESOLVE_OK;
+    return IDM_RESOLVE_OK;
 }
 
-const char *ish_binding_space_name(IshBindingSpace space) {
+const char *idm_binding_space_name(IdmBindingSpace space) {
     switch (space) {
-        case ISH_BIND_SPACE_DEFAULT: return "default";
-        case ISH_BIND_SPACE_PACKAGE: return "package";
-        case ISH_BIND_SPACE_OPERATOR: return "operator";
-        case ISH_BIND_SPACE_SHELL: return "shell";
-        case ISH_BIND_SPACE_LABEL: return "label";
-        case ISH_BIND_SPACE_PROTOCOL: return "protocol";
+        case IDM_BIND_SPACE_DEFAULT: return "default";
+        case IDM_BIND_SPACE_PACKAGE: return "package";
+        case IDM_BIND_SPACE_OPERATOR: return "operator";
+        case IDM_BIND_SPACE_SHELL: return "shell";
+        case IDM_BIND_SPACE_LABEL: return "label";
+        case IDM_BIND_SPACE_PROTOCOL: return "protocol";
     }
     return "<bad-space>";
 }
 
-const char *ish_binding_kind_name(IshBindingKind kind) {
+const char *idm_binding_kind_name(IdmBindingKind kind) {
     switch (kind) {
-        case ISH_BIND_VALUE: return "value";
-        case ISH_BIND_CORE_FORM: return "core-form";
-        case ISH_BIND_TRANSFORMER: return "transformer";
-        case ISH_BIND_PACKAGE: return "package";
-        case ISH_BIND_OPERATOR: return "operator";
-        case ISH_BIND_SHELL_FORM: return "shell-form";
-        case ISH_BIND_LOCAL: return "local";
-        case ISH_BIND_ARG: return "arg";
-        case ISH_BIND_GLOBAL: return "global";
-        case ISH_BIND_PROTOCOL: return "protocol";
-        case ISH_BIND_METHOD: return "method";
+        case IDM_BIND_VALUE: return "value";
+        case IDM_BIND_CORE_FORM: return "core-form";
+        case IDM_BIND_TRANSFORMER: return "transformer";
+        case IDM_BIND_PACKAGE: return "package";
+        case IDM_BIND_OPERATOR: return "operator";
+        case IDM_BIND_SHELL_FORM: return "shell-form";
+        case IDM_BIND_LOCAL: return "local";
+        case IDM_BIND_ARG: return "arg";
+        case IDM_BIND_GLOBAL: return "global";
+        case IDM_BIND_PROTOCOL: return "protocol";
+        case IDM_BIND_METHOD: return "method";
     }
     return "<bad-kind>";
 }
 
-const char *ish_resolve_status_name(IshResolveStatus status) {
+const char *idm_resolve_status_name(IdmResolveStatus status) {
     switch (status) {
-        case ISH_RESOLVE_OK: return "ok";
-        case ISH_RESOLVE_UNBOUND: return "unbound";
-        case ISH_RESOLVE_AMBIGUOUS: return "ambiguous";
+        case IDM_RESOLVE_OK: return "ok";
+        case IDM_RESOLVE_UNBOUND: return "unbound";
+        case IDM_RESOLVE_AMBIGUOUS: return "ambiguous";
     }
     return "<bad-resolve-status>";
 }

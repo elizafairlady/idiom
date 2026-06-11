@@ -1,61 +1,61 @@
 #include "test_util.h"
 
 static void test_source_defmacro(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
-    IshCore *core = NULL;
-    CHECK(ish_expand_string(&rt, "<macro-expand-test>", "defmacro answer stx -> %'(add 40 2)\nanswer\n", &core, &err));
-    IshBuffer dump;
-    ish_buf_init(&dump);
-    CHECK(ish_core_dump(&dump, core));
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmCore *core = NULL;
+    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro answer stx -> %'(add 40 2)\nanswer\n", &core, &err));
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_core_dump(&dump, core));
     CHECK_STR(dump.data, "(app (prim add) 40 2)");
-    ish_buf_destroy(&dump);
-    IshBytecodeModule module;
-    ish_bc_init(&module);
+    idm_buf_destroy(&dump);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
     uint32_t main_fn = 0;
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    IshValue out = ish_nil();
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<macro-expand-test>", "defmacro id stx -> syntax-nth stx 2\nid 42\n", &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro id stx -> syntax-nth stx 2\nid 42\n", &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<macro-expand-test>", "defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2)\nplus2 40\n", &core, &err));
-    ish_buf_init(&dump);
-    CHECK(ish_core_dump(&dump, core));
+    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2)\nplus2 40\n", &core, &err));
+    idm_buf_init(&dump);
+    CHECK(idm_core_dump(&dump, core));
     CHECK_STR(dump.data, "(app (prim add) 40 2)");
-    ish_buf_destroy(&dump);
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    idm_buf_destroy(&dump);
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_source_syntax_case(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
     const char *source =
         "defmacro plus2 stx ->\n"
         "  syntax-case stx do\n"
@@ -63,23 +63,23 @@ static void test_source_syntax_case(void) {
         "  end\n"
         "plus2 40\n";
 
-    IshCore *core = NULL;
-    CHECK(ish_expand_string(&rt, "<syntax-case-test>", source, &core, &err));
-    IshBuffer dump;
-    ish_buf_init(&dump);
-    CHECK(ish_core_dump(&dump, core));
+    IdmCore *core = NULL;
+    CHECK(idm_expand_string(&rt, "<syntax-case-test>", source, &core, &err));
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_core_dump(&dump, core));
     CHECK_STR(dump.data, "(app (prim add) 40 2)");
-    ish_buf_destroy(&dump);
-    IshBytecodeModule module;
-    ish_bc_init(&module);
+    idm_buf_destroy(&dump);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
     uint32_t main_fn = 0;
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    IshValue out = ish_nil();
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     const char *guarded_source =
         "defmacro word-only stx ->\n"
@@ -89,14 +89,14 @@ static void test_source_syntax_case(void) {
         "  end\n"
         "word-only hello\n";
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<syntax-case-guard-test>", guarded_source, &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_expand_string(&rt, "<syntax-case-guard-test>", guarded_source, &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     const char *guard_fallback_source =
         "defmacro word-only stx ->\n"
@@ -106,14 +106,14 @@ static void test_source_syntax_case(void) {
         "  end\n"
         "word-only 10\n";
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<syntax-case-guard-fallback-test>", guard_fallback_source, &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_expand_string(&rt, "<syntax-case-guard-fallback-test>", guard_fallback_source, &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     const char *ellipsis_source =
         "defmacro do-it stx ->\n"
@@ -122,84 +122,84 @@ static void test_source_syntax_case(void) {
         "  end\n"
         "do-it 1 42\n";
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<syntax-case-ellipsis-test>", ellipsis_source, &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_expand_string(&rt, "<syntax-case-ellipsis-test>", ellipsis_source, &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_source_standard_if(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
-    IshCore *core = NULL;
-    CHECK(ish_expand_string(&rt, "<if-macro-test>", "if :false do 0 else do 42 end\n", &core, &err));
-    IshBuffer dump;
-    ish_buf_init(&dump);
-    CHECK(ish_core_dump(&dump, core));
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmCore *core = NULL;
+    CHECK(idm_expand_string(&rt, "<if-macro-test>", "if :false do 0 else do 42 end\n", &core, &err));
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_core_dump(&dump, core));
     CHECK_STR(dump.data, "(cond :false 0 42)");
-    ish_buf_destroy(&dump);
-    IshBytecodeModule module;
-    ish_bc_init(&module);
+    idm_buf_destroy(&dump);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
     uint32_t main_fn = 0;
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    IshValue out = ish_nil();
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<if-macro-test>", "if :true do 42 end\n", &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_expand_string(&rt, "<if-macro-test>", "if :true do 42 end\n", &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<if-macro-test>", "if :false do 42 end\n", &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_NIL);
+    CHECK(idm_expand_string(&rt, "<if-macro-test>", "if :false do 42 end\n", &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_NIL);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<if-macro-test>", "if :false do 0 else if :false do 1 else do 42 end\n", &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_expand_string(&rt, "<if-macro-test>", "if :false do 0 else if :false do 1 else do 42 end\n", &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     core = NULL;
-    CHECK(!ish_expand_string(&rt, "<if-macro-test>", "if :false 0 42\n", &core, &err));
+    CHECK(!idm_expand_string(&rt, "<if-macro-test>", "if :false 0 42\n", &core, &err));
     CHECK(err.present);
-    ish_error_clear(&err);
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt);
+    idm_error_clear(&err);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_source_standard_control_macros(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
     const char *programs[] = {
         "unless :false do 42 end\n",
         "case [1 2] do [a b] -> add a b end\n",
@@ -210,29 +210,29 @@ static void test_source_standard_control_macros(void) {
     };
     int64_t expected[] = {42, 3, 42, 0, 42, 42};
     for (size_t i = 0; i < sizeof(programs) / sizeof(programs[0]); i++) {
-        IshCore *core = NULL;
-        CHECK(ish_expand_string(&rt, "<control-macro-test>", programs[i], &core, &err));
-        IshBytecodeModule module;
-        ish_bc_init(&module);
+        IdmCore *core = NULL;
+        CHECK(idm_expand_string(&rt, "<control-macro-test>", programs[i], &core, &err));
+        IdmBytecodeModule module;
+        idm_bc_init(&module);
         uint32_t main_fn = 0;
-        CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-        IshValue out = ish_nil();
-        CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-        if (i == 3) CHECK(out.tag == ISH_VAL_ATOM && strcmp(ish_symbol_text(out.as.symbol), "false") == 0);
-        else CHECK(out.tag == ISH_VAL_INT && out.as.i == expected[i]);
+        CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+        IdmValue out = idm_nil();
+        CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+        if (i == 3) CHECK(out.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(out.as.symbol), "false") == 0);
+        else CHECK(out.tag == IDM_VAL_INT && out.as.i == expected[i]);
         CHECK(!err.present);
-        ish_bc_destroy(&module);
-        ish_core_free(core);
+        idm_bc_destroy(&module);
+        idm_core_free(core);
     }
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_macro_hygienic_introduction(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
     const char *source =
         "defmacro twice stx ->\n"
         "  syntax-case stx do\n"
@@ -244,27 +244,27 @@ static void test_macro_hygienic_introduction(void) {
         "tmp = 100\n"
         "twice 21\n"
         "tmp\n";
-    IshCore *core = NULL;
-    CHECK(ish_expand_string(&rt, "<hygiene-test>", source, &core, &err));
-    IshBytecodeModule module;
-    ish_bc_init(&module);
+    IdmCore *core = NULL;
+    CHECK(idm_expand_string(&rt, "<hygiene-test>", source, &core, &err));
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
     uint32_t main_fn = 0;
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    IshValue out = ish_nil();
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 100);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 100);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_macro_bind_bang_and_depth(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
 
     const char *capture_source =
         "defmacro with-it stx ->\n"
@@ -278,129 +278,129 @@ static void test_macro_bind_bang_and_depth(void) {
         "    end\n"
         "  end\n"
         "with-it 10 (add it 5)\n";
-    IshCore *core = NULL;
-    CHECK(ish_expand_string(&rt, "<bind-bang-test>", capture_source, &core, &err));
-    IshBytecodeModule module;
-    ish_bc_init(&module);
+    IdmCore *core = NULL;
+    CHECK(idm_expand_string(&rt, "<bind-bang-test>", capture_source, &core, &err));
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
     uint32_t main_fn = 0;
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    IshValue out = ish_nil();
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 15);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 15);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     const char *use_site_source =
         "defmacro id stx -> %`(%,(syntax-nth stx 2))\n"
         "x = 42\n"
         "id x\n";
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<use-site-test>", use_site_source, &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_expand_string(&rt, "<use-site-test>", use_site_source, &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     const char *loop_source =
         "defmacro loop stx -> %`(loop)\n"
         "loop\n";
     core = NULL;
-    CHECK(!ish_expand_string(&rt, "<macro-depth-test>", loop_source, &core, &err));
+    CHECK(!idm_expand_string(&rt, "<macro-depth-test>", loop_source, &core, &err));
     CHECK(err.present);
-    ish_error_clear(&err);
+    idm_error_clear(&err);
 
     const char *local_expand_source =
         "defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2)\n"
         "defmacro expand-plus2 stx -> local-expand %`(plus2 40)\n"
         "expand-plus2\n";
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<local-expand-test>", local_expand_source, &core, &err));
-    IshBytecodeModule module2;
-    ish_bc_init(&module2);
+    CHECK(idm_expand_string(&rt, "<local-expand-test>", local_expand_source, &core, &err));
+    IdmBytecodeModule module2;
+    idm_bc_init(&module2);
     uint32_t main_fn2 = 0;
-    CHECK(ish_core_compile_main(core, &module2, &main_fn2, &err));
-    CHECK(ish_vm_run(&rt, &module2, main_fn2, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_core_compile_main(core, &module2, &main_fn2, &err));
+    CHECK(idm_vm_run(&rt, &module2, main_fn2, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module2);
-    ish_core_free(core);
+    idm_bc_destroy(&module2);
+    idm_core_free(core);
 
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_macro_origin_and_properties(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
     const char *origin_source =
         "defmacro answer stx -> %`(42)\n"
         "defmacro origin-name stx -> datum->syntax stx (first (syntax-origin (local-expand %`(answer))) )\n"
         "origin-name\n";
-    IshCore *core = NULL;
-    CHECK(ish_expand_string(&rt, "<origin-test>", origin_source, &core, &err));
-    IshBytecodeModule module;
-    ish_bc_init(&module);
+    IdmCore *core = NULL;
+    CHECK(idm_expand_string(&rt, "<origin-test>", origin_source, &core, &err));
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
     uint32_t main_fn = 0;
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    IshValue out = ish_nil();
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    IshBuffer buf;
-    ish_buf_init(&buf);
-    CHECK(ish_value_write(&buf, out));
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    IdmBuffer buf;
+    idm_buf_init(&buf);
+    CHECK(idm_value_write(&buf, out));
     CHECK_STR(buf.data, "\"answer\"");
-    ish_buf_destroy(&buf);
+    idm_buf_destroy(&buf);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
 
     const char *property_source =
         "defmacro prop stx -> datum->syntax stx (syntax-property (syntax-set-property %`(x) \"k\" \"v\") \"k\")\n"
         "prop\n";
     core = NULL;
-    CHECK(ish_expand_string(&rt, "<property-test>", property_source, &core, &err));
-    ish_bc_init(&module);
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    ish_buf_init(&buf);
-    CHECK(ish_value_write(&buf, out));
+    CHECK(idm_expand_string(&rt, "<property-test>", property_source, &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    idm_buf_init(&buf);
+    CHECK(idm_value_write(&buf, out));
     CHECK_STR(buf.data, "\"v\"");
-    ish_buf_destroy(&buf);
+    idm_buf_destroy(&buf);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_for_syntax_macro_registration(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
-    IshError err;
-    ish_error_init(&err);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
     const char *source =
         "for-syntax do\n"
         "  defmacro answer stx -> %`(42)\n"
         "end\n"
         "answer\n";
-    IshCore *core = NULL;
-    CHECK(ish_expand_string(&rt, "<for-syntax-test>", source, &core, &err));
-    IshBytecodeModule module;
-    ish_bc_init(&module);
+    IdmCore *core = NULL;
+    CHECK(idm_expand_string(&rt, "<for-syntax-test>", source, &core, &err));
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
     uint32_t main_fn = 0;
-    CHECK(ish_core_compile_main(core, &module, &main_fn, &err));
-    IshValue out = ish_nil();
-    CHECK(ish_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == ISH_VAL_INT && out.as.i == 42);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
-    ish_bc_destroy(&module);
-    ish_core_free(core);
-    ish_error_clear(&err);
-    ish_runtime_destroy(&rt);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_compile_time_surface_scoping(void) {
@@ -444,12 +444,12 @@ static void test_compile_time_surface_scoping(void) {
 }
 
 static void test_import_compile_time_surface_boundaries(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     check_value_written(&rt, "use tests/pkg/exporter\nanswer anything\n", "99");
     check_value_written(&rt, "use tests/pkg/exporter\n3 <+> 4\n", "7");
     check_value_written(&rt, "import tests/pkg/exporter as E\nE.answer anything\n", "99");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 
     expect_expand_result("<import-macro-leak>",
         "import tests/pkg/exporter as E\n"
@@ -462,8 +462,8 @@ static void test_import_compile_time_surface_boundaries(void) {
 }
 
 static void test_scoped_surface_shadowing(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     check_value_written(&rt,
         "defmacro answer y do %`1 end\n"
         "inner = do\n"
@@ -496,12 +496,12 @@ static void test_scoped_surface_shadowing(void) {
         "end\n"
         "{a (go x)}\n",
         "{6 5}");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_scoped_surface_protocol_nesting(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     expect_expand_result_rt(&rt, "<inline-protocol-body-ok>",
         "protocol Nest do\n"
         "  export defmacro answer y do %`42 end\n"
@@ -530,7 +530,7 @@ static void test_scoped_surface_protocol_nesting(void) {
         "end\n"
         "implements BodyLocal\n"
         "answer foo\n",
-        "open failed");
+        "not found");
     expect_expand_error_rt(&rt, "<fn-body-implements-scoped>",
         "protocol Nest do\n"
         "  export defmacro answer y do %`7 end\n"
@@ -541,12 +541,12 @@ static void test_scoped_surface_protocol_nesting(void) {
         "end\n"
         "answer foo\n",
         "unbound identifier 'answer'");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_scoped_surface_rollback_on_failure(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     expect_expand_error_rt(&rt, "<rollback-install-then-fail>",
         "do\n"
         "  defmacro answer y do %`42 end\n"
@@ -564,7 +564,7 @@ static void test_scoped_surface_rollback_on_failure(void) {
     expect_expand_error_rt(&rt, "<rollback-protocol-gone>",
         "implements RollP\n"
         "roll now\n",
-        "open failed");
+        "not found");
     expect_expand_result_rt(&rt, "<body-surface-ok>",
         "do\n"
         "  defmacro answer y do %`42 end\n"
@@ -572,12 +572,12 @@ static void test_scoped_surface_rollback_on_failure(void) {
         "end\n",
         true);
     expect_expand_error_rt(&rt, "<body-surface-not-persisted>", "answer now\n", "unbound identifier 'answer'");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_macro_phase_environment(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     check_value_written(&rt,
         "for-syntax do\n"
         "  defn lit stx -> make-syntax-int stx 42\n"
@@ -611,12 +611,12 @@ static void test_macro_phase_environment(void) {
         "use tests/pkg/macropriv\n"
         "hidden 41\n",
         false);
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_macro_privacy_boundaries(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     expect_expand_error_rt(&rt, "<phase-helper-hidden-runtime>",
         "use tests/pkg/macropriv\n"
         "lit 41\n",
@@ -630,12 +630,12 @@ static void test_macro_privacy_boundaries(void) {
         "import tests/pkg/macropriv as M\n"
         "phase-answer anything\n",
         "unbound identifier 'phase-answer'");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_free_identifier_eq_uses_bindings(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     check_value_written(&rt,
         "defmacro same-use-site stx ->\n"
         "  cond (free-identifier=? (syntax-nth stx 2) (syntax-nth stx 3)) %`(1) %`(0)\n"
@@ -650,12 +650,12 @@ static void test_free_identifier_eq_uses_bindings(void) {
         "end\n"
         "intro-diff\n",
         "0");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 static void test_splice_hygiene_negatives(void) {
-    IshRuntime rt;
-    ish_runtime_init(&rt);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     expect_expand_error_rt(&rt, "<splice-helper-hidden>",
         "defmacro m stx ->\n"
         "  %`(do\n"
@@ -676,7 +676,7 @@ static void test_splice_hygiene_negatives(void) {
     expect_expand_error_rt(&rt, "<register-macro-locality>",
         "answer x\n",
         "unbound identifier 'answer'");
-    ish_runtime_destroy(&rt);
+    idm_runtime_destroy(&rt);
 }
 
 void run_macro_suite(void) {

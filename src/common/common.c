@@ -1,11 +1,11 @@
-#include "ish/common.h"
+#include "idiom/common.h"
 
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
-IshSpan ish_span_unknown(const char *file) {
-    IshSpan span;
+IdmSpan idm_span_unknown(const char *file) {
+    IdmSpan span;
     span.file = file;
     span.start = 0;
     span.end = 0;
@@ -14,33 +14,33 @@ IshSpan ish_span_unknown(const char *file) {
     return span;
 }
 
-void ish_error_init(IshError *err) {
+void idm_error_init(IdmError *err) {
     if (!err) return;
     err->present = false;
-    err->span = ish_span_unknown(NULL);
+    err->span = idm_span_unknown(NULL);
     err->message = NULL;
     err->notes = NULL;
 }
 
-void ish_error_clear(IshError *err) {
+void idm_error_clear(IdmError *err) {
     if (!err) return;
     free(err->message);
     free(err->notes);
     err->present = false;
-    err->span = ish_span_unknown(NULL);
+    err->span = idm_span_unknown(NULL);
     err->message = NULL;
     err->notes = NULL;
 }
 
-bool ish_error_setv(IshError *err, IshSpan span, const char *fmt, va_list ap) {
+bool idm_error_setv(IdmError *err, IdmSpan span, const char *fmt, va_list ap) {
     if (!err) return false;
-    ish_error_clear(err);
+    idm_error_clear(err);
     va_list copy;
     va_copy(copy, ap);
     int needed = vsnprintf(NULL, 0, fmt, copy);
     va_end(copy);
     if (needed < 0) {
-        err->message = ish_strdup("failed to format error message");
+        err->message = idm_strdup("failed to format error message");
         err->present = true;
         err->span = span;
         return false;
@@ -58,19 +58,19 @@ bool ish_error_setv(IshError *err, IshSpan span, const char *fmt, va_list ap) {
     return false;
 }
 
-bool ish_error_set(IshError *err, IshSpan span, const char *fmt, ...) {
+bool idm_error_set(IdmError *err, IdmSpan span, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
-    bool result = ish_error_setv(err, span, fmt, ap);
+    bool result = idm_error_setv(err, span, fmt, ap);
     va_end(ap);
     return result;
 }
 
-bool ish_error_oom(IshError *err, IshSpan span) {
-    return ish_error_set(err, span, "out of memory");
+bool idm_error_oom(IdmError *err, IdmSpan span) {
+    return idm_error_set(err, span, "out of memory");
 }
 
-bool ish_error_note(IshError *err, const char *fmt, ...) {
+bool idm_error_note(IdmError *err, const char *fmt, ...) {
     if (!err || !err->present) return false;
     char line[512];
     va_list ap;
@@ -87,7 +87,7 @@ bool ish_error_note(IshError *err, const char *fmt, ...) {
     return false;
 }
 
-void ish_error_fprint(FILE *out, const IshError *err) {
+void idm_error_fprint(FILE *out, const IdmError *err) {
     if (!err || !err->present) return;
     const char *file = err->span.file ? err->span.file : "<unknown>";
     if (err->span.line != 0) {
@@ -97,13 +97,13 @@ void ish_error_fprint(FILE *out, const IshError *err) {
     }
 }
 
-void ish_buf_init(IshBuffer *buf) {
+void idm_buf_init(IdmBuffer *buf) {
     buf->data = NULL;
     buf->len = 0;
     buf->cap = 0;
 }
 
-void ish_buf_destroy(IshBuffer *buf) {
+void idm_buf_destroy(IdmBuffer *buf) {
     if (!buf) return;
     free(buf->data);
     buf->data = NULL;
@@ -111,7 +111,7 @@ void ish_buf_destroy(IshBuffer *buf) {
     buf->cap = 0;
 }
 
-bool ish_buf_reserve(IshBuffer *buf, size_t needed) {
+bool idm_buf_reserve(IdmBuffer *buf, size_t needed) {
     if (needed <= buf->cap) return true;
     size_t cap = buf->cap ? buf->cap : 64u;
     while (cap < needed) {
@@ -125,23 +125,23 @@ bool ish_buf_reserve(IshBuffer *buf, size_t needed) {
     return true;
 }
 
-bool ish_buf_append_n(IshBuffer *buf, const char *text, size_t len) {
-    if (!ish_buf_reserve(buf, buf->len + len + 1u)) return false;
+bool idm_buf_append_n(IdmBuffer *buf, const char *text, size_t len) {
+    if (!idm_buf_reserve(buf, buf->len + len + 1u)) return false;
     if (len != 0) memcpy(buf->data + buf->len, text, len);
     buf->len += len;
     buf->data[buf->len] = '\0';
     return true;
 }
 
-bool ish_buf_append(IshBuffer *buf, const char *text) {
-    return ish_buf_append_n(buf, text, strlen(text));
+bool idm_buf_append(IdmBuffer *buf, const char *text) {
+    return idm_buf_append_n(buf, text, strlen(text));
 }
 
-bool ish_buf_append_char(IshBuffer *buf, char ch) {
-    return ish_buf_append_n(buf, &ch, 1u);
+bool idm_buf_append_char(IdmBuffer *buf, char ch) {
+    return idm_buf_append_n(buf, &ch, 1u);
 }
 
-bool ish_buf_appendf(IshBuffer *buf, const char *fmt, ...) {
+bool idm_buf_appendf(IdmBuffer *buf, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     va_list copy;
@@ -153,7 +153,7 @@ bool ish_buf_appendf(IshBuffer *buf, const char *fmt, ...) {
         return false;
     }
     size_t start = buf->len;
-    if (!ish_buf_reserve(buf, start + (size_t)needed + 1u)) {
+    if (!idm_buf_reserve(buf, start + (size_t)needed + 1u)) {
         va_end(ap);
         return false;
     }
@@ -163,9 +163,9 @@ bool ish_buf_appendf(IshBuffer *buf, const char *fmt, ...) {
     return true;
 }
 
-char *ish_buf_take(IshBuffer *buf) {
+char *idm_buf_take(IdmBuffer *buf) {
     if (!buf->data) {
-        char *empty = ish_strdup("");
+        char *empty = idm_strdup("");
         return empty;
     }
     char *data = buf->data;
@@ -175,40 +175,40 @@ char *ish_buf_take(IshBuffer *buf) {
     return data;
 }
 
-bool ish_buf_put_u8(IshBuffer *buf, uint8_t v) {
+bool idm_buf_put_u8(IdmBuffer *buf, uint8_t v) {
     char c = (char)v;
-    return ish_buf_append_n(buf, &c, 1u);
+    return idm_buf_append_n(buf, &c, 1u);
 }
 
-bool ish_buf_put_u32(IshBuffer *buf, uint32_t v) {
+bool idm_buf_put_u32(IdmBuffer *buf, uint32_t v) {
     char t[4];
     t[0] = (char)(v >> 24);
     t[1] = (char)(v >> 16);
     t[2] = (char)(v >> 8);
     t[3] = (char)v;
-    return ish_buf_append_n(buf, t, 4u);
+    return idm_buf_append_n(buf, t, 4u);
 }
 
-bool ish_buf_put_u64(IshBuffer *buf, uint64_t v) {
+bool idm_buf_put_u64(IdmBuffer *buf, uint64_t v) {
     char t[8];
     for (int i = 0; i < 8; i++) t[i] = (char)(v >> (56 - 8 * i));
-    return ish_buf_append_n(buf, t, 8u);
+    return idm_buf_append_n(buf, t, 8u);
 }
 
-bool ish_buf_put_str(IshBuffer *buf, const char *data, size_t len) {
+bool idm_buf_put_str(IdmBuffer *buf, const char *data, size_t len) {
     if (len > UINT32_MAX) return false;
-    if (!ish_buf_put_u32(buf, (uint32_t)len)) return false;
-    return len == 0 ? true : ish_buf_append_n(buf, data, len);
+    if (!idm_buf_put_u32(buf, (uint32_t)len)) return false;
+    return len == 0 ? true : idm_buf_append_n(buf, data, len);
 }
 
-void ish_byte_reader_init(IshByteReader *r, const unsigned char *data, size_t len) {
+void idm_byte_reader_init(IdmByteReader *r, const unsigned char *data, size_t len) {
     r->data = data;
     r->len = len;
     r->pos = 0;
     r->ok = true;
 }
 
-uint8_t ish_rd_u8(IshByteReader *r) {
+uint8_t idm_rd_u8(IdmByteReader *r) {
     if (r->pos + 1u > r->len) {
         r->ok = false;
         return 0;
@@ -216,7 +216,7 @@ uint8_t ish_rd_u8(IshByteReader *r) {
     return r->data[r->pos++];
 }
 
-uint32_t ish_rd_u32(IshByteReader *r) {
+uint32_t idm_rd_u32(IdmByteReader *r) {
     if (r->pos + 4u > r->len) {
         r->ok = false;
         return 0;
@@ -226,7 +226,7 @@ uint32_t ish_rd_u32(IshByteReader *r) {
     return v;
 }
 
-uint64_t ish_rd_u64(IshByteReader *r) {
+uint64_t idm_rd_u64(IdmByteReader *r) {
     if (r->pos + 8u > r->len) {
         r->ok = false;
         return 0;
@@ -237,8 +237,8 @@ uint64_t ish_rd_u64(IshByteReader *r) {
     return v;
 }
 
-char *ish_rd_string(IshByteReader *r) {
-    uint32_t n = ish_rd_u32(r);
+char *idm_rd_string(IdmByteReader *r) {
+    uint32_t n = idm_rd_u32(r);
     if (!r->ok || r->pos + n > r->len) {
         r->ok = false;
         return NULL;
@@ -293,7 +293,7 @@ static void sha256_block(uint32_t state[8], const unsigned char block[64]) {
     state[4] += e; state[5] += f; state[6] += g; state[7] += h;
 }
 
-void ish_sha256(const void *data, size_t len, unsigned char out[32]) {
+void idm_sha256(const void *data, size_t len, unsigned char out[32]) {
     uint32_t state[8] = {
         0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
         0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u
@@ -322,10 +322,10 @@ void ish_sha256(const void *data, size_t len, unsigned char out[32]) {
     }
 }
 
-void ish_sha256_hex(const void *data, size_t len, char out[65]) {
+void idm_sha256_hex(const void *data, size_t len, char out[65]) {
     static const char digits[] = "0123456789abcdef";
     unsigned char digest[32];
-    ish_sha256(data, len, digest);
+    idm_sha256(data, len, digest);
     for (int i = 0; i < 32; i++) {
         out[i * 2] = digits[digest[i] >> 4];
         out[i * 2 + 1] = digits[digest[i] & 0x0fu];
@@ -333,11 +333,11 @@ void ish_sha256_hex(const void *data, size_t len, char out[65]) {
     out[64] = '\0';
 }
 
-char *ish_strdup(const char *s) {
-    return ish_strndup(s, strlen(s));
+char *idm_strdup(const char *s) {
+    return idm_strndup(s, strlen(s));
 }
 
-char *ish_strndup(const char *s, size_t n) {
+char *idm_strndup(const char *s, size_t n) {
     char *copy = malloc(n + 1u);
     if (!copy) return NULL;
     if (n != 0) memcpy(copy, s, n);
@@ -345,35 +345,35 @@ char *ish_strndup(const char *s, size_t n) {
     return copy;
 }
 
-bool ish_read_stream(FILE *stream, const char *name, char **out, size_t *out_len, IshError *err) {
-    IshBuffer buf;
-    ish_buf_init(&buf);
+bool idm_read_stream(FILE *stream, const char *name, char **out, size_t *out_len, IdmError *err) {
+    IdmBuffer buf;
+    idm_buf_init(&buf);
     char chunk[4096];
     for (;;) {
         size_t n = fread(chunk, 1u, sizeof(chunk), stream);
-        if (n != 0 && !ish_buf_append_n(&buf, chunk, n)) {
-            ish_buf_destroy(&buf);
-            return ish_error_oom(err, ish_span_unknown(name));
+        if (n != 0 && !idm_buf_append_n(&buf, chunk, n)) {
+            idm_buf_destroy(&buf);
+            return idm_error_oom(err, idm_span_unknown(name));
         }
         if (n < sizeof(chunk)) {
             if (ferror(stream)) {
-                ish_buf_destroy(&buf);
-                return ish_error_set(err, ish_span_unknown(name), "read failed: %s", strerror(errno));
+                idm_buf_destroy(&buf);
+                return idm_error_set(err, idm_span_unknown(name), "read failed: %s", strerror(errno));
             }
             break;
         }
     }
     size_t len = buf.len;
-    *out = ish_buf_take(&buf);
-    if (!*out) return ish_error_oom(err, ish_span_unknown(name));
+    *out = idm_buf_take(&buf);
+    if (!*out) return idm_error_oom(err, idm_span_unknown(name));
     if (out_len) *out_len = len;
     return true;
 }
 
-bool ish_read_file(const char *path, char **out, size_t *out_len, IshError *err) {
+bool idm_read_file(const char *path, char **out, size_t *out_len, IdmError *err) {
     FILE *f = fopen(path, "rb");
-    if (!f) return ish_error_set(err, ish_span_unknown(path), "open failed: %s", strerror(errno));
-    bool ok = ish_read_stream(f, path, out, out_len, err);
-    if (fclose(f) != 0 && ok) return ish_error_set(err, ish_span_unknown(path), "close failed: %s", strerror(errno));
+    if (!f) return idm_error_set(err, idm_span_unknown(path), "open failed: %s", strerror(errno));
+    bool ok = idm_read_stream(f, path, out, out_len, err);
+    if (fclose(f) != 0 && ok) return idm_error_set(err, idm_span_unknown(path), "close failed: %s", strerror(errno));
     return ok;
 }

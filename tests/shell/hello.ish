@@ -1,0 +1,5 @@
+#!/usr/bin/env ish
+x = printf "hello from ish"
+println x
+y = echo piped | wc -l
+println y

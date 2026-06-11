@@ -21,7 +21,7 @@ grep -iE 'golden|diag|dump pin' "$doc" | grep -oE '`[a-z0-9][a-z0-9-]*`' | tr -d
     case "$name" in
         test_*) continue ;;
     esac
-    if [ ! -e "tests/golden/${name}.ish" ] && [ ! -e "tests/diag/${name}.ish" ] && [ ! -e "tests/dump/${name}.out" ]; then
+    if [ ! -e "tests/golden/${name}.id" ] && [ ! -e "tests/diag/${name}.id" ] && [ ! -e "tests/dump/${name}.out" ]; then
         echo "CONFORMANCE MANIFEST DRIFT: artifact '${name}' not found in tests/golden, tests/diag, or tests/dump"
         echo drift > build/.conformance_drift
     fi

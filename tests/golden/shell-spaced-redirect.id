@@ -1,0 +1,4 @@
+implements std/shell
+echo 2 > /tmp/idiom_gold_spaced
+println "got:$(cat /tmp/idiom_gold_spaced)"
+rm /tmp/idiom_gold_spaced

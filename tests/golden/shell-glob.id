@@ -1,0 +1,2 @@
+implements std/shell
+ls tests/pkg/mathx/*.id
