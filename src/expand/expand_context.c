@@ -5,7 +5,6 @@ static void method_surface_def_destroy(MethodSurfaceDef *method);
 static bool seed_primitive(ExpandContext *ctx, const char *name, IdmPrimitive primitive);
 static const char *operator_fixity_name(IdmOpFixity fixity);
 static char *operator_binding_key(const char *name, IdmOpFixity fixity);
-static bool binder_scopes_pruned(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmScopeSet *out);
 static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap);
 static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index);
 static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, const IdmBinding *b);
@@ -373,7 +372,7 @@ const IdmBinding *resolve_default(const ExpandContext *ctx, const IdmSyntax *wor
     return status == IDM_RESOLVE_OK ? binding : NULL;
 }
 
-static bool binder_scopes_pruned(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmScopeSet *out) {
+bool binder_scopes_pruned(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmScopeSet *out) {
     if (!syntax_scopes_copy(out, name_syntax)) return false;
     if (ctx->def_ctx) {
         for (size_t i = 0; i < ctx->def_ctx->use_site.count; i++) idm_scope_set_remove(out, ctx->def_ctx->use_site.items[i]);

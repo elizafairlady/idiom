@@ -275,5 +275,6 @@ IdmCore *wrap_kernel_use(ExpandContext *ctx, IdmCore *body, IdmError *err);
 bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, IdmValue *out, IdmError *err);
 bool record_activation(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err);
 bool scopes_subset_for_ref(const IdmScopeSet *binding_scopes, const IdmSyntax *ref);
+bool binder_scopes_pruned(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmScopeSet *out);
 
 #endif

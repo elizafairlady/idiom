@@ -1,0 +1,4 @@
+package rulespkg
+export defrules twice-of do
+  (_ x) -> %`(mul 2 %,x)
+end

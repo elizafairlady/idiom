@@ -626,7 +626,18 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 (syn_is_word(form->as.seq.items[1], "export") && form->as.seq.count >= 3 && syn_is_word(form->as.seq.items[2], "record"));
             if (!is_boundary_word) {
                 uint32_t payload = 0;
-                if (resolve_transformer(ctx, form->as.seq.items[1], &payload, err)) {
+                const IdmSyntax *head_word = form->as.seq.items[1];
+                if (syn_is_word(head_word, "export") && form->as.seq.count >= 3 && form->as.seq.items[2]->kind == IDM_SYN_WORD &&
+                    resolve_transformer(ctx, form->as.seq.items[2], &payload, err)) {
+                    head_word = form->as.seq.items[2];
+                } else if (err && err->present) {
+                    failed = true;
+                    break;
+                } else if (!resolve_transformer(ctx, head_word, &payload, err)) {
+                    if (err && err->present) { failed = true; break; }
+                    head_word = NULL;
+                }
+                if (head_word != NULL) {
                     IdmSyntax *use = idm_syn_clone(form);
                     bool ok = use != NULL;
                     ok = ok && idm_syn_property_set(use, "value-context", ctx->value_context ? "true" : "false");
@@ -635,7 +646,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     ok = ok && idm_syn_scope_add_tree(use, 0, use_site);
                     ok = ok && idm_scope_set_add(&def_ctx.use_site, use_site);
                     IdmSyntax *expanded = NULL;
-                    if (ok) ok = invoke_macro_to_syntax(ctx, use, form->as.seq.items[1], payload, &expanded, err);
+                    if (ok) ok = invoke_macro_to_syntax(ctx, use, head_word, payload, &expanded, err);
                     idm_syn_free(use);
                     if (!ok) { failed = true; break; }
                     if (owned_count == owned_cap) {

@@ -1,16 +1,24 @@
 export defmacro operator stx do
   n = syntax-length stx
-  shape = cond (gt? n 4) :ok (syntax-error stx "operator declaration requires a name and a target")
+  if (lte? n 4) do
+    syntax-error stx "operator declaration requires a name and a target"
+  end
 
   defn find-arrow do
     i when (eq? i n) -> syntax-error stx "operator declaration requires '-> target'"
-    i when (cond (syntax-word? (syntax-nth stx i)) (eq? (syntax-word-text (syntax-nth stx i)) "->") :false) -> i
+    i when (and (syntax-word? (syntax-nth stx i)) (eq? (syntax-word-text (syntax-nth stx i)) "->")) -> i
     i -> find-arrow (add i 1)
   end
 
-  defn kw-text v -> cond (syntax-atom? v) (syntax-atom-text v) (syntax-error stx "operator declaration expects keyword: value pairs")
+  defn kw-text do
+    v when (syntax-atom? v) -> syntax-atom-text v
+    _ -> syntax-error stx "operator declaration expects keyword: value pairs"
+  end
 
-  defn opt-word v -> cond (syntax-word? v) (syntax-word-text v) (syntax-error stx "operator option must be an identifier")
+  defn opt-word do
+    v when (syntax-word? v) -> syntax-word-text v
+    _ -> syntax-error stx "operator option must be an identifier"
+  end
 
   defn apply-opt do
     "precedence" v {p a f} -> tuple (syntax-int-value v) a f
@@ -34,5 +42,5 @@ export defmacro operator stx do
 
   arrow = find-arrow 3
   finish (parse-opts 3 arrow (tuple 50 "left" "infix")) (target-of arrow)
-  make-syntax-atom stx "ok"
+  %`(do end)
 end

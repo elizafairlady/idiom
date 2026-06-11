@@ -70,6 +70,7 @@ typedef struct {
     size_t pos;
     const char *file;
     IdmError *err;
+    bool body_paused_on_else;
 } Parser;
 
 static void tokens_destroy(TokenVec *vec) {
@@ -594,7 +595,10 @@ static IdmSyntax *parse_body(Parser *p, IdmSpan span) {
         }
         skip_separators(p);
     }
-    if (ident_is(p, "else")) return body;
+    if (ident_is(p, "else")) {
+        p->body_paused_on_else = true;
+        return body;
+    }
     if (!ident_is(p, "end")) {
         idm_syn_free(body);
         idm_error_set(p->err, span, "unterminated do/end body");
@@ -750,7 +754,11 @@ static IdmSyntax *parse_expr_impl(Parser *p, TokenKind end1, TokenKind end2, Tok
             skip_separators(p);
             continue;
         }
-        if (is_stop(p, end1, end2, end3, false, end_stops, else_stops)) break;
+        if (p->body_paused_on_else && cur(p)->kind == TOK_IDENT && strcmp(cur(p)->lexeme, "else") == 0) {
+            p->body_paused_on_else = false;
+        } else if (is_stop(p, end1, end2, end3, false, end_stops, else_stops)) {
+            break;
+        }
         if (!separators_stop && (at(p, TOK_NEWLINE) || at(p, TOK_SEMI))) {
             skip_separators(p);
             continue;
@@ -814,7 +822,7 @@ bool idm_reader_read_string(const char *file, const char *source, IdmSyntax **ou
         tokens_destroy(&tokens);
         return false;
     }
-    Parser p = {tokens.items, tokens.count, 0, file, err};
+    Parser p = {tokens.items, tokens.count, 0, file, err, false};
     IdmSyntax *program = parse_program(&p);
     tokens_destroy(&tokens);
     if (!program) return false;

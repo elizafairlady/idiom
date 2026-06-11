@@ -267,7 +267,7 @@ bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *f
     }
     uint32_t payload = (uint32_t)ctx->macro_count;
     IdmScopeSet scopes;
-    if (!syntax_scopes_copy(&scopes, name_syntax)) {
+    if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) {
         macro_def_destroy(macro);
         return idm_error_oom(err, span);
     }
@@ -333,7 +333,7 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
     macro->phase_env = idm_phase_env_retain(ctx->phase_env);
     uint32_t payload = (uint32_t)ctx->macro_count;
     IdmScopeSet scopes;
-    if (!syntax_scopes_copy(&scopes, name_syntax)) {
+    if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) {
         macro_def_destroy(macro);
         return idm_error_oom(err, name_syntax->span);
     }

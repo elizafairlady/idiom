@@ -1,0 +1,45 @@
+defmacro if stx do
+  defn arm-else do
+    stx2 when (eq? (syntax-word-text (syntax-nth stx2 4)) "else") ->
+      %`(cond %,(syntax-nth stx2 2) %,(syntax-nth stx2 3) %,(syntax-nth stx2 5))
+    stx2 -> syntax-error stx2 "if expects: if COND BODY else BODY"
+  end
+  defn arm do
+    stx2 when (eq? (syntax-length stx2) 4) -> %`(cond %,(syntax-nth stx2 2) %,(syntax-nth stx2 3) :nil)
+    stx2 when (eq? (syntax-length stx2) 6) -> arm-else stx2
+    stx2 -> syntax-error stx2 "if expects: if COND BODY [else BODY]"
+  end
+  arm stx
+end
+
+defmacro and stx do
+  defn tail-of do
+    i n when (eq? i n) -> :nil
+    i n -> cons (syntax-nth stx i) (tail-of (add i 1) n)
+  end
+  defn arm do
+    n when (eq? n 2) -> syntax-error stx "and expects at least one form"
+    n when (eq? n 3) -> syntax-nth stx 2
+    n -> %`(cond %,(syntax-nth stx 2) (and %,@(tail-of 3 n)) :false)
+  end
+  arm (syntax-length stx)
+end
+
+defmacro or stx do
+  defn tail-of do
+    i n when (eq? i n) -> :nil
+    i n -> cons (syntax-nth stx i) (tail-of (add i 1) n)
+  end
+  defn arm do
+    n when (eq? n 2) -> syntax-error stx "or expects at least one form"
+    n when (eq? n 3) -> syntax-nth stx 2
+    n -> do
+      tmp = make-syntax-word stx "__or_tmp__"
+      %`(do
+        %,tmp = %,(syntax-nth stx 2)
+        cond %,tmp %,tmp (or %,@(tail-of 3 n))
+      end)
+    end
+  end
+  arm (syntax-length stx)
+end
