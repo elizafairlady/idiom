@@ -45,9 +45,14 @@ static IdmSyntax *with_shell(IdmSyntax *program, const char *file, IdmError *err
     return wrapped;
 }
 
+static char **g_cli_args = NULL;
+static size_t g_cli_arg_count = 0;
+
 static int run_shell_source(const char *file, const char *source, bool print_result) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
+    rt.cli_args = g_cli_args;
+    rt.cli_arg_count = g_cli_arg_count;
     IdmError err;
     idm_error_init(&err);
     int status = 1;
@@ -118,7 +123,11 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc == 3 && strcmp(argv[1], "-c") == 0) return run_shell_source("<command>", argv[2], false);
-    if (argc == 2 && argv[1][0] != '-') return run_shell_file(argv[1]);
+    if (argc >= 2 && argv[1][0] != '-') {
+        g_cli_args = argv + 2;
+        g_cli_arg_count = (size_t)(argc - 2);
+        return run_shell_file(argv[1]);
+    }
     usage(stderr);
     return 64;
 }

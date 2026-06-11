@@ -1,0 +1,100 @@
+package string
+
+export defn length s -> str-len s
+
+export defn slice s a b -> str-slice s a b
+
+export defn at s i -> str-byte s i
+
+export defn contains? s sub -> str-contains? s sub
+
+export defn find s sub -> str-find s sub 0
+
+export defn starts-with? s prefix ->
+  eq? (str-slice s 0 (str-len prefix)) prefix
+
+export defn ends-with? s suffix ->
+  eq? (str-slice s (sub (str-len s) (str-len suffix)) (str-len s)) suffix
+
+defn space? do
+  32 -> :true
+  9 -> :true
+  10 -> :true
+  13 -> :true
+  _ -> :false
+end
+
+defn scan-left do
+  s i n when (eq? i n) -> i
+  s i n -> if (space? (str-byte s i)) do scan-left s (add i 1) n else do i end
+end
+
+defn scan-right do
+  s i when (eq? i 0) -> 0
+  s i -> if (space? (str-byte s (sub i 1))) do scan-right s (sub i 1) else do i end
+end
+
+export defn trim-left s -> str-slice s (scan-left s 0 (str-len s)) (str-len s)
+export defn trim-right s -> str-slice s 0 (scan-right s (str-len s))
+export defn trim s -> s |> trim-left |> trim-right
+
+defn split-from do
+  s sep i acc -> match (str-find s sep i) do
+    :nil -> cons (str-slice s i (str-len s)) acc
+    at -> split-from s sep (add at (str-len sep)) (cons (str-slice s i at) acc)
+  end
+end
+
+defn rev do
+  :nil acc -> acc
+  [h . t] acc -> rev t (cons h acc)
+end
+
+export defn split do
+  s sep when (eq? (str-len sep) 0) -> error (tuple :split :empty-separator)
+  s sep -> rev (split-from s sep 0 :nil) :nil
+end
+
+export defn join do
+  :nil _sep -> ""
+  [h . t] sep -> join-from t sep h
+end
+
+defn join-from do
+  :nil _sep acc -> acc
+  [h . t] sep acc -> join-from t sep (str acc sep h)
+end
+
+export defn replace s old new ->
+  s |> split old |> join new
+
+export defn repeat do
+  _s 0 -> ""
+  s n -> str s (repeat s (sub n 1))
+end
+
+defn pad do
+  s n ch left? -> do
+    gap = sub n (str-len s)
+    if (lte? gap 0) do
+      s
+    else do
+      padding = repeat ch gap
+      if left? do str padding s else do str s padding end
+    end
+  end
+end
+
+export defn pad-left s n ch -> pad s n ch :true
+export defn pad-right s n ch -> pad s n ch :false
+
+defn map-bytes do
+  s i n f acc when (eq? i n) -> acc
+  s i n f acc -> map-bytes s (add i 1) n f (str acc (byte-str (f (str-byte s i))))
+end
+
+defn upbyte b -> if (and (gte? b 97) (lte? b 122)) do sub b 32 else do b end
+defn downbyte b -> if (and (gte? b 65) (lte? b 90)) do add b 32 else do b end
+
+export defn upcase s -> map-bytes s 0 (str-len s) &upbyte ""
+export defn downcase s -> map-bytes s 0 (str-len s) &downbyte ""

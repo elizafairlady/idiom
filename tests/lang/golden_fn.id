@@ -21,7 +21,7 @@ suite do
     got = do
       use std/enum
       square = fn x -> mul x x
-      map &square [1 2 3 4]
+      [1 2 3 4] |> map &square
     end
     assert-inspect got "(1 4 9 16)"
   end

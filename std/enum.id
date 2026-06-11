@@ -1,3 +1,5 @@
+package enum
+
 defn reduce-list do
   :nil acc _ -> acc
   [h . t] acc f -> reduce-list t (f h acc) f
@@ -5,16 +7,16 @@ end
 
 export defn reduce xs acc f -> reduce-list (to-list xs) acc f
 export defn reverse xs -> reduce xs :nil &cons
-export defn foldl f acc xs -> reduce xs acc (fn x a -> f a x)
-export defn map f xs -> reverse (reduce xs :nil (fn x acc -> cons (f x) acc))
-export defn filter f xs -> reverse (reduce xs :nil (fn x acc -> if (f x) do cons x acc else do acc end))
+export defn map xs f -> reverse (reduce xs :nil (fn x acc -> cons (f x) acc))
+export defn filter xs f -> reverse (reduce xs :nil (fn x acc -> if (f x) do cons x acc else do acc end))
+export defn flat-map xs f -> reduce (map xs f) :nil (fn part acc -> concat acc part)
 export defn length xs -> reduce xs 0 (fn _x acc -> add acc 1)
 export defn sum xs -> reduce xs 0 &add
 
 export defn member? do
-  _ :nil -> :false
-  x [h . _] when (eq? x h) -> :true
-  x [_ . t] -> member? x t
+  :nil _ -> :false
+  [h . _] x when (eq? x h) -> :true
+  [_ . t] x -> member? t x
 end
 
 export defn concat xs ys -> reduce (reverse xs) ys &cons
@@ -25,16 +27,61 @@ export defn nth do
 end
 
 export defn take do
-  0 _ -> :nil
-  _ :nil -> :nil
-  n [h . t] -> cons h (take (sub n 1) t)
+  _ 0 -> :nil
+  :nil _ -> :nil
+  [h . t] n -> cons h (take t (sub n 1))
 end
 
 export defn drop do
-  0 xs -> xs
-  _ :nil -> :nil
-  n [_ . t] -> drop (sub n 1) t
+  xs 0 -> xs
+  :nil _ -> :nil
+  [_ . t] n -> drop t (sub n 1)
 end
+
+export defn any? do
+  :nil _ -> :false
+  [h . t] f -> if (f h) do :true else do any? t f end
+end
+
+export defn all? do
+  :nil _ -> :true
+  [h . t] f -> if (f h) do all? t f else do :false end
+end
+
+export defn find do
+  :nil _ -> :nil
+  [h . t] f -> if (f h) do h else do find t f end
+end
+
+export defn zip do
+  :nil _ -> :nil
+  _ :nil -> :nil
+  [a . as] [b . bs] -> cons (tuple a b) (zip as bs)
+end
+
+export defn range do
+  a b when (gte? a b) -> :nil
+  a b -> cons a (range (add a 1) b)
+end
+
+defn insert-sorted do
+  x :nil _cmp -> cons x :nil
+  x [h . t] cmp -> if (cmp x h) do cons x (cons h t) else do cons h (insert-sorted x t cmp) end
+end
+
+export defn sort-by xs cmp -> reduce xs :nil (fn x acc -> insert-sorted x acc cmp)
+export defn sort xs -> sort-by xs &lt?
+
+export defn min-of do
+  [h . t] -> reduce t h (fn x best -> if (lt? x best) do x else do best end)
+end
+
+export defn max-of do
+  [h . t] -> reduce t h (fn x best -> if (gt? x best) do x else do best end)
+end
+
+export defn group-by xs f ->
+  reduce xs (dict) (fn x acc -> dict-put acc (f x) (cons x (dict-get acc (f x) :nil)))
 
 export defn not? do
   :false -> :true

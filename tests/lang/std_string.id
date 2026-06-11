@@ -1,0 +1,33 @@
+use std/test
+use std/string
+
+suite do
+  test "string-basics" do
+    assert-eq ("hello" |> length) 5
+    assert-eq ("hello" |> slice 1 4) "ell"
+    assert-eq ("banana" |> find "na") 2
+    assert-eq ("banana" |> contains? "nan") :true
+    assert-eq ("idiom" |> starts-with? "idi") :true
+    assert-eq ("idiom" |> ends-with? "om") :true
+  end
+  test "string-trim" do
+    assert-eq ("  x  " |> trim) "x"
+    assert-eq ("\t a" |> trim-left) "a"
+    assert-eq ("a \n" |> trim-right) "a"
+  end
+  test "string-split-join" do
+    assert-inspect ("a:b:c" |> split ":") "(\"a\" \"b\" \"c\")"
+    assert-eq ((list "a" "b" "c") |> join "-") "a-b-c"
+    assert-eq ("::x::" |> split "::" |> join "|") "|x|"
+  end
+  test "string-replace-repeat-pad" do
+    assert-eq ("banana" |> replace "na" "NA") "baNANA"
+    assert-eq ("ab" |> repeat 3) "ababab"
+    assert-eq ("7" |> pad-left 3 "0") "007"
+    assert-eq ("7" |> pad-right 3 "!") "7!!"
+  end
+  test "string-case" do
+    assert-eq ("Mixed Case 9" |> upcase) "MIXED CASE 9"
+    assert-eq ("Mixed Case 9" |> downcase) "mixed case 9"
+  end
+end

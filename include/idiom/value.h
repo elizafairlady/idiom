@@ -128,6 +128,8 @@ struct IdmRuntime {
     IdmRegisterMacroFn register_macro;
     void *expander_surface_user;
     IdmExpanderSurfaceFn expander_surface;
+    char **cli_args;
+    size_t cli_arg_count;
     IdmNamespace **namespaces;
     size_t ns_count;
     size_t ns_cap;

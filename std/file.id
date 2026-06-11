@@ -1,0 +1,36 @@
+package file
+
+export defn read path -> file-read path
+export defn write path data -> file-write path data
+export defn exists? path -> file-exists? path
+export defn stat path -> file-stat path
+export defn ls path -> file-list path
+export defn remove path -> file-remove path
+
+export defn read! do
+  path -> match (file-read path) do
+    {:ok data} -> data
+    {:error reason} -> error (tuple :file-read path reason)
+  end
+end
+
+export defn write! do
+  path data -> match (file-write path data) do
+    :ok -> :ok
+    {:error reason} -> error (tuple :file-write path reason)
+  end
+end
+
+export defn mtime! do
+  path -> match (file-stat path) do
+    {:ok {:stat _kind _size m}} -> m
+    {:error reason} -> error (tuple :file-stat path reason)
+  end
+end
+
+export defn dir? do
+  path -> match (file-stat path) do
+    {:ok {:stat :dir _ _}} -> :true
+    _ -> :false
+  end
+end

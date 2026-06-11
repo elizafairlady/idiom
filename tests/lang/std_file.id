@@ -1,0 +1,39 @@
+use std/test
+use std/file
+use std/enum
+
+suite do
+  test "file-roundtrip" do
+    p = "/tmp/idiom_test_file_rt"
+    write! p "contents"
+    assert-eq (read! p) "contents"
+    assert-eq (exists? p) :true
+    assert-eq (remove p) :ok
+    assert-eq (exists? p) :false
+  end
+  test "file-errors-tagged" do
+    assert-inspect (read "/tmp/idiom_no_such_file") "{:error :enoent}"
+    r = assert-raises (fn do read! "/tmp/idiom_no_such_file" end)
+    assert-eq (r |> tuple-get 0) :error
+  end
+  test "file-stat" do
+    p = "/tmp/idiom_test_stat"
+    write! p "12345"
+    s = match (stat p) do
+      {:ok st} -> st
+    end
+    assert-eq (s |> tuple-get 1) :file
+    assert-eq (s |> tuple-get 2) 5
+    assert-eq (dir? "/tmp") :true
+    remove p
+  end
+  test "file-list" do
+    p = "/tmp/idiom_test_dir_probe"
+    write! p "x"
+    names = match (ls "/tmp") do
+      {:ok ns} -> ns
+    end
+    assert-eq (names |> member? "idiom_test_dir_probe") :true
+    remove p
+  end
+end

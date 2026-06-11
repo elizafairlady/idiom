@@ -1,0 +1,60 @@
+package path
+
+use std/string
+
+export defn join do
+  a b when (eq? a "") -> b
+  a b when (ends-with? a "/") -> str a b
+  a b -> str a "/" b
+end
+
+defn last-slash p -> scan-slash p (str-len p)
+
+defn scan-slash do
+  _p 0 -> :nil
+  p i -> if (eq? (str-byte p (sub i 1)) 47) do sub i 1 else do scan-slash p (sub i 1) end
+end
+
+export defn dirname do
+  p -> match (last-slash p) do
+    :nil -> "."
+    0 -> "/"
+    i -> str-slice p 0 i
+  end
+end
+
+export defn basename do
+  p -> match (last-slash p) do
+    :nil -> p
+    i -> str-slice p (add i 1) (str-len p)
+  end
+end
+
+defn last-dot do
+  _p 0 -> :nil
+  p i -> do
+    b = str-byte p (sub i 1)
+    if (eq? b 46) do
+      sub i 1
+    else if (eq? b 47) do
+      :nil
+    else do
+      last-dot p (sub i 1)
+    end
+  end
+end
+
+export defn extname do
+  p -> match (last-dot p (str-len p)) do
+    :nil -> ""
+    0 -> ""
+    i -> str-slice p i (str-len p)
+  end
+end
+
+export defn absolute? p -> starts-with? p "/"
+
+export defn expand do
+  p when (absolute? p) -> p
+  p -> join (pwd) p
+end

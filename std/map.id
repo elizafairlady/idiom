@@ -1,0 +1,19 @@
+package map
+
+export defn get m k -> dict-get m k :nil
+export defn get-or m k default -> dict-get m k default
+export defn put m k v -> dict-put m k v
+export defn del m k -> dict-del m k
+export defn keys m -> dict-keys m
+export defn vals m -> dict-vals m
+export defn size m -> dict-size m
+export defn has? m k -> dict-has? m k
+
+export defn update m k default f -> dict-put m k (f (dict-get m k default))
+
+export defn merge a b -> merge-pairs a (dict-keys b) b
+
+defn merge-pairs do
+  m :nil _other -> m
+  m [k . t] other -> merge-pairs (dict-put m k (dict-get other k :nil)) t other
+end

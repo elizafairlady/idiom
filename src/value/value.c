@@ -151,6 +151,8 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->register_macro = NULL;
     rt->expander_surface_user = NULL;
     rt->expander_surface = NULL;
+    rt->cli_args = NULL;
+    rt->cli_arg_count = 0;
     rt->namespaces = NULL;
     rt->ns_count = 0;
     rt->ns_cap = 0;

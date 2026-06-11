@@ -51,7 +51,7 @@ static void test_gc_stress(void) {
     const char *src =
         "use std/enum\n"
         "keep = [10 20 30 40]\n"
-        "defn loop n -> cond (eq? n 0) (sum keep) (do (map (fn x -> mul x x) [1 2 3 4 5]); (loop (sub n 1)) end)\n"
+        "defn loop n -> cond (eq? n 0) (sum keep) (do (map [1 2 3 4 5] (fn x -> mul x x)); (loop (sub n 1)) end)\n"
         "loop 200\n";
     IdmCore *core = NULL;
     CHECK(idm_expand_string(&rt, "<gc>", src, &core, &err));

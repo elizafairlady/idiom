@@ -6,10 +6,13 @@
 #include "idiom/syntax.h"
 #include "idiom/vm.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -971,6 +974,288 @@ static bool prim_expand_check(IdmRuntime *rt, IdmValue *args, IdmValue *out, Idm
     return !(err && err->present);
 }
 
+static bool require_string_arg(IdmValue v, const char **out_s, size_t *out_len, const char *what, IdmError *err) {
+    if (v.tag != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "%s expects a string", what);
+    *out_s = idm_string_bytes(v);
+    *out_len = idm_string_length(v);
+    return true;
+}
+
+static int64_t clamp_index(int64_t i, size_t len) {
+    if (i < 0) i = 0;
+    if ((size_t)i > len) i = (int64_t)len;
+    return i;
+}
+
+static bool prim_str_len(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt;
+    const char *s; size_t len;
+    if (!require_string_arg(args[0], &s, &len, "str-len", err)) return false;
+    *out = idm_int((int64_t)len);
+    return true;
+}
+
+static bool prim_str_slice(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *s; size_t len;
+    if (!require_string_arg(args[0], &s, &len, "str-slice", err)) return false;
+    if (args[1].tag != IDM_VAL_INT || args[2].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "str-slice expects integer bounds");
+    int64_t a = clamp_index(args[1].as.i, len);
+    int64_t b = clamp_index(args[2].as.i, len);
+    if (b < a) b = a;
+    *out = idm_string_n(rt, s + a, (size_t)(b - a), err);
+    return !(err && err->present);
+}
+
+static bool prim_str_find(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt;
+    const char *s; size_t len;
+    const char *needle; size_t nlen;
+    if (!require_string_arg(args[0], &s, &len, "str-find", err)) return false;
+    if (!require_string_arg(args[1], &needle, &nlen, "str-find", err)) return false;
+    if (args[2].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "str-find expects an integer start");
+    size_t from = (size_t)clamp_index(args[2].as.i, len);
+    if (nlen == 0) { *out = idm_int((int64_t)from); return true; }
+    for (size_t i = from; i + nlen <= len; i++) {
+        if (memcmp(s + i, needle, nlen) == 0) {
+            *out = idm_int((int64_t)i);
+            return true;
+        }
+    }
+    *out = idm_nil();
+    return true;
+}
+
+static bool prim_str_byte(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt;
+    const char *s; size_t len;
+    if (!require_string_arg(args[0], &s, &len, "str-byte", err)) return false;
+    if (args[1].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "str-byte expects an integer index");
+    int64_t i = args[1].as.i;
+    if (i < 0 || (size_t)i >= len) { *out = idm_nil(); return true; }
+    *out = idm_int((int64_t)(unsigned char)s[i]);
+    return true;
+}
+
+static bool prim_byte_str(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_INT || args[0].as.i < 0 || args[0].as.i > 255) return idm_error_set(err, idm_span_unknown(NULL), "byte-str expects an integer 0..255");
+    char c = (char)args[0].as.i;
+    *out = idm_string_n(rt, &c, 1u, err);
+    return !(err && err->present);
+}
+
+static IdmValue errno_reason(IdmRuntime *rt) {
+    switch (errno) {
+        case ENOENT: return idm_atom(rt, "enoent");
+        case EACCES: return idm_atom(rt, "eacces");
+        case EISDIR: return idm_atom(rt, "eisdir");
+        case ENOTDIR: return idm_atom(rt, "enotdir");
+        case EEXIST: return idm_atom(rt, "eexist");
+        default: return idm_atom(rt, "eio");
+    }
+}
+
+static bool result_ok(IdmRuntime *rt, IdmValue payload, IdmValue *out, IdmError *err) {
+    IdmValue items[2] = { idm_atom(rt, "ok"), payload };
+    *out = idm_tuple(rt, items, 2u, err);
+    return !(err && err->present);
+}
+
+static bool result_error(IdmRuntime *rt, IdmValue *out, IdmError *err) {
+    IdmValue items[2] = { idm_atom(rt, "error"), errno_reason(rt) };
+    *out = idm_tuple(rt, items, 2u, err);
+    return !(err && err->present);
+}
+
+static bool prim_file_read(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    if (!require_string_arg(args[0], &path, &plen, "file-read", err)) return false;
+    char *data = NULL;
+    size_t len = 0;
+    IdmError inner;
+    idm_error_init(&inner);
+    if (!idm_read_file(path, &data, &len, &inner)) {
+        idm_error_clear(&inner);
+        return result_error(rt, out, err);
+    }
+    IdmValue s = idm_string_n(rt, data, len, err);
+    free(data);
+    if (err && err->present) return false;
+    return result_ok(rt, s, out, err);
+}
+
+static bool prim_file_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    const char *data; size_t dlen;
+    if (!require_string_arg(args[0], &path, &plen, "file-write", err)) return false;
+    if (!require_string_arg(args[1], &data, &dlen, "file-write", err)) return false;
+    FILE *f = fopen(path, "wb");
+    if (!f) return result_error(rt, out, err);
+    bool ok = fwrite(data, 1u, dlen, f) == dlen;
+    ok = (fclose(f) == 0) && ok;
+    if (!ok) return result_error(rt, out, err);
+    *out = idm_atom(rt, "ok");
+    return true;
+}
+
+static bool prim_file_exists(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    if (!require_string_arg(args[0], &path, &plen, "file-exists?", err)) return false;
+    *out = access(path, F_OK) == 0 ? idm_atom(rt, "true") : idm_atom(rt, "false");
+    return true;
+}
+
+static bool prim_file_stat(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    if (!require_string_arg(args[0], &path, &plen, "file-stat", err)) return false;
+    struct stat st;
+    if (stat(path, &st) != 0) return result_error(rt, out, err);
+    IdmValue items[4];
+    items[0] = idm_atom(rt, "stat");
+    items[1] = S_ISDIR(st.st_mode) ? idm_atom(rt, "dir") : (S_ISREG(st.st_mode) ? idm_atom(rt, "file") : idm_atom(rt, "other"));
+    items[2] = idm_int((int64_t)st.st_size);
+    items[3] = idm_int((int64_t)st.st_mtime * 1000);
+    IdmValue stat_tuple = idm_tuple(rt, items, 4u, err);
+    if (err && err->present) return false;
+    return result_ok(rt, stat_tuple, out, err);
+}
+
+static bool prim_file_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    if (!require_string_arg(args[0], &path, &plen, "file-list", err)) return false;
+    DIR *dir = opendir(path);
+    if (!dir) return result_error(rt, out, err);
+    IdmValue acc = idm_nil();
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        IdmValue name = idm_string(rt, entry->d_name, err);
+        if (err && err->present) { closedir(dir); return false; }
+        acc = idm_cons(rt, name, acc, err);
+        if (err && err->present) { closedir(dir); return false; }
+    }
+    closedir(dir);
+    return result_ok(rt, acc, out, err);
+}
+
+static bool prim_file_remove(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    if (!require_string_arg(args[0], &path, &plen, "file-remove", err)) return false;
+    if (remove(path) != 0) return result_error(rt, out, err);
+    *out = idm_atom(rt, "ok");
+    return true;
+}
+
+static bool prim_args(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)args;
+    IdmValue acc = idm_nil();
+    for (size_t i = rt->cli_arg_count; i > 0; i--) {
+        IdmValue s = idm_string(rt, rt->cli_args[i - 1u], err);
+        if (err && err->present) return false;
+        acc = idm_cons(rt, s, acc, err);
+        if (err && err->present) return false;
+    }
+    *out = acc;
+    return true;
+}
+
+static bool prim_time_ms(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt; (void)args; (void)err;
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    *out = idm_int((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+    return true;
+}
+
+static bool prim_random(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt;
+    if (args[0].tag != IDM_VAL_INT || args[0].as.i <= 0) return idm_error_set(err, idm_span_unknown(NULL), "random expects a positive integer bound");
+    *out = idm_int((int64_t)(random() % args[0].as.i));
+    return true;
+}
+
+static bool prim_dict_get(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt; (void)err;
+    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-get expects a dict");
+    IdmValue found;
+    *out = idm_dict_get(args[0], args[1], &found) ? found : args[2];
+    return true;
+}
+
+static bool dict_rebuild(IdmRuntime *rt, IdmValue d, IdmValue skip_key, bool have_extra, IdmValue extra_key, IdmValue extra_val, IdmValue *out, IdmError *err) {
+    size_t n = idm_dict_count(d);
+    size_t cap = n + (have_extra ? 1u : 0u);
+    IdmDictEntry *entries = cap ? calloc(cap, sizeof(*entries)) : NULL;
+    if (cap && !entries) return idm_error_oom(err, idm_span_unknown(NULL));
+    size_t count = 0;
+    for (size_t i = 0; i < n; i++) {
+        IdmValue k, v;
+        if (!idm_dict_entry(d, i, &k, &v)) continue;
+        if (idm_value_equal(k, skip_key)) continue;
+        entries[count].key = k;
+        entries[count].value = v;
+        count++;
+    }
+    if (have_extra) {
+        entries[count].key = extra_key;
+        entries[count].value = extra_val;
+        count++;
+    }
+    *out = idm_dict(rt, entries, count, err);
+    free(entries);
+    return !(err && err->present);
+}
+
+static bool prim_dict_put(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-put expects a dict");
+    return dict_rebuild(rt, args[0], args[1], true, args[1], args[2], out, err);
+}
+
+static bool prim_dict_del(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-del expects a dict");
+    return dict_rebuild(rt, args[0], args[1], false, idm_nil(), idm_nil(), out, err);
+}
+
+static bool prim_dict_keys(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-keys expects a dict");
+    IdmValue acc = idm_nil();
+    for (size_t i = idm_dict_count(args[0]); i > 0; i--) {
+        IdmValue k, v;
+        if (!idm_dict_entry(args[0], i - 1u, &k, &v)) continue;
+        acc = idm_cons(rt, k, acc, err);
+        if (err && err->present) return false;
+    }
+    *out = acc;
+    return true;
+}
+
+static bool prim_dict_vals(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-vals expects a dict");
+    IdmValue acc = idm_nil();
+    for (size_t i = idm_dict_count(args[0]); i > 0; i--) {
+        IdmValue k, v;
+        if (!idm_dict_entry(args[0], i - 1u, &k, &v)) continue;
+        acc = idm_cons(rt, v, acc, err);
+        if (err && err->present) return false;
+    }
+    *out = acc;
+    return true;
+}
+
+static bool prim_dict_has(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)err;
+    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-has? expects a dict");
+    IdmValue found;
+    *out = idm_dict_get(args[0], args[1], &found) ? idm_atom(rt, "true") : idm_atom(rt, "false");
+    return true;
+}
+
+static bool prim_dict_size(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt; (void)err;
+    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-size expects a dict");
+    *out = idm_int((int64_t)idm_dict_count(args[0]));
+    return true;
+}
+
 static bool prim_str_contains(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     size_t hay_len = 0;
     const char *hay = require_string(args[0], &hay_len, err);
@@ -1385,6 +1670,27 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_EXPANDER_SURFACE: return prim_expander_surface(rt, args, out, err);
         case IDM_PRIM_EXPAND_CHECK: return prim_expand_check(rt, args, out, err);
         case IDM_PRIM_INSPECT: return prim_inspect(rt, args, out, err);
+        case IDM_PRIM_STR_LEN: return prim_str_len(rt, args, out, err);
+        case IDM_PRIM_STR_SLICE: return prim_str_slice(rt, args, out, err);
+        case IDM_PRIM_STR_FIND: return prim_str_find(rt, args, out, err);
+        case IDM_PRIM_STR_BYTE: return prim_str_byte(rt, args, out, err);
+        case IDM_PRIM_BYTE_STR: return prim_byte_str(rt, args, out, err);
+        case IDM_PRIM_FILE_READ: return prim_file_read(rt, args, out, err);
+        case IDM_PRIM_FILE_WRITE: return prim_file_write(rt, args, out, err);
+        case IDM_PRIM_FILE_EXISTS: return prim_file_exists(rt, args, out, err);
+        case IDM_PRIM_FILE_STAT: return prim_file_stat(rt, args, out, err);
+        case IDM_PRIM_FILE_LIST: return prim_file_list(rt, args, out, err);
+        case IDM_PRIM_FILE_REMOVE: return prim_file_remove(rt, args, out, err);
+        case IDM_PRIM_ARGS: return prim_args(rt, args, out, err);
+        case IDM_PRIM_TIME_MS: return prim_time_ms(rt, args, out, err);
+        case IDM_PRIM_RANDOM: return prim_random(rt, args, out, err);
+        case IDM_PRIM_DICT_GET: return prim_dict_get(rt, args, out, err);
+        case IDM_PRIM_DICT_PUT: return prim_dict_put(rt, args, out, err);
+        case IDM_PRIM_DICT_DEL: return prim_dict_del(rt, args, out, err);
+        case IDM_PRIM_DICT_KEYS: return prim_dict_keys(rt, args, out, err);
+        case IDM_PRIM_DICT_VALS: return prim_dict_vals(rt, args, out, err);
+        case IDM_PRIM_DICT_HAS: return prim_dict_has(rt, args, out, err);
+        case IDM_PRIM_DICT_SIZE: return prim_dict_size(rt, args, out, err);
         case IDM_PRIM_SYNTAX_INT_VALUE: return prim_syntax_int_value(rt, args, out, err);
         case IDM_PRIM_MAKE_SYNTAX_WORD: return prim_make_syntax_word(rt, args, out, err);
         case IDM_PRIM_MAKE_SYNTAX_ATOM: return prim_make_syntax_atom(rt, args, out, err);

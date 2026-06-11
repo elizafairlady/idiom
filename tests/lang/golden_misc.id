@@ -225,7 +225,7 @@ suite do
   test "import-default-alias" do
     got = do
       import std/enum
-      enum.map (fn x -> mul x x) [1 2 3]
+      enum.map [1 2 3] (fn x -> mul x x)
     end
     assert-inspect got "(1 4 9)"
   end

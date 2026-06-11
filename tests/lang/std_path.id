@@ -1,0 +1,23 @@
+use std/test
+use std/path
+
+suite do
+  test "path-join" do
+    assert-eq (join "a/b" "c.id") "a/b/c.id"
+    assert-eq (join "a/" "b") "a/b"
+    assert-eq (join "" "b") "b"
+  end
+  test "path-parts" do
+    assert-eq ("/x/y/z.id" |> dirname) "/x/y"
+    assert-eq ("/x/y/z.id" |> basename) "z.id"
+    assert-eq ("plain" |> dirname) "."
+    assert-eq ("/top" |> dirname) "/"
+    assert-eq ("z.tar.gz" |> extname) ".gz"
+    assert-eq ("noext" |> extname) ""
+  end
+  test "path-absolute" do
+    assert-eq ("/etc" |> absolute?) :true
+    assert-eq ("rel" |> absolute?) :false
+    assert-eq ("/abs/x" |> expand) "/abs/x"
+  end
+end

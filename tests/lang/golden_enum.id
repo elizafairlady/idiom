@@ -1,74 +1,68 @@
 use std/test
+use std/enum
 
 suite do
-  test "enum-compose" do
-    got = do
-      use std/enum
-      map (fn x -> add x 1) (filter (fn x -> gt? x 1) [1 2 3])
-    end
-    assert-inspect got "(3 4)"
-  end
-  test "enum-concat" do
-    got = do
-      use std/enum
-      concat [1 2] [3 4]
-    end
-    assert-inspect got "(1 2 3 4)"
-  end
-  test "enum-filter" do
-    got = do
-      use std/enum
-      filter (fn x -> gt? x 2) [1 2 3 4]
-    end
-    assert-inspect got "(3 4)"
-  end
-  test "enum-foldl" do
-    got = do
-      use std/enum
-      foldl (fn acc x -> sub acc x) 100 [1 2 3]
-    end
-    assert-inspect got "94"
-  end
-  test "enum-length" do
-    got = do
-      use std/enum
-      length [9 8 7 6]
-    end
-    assert-inspect got "4"
-  end
   test "enum-map" do
-    got = do
-      use std/enum
-      map (fn x -> mul x x) [1 2 3 4]
-    end
+    got = [1 2 3 4] |> map (fn x -> mul x x)
     assert-inspect got "(1 4 9 16)"
   end
-  test "enum-reduce-poly" do
-    got = do
-      use std/enum
-      reduce {10 20 30} 0 (fn x acc -> add acc x)
-    end
-    assert-inspect got "60"
+  test "enum-filter" do
+    got = [1 2 3 4] |> filter (fn x -> gt? x 2)
+    assert-inspect got "(3 4)"
+  end
+  test "enum-compose" do
+    got = [1 2 3] |> filter (fn x -> gt? x 1) |> map (fn x -> add x 1)
+    assert-inspect got "(3 4)"
   end
   test "enum-reduce" do
-    got = do
-      use std/enum
-      reduce [1 2 3 4] 0 (fn x acc -> add x acc)
-    end
-    assert-inspect got "10"
+    assert-eq ([1 2 3 4] |> reduce 0 &add) 10
+  end
+  test "enum-reduce-poly" do
+    assert-eq ({10 20 30} |> reduce 0 &add) 60
   end
   test "enum-reverse" do
-    got = do
-      use std/enum
-      reverse [1 2 3]
-    end
-    assert-inspect got "(3 2 1)"
+    assert-inspect ([1 2 3] |> reverse) "(3 2 1)"
+  end
+  test "enum-length" do
+    assert-eq ([9 9 9 9] |> length) 4
   end
   test "enum-sum" do
-    got = do
-      use std/enum
-      sum [1 2 3 4 5]
-    end
-    assert-inspect got "15"
+    assert-eq ([1 2 3 4 5] |> sum) 15
+  end
+  test "enum-member" do
+    assert-eq ([1 2 3] |> member? 3) :true
+    assert-eq ([1 2 3] |> member? 7) :false
+  end
+  test "enum-concat" do
+    assert-inspect ([1 2] |> concat [3 4]) "(1 2 3 4)"
+  end
+  test "enum-take-drop-nth" do
+    assert-inspect ([7 8 9] |> take 2) "(7 8)"
+    assert-inspect ([7 8 9] |> drop 1) "(8 9)"
+    assert-eq ([4 5 6] |> nth 1) 5
+  end
+  test "enum-predicates" do
+    assert-eq ([1 2 3] |> any? (fn x -> eq? x 2)) :true
+    assert-eq ([1 2 3] |> all? (fn x -> gt? x 0)) :true
+    assert-eq ([1 2 3] |> all? (fn x -> gt? x 1)) :false
+    assert-eq ([1 2 3] |> find (fn x -> gt? x 1)) 2
+  end
+  test "enum-zip-range-sort" do
+    assert-inspect (range 1 4) "(1 2 3)"
+    assert-inspect ([1 2] |> zip [:a :b]) "({1 :a} {2 :b})"
+    assert-inspect ([3 1 2] |> sort) "(1 2 3)"
+    assert-eq (min-of [3 1 2]) 1
+    assert-eq (max-of [3 1 2]) 3
+  end
+  test "enum-flat-map" do
+    assert-inspect ([1 2] |> flat-map (fn x -> list x x)) "(1 1 2 2)"
+  end
+  test "enum-group-by" do
+    g = [1 2 3 4] |> group-by (fn x -> mod x 2)
+    assert-eq (g |> dict-get 0 :nil |> length) 2
+  end
+  test "enum-not" do
+    assert-eq (not? :false) :true
+    assert-eq (not? 1) :false
   end
 end

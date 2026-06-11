@@ -134,9 +134,14 @@ static int dump_bytecode(const char *path) {
     return 0;
 }
 
+static char **g_cli_args = NULL;
+static size_t g_cli_arg_count = 0;
+
 static int run_source(const char *file, const char *source, bool print_result) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
+    rt.cli_args = g_cli_args;
+    rt.cli_arg_count = g_cli_arg_count;
     IdmError err;
     idm_error_init(&err);
     int status = 1;
@@ -309,7 +314,11 @@ int main(int argc, char **argv) {
                  ":ok\n", prelude);
         return run_source("<dump-surface>", source, false);
     }
-    if (argc == 2 && argv[1][0] != '-') return run_file(argv[1]);
+    if (argc >= 2 && argv[1][0] != '-') {
+        g_cli_args = argv + 2;
+        g_cli_arg_count = (size_t)(argc - 2);
+        return run_file(argv[1]);
+    }
     if (argc == 2 && strcmp(argv[1], "-") == 0) return run_file("-");
     usage(stderr);
     return 64;
