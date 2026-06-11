@@ -1,2 +1,0 @@
-use std/enum
-map (fn x -> add x 1) (filter (fn x -> gt? x 1) [1 2 3])

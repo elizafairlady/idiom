@@ -1,11 +1,11 @@
 resolver form do
-  defn head-is do
+  defn head-is? do
     node name when (syntax-list? node) ->
       and (gt? (syntax-length node) 0) (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name)
     _ _ -> :false
   end
 
-  defn word-is node text -> and (syntax-word? node) (eq? (syntax-word-text node) text)
+  defn word-is? node text -> and (syntax-word? node) (eq? (syntax-word-text node) text)
 
   defn redir-op-text do
     ">" -> :true
@@ -18,7 +18,7 @@ resolver form do
 
   defn redir-op? node -> and (syntax-word? node) (redir-op-text (syntax-word-text node))
 
-  defn dup-op? node -> word-is node ">&"
+  defn dup-op? node -> word-is? node ">&"
 
   defn glob-text? t -> or (str-contains? t "*") (str-contains? t "?") (str-contains? t "[")
 
@@ -30,12 +30,12 @@ resolver form do
   end
 
   defn part->arg do
-    part when (head-is part "%-procsub-write") -> %`(tuple :lit __psw)
-    part when (head-is part "%-procsub-read") ->
+    part when (head-is? part "%-procsub-write") -> %`(tuple :lit __psw)
+    part when (head-is? part "%-procsub-read") ->
       %`(tuple :temp (write-procsub-temp (await (exec %,(form->graph (syntax-nth part 1) (make-syntax-atom form "true"))))))
     part when (syntax-word? part) -> %`(tuple :lit %,(make-syntax-string form (syntax-word-text part)))
-    part when (head-is part "%-word") -> word-arg (syntax-string-text (syntax-nth part 1))
-    part when (head-is part "%-shell-var") -> %`(tuple :env %,(make-syntax-string form (syntax-word-text (syntax-nth part 1))))
+    part when (head-is? part "%-word") -> word-arg (syntax-string-text (syntax-nth part 1))
+    part when (head-is? part "%-shell-var") -> %`(tuple :env %,(make-syntax-string form (syntax-word-text (syntax-nth part 1))))
     part -> %`(tuple :lit (str %,part))
   end
 
@@ -51,7 +51,7 @@ resolver form do
 
   defn mk-dup fdn ton -> %`(tuple :dup %,(make-syntax-int form fdn) %,(make-syntax-int form ton))
 
-  defn heredoc? part -> head-is part "%-heredoc"
+  defn heredoc? part -> head-is? part "%-heredoc"
 
   defn mk-heredoc part -> %`(tuple :redir :heredoc 0 (tuple :lit %,(syntax-nth part 1)))
 
@@ -92,18 +92,18 @@ resolver form do
   defn static-seg? do
     p when (redir-op? p) -> :false
     p when (dup-op? p) -> :false
-    p -> or (syntax-word? p) (head-is p "%-word") (string-syntax? p) (syntax-int? p)
+    p -> or (syntax-word? p) (head-is? p "%-word") (string-syntax? p) (syntax-int? p)
   end
 
   defn seg-text do
     p when (syntax-word? p) -> syntax-word-text p
-    p when (head-is p "%-word") -> syntax-string-text (syntax-nth p 1)
+    p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
     p when (string-syntax? p) -> syntax-string-text p
     p -> str (syntax-int-value p)
   end
 
   defn seg-glob? do
-    p when (head-is p "%-word") -> glob-text? (syntax-string-text (syntax-nth p 1))
+    p when (head-is? p "%-word") -> glob-text? (syntax-string-text (syntax-nth p 1))
     _ -> :false
   end
 
@@ -150,7 +150,7 @@ resolver form do
   end
 
   defn env-triple? do
-    [a b c . _] -> and (syntax-word? a) (word-is b "=") (syntax-adjacent? b) (syntax-adjacent? c)
+    [a b c . _] -> and (syntax-word? a) (word-is? b "=") (syntax-adjacent? b) (syntax-adjacent? c)
     _ -> :false
   end
 
@@ -172,19 +172,19 @@ resolver form do
 
   defn split-stages do
     :nil cur -> cons (stage-of cur) :nil
-    [h . t] cur when (word-is h "|") -> cons (stage-of cur) (split-stages t :nil)
+    [h . t] cur when (word-is? h "|") -> cons (stage-of cur) (split-stages t :nil)
     [h . t] cur -> split-stages t (append cur (cons h :nil))
   end
 
   defn collect-parts do
     f i n when (eq? i n) -> :nil
-    f i n when (and (word-is (syntax-nth f i) "&") (eq? (add i 1) n)) -> :nil
+    f i n when (and (word-is? (syntax-nth f i) "&") (eq? (add i 1) n)) -> :nil
     f i n -> cons (syntax-nth f i) (collect-parts f (add i 1) n)
   end
 
-  defn last-is-amp do
+  defn last-amp? do
     1 -> :false
-    n -> word-is (syntax-nth form (sub n 1)) "&"
+    n -> word-is? (syntax-nth form (sub n 1)) "&"
   end
 
   defn build-graph do
@@ -196,7 +196,7 @@ resolver form do
 
   defn find-pw do
     :nil -> :nil
-    [h . _] when (head-is h "%-procsub-write") -> h
+    [h . _] when (head-is? h "%-procsub-write") -> h
     [_ . t] -> find-pw t
   end
 
@@ -223,7 +223,7 @@ resolver form do
   end
 
   n = syntax-length form
-  background = last-is-amp n
+  background = last-amp? n
   capturing = cond background :true (eq? (syntax-property form "value-context") "true")
   cap = make-syntax-atom form (cond capturing "true" "false")
   wrap-cs (emit (form->graph form cap) (find-pw (collect-parts form 1 n)) background)

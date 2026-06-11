@@ -1,0 +1,28 @@
+use std/test
+
+suite do
+  test "to-list-dict" do
+    got = do
+      to-list %{:a 1 :b 2}
+    end
+    assert-inspect got "({:a 1} {:b 2})"
+  end
+  test "to-list-list" do
+    got = do
+      to-list [7 8 9]
+    end
+    assert-inspect got "(7 8 9)"
+  end
+  test "to-list-tuple" do
+    got = do
+      to-list {10 20 30}
+    end
+    assert-inspect got "(10 20 30)"
+  end
+  test "to-list-vector" do
+    got = do
+      to-list %[1 2 3]
+    end
+    assert-inspect got "(1 2 3)"
+  end
+end

@@ -1,1 +1,0 @@
-send self 42; receive do n -> n end

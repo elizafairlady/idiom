@@ -37,7 +37,7 @@
 
 # Executables
 *.exe
-*.out
+build/
 *.app
 *.i*86
 *.x86_64

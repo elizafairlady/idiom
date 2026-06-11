@@ -1,0 +1,39 @@
+use std/test
+
+suite do
+  test "fn-clause-multiarg" do
+    got = do
+      f = fn do
+        a 0 -> a
+        a b -> add a b
+      end
+      tuple (f 7 0) (f 3 4)
+    end
+    assert-inspect got "{7 7}"
+  end
+  test "fn-literal" do
+    got = do
+      inc = fn x -> add x 1; inc 41
+    end
+    assert-inspect got "42"
+  end
+  test "fn-value-hof" do
+    got = do
+      use std/enum
+      square = fn x -> mul x x
+      map &square [1 2 3 4]
+    end
+    assert-inspect got "(1 4 9 16)"
+  end
+  test "fn-value-local" do
+    got = do
+      outer = fn z do
+        loc = fn x -> mul x 2
+        ref = &loc
+        ref z
+      end
+      outer 21
+    end
+    assert-inspect got "42"
+  end
+end

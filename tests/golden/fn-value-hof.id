@@ -1,3 +1,0 @@
-use std/enum
-square = fn x -> mul x x
-map &square [1 2 3 4]

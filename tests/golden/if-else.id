@@ -1,1 +1,0 @@
-if :false do 0 else do 42 end

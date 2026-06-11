@@ -1,5 +1,0 @@
-f = fn do
-  a 0 -> a
-  a b -> add a b
-end
-tuple (f 7 0) (f 3 4)

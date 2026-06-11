@@ -1,1 +1,0 @@
-c = spawn (fn -> 1); r = monitor c; receive do {:down ref pid reason} -> 42 end

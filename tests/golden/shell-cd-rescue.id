@@ -1,5 +1,0 @@
-try do
-  cd "/zzz-does-not-exist"
-  :unreachable
-  rescue r -> :caught
-end

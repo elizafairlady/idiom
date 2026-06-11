@@ -1,2 +1,0 @@
-import tests/pkg/mathx as m
-add (m.quad 5) (m.trip 4)

@@ -1,0 +1,111 @@
+package test
+
+export defrules test do
+  (_ name body) -> %`(tuple :test %,name (fn _ig %,body))
+end
+
+export defmacro suite stx do
+  defn parts-of do
+    i n _body when (eq? i n) -> :nil
+    i n body -> cons (syntax-nth body i) (parts-of (add i 1) n body)
+  end
+  body = syntax-nth stx 2
+  body-form? = and (syntax-list? body) (gt? (syntax-length body) 0) (syntax-word? (syntax-nth body 0)) (eq? (syntax-word-text (syntax-nth body 0)) "%-body")
+  if body-form? do
+    %`(run-suite (list %,@(parts-of 1 (syntax-length body) body)))
+  else do
+    %`(run-suite %,body)
+  end
+end
+
+export defn assert do
+  :false -> error (tuple :assert-failed :false)
+  :nil -> error (tuple :assert-failed :nil)
+  v -> :ok
+end
+
+export defn assert-eq do
+  a b when (eq? a b) -> :ok
+  a b -> error (tuple :assert-eq :got a :want b)
+end
+
+export defn assert-neq do
+  a b when (neq? a b) -> :ok
+  a b -> error (tuple :assert-neq a b)
+end
+
+export defn assert-inspect do
+  v expected when (eq? (inspect v) expected) -> :ok
+  v expected -> error (tuple :assert-inspect :got (inspect v) :want expected)
+end
+
+export defn assert-raises thunk do
+  caught = try do
+    thunk :go
+    :no-raise
+    rescue r -> tuple :raised r
+  end
+  match caught do
+    {:raised r} -> r
+    _ -> error (tuple :assert-raises :nothing-raised)
+  end
+end
+
+export defn assert-expand-error do
+  source expected -> match (expand-check source) do
+    {:error msg} ->
+      if (str-contains? msg expected) do
+        :ok
+      else do
+        error (tuple :assert-expand-error :got msg :want expected)
+      end
+    :ok -> error (tuple :assert-expand-error :compiled source)
+  end
+end
+
+export defn assert-compiles do
+  source -> match (expand-check source) do
+    :ok -> :ok
+    {:error msg} -> error (tuple :assert-compiles :failed msg :source source)
+  end
+end
+
+defn run-one do
+  {:test name thunk} failures -> do
+    parent = self
+    spawn (fn do
+      outcome = try do
+        thunk :go
+        :ok
+        rescue r -> tuple :failed r
+      end
+      send parent (tuple :test-outcome outcome)
+    end)
+    outcome = receive do
+      {:test-outcome o} -> o
+    end
+    match outcome do
+      :ok -> failures
+      {:failed r} -> do
+        println (str "FAIL " name ": " (inspect r))
+        add failures 1
+      end
+    end
+  end
+end
+
+defn run-all do
+  :nil failures total -> tuple failures total
+  [t . rest] failures total -> run-all rest (run-one t failures) (add total 1)
+end
+
+export defn run-suite tests do
+  result = run-all (to-list tests) 0 0
+  match result do
+    {0 total} -> do
+      println (str "ok: " total " tests")
+      :ok
+    end
+    {failures total} -> error (tuple :suite-failed failures :of total)
+  end
+end

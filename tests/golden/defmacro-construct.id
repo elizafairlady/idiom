@@ -1,1 +1,0 @@
-defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2); plus2 40

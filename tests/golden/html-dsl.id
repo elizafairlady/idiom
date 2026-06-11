@@ -1,8 +1,0 @@
-implements tests/pkg/htmldsl
-html do
-  body class: "main" do
-    h1 "Title"
-    p "hello " "world"
-    section id: "footer" (em "fin")
-  end
-end

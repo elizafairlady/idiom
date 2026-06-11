@@ -1,3 +1,0 @@
-defn combine a b -> add (mul a 10) b
-operator <+> precedence: 50 assoc: left fixity: infix -> combine
-1 <+> 2 <+> 3

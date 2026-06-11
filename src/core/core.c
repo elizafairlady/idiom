@@ -806,6 +806,8 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_EXPANDER_REGISTER_OPERATOR] = {"expander-register-operator", 5, 5},
     [IDM_PRIM_EXPANDER_REGISTER_MACRO] = {"expander-register-macro", 2, 2},
     [IDM_PRIM_EXPANDER_SURFACE] = {"expander-surface", 1, 1},
+    [IDM_PRIM_EXPAND_CHECK] = {"expand-check", 1, 1},
+    [IDM_PRIM_INSPECT] = {"inspect", 1, 1},
     [IDM_PRIM_RECORD_FIELD] = {"record-field", 2, 2},
 };
 

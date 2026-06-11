@@ -1,0 +1,74 @@
+use std/test
+
+suite do
+  test "enum-compose" do
+    got = do
+      use std/enum
+      map (fn x -> add x 1) (filter (fn x -> gt? x 1) [1 2 3])
+    end
+    assert-inspect got "(3 4)"
+  end
+  test "enum-concat" do
+    got = do
+      use std/enum
+      concat [1 2] [3 4]
+    end
+    assert-inspect got "(1 2 3 4)"
+  end
+  test "enum-filter" do
+    got = do
+      use std/enum
+      filter (fn x -> gt? x 2) [1 2 3 4]
+    end
+    assert-inspect got "(3 4)"
+  end
+  test "enum-foldl" do
+    got = do
+      use std/enum
+      foldl (fn acc x -> sub acc x) 100 [1 2 3]
+    end
+    assert-inspect got "94"
+  end
+  test "enum-length" do
+    got = do
+      use std/enum
+      length [9 8 7 6]
+    end
+    assert-inspect got "4"
+  end
+  test "enum-map" do
+    got = do
+      use std/enum
+      map (fn x -> mul x x) [1 2 3 4]
+    end
+    assert-inspect got "(1 4 9 16)"
+  end
+  test "enum-reduce-poly" do
+    got = do
+      use std/enum
+      reduce {10 20 30} 0 (fn x acc -> add acc x)
+    end
+    assert-inspect got "60"
+  end
+  test "enum-reduce" do
+    got = do
+      use std/enum
+      reduce [1 2 3 4] 0 (fn x acc -> add x acc)
+    end
+    assert-inspect got "10"
+  end
+  test "enum-reverse" do
+    got = do
+      use std/enum
+      reverse [1 2 3]
+    end
+    assert-inspect got "(3 2 1)"
+  end
+  test "enum-sum" do
+    got = do
+      use std/enum
+      sum [1 2 3 4 5]
+    end
+    assert-inspect got "15"
+  end
+end

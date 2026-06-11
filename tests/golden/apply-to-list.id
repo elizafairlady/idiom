@@ -1,1 +1,0 @@
-apply (fn a b c -> add a (add b c)) (to-list %[1 2 3])

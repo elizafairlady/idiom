@@ -1,6 +1,0 @@
-defmacro defpair stx -> %`do
-  defn %,(syntax-nth stx 2) v -> v
-  defn %,(syntax-nth stx 3) v -> mul v 2
-end
-defpair one-of two-of
-tuple (one-of 3) (two-of 3)

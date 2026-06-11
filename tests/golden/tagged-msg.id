@@ -1,1 +1,0 @@
-send self {:reply self 42}; receive do {:reply from v} -> v end

@@ -1,0 +1,591 @@
+use std/test
+
+suite do
+  test "actor-capture" do
+    got = do
+      defn double n -> add n n; mk = fn base -> (fn -> receive do {:job from x} -> send from (add base (double x)) end); s = spawn (mk 22); me = self; send s {:job me 10}; receive do r -> r end
+    end
+    assert-inspect got "42"
+  end
+  test "actor-cwd-isolated" do
+    got = do
+      p0 = pwd
+      parent = self
+      spawn (fn do
+        cd "/tmp"
+        send parent (tuple :child pwd)
+      end)
+      receive do
+        {:child cp} -> tuple (eq? cp "/tmp") (eq? pwd p0)
+      end
+    end
+    assert-inspect got "{:true :true}"
+  end
+  test "after-timeout" do
+    got = do
+      receive do {:never x} -> x; after 0 -> 42 end
+    end
+    assert-inspect got "42"
+  end
+  test "apply-basic" do
+    got = do
+      apply (fn x y -> add x y) [40 2]
+    end
+    assert-inspect got "42"
+  end
+  test "apply-to-list" do
+    got = do
+      apply (fn a b c -> add a (add b c)) (to-list %[1 2 3])
+    end
+    assert-inspect got "6"
+  end
+  test "call-curried-3" do
+    got = do
+      f = fn a -> (fn b -> (fn c -> add a (add b c))); ((f 100) 20) 3
+    end
+    assert-inspect got "123"
+  end
+  test "call-grouped-head" do
+    got = do
+      (fn x -> add x 1) 41
+    end
+    assert-inspect got "42"
+  end
+  test "call-returned-fn" do
+    got = do
+      adder = fn n -> (fn x -> add x n); (adder 40) 2
+    end
+    assert-inspect got "42"
+  end
+  test "clause-param-capture" do
+    got = do
+      defn f n -> match n do _ -> add n 1 end; f 41
+    end
+    assert-inspect got "42"
+  end
+  test "cwd-cd-pwd" do
+    got = do
+      cd "/tmp"
+      pwd
+    end
+    assert-inspect got "\"/tmp\""
+  end
+  test "defmacro-construct" do
+    got = do
+      defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2); plus2 40
+    end
+    assert-inspect got "42"
+  end
+  test "defmacro" do
+    got = do
+      defmacro answer stx -> %'(add 40 2); answer
+    end
+    assert-inspect got "42"
+  end
+  test "defn-clause-block" do
+    got = do
+      defn fact do
+        0 -> 1
+        n -> mul n (fact (sub n 1))
+      end
+      defn classify do
+        n when n < 0 -> :negative
+        0 -> :zero
+        _ -> :positive
+      end
+      defn dropn do
+        parts 0 -> parts
+        [_ . t] k -> dropn t (sub k 1)
+      end
+      tuple (fact 5) (classify (sub 0 3)) (classify 0) (classify 7) (dropn [1 2 3 4] 2)
+    end
+    assert-inspect got "{120 :negative :zero :positive (3 4)}"
+  end
+  test "defn" do
+    got = do
+      defn inc x -> x + 1; inc 41
+    end
+    assert-inspect got "42"
+  end
+  test "defrules-basic" do
+    got = do
+      defrules swap do
+        (_ a b) -> %`(tuple %,b %,a)
+      end
+      defrules pick do
+        (_ a) when (syntax-int? a) -> %`(add %,a 1)
+        (_ a) -> %`(tuple :other %,a)
+      end
+      tuple (swap 1 2) (pick 41) (pick :x)
+    end
+    assert-inspect got "{{2 1} 42 {:other :x}}"
+  end
+  test "defrules-export" do
+    got = do
+      use tests/pkg/rulespkg
+      twice-of 21
+    end
+    assert-inspect got "42"
+  end
+  test "dict-bind-match" do
+    got = do
+      match %{:a 42} do %{:a x} -> x end
+    end
+    assert-inspect got "42"
+  end
+  test "dict-expr" do
+    got = do
+      v = 42; %{:a v}
+    end
+    assert-inspect got "%{:a 42}"
+  end
+  test "dict-match" do
+    got = do
+      match %{:a 42 :b 0} do %{:a 42} -> 42; _ -> 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "div-mod" do
+    got = do
+      add (div 80 2) (mod 5 3)
+    end
+    assert-inspect got "42"
+  end
+  test "eval-add" do
+    got = do
+      x = 40; add x 2
+    end
+    assert-inspect got "42"
+  end
+  test "expander-prim-runtime" do
+    got = do
+      try do
+        s = %'(x)
+        expander-register-operator s 50 "left" "infix" s
+        :unreachable
+        rescue r -> :caught
+      end
+    end
+    assert-inspect got ":caught"
+  end
+  test "export-macro" do
+    got = do
+      use tests/pkg/exporter
+      answer foo
+    end
+    assert-inspect got "99"
+  end
+  test "export-operator" do
+    got = do
+      use tests/pkg/exporter
+      3 <+> 4
+    end
+    assert-inspect got "7"
+  end
+  test "float-arith" do
+    got = do
+      add 1.5 (mul 2.0 (div 7.0 2.0))
+    end
+    assert-inspect got "8.5"
+  end
+  test "global-mutual" do
+    got = do
+      defn ev n -> cond (n == 0) :true (od (sub n 1))
+      defn od n -> cond (n == 0) :false (ev (sub n 1))
+      ev 10
+    end
+    assert-inspect got ":true"
+  end
+  test "gte" do
+    got = do
+      if (gte? 2 2) do 42 else do 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "html-dsl" do
+    got = do
+      implements tests/pkg/htmldsl
+      html do
+        body class: "main" do
+          h1 "Title"
+          p "hello " "world"
+          section id: "footer" (em "fin")
+        end
+      end
+    end
+    assert-inspect got "\"<html><body class=\\\"main\\\"><h1>Title</h1><p>hello world</p><section id=\\\"footer\\\"><em>fin</em></section></body></html>\""
+  end
+  test "import-alias" do
+    got = do
+      import tests/pkg/mathx as m
+      add (m.quad 5) (m.trip 4)
+    end
+    assert-inspect got "32"
+  end
+  test "import-default-alias" do
+    got = do
+      import std/enum
+      enum.map (fn x -> mul x x) [1 2 3]
+    end
+    assert-inspect got "(1 4 9)"
+  end
+  test "link-trap" do
+    got = do
+      trap-exit :true; c = spawn (fn -> exit :boom); link c; receive do {:exit pid :boom} -> 42; {:exit pid other} -> 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "list-bind-match" do
+    got = do
+      match [1 2] do [h t] -> h end
+    end
+    assert-inspect got "1"
+  end
+  test "list-match" do
+    got = do
+      match [1 2] do [1 2] -> 42; _ -> 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "list-rest-match" do
+    got = do
+      match [1 2 3] do [h . t] -> h end
+    end
+    assert-inspect got "1"
+  end
+  test "lte" do
+    got = do
+      if (lte? 2 2) do 42 else do 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "make-dsl-diamond" do
+    got = do
+      use tests/pkg/makedsl
+      rules = list (rule :base do :b end) (rule :l deps: (list :base) do :l end) (rule :r deps: (list :base) do :r end) (rule :top deps: (list :l :r) do :t end)
+      tuple (build rules :top) (try do
+        build rules :missing
+        rescue r -> tuple :caught r
+      end)
+    end
+    assert-inspect got "{({:base :b} {:l :l} {:r :r} {:top :t}) {:caught {:error {:unknown-target :missing}}}}"
+  end
+  test "make-dsl" do
+    got = do
+      use tests/pkg/makedsl
+      implements std/shell
+      rules = list (rule :prep do
+          x = sh -c "printf prep"
+          tuple :prep-out x
+        end) (rule :out deps: (list :prep) do
+          y = sh -c "printf built"
+          tuple :out-out y
+        end) (rule :unused do
+          :never
+        end)
+      build rules :out
+    end
+    assert-inspect got "({:prep {:prep-out {:ok 0 \"prep\" \"\"}}} {:out {:out-out {:ok 0 \"built\" \"\"}}})"
+  end
+  test "match" do
+    got = do
+      match 0 do 0 -> 42; n -> n end
+    end
+    assert-inspect got "42"
+  end
+  test "monitor-down" do
+    got = do
+      c = spawn (fn -> 1); r = monitor c; receive do {:down ref pid reason} -> 42 end
+    end
+    assert-inspect got "42"
+  end
+  test "monitor-noproc" do
+    got = do
+      c = spawn (fn -> 1); receive do x -> x; after 5 -> :woke end; r = monitor c; receive do {:down ref pid :noproc} -> 42; {:down ref pid other} -> 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "multiclause-defn" do
+    got = do
+      defn f 0 -> 40; defn f n -> n; add (f 0) 2
+    end
+    assert-inspect got "42"
+  end
+  test "mutual-defn" do
+    got = do
+      defn f x -> g x; defn g x -> x + 1; f 41
+    end
+    assert-inspect got "42"
+  end
+  test "nullary-variadic" do
+    got = do
+      f = &list
+      g = add
+      empty = list
+      tuple (list) (tuple) (vector) (dict) empty (f 1 2) (apply &list (list 3 4)) (g 40 2)
+    end
+    assert-inspect got "{:nil {} %[] %{} :nil (1 2) (3 4) 42}"
+  end
+  test "operator-precedence" do
+    got = do
+      x = 2; x * 20 + 2
+    end
+    assert-inspect got "42"
+  end
+  test "or-short" do
+    got = do
+      or 42 (add 1 "bad")
+    end
+    assert-inspect got "42"
+  end
+  test "param-capture" do
+    got = do
+      mk = fn base -> (fn n -> add base n); add5 = mk 5; add5 37
+    end
+    assert-inspect got "42"
+  end
+  test "pow" do
+    got = do
+      add (pow 6 2) 6
+    end
+    assert-inspect got "42"
+  end
+  test "prim-first-class" do
+    got = do
+      f = cons
+      f 40 2
+    end
+    assert-inspect got "(40 . 2)"
+  end
+  test "protocol-macro" do
+    got = do
+      protocol m do
+        export defmacro answer s -> (make-syntax-int s 99)
+      end
+      implements m
+      answer foo
+    end
+    assert-inspect got "99"
+  end
+  test "protocol-operator" do
+    got = do
+      protocol arith do
+        operator <+> precedence: 6 assoc: left fixity: infix -> add
+      end
+      implements arith
+      3 <+> 4
+    end
+    assert-inspect got "7"
+  end
+  test "qq-bracket" do
+    got = do
+      x = 9; `[1 ,x 3]
+    end
+    assert-inspect got "(1 9 3)"
+  end
+  test "qq-splice" do
+    got = do
+      xs = [1 2 3]; `(a ,@xs z)
+    end
+    assert-inspect got "(a 1 2 3 z)"
+  end
+  test "qq-unquote" do
+    got = do
+      x = 5; `(a ,x c)
+    end
+    assert-inspect got "(a 5 c)"
+  end
+  test "quasi-do-shorthand" do
+    got = do
+      defmacro defpair stx -> %`do
+        defn %,(syntax-nth stx 2) v -> v
+        defn %,(syntax-nth stx 3) v -> mul v 2
+      end
+      defpair one-of two-of
+      tuple (one-of 3) (two-of 3)
+    end
+    assert-inspect got "{3 6}"
+  end
+  test "receive-after" do
+    got = do
+      me = self
+      send me :other
+      receive do
+        :wanted -> :got
+        after 0 -> :timed-out
+      end
+    end
+    assert-inspect got ":timed-out"
+  end
+  test "receive-selective" do
+    got = do
+      me = self
+      s = spawn (fn -> (do
+        send me :first
+        send me :second
+        :done
+      end))
+      receive do :second -> :got-second end
+    end
+    assert-inspect got ":got-second"
+  end
+  test "recursive-defn" do
+    got = do
+      defn sumdown n -> cond (n < 1) 0 (n + sumdown (n - 1)); sumdown 5
+    end
+    assert-inspect got "15"
+  end
+  test "recv" do
+    got = do
+      send self 42; receive do n -> n end
+    end
+    assert-inspect got "42"
+  end
+  test "register-macro" do
+    got = do
+      for-syntax do
+        defn lit s v -> make-syntax-int s v
+        base = 40
+        expander-register-macro %'answer (fn s -> lit s (add base 2))
+      end
+      answer x
+    end
+    assert-inspect got "42"
+  end
+  test "sc-literal" do
+    got = do
+      defmacro pick stx ->
+        syntax-case stx do
+          (_ :inc n) -> %`(add %,n 1)
+          (_ :dec n) -> %`(sub %,n 1)
+        end
+      add (pick :inc 41) (pick :dec 1)
+    end
+    assert-inspect got "42"
+  end
+  test "selective-recv" do
+    got = do
+      send self {:a 1}; send self {:b 42}; send self {:c 3}; receive do {:b x} -> x end
+    end
+    assert-inspect got "42"
+  end
+  test "spawn-rpc" do
+    got = do
+      me = self; c = spawn (fn -> receive do {:ask from} -> send from 42 end); send c {:ask me}; receive do v -> v end
+    end
+    assert-inspect got "42"
+  end
+  test "surface-shadow-macro" do
+    got = do
+      defmacro answer y do %`1 end
+      inner = do
+        defmacro answer y do %`2 end
+        answer foo
+      end
+      outer = answer foo
+      {inner outer}
+    end
+    assert-inspect got "{2 1}"
+  end
+  test "surface-shadow-operator" do
+    got = do
+      operator <+> precedence: 60 -> add
+      inner = do
+        operator <+> precedence: 60 -> mul
+        3 <+> 4
+      end
+      outer = 3 <+> 4
+      {inner outer}
+    end
+    assert-inspect got "{12 7}"
+  end
+  test "surface-shadow-protocol" do
+    got = do
+      protocol Outer do
+        export defmacro go y do %`5 end
+      end
+      protocol Inner do
+        export defmacro go y do %`6 end
+      end
+      implements Outer
+      a = do
+        implements Inner
+        go x
+      end
+      {a (go x)}
+    end
+    assert-inspect got "{6 5}"
+  end
+  test "syntax-case" do
+    got = do
+      defmacro plus2 stx -> syntax-case stx do (_ x) -> %`(add %,x 2) end; plus2 40
+    end
+    assert-inspect got "42"
+  end
+  test "tagged-msg" do
+    got = do
+      send self {:reply self 42}; receive do {:reply from v} -> v end
+    end
+    assert-inspect got "42"
+  end
+  test "transitive-capture" do
+    got = do
+      a = 40; mk = fn y -> (fn z -> add a (sub z y)); g = mk 8; g 10
+    end
+    assert-inspect got "42"
+  end
+  test "tuple-match" do
+    got = do
+      match {:ok 42} do {:ok 42} -> 42; _ -> 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "tuple-rest-match" do
+    got = do
+      match {1 2 3} do {h . t} -> t end
+    end
+    assert-inspect got "{2 3}"
+  end
+  test "unless" do
+    got = do
+      unless :false do 42 end
+    end
+    assert-inspect got "42"
+  end
+  test "user-operator" do
+    got = do
+      operator plus precedence: 50 assoc: left fixity: infix -> add; 40 plus 2
+    end
+    assert-inspect got "42"
+  end
+  test "value-pipe" do
+    got = do
+      1 |> add 2 |> mul 14
+    end
+    assert-inspect got "42"
+  end
+  test "valueless-decls" do
+    got = do
+      last-is-decl = do
+        operator weave precedence: 50 -> add
+      end
+      used-in-scope = do
+        operator weave precedence: 50 -> add
+        1 weave 2
+      end
+      rules-last = do
+        defrules nothing do
+          (_ a) -> a
+        end
+      end
+      tuple last-is-decl used-in-scope rules-last
+    end
+    assert-inspect got "{:nil 3 :nil}"
+  end
+  test "vector-rest-match" do
+    got = do
+      match %[1 2 3] do %[h . t] -> t end
+    end
+    assert-inspect got "%[2 3]"
+  end
+end

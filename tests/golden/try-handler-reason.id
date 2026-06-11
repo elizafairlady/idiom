@@ -1,1 +1,0 @@
-try do raise 5; rescue r -> add r 37 end

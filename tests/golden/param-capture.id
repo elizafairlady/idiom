@@ -1,1 +1,0 @@
-mk = fn base -> (fn n -> add base n); add5 = mk 5; add5 37

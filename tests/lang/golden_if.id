@@ -1,0 +1,35 @@
+use std/test
+
+suite do
+  test "if-chain" do
+    got = do
+      if :false do 0 else if :false do 1 else do 42 end
+    end
+    assert-inspect got "42"
+  end
+  test "if-else-in-block" do
+    got = do
+      defn classify do
+        n -> do
+          size = if (gt? n 100) do :big else if (gt? n 10) do :medium else do :small end
+          label = if (eq? size :small) do "s" else do "L" end
+          tuple size label
+        end
+      end
+      tuple (classify 5) (classify 50) (classify 500)
+    end
+    assert-inspect got "{{:small \"s\"} {:medium \"L\"} {:big \"L\"}}"
+  end
+  test "if-else" do
+    got = do
+      if :false do 0 else do 42 end
+    end
+    assert-inspect got "42"
+  end
+  test "if-single" do
+    got = do
+      if :true do 42 end
+    end
+    assert-inspect got "42"
+  end
+end

@@ -1,2 +1,0 @@
-implements std/shell
-out = printf 42; out

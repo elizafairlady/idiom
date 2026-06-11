@@ -1,1 +1,0 @@
-match 0 do 0 -> 42; n -> n end

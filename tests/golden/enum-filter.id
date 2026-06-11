@@ -1,2 +1,0 @@
-use std/enum
-filter (fn x -> gt? x 2) [1 2 3 4]

@@ -1,1 +1,0 @@
-c = spawn (fn -> 1); receive do x -> x; after 5 -> :woke end; r = monitor c; receive do {:down ref pid :noproc} -> 42; {:down ref pid other} -> 0 end

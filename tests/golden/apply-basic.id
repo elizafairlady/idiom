@@ -1,1 +1,0 @@
-apply (fn x y -> add x y) [40 2]

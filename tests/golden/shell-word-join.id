@@ -1,3 +1,0 @@
-implements std/shell
-x = echo a"b"c
-x

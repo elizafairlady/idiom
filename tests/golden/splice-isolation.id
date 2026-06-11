@@ -1,8 +1,0 @@
-defmacro defconst stx do
-  %`(do
-      defn %,(syntax-nth stx 2) v -> %,(syntax-nth stx 3)
-    end)
-end
-defconst a 1
-defconst b 2
-tuple (a 0) (b 0)

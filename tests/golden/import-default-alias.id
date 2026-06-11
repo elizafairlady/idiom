@@ -1,2 +1,0 @@
-import std/enum
-enum.map (fn x -> mul x x) [1 2 3]

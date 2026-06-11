@@ -1,1 +1,0 @@
-receive do {:never x} -> x; after 0 -> 42 end

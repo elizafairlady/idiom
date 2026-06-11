@@ -188,7 +188,96 @@ static int run_file(const char *path) {
     return status;
 }
 
+#include <dirent.h>
+
+static int collect_test_files(const char *dir_path, char ***out_files, size_t *out_count, size_t *out_cap) {
+    DIR *dir = opendir(dir_path);
+    if (!dir) return -1;
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        size_t len = strlen(entry->d_name);
+        if (len < 4 || strcmp(entry->d_name + len - 3, ".id") != 0) continue;
+        if (*out_count == *out_cap) {
+            size_t cap = *out_cap ? *out_cap * 2u : 16u;
+            char **grown = realloc(*out_files, cap * sizeof(*grown));
+            if (!grown) { closedir(dir); return -1; }
+            *out_files = grown;
+            *out_cap = cap;
+        }
+        size_t full_len = strlen(dir_path) + 1u + len + 1u;
+        char *full = malloc(full_len);
+        if (!full) { closedir(dir); return -1; }
+        snprintf(full, full_len, "%s/%s", dir_path, entry->d_name);
+        (*out_files)[(*out_count)++] = full;
+    }
+    closedir(dir);
+    return 0;
+}
+
+static int name_cmp(const void *a, const void *b) {
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static int run_tests(int argc, char **argv) {
+    char **files = NULL;
+    size_t count = 0;
+    size_t cap = 0;
+    if (argc == 0) {
+        if (collect_test_files("tests/lang", &files, &count, &cap) != 0) {
+            fprintf(stderr, "idiomc test: cannot read tests/lang\n");
+            return 1;
+        }
+    } else {
+        for (int i = 0; i < argc; i++) {
+            if (collect_test_files(argv[i], &files, &count, &cap) == 0) continue;
+            if (count == cap) {
+                size_t next = cap ? cap * 2u : 16u;
+                char **grown = realloc(files, next * sizeof(*grown));
+                if (!grown) return 1;
+                files = grown;
+                cap = next;
+            }
+            files[count++] = strdup(argv[i]);
+        }
+    }
+    if (count == 0) {
+        fprintf(stderr, "idiomc test: no test files found\n");
+        return 1;
+    }
+    qsort(files, count, sizeof(*files), name_cmp);
+    size_t failed = 0;
+    for (size_t i = 0; i < count; i++) {
+        IdmError err;
+        idm_error_init(&err);
+        char *source = NULL;
+        size_t len = 0;
+        int status = 1;
+        if (idm_read_file(files[i], &source, &len, &err)) {
+            status = run_source(files[i], source, false);
+            free(source);
+        } else {
+            idm_error_fprint(stderr, &err);
+        }
+        idm_error_clear(&err);
+        if (status != 0) {
+            fprintf(stderr, "FAIL %s\n", files[i]);
+            failed++;
+        } else {
+            printf("pass %s\n", files[i]);
+        }
+    }
+    if (failed == 0) {
+        printf("idiomc test: %zu file%s passed\n", count, count == 1 ? "" : "s");
+    } else {
+        printf("idiomc test: %zu of %zu file%s FAILED\n", failed, count, count == 1 ? "" : "s");
+    }
+    for (size_t i = 0; i < count; i++) free(files[i]);
+    free(files);
+    return failed == 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
+    if (argc >= 2 && strcmp(argv[1], "test") == 0) return run_tests(argc - 2, argv + 2);
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
 #ifndef IDM_VERSION
 #define IDM_VERSION "0.0.0-dev"

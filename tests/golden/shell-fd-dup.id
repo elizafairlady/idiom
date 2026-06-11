@@ -1,3 +1,0 @@
-implements std/shell
-x = sh -c "echo oops >&2" 2>&1
-x

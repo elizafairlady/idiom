@@ -1,1 +1,0 @@
-try do add 40 2; rescue r -> 0 end

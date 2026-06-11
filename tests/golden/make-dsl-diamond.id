@@ -1,6 +1,0 @@
-use tests/pkg/makedsl
-rules = list (rule :base do :b end) (rule :l deps: (list :base) do :l end) (rule :r deps: (list :base) do :r end) (rule :top deps: (list :l :r) do :t end)
-tuple (build rules :top) (try do
-  build rules :missing
-  rescue r -> tuple :caught r
-end)

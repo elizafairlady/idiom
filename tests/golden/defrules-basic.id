@@ -1,8 +1,0 @@
-defrules swap do
-  (_ a b) -> %`(tuple %,b %,a)
-end
-defrules pick do
-  (_ a) when (syntax-int? a) -> %`(add %,a 1)
-  (_ a) -> %`(tuple :other %,a)
-end
-tuple (swap 1 2) (pick 41) (pick :x)

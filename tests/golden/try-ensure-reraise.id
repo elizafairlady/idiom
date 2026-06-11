@@ -1,1 +1,0 @@
-try do try do raise :x; ensure 1 end; rescue r -> r end

@@ -1,6 +1,8 @@
 #define _XOPEN_SOURCE 700
 
 #include "idiom/prims.h"
+#include "idiom/bytecode.h"
+#include "idiom/expand.h"
 #include "idiom/syntax.h"
 #include "idiom/vm.h"
 
@@ -927,6 +929,48 @@ static bool prim_expander_surface(IdmRuntime *rt, IdmValue *args, IdmValue *out,
     return rt->expander_surface(rt->expander_surface_user, rt, idm_symbol_text(args[0].as.symbol), out, err);
 }
 
+static bool prim_inspect(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    IdmBuffer buf;
+    idm_buf_init(&buf);
+    if (!idm_value_write(&buf, args[0])) {
+        idm_buf_destroy(&buf);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    *out = idm_string(rt, buf.data ? buf.data : "", err);
+    idm_buf_destroy(&buf);
+    return !(err && err->present);
+}
+
+static bool prim_expand_check(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *source = require_string(args[0], NULL, err);
+    if (!source) return false;
+    IdmError inner;
+    idm_error_init(&inner);
+    IdmCore *core = NULL;
+    bool expanded = idm_expand_string(rt, "<expand-check>", source, &core, &inner);
+    bool compiled = false;
+    if (expanded) {
+        IdmBytecodeModule module;
+        idm_bc_init(&module);
+        uint32_t main_fn = 0;
+        compiled = idm_core_compile_main(core, &module, &main_fn, &inner);
+        idm_bc_destroy(&module);
+    }
+    idm_core_free(core);
+    if (expanded && compiled) {
+        *out = idm_atom(rt, "ok");
+        idm_error_clear(&inner);
+        return true;
+    }
+    IdmValue items[2];
+    items[0] = idm_atom(rt, "error");
+    items[1] = idm_string(rt, inner.message ? inner.message : "compile failed", err);
+    idm_error_clear(&inner);
+    if (err && err->present) return false;
+    *out = idm_tuple(rt, items, 2u, err);
+    return !(err && err->present);
+}
+
 static bool prim_str_contains(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     size_t hay_len = 0;
     const char *hay = require_string(args[0], &hay_len, err);
@@ -1339,6 +1383,8 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_EXPANDER_REGISTER_OPERATOR: return prim_expander_register_operator(rt, args, out, err);
         case IDM_PRIM_EXPANDER_REGISTER_MACRO: return prim_expander_register_macro(rt, args, out, err);
         case IDM_PRIM_EXPANDER_SURFACE: return prim_expander_surface(rt, args, out, err);
+        case IDM_PRIM_EXPAND_CHECK: return prim_expand_check(rt, args, out, err);
+        case IDM_PRIM_INSPECT: return prim_inspect(rt, args, out, err);
         case IDM_PRIM_SYNTAX_INT_VALUE: return prim_syntax_int_value(rt, args, out, err);
         case IDM_PRIM_MAKE_SYNTAX_WORD: return prim_make_syntax_word(rt, args, out, err);
         case IDM_PRIM_MAKE_SYNTAX_ATOM: return prim_make_syntax_atom(rt, args, out, err);

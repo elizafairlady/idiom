@@ -1,0 +1,62 @@
+use std/test
+
+suite do
+  test "op-div" do
+    got = do
+      84 / 2
+    end
+    assert-inspect got "42"
+  end
+  test "op-func-target" do
+    got = do
+      defn combine a b -> add (mul a 10) b
+      operator glue precedence: 50 assoc: left fixity: infix -> combine
+      4 glue 2
+    end
+    assert-inspect got "42"
+  end
+  test "op-mod" do
+    got = do
+      142 % 100
+    end
+    assert-inspect got "42"
+  end
+  test "op-neg" do
+    got = do
+      50 + -8
+    end
+    assert-inspect got "42"
+  end
+  test "op-neq" do
+    got = do
+      if (3 != 4) do 42 else do 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "op-pow-right" do
+    got = do
+      2 ** 3 ** 2
+    end
+    assert-inspect got "512"
+  end
+  test "op-pow" do
+    got = do
+      2 ** 5 + 10
+    end
+    assert-inspect got "42"
+  end
+  test "op-prefix-neg-bind" do
+    got = do
+      x = -5; x + 47
+    end
+    assert-inspect got "42"
+  end
+  test "op-symbolic-name" do
+    got = do
+      defn combine a b -> add (mul a 10) b
+      operator <+> precedence: 50 assoc: left fixity: infix -> combine
+      1 <+> 2 <+> 3
+    end
+    assert-inspect got "123"
+  end
+end

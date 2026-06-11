@@ -1,6 +1,0 @@
-for-syntax do
-  defn lit s v -> make-syntax-int s v
-  base = 40
-  expander-register-macro %'answer (fn s -> lit s (add base 2))
-end
-answer x

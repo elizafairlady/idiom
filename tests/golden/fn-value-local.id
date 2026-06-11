@@ -1,6 +1,0 @@
-outer = fn z do
-  loc = fn x -> mul x 2
-  ref = &loc
-  ref z
-end
-outer 21

@@ -1,1 +1,0 @@
-try do raise :oops; rescue r -> r; ensure :cleaned end

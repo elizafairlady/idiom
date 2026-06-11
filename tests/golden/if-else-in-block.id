@@ -1,8 +1,0 @@
-defn classify do
-  n -> do
-    size = if (gt? n 100) do :big else if (gt? n 10) do :medium else do :small end
-    label = if (eq? size :small) do "s" else do "L" end
-    tuple size label
-  end
-end
-tuple (classify 5) (classify 50) (classify 500)

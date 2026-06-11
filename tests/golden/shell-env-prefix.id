@@ -1,3 +1,0 @@
-implements std/shell
-x = ISH_GOLD_PREFIX=hello printenv ISH_GOLD_PREFIX
-x

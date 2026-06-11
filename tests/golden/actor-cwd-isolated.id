@@ -1,9 +1,0 @@
-p0 = pwd
-parent = self
-spawn (fn do
-  cd "/tmp"
-  send parent (tuple :child pwd)
-end)
-receive do
-  {:child cp} -> tuple (eq? cp "/tmp") (eq? pwd p0)
-end

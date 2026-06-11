@@ -11,10 +11,10 @@ export defn filter f xs -> reverse (reduce xs :nil (fn x acc -> if (f x) do cons
 export defn length xs -> reduce xs 0 (fn _x acc -> add acc 1)
 export defn sum xs -> reduce xs 0 &add
 
-export defn member do
+export defn member? do
   _ :nil -> :false
   x [h . _] when (eq? x h) -> :true
-  x [_ . t] -> member x t
+  x [_ . t] -> member? x t
 end
 
 export defn concat xs ys -> reduce (reverse xs) ys &cons
@@ -36,7 +36,7 @@ export defn drop do
   n [_ . t] -> drop (sub n 1) t
 end
 
-export defn enum-not do
+export defn not? do
   :false -> :true
   :nil -> :true
   _ -> :false
