@@ -1,0 +1,15 @@
+use std/test
+
+suite do
+  test "integer-overflow-traps" do
+    assert-eq (assert-raises (fn _ig do 9223372036854775807 + 1 end)) (tuple :error "integer overflow in ADD")
+    assert-eq (assert-raises (fn _ig do 0 - 9223372036854775807 - 2 end)) (tuple :error "integer overflow in SUB")
+    assert-eq (assert-raises (fn _ig do 4611686018427387904 * 4 end)) (tuple :error "integer overflow in MUL")
+    assert-eq (assert-raises (fn _ig do 2 ** 64 end)) (tuple :error "integer overflow in pow")
+  end
+  test "strings-are-bytes" do
+    assert-eq (str-len "héllo") 6
+    assert-eq (str-byte "é" 0) 195
+    assert-eq (str-byte "é" 1) 169
+  end
+end

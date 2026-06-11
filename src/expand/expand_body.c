@@ -709,7 +709,11 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             rec->core = expand_parts(ctx, rec->form->as.seq.items, rec->rhs_start, rec->form->as.seq.count, err);
             ctx->value_context = saved_vc;
             if (!rec->core) { failed = true; break; }
-            if (!local_push_def_binder(ctx, rec->bind_name->as.text, rec->bind_name, &rec->bind_slot)) {
+            bool repl_global = ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP;
+            bool pushed = repl_global
+                ? global_push_def_binder(ctx, rec->bind_name->as.text, rec->bind_name, &rec->bind_slot)
+                : local_push_def_binder(ctx, rec->bind_name->as.text, rec->bind_name, &rec->bind_slot);
+            if (!pushed) {
                 idm_error_oom(err, rec->form->span);
                 failed = true;
                 break;
@@ -812,8 +816,23 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             IdmCore *inner = rec->core;
             rec->core = NULL;
             if (rec->kind == BODY_REC_BIND) {
-                core = idm_core_bind_local(rec->bind_slot, inner, core, rec->form->span);
-                if (!core) { idm_core_free(inner); idm_error_oom(err, rec->form->span); failed = true; }
+                if (ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP) {
+                    IdmCore *letrec = idm_core_letrec(rec->form->span);
+                    if (!letrec || !idm_core_letrec_add(letrec, rec->bind_name->as.text, rec->bind_slot, inner) || !idm_core_letrec_set_body(letrec, core)) {
+                        idm_core_free(letrec);
+                        idm_core_free(inner);
+                        idm_core_free(core);
+                        core = NULL;
+                        idm_error_oom(err, rec->form->span);
+                        failed = true;
+                    } else {
+                        idm_core_letrec_set_global(letrec);
+                        core = letrec;
+                    }
+                } else {
+                    core = idm_core_bind_local(rec->bind_slot, inner, core, rec->form->span);
+                    if (!core) { idm_core_free(inner); idm_error_oom(err, rec->form->span); failed = true; }
+                }
             } else if (rec->kind == BODY_REC_GROUPS) {
                 if (!idm_core_letrec_set_body(inner, core)) {
                     idm_core_free(inner);

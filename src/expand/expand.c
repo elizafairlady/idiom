@@ -697,6 +697,121 @@ bool idm_expand_syntax(IdmRuntime *rt, const IdmSyntax *syntax, IdmCore **out, I
     return idm_expand_syntax_with_runner(rt, syntax, NULL, out, err);
 }
 
+struct IdmRepl {
+    IdmRuntime *rt;
+    ExpandContext ctx;
+    IdmBytecodeModule **modules;
+    size_t module_count;
+    size_t module_cap;
+};
+
+static void repl_install_hooks(IdmRepl *repl) {
+    IdmRuntime *rt = repl->rt;
+    rt->local_expand_user = &repl->ctx;
+    rt->local_expand = local_expand_callback;
+    rt->free_identifier_eq_user = &repl->ctx;
+    rt->free_identifier_eq = free_identifier_eq_callback;
+    rt->register_operator_user = &repl->ctx;
+    rt->register_operator = register_operator_callback;
+    rt->register_macro_user = &repl->ctx;
+    rt->register_macro = register_macro_callback;
+    rt->expander_surface_user = &repl->ctx;
+    rt->expander_surface = expander_surface_callback;
+}
+
+IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
+    IdmRepl *repl = calloc(1u, sizeof(*repl));
+    if (!repl) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return NULL;
+    }
+    repl->rt = rt;
+    ctx_init(&repl->ctx, rt);
+    repl->ctx.repl_global_binds = true;
+    repl->ctx.phase_env = idm_phase_env_create(rt, repl->ctx.phase_ns);
+    if (!repl->ctx.phase_env) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        ctx_destroy(&repl->ctx);
+        free(repl);
+        return NULL;
+    }
+    repl->ctx.runner = &repl->ctx.local_runner;
+    repl_install_hooks(repl);
+    if (!ctx_seed(&repl->ctx, err) || !ctx_activate_kernel(&repl->ctx, err)) {
+        ctx_destroy(&repl->ctx);
+        free(repl);
+        return NULL;
+    }
+    return repl;
+}
+
+bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool *out_has_value, IdmError *err) {
+    *out_has_value = false;
+    IdmSyntax *program = NULL;
+    if (!idm_reader_read_string("<repl>", source, &program, err)) return false;
+    if (program->as.seq.count < 2) {
+        idm_syn_free(program);
+        return true;
+    }
+    repl_install_hooks(repl);
+    IdmCore *core = expand_body_items(&repl->ctx, program->as.seq.items, 1, program->as.seq.count, err);
+    idm_syn_free(program);
+    if (!core) return false;
+    IdmBytecodeModule *module = malloc(sizeof(*module));
+    if (!module) {
+        idm_core_free(core);
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return false;
+    }
+    idm_bc_init(module);
+    uint32_t main_fn = 0;
+    bool compiled = idm_core_compile_main(core, module, &main_fn, err);
+    idm_core_free(core);
+    if (!compiled) {
+        idm_bc_destroy(module);
+        free(module);
+        return false;
+    }
+    if (repl->module_count == repl->module_cap) {
+        size_t cap = repl->module_cap ? repl->module_cap * 2u : 8u;
+        IdmBytecodeModule **grown = realloc(repl->modules, cap * sizeof(*grown));
+        if (!grown) {
+            idm_bc_destroy(module);
+            free(module);
+            idm_error_oom(err, idm_span_unknown(NULL));
+            return false;
+        }
+        repl->modules = grown;
+        repl->module_cap = cap;
+    }
+    repl->modules[repl->module_count++] = module;
+    if (!idm_runtime_register_gc_module(repl->rt, module)) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return false;
+    }
+    IdmScheduler *sched = idm_sched_create(repl->rt, module, err);
+    if (!sched) return false;
+    IdmValue out = idm_nil();
+    bool ran = idm_sched_run_main(sched, main_fn, &out, err);
+    idm_sched_destroy(sched);
+    if (!ran) return false;
+    *out_value = out;
+    *out_has_value = true;
+    return true;
+}
+
+void idm_repl_destroy(IdmRepl *repl) {
+    if (!repl) return;
+    for (size_t i = 0; i < repl->module_count; i++) {
+        idm_runtime_unregister_gc_module(repl->rt, repl->modules[i]);
+        idm_bc_destroy(repl->modules[i]);
+        free(repl->modules[i]);
+    }
+    free(repl->modules);
+    ctx_destroy(&repl->ctx);
+    free(repl);
+}
+
 bool idm_expand_syntax_with_runner(IdmRuntime *rt, const IdmSyntax *syntax, IdmMacroRunner *runner, IdmCore **out, IdmError *err) {
     ExpandContext ctx;
     ctx_init(&ctx, rt);

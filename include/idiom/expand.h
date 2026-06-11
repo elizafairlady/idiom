@@ -16,6 +16,11 @@ struct IdmMacroRunner {
 bool idm_expand_syntax(IdmRuntime *rt, const IdmSyntax *syntax, IdmCore **out, IdmError *err);
 bool idm_expand_syntax_with_runner(IdmRuntime *rt, const IdmSyntax *syntax, IdmMacroRunner *runner, IdmCore **out, IdmError *err);
 bool idm_expand_string(IdmRuntime *rt, const char *file, const char *source, IdmCore **out, IdmError *err);
+typedef struct IdmRepl IdmRepl;
+IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err);
+bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool *out_has_value, IdmError *err);
+void idm_repl_destroy(IdmRepl *repl);
+
 bool idm_expand_string_with_runner(IdmRuntime *rt, const char *file, const char *source, IdmMacroRunner *runner, IdmCore **out, IdmError *err);
 
 #endif

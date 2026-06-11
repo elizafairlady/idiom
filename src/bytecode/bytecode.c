@@ -6,6 +6,73 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool span_file_index(IdmBytecodeModule *module, const char *file, uint32_t *out_index) {
+    for (size_t i = 0; i < module->span_file_count; i++) {
+        if (strcmp(module->span_files[i], file) == 0) {
+            *out_index = (uint32_t)i;
+            return true;
+        }
+    }
+    if (module->span_file_count == module->span_file_cap) {
+        size_t cap = module->span_file_cap ? module->span_file_cap * 2u : 4u;
+        char **grown = realloc(module->span_files, cap * sizeof(*grown));
+        if (!grown) return false;
+        module->span_files = grown;
+        module->span_file_cap = cap;
+    }
+    char *copy = idm_strdup(file);
+    if (!copy) return false;
+    module->span_files[module->span_file_count] = copy;
+    *out_index = (uint32_t)module->span_file_count;
+    module->span_file_count++;
+    return true;
+}
+
+bool idm_bc_note_span(IdmBytecodeModule *module, IdmSpan span) {
+    if (!span.file || span.line == 0) return true;
+    uint32_t file_index = 0;
+    if (!span_file_index(module, span.file, &file_index)) return false;
+    if (module->span_count != 0) {
+        size_t last = module->span_count - 1u;
+        if (module->spans[last].offset == (uint32_t)module->code_count) {
+            module->spans[last].file = file_index;
+            module->spans[last].line = span.line;
+            module->spans[last].column = span.column;
+            return true;
+        }
+        if (module->spans[last].file == file_index && module->spans[last].line == span.line && module->spans[last].column == span.column) return true;
+    }
+    if (module->span_count == module->span_cap) {
+        size_t cap = module->span_cap ? module->span_cap * 2u : 32u;
+        void *grown = realloc(module->spans, cap * sizeof(*module->spans));
+        if (!grown) return false;
+        module->spans = grown;
+        module->span_cap = cap;
+    }
+    module->spans[module->span_count].offset = (uint32_t)module->code_count;
+    module->spans[module->span_count].file = file_index;
+    module->spans[module->span_count].line = span.line;
+    module->spans[module->span_count].column = span.column;
+    module->span_count++;
+    return true;
+}
+
+IdmSpan idm_bc_span_at(const IdmBytecodeModule *module, size_t ip) {
+    IdmSpan none = idm_span_unknown(NULL);
+    if (module->span_count == 0) return none;
+    size_t lo = 0;
+    size_t hi = module->span_count;
+    while (lo + 1u < hi) {
+        size_t mid = lo + (hi - lo) / 2u;
+        if ((size_t)module->spans[mid].offset <= ip) lo = mid; else hi = mid;
+    }
+    if ((size_t)module->spans[lo].offset > ip) return none;
+    IdmSpan out = idm_span_unknown(module->span_files[module->spans[lo].file]);
+    out.line = module->spans[lo].line;
+    out.column = module->spans[lo].column;
+    return out;
+}
+
 void idm_bc_init(IdmBytecodeModule *module) {
     module->code = NULL;
     module->code_count = 0;
@@ -16,12 +83,21 @@ void idm_bc_init(IdmBytecodeModule *module) {
     module->functions = NULL;
     module->function_count = 0;
     module->function_cap = 0;
+    module->span_files = NULL;
+    module->span_file_count = 0;
+    module->span_file_cap = 0;
+    module->spans = NULL;
+    module->span_count = 0;
+    module->span_cap = 0;
 }
 
 void idm_bc_destroy(IdmBytecodeModule *module) {
     if (!module) return;
     free(module->code);
     free(module->constants);
+    for (size_t i = 0; i < module->span_file_count; i++) free(module->span_files[i]);
+    free(module->span_files);
+    free(module->spans);
     for (size_t i = 0; i < module->function_count; i++) {
         free(module->functions[i].name);
         for (uint32_t p = 0; p < module->functions[i].pattern_count; p++) idm_pat_free(module->functions[i].param_patterns[p]);
@@ -532,7 +608,7 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, IdmError *e
 }
 
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err) {
-    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, 1u)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, 2u)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u32(out, (uint32_t)module->const_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->const_count; i++) if (!serialize_value(out, module->constants[i], err)) return false;
     if (!idm_buf_put_u32(out, (uint32_t)module->function_count)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -550,6 +626,17 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
     }
     if (!idm_buf_put_u64(out, (uint64_t)module->code_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->code_count; i++) if (!idm_buf_put_u32(out, module->code[i])) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_buf_put_u32(out, (uint32_t)module->span_file_count)) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < module->span_file_count; i++) {
+        if (!idm_buf_put_str(out, module->span_files[i], strlen(module->span_files[i]))) return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    if (!idm_buf_put_u32(out, (uint32_t)module->span_count)) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < module->span_count; i++) {
+        if (!idm_buf_put_u32(out, module->spans[i].offset) || !idm_buf_put_u32(out, module->spans[i].file) ||
+            !idm_buf_put_u32(out, module->spans[i].line) || !idm_buf_put_u32(out, module->spans[i].column)) {
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+    }
     return true;
 }
 
@@ -683,7 +770,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     if (len < 8u || memcmp(data, "IDMC", 4u) != 0) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "not an .ic module"); }
     r.pos = 4u;
     uint32_t version = idm_rd_u32(&r);
-    if (version != 1u) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
+    if (version != 2u) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
     uint32_t const_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < const_count && r.ok; i++) {
         IdmValue v;
@@ -756,6 +843,35 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     for (uint64_t i = 0; i < code_count && r.ok; i++) {
         uint32_t word = idm_rd_u32(&r);
         if (!r.ok || !idm_bc_emit(module, word, NULL)) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic code"); }
+    }
+    uint32_t span_file_count = idm_rd_u32(&r);
+    for (uint32_t i = 0; i < span_file_count && r.ok; i++) {
+        char *name = idm_rd_string(&r);
+        if (!name) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "truncated span file"); }
+        uint32_t idx = 0;
+        bool ok = span_file_index(module, name, &idx);
+        free(name);
+        if (!ok) { idm_bc_destroy(module); return idm_error_oom(err, idm_span_unknown(NULL)); }
+    }
+    uint32_t span_count = idm_rd_u32(&r);
+    for (uint32_t i = 0; i < span_count && r.ok; i++) {
+        uint32_t offset = idm_rd_u32(&r);
+        uint32_t file = idm_rd_u32(&r);
+        uint32_t line = idm_rd_u32(&r);
+        uint32_t column = idm_rd_u32(&r);
+        if (!r.ok || file >= module->span_file_count) break;
+        if (module->span_count == module->span_cap) {
+            size_t cap = module->span_cap ? module->span_cap * 2u : 32u;
+            void *grown = realloc(module->spans, cap * sizeof(*module->spans));
+            if (!grown) { idm_bc_destroy(module); return idm_error_oom(err, idm_span_unknown(NULL)); }
+            module->spans = grown;
+            module->span_cap = cap;
+        }
+        module->spans[module->span_count].offset = offset;
+        module->spans[module->span_count].file = file;
+        module->spans[module->span_count].line = line;
+        module->spans[module->span_count].column = column;
+        module->span_count++;
     }
     if (!r.ok) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic module"); }
     if (!idm_bc_verify(module, err)) { idm_bc_destroy(module); return false; }
@@ -837,10 +953,31 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
     return true;
 }
 
+static bool link_spans(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t code_off, IdmError *err) {
+    for (size_t i = 0; i < src->span_count; i++) {
+        uint32_t file_index = 0;
+        if (!span_file_index(dst, src->span_files[src->spans[i].file], &file_index)) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (dst->span_count == dst->span_cap) {
+            size_t cap = dst->span_cap ? dst->span_cap * 2u : 32u;
+            void *grown = realloc(dst->spans, cap * sizeof(*dst->spans));
+            if (!grown) return idm_error_oom(err, idm_span_unknown(NULL));
+            dst->spans = grown;
+            dst->span_cap = cap;
+        }
+        dst->spans[dst->span_count].offset = src->spans[i].offset + code_off;
+        dst->spans[dst->span_count].file = file_index;
+        dst->spans[dst->span_count].line = src->spans[i].line;
+        dst->spans[dst->span_count].column = src->spans[i].column;
+        dst->span_count++;
+    }
+    return true;
+}
+
 bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t *out_const_offset, uint32_t *out_fn_offset, uint32_t *out_code_offset, IdmError *err) {
     uint32_t const_off = (uint32_t)dst->const_count;
     uint32_t fn_off = (uint32_t)dst->function_count;
     uint32_t code_off = (uint32_t)dst->code_count;
+    if (!link_spans(dst, src, code_off, err)) return false;
     for (size_t i = 0; i < src->const_count; i++) if (!idm_bc_add_const(dst, src->constants[i], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < src->function_count; i++) {
         const IdmBcFunction *sf = &src->functions[i];

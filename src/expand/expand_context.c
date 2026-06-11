@@ -53,6 +53,7 @@ void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     ctx->value_context = false;
     ctx->command_sub_context = false;
     ctx->def_ctx = NULL;
+    ctx->repl_global_binds = false;
     ctx->activations = NULL;
     ctx->activation_count = 0;
     ctx->activation_cap = 0;

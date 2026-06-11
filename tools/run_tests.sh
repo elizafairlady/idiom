@@ -93,6 +93,13 @@ if [ "$MODE" = "output" ]; then
         fi
     fi
 
+    "$IDIOMC" repl < tests/repl/session.in > build/repl-session.out 2>build/repl-session.err
+    if [ -s build/repl-session.err ] || ! cmp -s tests/repl/session.out build/repl-session.out; then
+        echo "REPL FAIL"; cat build/repl-session.err; diff tests/repl/session.out build/repl-session.out || true; fail=1
+    else
+        echo "repl session passed (1 case)"
+    fi
+
     "$IDIOMC" --dump-surface > build/dump-surface-default.out 2>/dev/null
     cmp -s tests/dump/surface-default.out build/dump-surface-default.out || { echo "DUMP FAIL: surface-default"; diff tests/dump/surface-default.out build/dump-surface-default.out; fail=1; }
     "$IDIOMC" --dump-surface 'implements std/shell' > build/dump-surface-shell.out 2>/dev/null

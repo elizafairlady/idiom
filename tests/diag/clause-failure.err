@@ -1,2 +1,2 @@
-<unknown>: error: main actor exited with reason {:error "no clause of 'pick' matches (:wat 0)"}
-  in main
+tests/diag/clause-failure.id:5:11: error: main actor exited with reason {:error "no clause of 'pick' matches (:wat 0)"}
+  in main (tests/diag/clause-failure.id:5)

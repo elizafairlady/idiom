@@ -83,6 +83,12 @@ typedef struct IdmBytecodeModule {
     IdmBcFunction *functions;
     size_t function_count;
     size_t function_cap;
+    char **span_files;
+    size_t span_file_count;
+    size_t span_file_cap;
+    struct { uint32_t offset; uint32_t file; uint32_t line; uint32_t column; } *spans;
+    size_t span_count;
+    size_t span_cap;
 } IdmBytecodeModule;
 
 void idm_bc_init(IdmBytecodeModule *module);
@@ -90,6 +96,8 @@ void idm_bc_destroy(IdmBytecodeModule *module);
 bool idm_bc_add_const(IdmBytecodeModule *module, IdmValue value, uint32_t *out_index);
 bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t arity, uint32_t local_count, size_t entry, uint32_t *out_index);
 bool idm_bc_set_function_entry(IdmBytecodeModule *module, uint32_t function_index, size_t entry);
+bool idm_bc_note_span(IdmBytecodeModule *module, IdmSpan span);
+IdmSpan idm_bc_span_at(const IdmBytecodeModule *module, size_t ip);
 bool idm_bc_set_function_patterns_take(IdmBytecodeModule *module, uint32_t function_index, IdmPattern **patterns, uint32_t pattern_count);
 bool idm_bc_set_function_pattern_locals_take(IdmBytecodeModule *module, uint32_t function_index, IdmPatternLocal *locals, uint32_t local_count);
 bool idm_bc_set_function_guard(IdmBytecodeModule *module, uint32_t function_index, uint32_t guard_function);

@@ -877,6 +877,7 @@ static bool add_const_value(IdmBytecodeModule *module, IdmValue value, uint32_t 
 }
 
 static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+    if (!idm_bc_note_span(module, core->span)) return idm_error_oom(err, core->span);
     if (!core) return idm_error_set(err, idm_span_unknown(NULL), "cannot compile null core expression");
     switch (core->kind) {
         case IDM_CORE_LITERAL: {

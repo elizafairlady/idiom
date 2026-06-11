@@ -1,6 +1,7 @@
 #ifndef IDM_EXPAND_INTERNAL_H
 #define IDM_EXPAND_INTERNAL_H
 
+#include "idiom/actor.h"
 #include "idiom/expand.h"
 #include "idiom/artifact.h"
 #include "idiom/prims.h"
@@ -129,6 +130,7 @@ typedef struct {
     bool value_context;
     bool command_sub_context;
     struct BodyDefCtx *def_ctx;
+    bool repl_global_binds;
     struct { char *name; IdmSpan span; } *activations;
     size_t activation_count;
     size_t activation_cap;

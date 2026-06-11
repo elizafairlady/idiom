@@ -1041,12 +1041,24 @@ static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue 
                 if (out_reason) *out_reason = vm->raised;
                 return true;
             }
+            if (err->present && err->span.line == 0) {
+                const Frame *top = vm->frame_count != 0 ? &vm->frames[vm->frame_count - 1u] : NULL;
+                if (top && top->module) {
+                    IdmSpan where = idm_bc_span_at(top->module, top->ip > 0 ? top->ip - 1u : 0u);
+                    if (where.line != 0) err->span = where;
+                }
+            }
             size_t depth = vm->frame_count;
             size_t shown = depth < 12u ? depth : 12u;
             for (size_t i = 0; i < shown; i++) {
                 const Frame *f = &vm->frames[depth - 1u - i];
                 const char *fname = f->module && f->function_index < f->module->function_count ? f->module->functions[f->function_index].name : NULL;
-                idm_error_note(err, "in %s", fname && fname[0] ? fname : "<fn>");
+                IdmSpan where = f->module ? idm_bc_span_at(f->module, f->ip > 0 ? f->ip - 1u : 0u) : idm_span_unknown(NULL);
+                if (where.line != 0) {
+                    idm_error_note(err, "in %s (%s:%u)", fname && fname[0] ? fname : "<fn>", where.file, where.line);
+                } else {
+                    idm_error_note(err, "in %s", fname && fname[0] ? fname : "<fn>");
+                }
             }
             if (depth > shown) idm_error_note(err, "... (%zu more frames)", depth - shown);
             return false;

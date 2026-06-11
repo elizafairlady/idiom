@@ -97,6 +97,7 @@ struct IdmScheduler {
     IdmValue main_value;
     IdmValue main_reason;
     char *crash_notes;
+    IdmSpan crash_span;
     size_t gc_threshold;
 };
 
@@ -202,6 +203,7 @@ IdmScheduler *idm_sched_create(IdmRuntime *rt, const IdmBytecodeModule *module, 
     sched->main_value = idm_nil();
     sched->main_reason = idm_nil();
     sched->crash_notes = NULL;
+    sched->crash_span = idm_span_unknown(NULL);
     sched->gc_threshold = gc_threshold_from_env();
     return sched;
 }
@@ -461,6 +463,9 @@ static IdmValue crash_reason_from_err(IdmScheduler *sched, IdmError *err) {
     if (err->present && err->notes) {
         free(sched->crash_notes);
         sched->crash_notes = idm_strdup(err->notes);
+    }
+    if (err->present && err->span.line != 0 && sched->crash_span.line == 0) {
+        sched->crash_span = err->span;
     }
     idm_error_clear(err);
     IdmValue items[2];
@@ -835,7 +840,7 @@ bool idm_sched_run_main(IdmScheduler *sched, uint32_t main_fn, IdmValue *out_res
         IdmBuffer buf;
         idm_buf_init(&buf);
         if (idm_buf_append(&buf, "main actor exited with reason ") && idm_value_write(&buf, sched->main_reason)) {
-            idm_error_set(err, idm_span_unknown(NULL), "%s", buf.data);
+            idm_error_set(err, sched->crash_span, "%s", buf.data);
         } else {
             idm_error_set(err, idm_span_unknown(NULL), "main actor exited abnormally");
         }

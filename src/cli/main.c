@@ -218,6 +218,7 @@ static int run_file(const char *path) {
 
 #include <dirent.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 static int collect_test_files(const char *dir_path, char ***out_files, size_t *out_count, size_t *out_cap) {
     DIR *dir = opendir(dir_path);
@@ -403,7 +404,74 @@ done:
     return status;
 }
 
+#ifndef IDM_VERSION
+#define IDM_VERSION "0.0.0-dev"
+#endif
+
+static int run_repl(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmRepl *repl = idm_repl_create(&rt, &err);
+    if (!repl) {
+        idm_error_fprint(stderr, &err);
+        idm_error_clear(&err);
+        idm_runtime_destroy(&rt);
+        return 1;
+    }
+    bool tty = isatty(0);
+    if (tty) printf("idiom %s — :quit or ^D to exit\n", IDM_VERSION);
+    char *line = NULL;
+    size_t cap = 0;
+    IdmBuffer pending;
+    idm_buf_init(&pending);
+    for (;;) {
+        if (tty) {
+            fputs(pending.len == 0 ? "idiom> " : "  ...> ", stdout);
+            fflush(stdout);
+        }
+        ssize_t n = getline(&line, &cap, stdin);
+        if (n < 0) break;
+        if (pending.len == 0 && strcmp(line, ":quit\n") == 0) break;
+        if (!idm_buf_append(&pending, line)) break;
+        IdmSyntax *probe = NULL;
+        IdmError parse_err;
+        idm_error_init(&parse_err);
+        bool parsed = idm_reader_read_string("<repl>", pending.data, &probe, &parse_err);
+        if (!parsed && parse_err.message && strstr(parse_err.message, "unterminated")) {
+            idm_error_clear(&parse_err);
+            continue;
+        }
+        idm_syn_free(probe);
+        idm_error_clear(&parse_err);
+        IdmValue out = idm_nil();
+        bool has_value = false;
+        bool ok = idm_repl_eval(repl, pending.data, &out, &has_value, &err);
+        pending.len = 0;
+        if (pending.data) pending.data[0] = '\0';
+        if (!ok) {
+            idm_error_fprint(stderr, &err);
+            idm_error_clear(&err);
+            continue;
+        }
+        if (has_value && !idm_is_nil(out)) {
+            IdmBuffer buf;
+            idm_buf_init(&buf);
+            if (idm_value_write(&buf, out) && idm_buf_append_char(&buf, '\n')) fputs(buf.data, stdout);
+            idm_buf_destroy(&buf);
+        }
+    }
+    free(line);
+    idm_buf_destroy(&pending);
+    idm_repl_destroy(repl);
+    idm_runtime_destroy(&rt);
+    if (tty) putchar('\n');
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "repl") == 0) return run_repl();
     if (argc >= 2 && strcmp(argv[1], "test") == 0) return run_tests(argc - 2, argv + 2);
     if (argc >= 3 && strcmp(argv[1], "build") == 0) {
         const char *out_path = NULL;
@@ -423,9 +491,7 @@ int main(int argc, char **argv) {
         return build_sealed(src_path, out_path);
     }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
-#ifndef IDM_VERSION
-#define IDM_VERSION "0.0.0-dev"
-#endif
+
         printf("idiomc %s (idiom)\n", IDM_VERSION);
         return 0;
     }

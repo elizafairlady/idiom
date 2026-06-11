@@ -1,0 +1,10 @@
+x = 41
+defn bump n -> n + 1
+bump x
+defrules dbl do
+  (_ a) -> %`(mul 2 %,a)
+end
+dbl (bump x)
+implements std/shell
+y = printf from-repl-shell
+y
