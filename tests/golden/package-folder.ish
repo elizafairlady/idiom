@@ -1,0 +1,2 @@
+use tests/pkg/mathx
+add (quad 5) (trip 4)

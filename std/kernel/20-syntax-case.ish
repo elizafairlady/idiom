@@ -1,0 +1,116 @@
+export defmacro syntax-case stx do
+  defn collect_from i n syn -> cond (i == n) :nil (cons (syntax-nth syn i) (collect_from (add i 1) n syn))
+
+  defn word_text_or_empty syn -> cond (syntax-word? syn) (syntax-word-text syn) ""
+
+  defn build_binding_value ctx var_syn value_expr do
+    cond (syntax-word? var_syn)
+      (cond ((syntax-word-text var_syn) == "_")
+        :nil
+        (make-syntax-expr ctx (list var_syn (make-syntax-word ctx "=") value_expr)))
+      :nil
+  end
+
+  defn build_binding ctx var_syn input_var_syn i do
+    build_binding_value ctx var_syn %`(syntax-nth %,input_var_syn %,(make-syntax-int ctx i))
+  end
+
+  defn build_bindings_loop ctx pattern_tuple input_var_syn i n tail do
+    cond (i == n)
+      tail
+      (do
+        b = build_binding ctx (syntax-nth pattern_tuple i) input_var_syn i
+        rest = build_bindings_loop ctx pattern_tuple input_var_syn (i + 1) n tail
+        cond (eq? b :nil) rest (cons b rest)
+      end)
+  end
+
+  defn literal_datum ctx elem do
+    cond (syntax-atom? elem)
+      (make-syntax-atom ctx (syntax-atom-text elem))
+      (make-syntax-int ctx (syntax-int-value elem))
+  end
+
+  defn build_elem_checks ctx pattern_tuple input_var_syn i n do
+    cond (i == n)
+      %`:true
+      (do
+        elem = syntax-nth pattern_tuple i
+        rest = build_elem_checks ctx pattern_tuple input_var_syn (i + 1) n
+        cond (syntax-word? elem)
+          rest
+          %`(cond (eq? (syntax->datum (syntax-nth %,input_var_syn %,(make-syntax-int ctx i))) %,(literal_datum ctx elem)) %,rest :false)
+      end)
+  end
+
+  defn unwrap_pattern_tuple pattern_syn do
+    cond (syntax-list? pattern_syn)
+      (cond (word_text_or_empty (syntax-nth pattern_syn 0) == "%-group")
+        (syntax-nth pattern_syn 1)
+        pattern_syn)
+      pattern_syn
+  end
+
+  defn find_arrow clause i n do
+    cond (i == n)
+      (syntax-error clause "syntax-case clause requires ->")
+      (cond (word_text_or_empty (syntax-nth clause i) == "->")
+        i
+        (find_arrow clause (i + 1) n))
+  end
+
+  defn build_clause_cond ctx clause input_var_syn else_chain do
+    pattern_tuple = unwrap_pattern_tuple (syntax-nth clause 1)
+    clause_len = syntax-length clause
+    arrow = find_arrow clause 2 clause_len
+    result_expr = make-syntax-expr ctx (collect_from (arrow + 1) clause_len clause)
+    guard_expr = cond (arrow == 2)
+      (make-syntax-atom ctx "true")
+      (cond (word_text_or_empty (syntax-nth clause 2) == "when")
+        (make-syntax-expr ctx (collect_from 3 arrow clause))
+        (syntax-error clause "syntax-case guard must use when before ->"))
+    n = syntax-length pattern_tuple
+    ellipsis? = cond (n < 3) :false (word_text_or_empty (syntax-nth pattern_tuple (n - 1)) == "...")
+    fixed_n = cond ellipsis? (n - 2) n
+    head_pat = syntax-nth pattern_tuple 0
+    head_text = word_text_or_empty head_pat
+    head_check = cond (head_text == "_")
+      (make-syntax-atom ctx "true")
+      %`(eq? (syntax-word-text (syntax-nth %,input_var_syn 0)) %,(make-syntax-string ctx head_text))
+    guarded_result = %`(cond %,guard_expr %,result_expr %,else_chain)
+    repeat_tail = cond ellipsis?
+      (do
+        repeat_var = syntax-nth pattern_tuple fixed_n
+        repeat_value = %`(syntax-slice %,input_var_syn %,(make-syntax-int ctx fixed_n) (syntax-length %,input_var_syn))
+        repeat_binding = build_binding_value ctx repeat_var repeat_value
+        cond (eq? repeat_binding :nil) (list guarded_result) (cons repeat_binding (list guarded_result))
+      end)
+      (list guarded_result)
+    body_items = build_bindings_loop ctx pattern_tuple input_var_syn 1 fixed_n repeat_tail
+    body_syn = make-syntax-body ctx body_items
+    elem_checks = build_elem_checks ctx pattern_tuple input_var_syn 1 fixed_n
+    len_check = cond ellipsis?
+      %`(gte? (syntax-length %,input_var_syn) %,(make-syntax-int ctx fixed_n))
+      %`(eq? (syntax-length %,input_var_syn) %,(make-syntax-int ctx n))
+    elem_cond = %`(cond %,elem_checks %,body_syn %,else_chain)
+    head_cond = %`(cond %,head_check %,elem_cond %,else_chain)
+    inner_cond = %`(cond %,len_check %,head_cond %,else_chain)
+    list_check = %`(syntax-list? %,input_var_syn)
+    %`(cond %,list_check %,inner_cond %,else_chain)
+  end
+
+  defn build_chain ctx body input_var_syn i count do
+    cond (i > count)
+      %`(syntax-error %,input_var_syn "no matching syntax-case clause")
+      (build_clause_cond ctx (syntax-nth body i) input_var_syn (build_chain ctx body input_var_syn (i + 1) count))
+  end
+
+  input_expr = syntax-nth stx 2
+  body = syntax-nth stx 3
+  num_clauses = (syntax-length body) - 1
+  input_var_syn = make-syntax-word stx "__sc_input__"
+  bind_input = make-syntax-expr stx (list input_var_syn (make-syntax-word stx "=") input_expr)
+  chain = build_chain stx body input_var_syn 1 num_clauses
+  body_items = list bind_input chain
+  make-syntax-body stx body_items
+end

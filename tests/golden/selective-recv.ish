@@ -1,0 +1,1 @@
+send self {:a 1}; send self {:b 42}; send self {:c 3}; receive do {:b x} -> x end

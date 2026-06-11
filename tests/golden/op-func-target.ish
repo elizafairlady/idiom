@@ -1,0 +1,3 @@
+defn combine a b -> add (mul a 10) b
+operator glue precedence: 50 assoc: left fixity: infix -> combine
+4 glue 2

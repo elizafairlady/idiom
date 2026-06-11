@@ -1,0 +1,14 @@
+defn reduce-list xs acc f -> cond (eq? xs :nil) acc (reduce-list (rest xs) (f (first xs) acc) f)
+export defn reduce xs acc f -> reduce-list (to-list xs) acc f
+export defn reverse xs -> reduce xs :nil (fn x acc -> cons x acc)
+export defn foldl f acc xs -> reduce xs acc (fn x a -> f a x)
+export defn map f xs -> reverse (reduce xs :nil (fn x acc -> cons (f x) acc))
+export defn filter f xs -> reverse (reduce xs :nil (fn x acc -> cond (f x) (cons x acc) acc))
+export defn length xs -> reduce xs 0 (fn x acc -> add acc 1)
+export defn sum xs -> reduce xs 0 (fn x acc -> add acc x)
+export defn member x xs -> reduce xs :false (fn y acc -> cond acc :true (eq? x y))
+export defn concat xs ys -> reduce (reverse xs) ys (fn x acc -> cons x acc)
+export defn nth xs i -> cond (eq? i 0) (first xs) (nth (rest xs) (sub i 1))
+export defn take n xs -> cond (eq? n 0) :nil (cond (eq? xs :nil) :nil (cons (first xs) (take (sub n 1) (rest xs))))
+export defn drop n xs -> cond (eq? n 0) xs (cond (eq? xs :nil) :nil (drop (sub n 1) (rest xs)))
+export defn enum-not x -> cond x :false :true

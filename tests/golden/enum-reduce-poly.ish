@@ -1,0 +1,2 @@
+use std/enum
+reduce {10 20 30} 0 (fn x acc -> add acc x)

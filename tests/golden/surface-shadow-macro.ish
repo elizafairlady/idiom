@@ -1,0 +1,7 @@
+defmacro answer y do %`1 end
+inner = do
+  defmacro answer y do %`2 end
+  answer foo
+end
+outer = answer foo
+{inner outer}

@@ -1,0 +1,3 @@
+package mathx
+export defn dbl x -> add x x
+export defn quad x -> dbl (dbl x)

@@ -1,0 +1,8 @@
+defmacro defzero stx do
+  %`(do
+      defn %,(syntax-nth stx 2) v -> v
+      defn helper99 -> 1
+    end)
+end
+defzero published
+published 42

@@ -1,0 +1,5 @@
+implements std/shell
+p = printf hi &
+r1 = await p
+r2 = await p
+eq? r1 r2

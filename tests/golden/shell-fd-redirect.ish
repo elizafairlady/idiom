@@ -1,0 +1,4 @@
+implements std/shell
+sh -c "echo out; echo err >&2" 2> /tmp/ish_gold_fd_err
+println "err:$(cat /tmp/ish_gold_fd_err)"
+rm /tmp/ish_gold_fd_err

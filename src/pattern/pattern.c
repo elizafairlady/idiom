@@ -185,10 +185,6 @@ IshPattern *ish_pat_clone(const IshPattern *pat) {
             }
             return ish_pat_dict(entries, pat->as.dict.count, pat->span);
         }
-        case ISH_PAT_AS:
-        case ISH_PAT_GUARD:
-        case ISH_PAT_SYNTAX_ELLIPSIS:
-            return NULL;
     }
     return NULL;
 }
@@ -349,10 +345,6 @@ bool ish_pattern_match(IshRuntime *rt, IshPattern *pat, IshValue value, IshPatte
             }
             break;
         }
-        case ISH_PAT_AS:
-        case ISH_PAT_GUARD:
-        case ISH_PAT_SYNTAX_ELLIPSIS:
-            return ish_error_set(err, pat->span, "pattern kind is not implemented in matcher yet");
     }
     if (!ok) bindings_truncate(bindings, checkpoint);
     return ok;

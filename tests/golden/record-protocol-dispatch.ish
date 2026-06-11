@@ -1,0 +1,23 @@
+protocol Label do
+  method label-of x
+end
+
+record Point do
+  field x
+end
+
+record User do
+  field name
+end
+
+extend Point with Label do
+  method label-of p -> str "point:" (p.x)
+end
+
+extend User with Label do
+  method label-of u -> str "user:" (u.name)
+end
+
+implements Label
+println (label-of (Point 7))
+println (label-of (User "ada"))

@@ -1,0 +1,2 @@
+defmacro boomer stx -> error :kaboom
+boomer x

@@ -1,0 +1,2 @@
+implements std/shell
+out = printf "a\nb\nc\n" | wc -l; match out do {tag code so se} -> so end

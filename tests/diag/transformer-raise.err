@@ -1,0 +1,2 @@
+<unknown>: error: exited with reason {:error :kaboom}
+  in expansion of 'boomer' (tests/diag/transformer-raise.ish:2:1)

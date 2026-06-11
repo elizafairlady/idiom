@@ -26,7 +26,33 @@ typedef enum {
     ISH_OP_SUB,
     ISH_OP_MUL,
     ISH_OP_EQ,
-    ISH_OP_LT
+    ISH_OP_LT,
+    ISH_OP_PRIM_CALL,
+    ISH_OP_SELF,
+    ISH_OP_SPAWN,
+    ISH_OP_SEND,
+    ISH_OP_EXIT,
+    ISH_OP_LINK,
+    ISH_OP_UNLINK,
+    ISH_OP_MONITOR,
+    ISH_OP_DEMONITOR,
+    ISH_OP_TRAP_EXIT,
+    ISH_OP_RECV,
+    ISH_OP_EXEC,
+    ISH_OP_RESCUE_PUSH,
+    ISH_OP_RESCUE_POP,
+    ISH_OP_RAISE,
+    ISH_OP_LOAD_RAISED,
+    ISH_OP_LOAD_GLOBAL,
+    ISH_OP_STORE_GLOBAL,
+    ISH_OP_AWAIT,
+    ISH_OP_APPLY,
+    ISH_OP_ENTER_NAMESPACE,
+    ISH_OP_IMPORT_GLOBAL,
+    ISH_OP_LEAVE_NAMESPACE,
+    ISH_OP_DEFINE_PROTOCOL,
+    ISH_OP_EXTEND_PROTOCOL,
+    ISH_OP_CALL_METHOD
 } IshOpcode;
 
 typedef struct {
@@ -47,7 +73,7 @@ typedef struct {
     uint32_t pattern_local_count;
 } IshBcFunction;
 
-typedef struct {
+typedef struct IshBytecodeModule {
     uint32_t *code;
     size_t code_count;
     size_t code_cap;
@@ -74,5 +100,9 @@ bool ish_bc_patch_u32(IshBytecodeModule *module, size_t operand_offset, uint32_t
 bool ish_bc_verify(const IshBytecodeModule *module, IshError *err);
 const char *ish_opcode_name(IshOpcode op);
 bool ish_bc_disassemble(IshBuffer *buf, const IshBytecodeModule *module);
+bool ish_ishc_serialize(const IshBytecodeModule *module, IshBuffer *out, IshError *err);
+bool ish_ishc_deserialize(IshRuntime *rt, const unsigned char *data, size_t len, IshBytecodeModule *module, IshError *err);
+bool ish_bc_link(IshBytecodeModule *dst, const IshBytecodeModule *src, uint32_t *out_const_offset, uint32_t *out_fn_offset, uint32_t *out_code_offset, IshError *err);
+bool ish_bc_relocate_syntax_scopes(IshRuntime *rt, IshBytecodeModule *module, IshScopeId min_id, int64_t delta, IshError *err);
 
 #endif

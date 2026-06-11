@@ -114,6 +114,21 @@ bool ish_scope_set_write(IshBuffer *buf, const IshScopeSet *set) {
     return ish_buf_append_char(buf, '}');
 }
 
+void ish_scope_set_relocate(IshScopeSet *set, IshScopeId min_id, int64_t delta) {
+    for (size_t i = 0; i < set->count; i++) {
+        if (set->items[i] >= min_id) set->items[i] = (IshScopeId)((int64_t)set->items[i] + delta);
+    }
+    for (size_t i = 1; i < set->count; i++) {
+        IshScopeId key = set->items[i];
+        size_t j = i;
+        while (j > 0 && set->items[j - 1u] > key) {
+            set->items[j] = set->items[j - 1u];
+            j--;
+        }
+        set->items[j] = key;
+    }
+}
+
 void ish_binding_table_init(IshBindingTable *table) {
     table->items = NULL;
     table->count = 0;
@@ -134,7 +149,7 @@ void ish_binding_table_destroy(IshBindingTable *table) {
     table->next_id = 1u;
 }
 
-bool ish_binding_table_add(IshBindingTable *table, const char *name, int phase, IshBindingSpace space, IshBindingKind kind, const IshScopeSet *scopes, uint32_t payload, IshBindingId *out_id) {
+bool ish_binding_table_add(IshBindingTable *table, const char *name, int phase, IshBindingSpace space, IshBindingKind kind, const IshScopeSet *scopes, uint32_t payload, uint32_t frame_id, IshBindingId *out_id) {
     if (table->count == table->cap) {
         size_t cap = table->cap ? table->cap * 2u : 16u;
         IshBinding *items = realloc(table->items, cap * sizeof(*items));
@@ -154,9 +169,18 @@ bool ish_binding_table_add(IshBindingTable *table, const char *name, int phase, 
     }
     binding->id = table->next_id++;
     binding->payload = payload;
+    binding->frame_id = frame_id;
     table->count++;
     if (out_id) *out_id = binding->id;
     return true;
+}
+
+void ish_binding_table_truncate(IshBindingTable *table, size_t count) {
+    while (table->count > count) {
+        table->count--;
+        free(table->items[table->count].name);
+        ish_scope_set_destroy(&table->items[table->count].scopes);
+    }
 }
 
 IshResolveStatus ish_binding_resolve(const IshBindingTable *table, const char *name, int phase, IshBindingSpace space, const IshScopeSet *reference_scopes, const IshBinding **out_binding) {
@@ -174,6 +198,9 @@ IshResolveStatus ish_binding_resolve(const IshBindingTable *table, const char *n
         bool candidate_more_specific = ish_scope_set_subset(&best->scopes, &candidate->scopes);
         bool best_more_specific = ish_scope_set_subset(&candidate->scopes, &best->scopes);
         if (candidate_more_specific && !best_more_specific) {
+            best = candidate;
+            ambiguous = false;
+        } else if (candidate_more_specific && best_more_specific) {
             best = candidate;
             ambiguous = false;
         } else if (!candidate_more_specific && !best_more_specific) {
@@ -199,6 +226,7 @@ const char *ish_binding_space_name(IshBindingSpace space) {
         case ISH_BIND_SPACE_OPERATOR: return "operator";
         case ISH_BIND_SPACE_SHELL: return "shell";
         case ISH_BIND_SPACE_LABEL: return "label";
+        case ISH_BIND_SPACE_PROTOCOL: return "protocol";
     }
     return "<bad-space>";
 }
@@ -211,6 +239,11 @@ const char *ish_binding_kind_name(IshBindingKind kind) {
         case ISH_BIND_PACKAGE: return "package";
         case ISH_BIND_OPERATOR: return "operator";
         case ISH_BIND_SHELL_FORM: return "shell-form";
+        case ISH_BIND_LOCAL: return "local";
+        case ISH_BIND_ARG: return "arg";
+        case ISH_BIND_GLOBAL: return "global";
+        case ISH_BIND_PROTOCOL: return "protocol";
+        case ISH_BIND_METHOD: return "method";
     }
     return "<bad-kind>";
 }

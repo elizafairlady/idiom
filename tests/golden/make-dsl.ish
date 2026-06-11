@@ -1,0 +1,12 @@
+use tests/pkg/makedsl
+implements std/shell
+rules = list (rule :prep do
+    x = sh -c "printf prep"
+    tuple :prep-out x
+  end) (rule :out deps: (list :prep) do
+    y = sh -c "printf built"
+    tuple :out-out y
+  end) (rule :unused do
+    :never
+  end)
+build rules :out

@@ -1,0 +1,1 @@
+me = self; c = spawn (fn -> receive do {:ask from} -> send from 42 end); send c {:ask me}; receive do v -> v end

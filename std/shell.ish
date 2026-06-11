@@ -1,0 +1,230 @@
+resolver form do
+  defn head-is do
+    node name when (syntax-list? node) ->
+      and (gt? (syntax-length node) 0) (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name)
+    _ _ -> :false
+  end
+
+  defn word-is node text -> and (syntax-word? node) (eq? (syntax-word-text node) text)
+
+  defn redir-op-text do
+    ">" -> :true
+    ">>" -> :true
+    "<" -> :true
+    "&>" -> :true
+    "&>>" -> :true
+    _ -> :false
+  end
+
+  defn redir-op? node -> and (syntax-word? node) (redir-op-text (syntax-word-text node))
+
+  defn dup-op? node -> word-is node ">&"
+
+  defn glob-text? t -> or (str-contains? t "*") (str-contains? t "?") (str-contains? t "[")
+
+  defn string-syntax? p -> eq? (syntax-kind p) :string
+
+  defn word-arg do
+    t when (glob-text? t) -> %`(tuple :glob %,(make-syntax-string form t))
+    t -> %`(tuple :lit %,(make-syntax-string form t))
+  end
+
+  defn part->arg do
+    part when (head-is part "%-procsub-write") -> %`(tuple :lit __psw)
+    part when (head-is part "%-procsub-read") ->
+      %`(tuple :temp (write-procsub-temp (await (exec %,(form->graph (syntax-nth part 1) (make-syntax-atom form "true"))))))
+    part when (syntax-word? part) -> %`(tuple :lit %,(make-syntax-string form (syntax-word-text part)))
+    part when (head-is part "%-word") -> word-arg (syntax-string-text (syntax-nth part 1))
+    part when (head-is part "%-shell-var") -> %`(tuple :env %,(make-syntax-string form (syntax-word-text (syntax-nth part 1))))
+    part -> %`(tuple :lit (str %,part))
+  end
+
+  defn redir-fd do
+    "<" -> 0
+    _ -> 1
+  end
+
+  defn mk-redir-fd op-word fdn target ->
+    %`(tuple :redir %,(make-syntax-atom form (syntax-word-text op-word)) %,(make-syntax-int form fdn) %,(part->arg target))
+
+  defn mk-redir op-word target -> mk-redir-fd op-word (redir-fd (syntax-word-text op-word)) target
+
+  defn mk-dup fdn ton -> %`(tuple :dup %,(make-syntax-int form fdn) %,(make-syntax-int form ton))
+
+  defn heredoc? part -> head-is part "%-heredoc"
+
+  defn mk-heredoc part -> %`(tuple :redir :heredoc 0 (tuple :lit %,(syntax-nth part 1)))
+
+  defn drop-n do
+    parts 0 -> parts
+    [_ . t] k -> drop-n t (sub k 1)
+  end
+
+  defn fd-redir? do
+    [a b _ . _] -> and (syntax-int? a) (redir-op? b) (syntax-adjacent? b)
+    _ -> :false
+  end
+
+  defn fd-dup3? do
+    [a b c . _] -> and (syntax-int? a) (dup-op? b) (syntax-adjacent? b) (syntax-int? c) (syntax-adjacent? c)
+    _ -> :false
+  end
+
+  defn dup2? do
+    [a b . _] -> and (dup-op? a) (syntax-int? b) (syntax-adjacent? b)
+    _ -> :false
+  end
+
+  defn plain-redir? do
+    [a _ . _] -> redir-op? a
+    _ -> :false
+  end
+
+  defn skip-count do
+    parts when (fd-dup3? parts) -> 3
+    parts when (fd-redir? parts) -> 3
+    parts when (dup2? parts) -> 2
+    parts when (plain-redir? parts) -> 2
+    [h . _] when (heredoc? h) -> 1
+    _ -> 0
+  end
+
+  defn static-seg? do
+    p when (redir-op? p) -> :false
+    p when (dup-op? p) -> :false
+    p -> or (syntax-word? p) (head-is p "%-word") (string-syntax? p) (syntax-int? p)
+  end
+
+  defn seg-text do
+    p when (syntax-word? p) -> syntax-word-text p
+    p when (head-is p "%-word") -> syntax-string-text (syntax-nth p 1)
+    p when (string-syntax? p) -> syntax-string-text p
+    p -> str (syntax-int-value p)
+  end
+
+  defn seg-glob? do
+    p when (head-is p "%-word") -> glob-text? (syntax-string-text (syntax-nth p 1))
+    _ -> :false
+  end
+
+  defn run-len do
+    [_ n . t] when (and (syntax-adjacent? n) (static-seg? n)) -> add 1 (run-len (cons n t))
+    _ -> 1
+  end
+
+  defn run-text do
+    _ 0 -> ""
+    [h . t] k -> str (seg-text h) (run-text t (sub k 1))
+  end
+
+  defn run-glob? do
+    _ 0 -> :false
+    [h . t] k -> or (seg-glob? h) (run-glob? t (sub k 1))
+  end
+
+  defn mk-run do
+    parts k when (run-glob? parts k) -> %`(tuple :glob %,(make-syntax-string form (run-text parts k)))
+    parts k -> %`(tuple :lit %,(make-syntax-string form (run-text parts k)))
+  end
+
+  defn argv-of do
+    :nil -> :nil
+    parts when (gt? (skip-count parts) 0) -> argv-of (drop-n parts (skip-count parts))
+    parts when (static-seg? (first parts)) -> cons (mk-run parts (run-len parts)) (argv-of (drop-n parts (run-len parts)))
+    [h . t] -> cons (part->arg h) (argv-of t)
+  end
+
+  defn redirs-of do
+    :nil -> :nil
+    parts when (fd-dup3? parts) ->
+      cons (mk-dup (syntax-int-value (first parts)) (syntax-int-value (first (rest (rest parts))))) (redirs-of (drop-n parts 3))
+    parts when (fd-redir? parts) ->
+      cons (mk-redir-fd (first (rest parts)) (syntax-int-value (first parts)) (first (rest (rest parts)))) (redirs-of (drop-n parts 3))
+    parts when (dup2? parts) ->
+      cons (mk-dup 1 (syntax-int-value (first (rest parts)))) (redirs-of (drop-n parts 2))
+    parts when (plain-redir? parts) ->
+      cons (mk-redir (first parts) (first (rest parts))) (redirs-of (drop-n parts 2))
+    [h . t] when (heredoc? h) -> cons (mk-heredoc h) (redirs-of t)
+    parts when (static-seg? (first parts)) -> redirs-of (drop-n parts (run-len parts))
+    [_ . t] -> redirs-of t
+  end
+
+  defn env-triple? do
+    [a b c . _] -> and (syntax-word? a) (word-is b "=") (syntax-adjacent? b) (syntax-adjacent? c)
+    _ -> :false
+  end
+
+  defn envs-of do
+    parts when (env-triple? parts) ->
+      cons %`(tuple %,(make-syntax-string form (syntax-word-text (first parts))) %,(part->arg (first (rest (rest parts))))) (envs-of (drop-n parts 3))
+    _ -> :nil
+  end
+
+  defn strip-envs do
+    parts when (env-triple? parts) -> strip-envs (drop-n parts 3)
+    parts -> parts
+  end
+
+  defn stage-of parts do
+    body = strip-envs parts
+    %`(tuple :stage (list %,@(argv-of body)) (list %,@(redirs-of body)) (list %,@(envs-of parts)))
+  end
+
+  defn split-stages do
+    :nil cur -> cons (stage-of cur) :nil
+    [h . t] cur when (word-is h "|") -> cons (stage-of cur) (split-stages t :nil)
+    [h . t] cur -> split-stages t (append cur (cons h :nil))
+  end
+
+  defn collect-parts do
+    f i n when (eq? i n) -> :nil
+    f i n when (and (word-is (syntax-nth f i) "&") (eq? (add i 1) n)) -> :nil
+    f i n -> cons (syntax-nth f i) (collect-parts f (add i 1) n)
+  end
+
+  defn last-is-amp do
+    1 -> :false
+    n -> word-is (syntax-nth form (sub n 1)) "&"
+  end
+
+  defn build-graph do
+    [s] cap -> %`(tuple :exec %,s %,cap)
+    stages cap -> %`(tuple :pipeline (list %,@stages) %,cap :true)
+  end
+
+  defn form->graph f cap -> build-graph (split-stages (collect-parts f 1 (syntax-length f)) :nil) cap
+
+  defn find-pw do
+    :nil -> :nil
+    [h . _] when (head-is h "%-procsub-write") -> h
+    [_ . t] -> find-pw t
+  end
+
+  defn write-sub-graph sub do
+    sub-parts = collect-parts sub 1 (syntax-length sub)
+    %`(tuple :exec (tuple :stage (list %,@(argv-of sub-parts)) (list (tuple :redir %,(make-syntax-atom form "<") 0 (tuple :temp __psw)) %,@(redirs-of sub-parts)) (list)) :false)
+  end
+
+  defn emit do
+    graph :nil :true -> %`(exec %,graph)
+    graph :nil _ -> %`(await (exec %,graph))
+    graph pw _ ->
+      %`(do
+          __psw = make-procsub-temp
+          __r = (await (exec %,graph))
+          (await (exec %,(write-sub-graph (syntax-nth pw 1))))
+          __r
+        end)
+  end
+
+  defn wrap-cs do
+    e when (eq? (syntax-property form "command-sub") "true") -> %`(capture-stdout %,e)
+    e -> e
+  end
+
+  n = syntax-length form
+  background = last-is-amp n
+  capturing = cond background :true (eq? (syntax-property form "value-context") "true")
+  cap = make-syntax-atom form (cond capturing "true" "false")
+  wrap-cs (emit (form->graph form cap) (find-pw (collect-parts form 1 n)) background)
+end

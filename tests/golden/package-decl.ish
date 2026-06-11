@@ -1,0 +1,3 @@
+package demo
+use std/enum
+sum (map (fn x -> mul x 2) [1 2 3])

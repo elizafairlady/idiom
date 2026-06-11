@@ -1,0 +1,35 @@
+resolver form do
+  defn parts-of do
+    i n when (eq? i n) -> :nil
+    i n -> cons (syntax-nth form i) (parts-of (add i 1) n)
+  end
+
+  defn body? do
+    p when (syntax-list? p) ->
+      and (gt? (syntax-length p) 0) (syntax-word? (syntax-nth p 0)) (eq? (syntax-word-text (syntax-nth p 0)) "%-body")
+    _ -> :false
+  end
+
+  defn body-children do
+    b i n when (eq? i n) -> :nil
+    b i n -> cons (syntax-nth b i) (body-children b (add i 1) n)
+  end
+
+  defn attrs-of do
+    [a v . t] when (syntax-atom? a) ->
+      cons %`(str " " %,(make-syntax-string form (syntax-atom-text a)) "=\"" %,v "\"") (attrs-of t)
+    [_ . t] -> attrs-of t
+    :nil -> :nil
+  end
+
+  defn kids-of do
+    [a _ . t] when (syntax-atom? a) -> kids-of t
+    [b . t] when (body? b) -> append (body-children b 1 (syntax-length b)) (kids-of t)
+    [c . t] -> cons c (kids-of t)
+    :nil -> :nil
+  end
+
+  tag = make-syntax-string form (syntax-word-text (syntax-nth form 1))
+  parts = parts-of 2 (syntax-length form)
+  %`(str "<" %,tag %,@(attrs-of parts) ">" %,@(kids-of parts) "</" %,tag ">")
+end

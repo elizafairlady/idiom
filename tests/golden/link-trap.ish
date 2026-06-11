@@ -1,0 +1,1 @@
+trap-exit :true; c = spawn (fn -> exit :boom); link c; receive do {:exit pid :boom} -> 42; {:exit pid other} -> 0 end

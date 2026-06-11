@@ -1,0 +1,1 @@
+defn f 0 -> 40; defn f n -> n; add (f 0) 2

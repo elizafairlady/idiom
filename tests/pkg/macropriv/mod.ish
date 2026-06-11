@@ -1,0 +1,10 @@
+package macropriv
+
+defn hidden x -> add x 1
+
+for-syntax do
+  defn lit stx -> make-syntax-int stx 77
+  export defmacro phase-answer stx -> lit stx
+end
+
+export defmacro inc-private stx -> %`(hidden %,(syntax-nth stx 2))

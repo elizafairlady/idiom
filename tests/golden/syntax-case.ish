@@ -1,0 +1,1 @@
+defmacro plus2 stx -> syntax-case stx do (_ x) -> %`(add %,x 2) end; plus2 40

@@ -1,0 +1,9 @@
+protocol Show do
+  method show x -> str "default:" x
+end
+
+implements Show
+extend int with Show do
+end
+
+println (show 42)

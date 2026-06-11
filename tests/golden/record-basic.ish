@@ -1,0 +1,10 @@
+record Point do
+  field x
+  field y
+end
+
+p = Point 3 4
+println (p.x)
+println (y p)
+println (Point? p)
+println (Point? 12)

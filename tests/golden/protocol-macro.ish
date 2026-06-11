@@ -1,0 +1,5 @@
+protocol m do
+  export defmacro answer s -> (make-syntax-int s 99)
+end
+implements m
+answer foo

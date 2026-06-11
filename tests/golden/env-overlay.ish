@@ -1,0 +1,4 @@
+implements std/shell
+env-set "ISH_GOLD_VAR" "from-overlay"
+println "penv:$(printenv ISH_GOLD_VAR)"
+env-get "ISH_GOLD_VAR"

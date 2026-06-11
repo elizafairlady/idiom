@@ -11,6 +11,7 @@ typedef enum {
     ISH_SYN_WORD,
     ISH_SYN_ATOM,
     ISH_SYN_INT,
+    ISH_SYN_FLOAT,
     ISH_SYN_STRING,
     ISH_SYN_LIST,
     ISH_SYN_VECTOR,
@@ -34,16 +35,32 @@ typedef struct {
     size_t cap;
 } IshPhaseScopes;
 
+typedef struct {
+    char *key;
+    char *value;
+} IshSyntaxProperty;
+
+typedef struct {
+    char **items;
+    size_t count;
+    size_t cap;
+} IshOriginChain;
+
 struct IshSyntax {
     IshSyntaxKind kind;
     IshSpan span;
     IshPhaseScopes scopes;
+    IshSyntaxProperty *properties;
+    size_t property_count;
+    size_t property_cap;
+    IshOriginChain origins;
     char *token_raw;
     bool token_leading_space;
     bool token_adjacent_previous;
     union {
         char *text;
         int64_t integer;
+        double real;
         struct {
             IshSyntax **items;
             size_t count;
@@ -57,6 +74,7 @@ IshSyntax *ish_syn_nil(IshSpan span);
 IshSyntax *ish_syn_word(const char *text, IshSpan span);
 IshSyntax *ish_syn_atom(const char *text, IshSpan span);
 IshSyntax *ish_syn_int(int64_t value, IshSpan span);
+IshSyntax *ish_syn_float(double value, IshSpan span);
 IshSyntax *ish_syn_string(const char *text, IshSpan span);
 IshSyntax *ish_syn_string_n(const char *text, size_t len, IshSpan span);
 IshSyntax *ish_syn_list(IshSequenceShape shape, IshSpan span);
@@ -72,7 +90,18 @@ bool ish_syn_scope_contains(const IshSyntax *syn, int phase, IshScopeId scope);
 const IshScopeSet *ish_syn_scope_set(const IshSyntax *syn, int phase);
 bool ish_syn_scope_add_tree(IshSyntax *syn, int phase, IshScopeId scope);
 bool ish_syn_scope_flip_tree(IshSyntax *syn, int phase, IshScopeId scope);
+bool ish_syn_property_set(IshSyntax *syn, const char *key, const char *value);
+const char *ish_syn_property_get(const IshSyntax *syn, const char *key);
+bool ish_syn_origin_push(IshSyntax *syn, const char *origin);
+bool ish_syn_origin_push_tree(IshSyntax *syn, const char *origin);
+IshSyntax *ish_syn_clone(const IshSyntax *syn);
 void ish_syn_free(IshSyntax *syn);
 bool ish_syn_dump(IshBuffer *buf, const IshSyntax *syn);
+
+typedef struct IshRuntime IshRuntime;
+bool ish_syn_serialize(IshBuffer *out, const IshSyntax *syn, IshError *err);
+IshSyntax *ish_syn_deserialize(IshRuntime *rt, IshByteReader *r, IshError *err);
+void ish_syn_scope_relocate_tree(IshSyntax *syn, IshScopeId min_id, int64_t delta);
+bool ish_syn_scope_visit_tree(const IshSyntax *syn, bool (*visit)(void *user, IshScopeId id), void *user);
 
 #endif

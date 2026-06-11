@@ -1,0 +1,6 @@
+try do
+  s = %'(x)
+  expander-register-operator s 50 "left" "infix" s
+  :unreachable
+  rescue r -> :caught
+end

@@ -1,0 +1,6 @@
+package protomethod
+
+defn private-prefix x -> str "pkg:" x
+
+method describe x -> private-prefix x
+method tag x

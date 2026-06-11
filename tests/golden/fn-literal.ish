@@ -1,0 +1,1 @@
+inc = fn x -> add x 1; inc 41

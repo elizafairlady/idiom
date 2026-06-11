@@ -1,0 +1,14 @@
+defn fact do
+  0 -> 1
+  n -> mul n (fact (sub n 1))
+end
+defn classify do
+  n when n < 0 -> :negative
+  0 -> :zero
+  _ -> :positive
+end
+defn dropn do
+  parts 0 -> parts
+  [_ . t] k -> dropn t (sub k 1)
+end
+tuple (fact 5) (classify (sub 0 3)) (classify 0) (classify 7) (dropn [1 2 3 4] 2)

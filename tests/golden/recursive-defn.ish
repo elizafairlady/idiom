@@ -1,0 +1,1 @@
+defn sumdown n -> cond (n < 1) 0 (n + sumdown (n - 1)); sumdown 5

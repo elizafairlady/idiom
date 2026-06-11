@@ -1,0 +1,1 @@
+try do raise :boom; rescue r -> r end

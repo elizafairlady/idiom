@@ -1,0 +1,7 @@
+operator <+> precedence: 60 -> add
+inner = do
+  operator <+> precedence: 60 -> mul
+  3 <+> 4
+end
+outer = 3 <+> 4
+{inner outer}

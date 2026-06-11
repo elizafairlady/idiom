@@ -1,0 +1,6 @@
+me = self
+send me :other
+receive do
+  :wanted -> :got
+  after 0 -> :timed-out
+end

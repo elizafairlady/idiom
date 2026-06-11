@@ -1,0 +1,61 @@
+export defmacro if stx do
+  syntax-case stx do
+    (_ condition then_body) -> %`(cond %,condition %,then_body :nil)
+    (_ condition then_body else_word else_body) ->
+      cond (syntax-word-text else_word == "else")
+        %`(cond %,condition %,then_body %,else_body)
+        (syntax-error stx "if requires else before the else body")
+    (_ condition then_body else_word if_word condition2 then_body2 else_word2 else_body2) ->
+      cond (syntax-word-text else_word == "else")
+        (cond (syntax-word-text if_word == "if")
+          (cond (syntax-word-text else_word2 == "else")
+            %`(cond %,condition %,then_body (if %,condition2 %,then_body2 %,else_word2 %,else_body2))
+            (syntax-error stx "else-if requires a final else branch"))
+          (syntax-error stx "if else-chain must use else if"))
+        (syntax-error stx "if requires else before the else branch")
+  end
+end
+
+export defmacro match stx do
+  syntax-case stx do
+    (_ scrutinee body) -> %`((fn %,body) %,scrutinee)
+  end
+end
+
+export defmacro error stx do
+  syntax-case stx do
+    (_ value ...) -> %`(raise (tuple :error (%,@value)))
+  end
+end
+
+export defmacro case stx do
+  syntax-case stx do
+    (_ scrutinee clauses) -> %`(match %,scrutinee %,clauses)
+  end
+end
+
+export defmacro unless stx do
+  syntax-case stx do
+    (_ condition body) -> %`(cond %,condition :nil %,body)
+  end
+end
+
+export defmacro and stx do
+  syntax-case stx do
+    (_ last) -> last
+    (_ first rest ...) -> %`(cond %,first (and %,@rest) :false)
+  end
+end
+
+export defmacro or stx do
+  syntax-case stx do
+    (_ last) -> last
+    (_ first rest ...) -> do
+      tmp = make-syntax-word stx "__or_tmp__"
+      %`(do
+        %,tmp = %,first
+        cond %,tmp %,tmp (or %,@rest)
+      end)
+    end
+  end
+end

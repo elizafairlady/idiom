@@ -1,0 +1,3 @@
+use tests/pkg/splicemak
+defdouble dbl
+dbl 21

@@ -1,0 +1,1 @@
+adder = fn n -> (fn x -> add x n); (adder 40) 2

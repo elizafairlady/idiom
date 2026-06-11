@@ -1,0 +1,18 @@
+protocol Describe do
+  method describe x -> str "value:" x
+end
+
+implements Describe
+extend int with Describe do
+  method describe n -> str "int:" n
+end
+extend string with Describe do
+  method describe s -> str "string:" s
+end
+extend pair with Describe do
+end
+
+println (describe 7)
+println (describe "hi")
+println (describe (cons 1 2))
+println (7.describe)

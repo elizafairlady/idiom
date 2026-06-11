@@ -1,0 +1,5 @@
+protocol arith do
+  operator <+> precedence: 6 assoc: left fixity: infix -> add
+end
+implements arith
+3 <+> 4

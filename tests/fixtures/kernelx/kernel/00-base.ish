@@ -1,0 +1,2 @@
+export defn kernel-answer x -> add x 1
+defn kernel-hidden x -> x

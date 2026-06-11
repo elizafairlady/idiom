@@ -1,0 +1,2 @@
+tests/pkg/nope-not-real.ish: error: open failed: No such file or directory
+  while loading package 'tests/pkg/nope-not-real' (tests/diag/package-chain.ish:1:1)

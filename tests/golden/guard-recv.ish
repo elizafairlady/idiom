@@ -1,0 +1,1 @@
+send self 5; receive do n when n > 10 -> 0; n -> add n 37 end

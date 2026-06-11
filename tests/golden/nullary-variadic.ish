@@ -1,0 +1,4 @@
+f = &list
+g = add
+empty = list
+tuple (list) (tuple) (vector) (dict) empty (f 1 2) (apply &list (list 3 4)) (g 40 2)

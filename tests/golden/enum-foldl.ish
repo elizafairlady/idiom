@@ -1,0 +1,2 @@
+use std/enum
+foldl (fn acc x -> sub acc x) 100 [1 2 3]

@@ -1,0 +1,1 @@
+defn double n -> add n n; mk = fn base -> (fn -> receive do {:job from x} -> send from (add base (double x)) end); s = spawn (mk 22); me = self; send s {:job me 10}; receive do r -> r end

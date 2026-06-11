@@ -1,0 +1,10 @@
+protocol Show do
+  method show x
+end
+
+implements Show
+extend int with Show do
+  method show x -> str "int:" x
+end
+
+println (42.show)

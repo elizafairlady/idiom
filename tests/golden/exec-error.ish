@@ -1,0 +1,2 @@
+implements std/shell
+out = ls /no/such/path/zzz; match out do {tag code so se} -> tag end

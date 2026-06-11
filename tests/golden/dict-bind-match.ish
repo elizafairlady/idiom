@@ -1,0 +1,1 @@
+match %{:a 42} do %{:a x} -> x end

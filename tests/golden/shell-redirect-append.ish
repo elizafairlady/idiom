@@ -1,0 +1,5 @@
+implements std/shell
+echo one > /tmp/ish_gold_append
+echo two >> /tmp/ish_gold_append
+println "got:$(cat /tmp/ish_gold_append)"
+rm /tmp/ish_gold_append

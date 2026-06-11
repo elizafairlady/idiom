@@ -1,0 +1,1 @@
+operator plus precedence: 50 assoc: left fixity: infix -> add; 40 plus 2

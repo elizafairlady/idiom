@@ -14,10 +14,7 @@ typedef enum {
     ISH_PAT_TUPLE,
     ISH_PAT_VECTOR_REST,
     ISH_PAT_TUPLE_REST,
-    ISH_PAT_DICT,
-    ISH_PAT_AS,
-    ISH_PAT_GUARD,
-    ISH_PAT_SYNTAX_ELLIPSIS
+    ISH_PAT_DICT
 } IshPatternKind;
 
 typedef struct IshPattern IshPattern;

@@ -1,0 +1,2 @@
+use std/enum
+reverse [1 2 3]

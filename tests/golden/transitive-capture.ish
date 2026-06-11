@@ -1,0 +1,1 @@
+a = 40; mk = fn y -> (fn z -> add a (sub z y)); g = mk 8; g 10

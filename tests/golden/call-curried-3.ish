@@ -1,0 +1,1 @@
+f = fn a -> (fn b -> (fn c -> add a (add b c))); ((f 100) 20) 3

@@ -1,0 +1,2 @@
+use tests/pkg/secret
+reveal 5

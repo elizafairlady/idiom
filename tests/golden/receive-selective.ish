@@ -1,0 +1,7 @@
+me = self
+s = spawn (fn -> (do
+  send me :first
+  send me :second
+  :done
+end))
+receive do :second -> :got-second end

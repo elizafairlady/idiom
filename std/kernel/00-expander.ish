@@ -1,0 +1,38 @@
+export defmacro operator stx do
+  n = syntax-length stx
+  shape = cond (gt? n 4) :ok (syntax-error stx "operator declaration requires a name and a target")
+
+  defn find-arrow do
+    i when (eq? i n) -> syntax-error stx "operator declaration requires '-> target'"
+    i when (cond (syntax-word? (syntax-nth stx i)) (eq? (syntax-word-text (syntax-nth stx i)) "->") :false) -> i
+    i -> find-arrow (add i 1)
+  end
+
+  defn kw-text v -> cond (syntax-atom? v) (syntax-atom-text v) (syntax-error stx "operator declaration expects keyword: value pairs")
+
+  defn opt-word v -> cond (syntax-word? v) (syntax-word-text v) (syntax-error stx "operator option must be an identifier")
+
+  defn apply-opt do
+    "precedence" v {p a f} -> tuple (syntax-int-value v) a f
+    "assoc" v {p a f} -> tuple p (opt-word v) f
+    "fixity" v {p a f} -> tuple p a (opt-word v)
+    other _ _ -> syntax-error stx (str "unknown operator keyword '" other "'")
+  end
+
+  defn parse-opts do
+    i arrow acc when (eq? i arrow) -> acc
+    i arrow acc when (eq? (add i 1) arrow) -> syntax-error stx (str "operator keyword '" (kw-text (syntax-nth stx i)) "' requires a value")
+    i arrow acc -> parse-opts (add i 2) arrow (apply-opt (kw-text (syntax-nth stx i)) (syntax-nth stx (add i 1)) acc)
+  end
+
+  defn target-of do
+    a when (eq? (add a 1) n) -> syntax-error stx "operator declaration requires '-> target'"
+    a -> syntax-nth stx (add a 1)
+  end
+
+  defn finish {p a f} target -> expander-register-operator (syntax-nth stx 2) p a f target
+
+  arrow = find-arrow 3
+  finish (parse-opts 3 arrow (tuple 50 "left" "infix")) (target-of arrow)
+  make-syntax-atom stx "ok"
+end

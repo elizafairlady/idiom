@@ -1,0 +1,3 @@
+tests/diag/origin-chain.ish:2:25: error: unbound identifier 'no-such-fn'
+  in expansion of 'inner'
+  in expansion of 'outer'

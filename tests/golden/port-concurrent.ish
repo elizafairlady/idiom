@@ -1,0 +1,4 @@
+implements std/shell
+a = printf one &
+b = printf two &
+{(await a) (await b)}

@@ -1,0 +1,1416 @@
+#include "internal.h"
+
+static IshPattern *pattern_from_param_depth(ExpandContext *ctx, const IshSyntax *syn, uint32_t arg_index, bool allow_bind, IshError *err);
+static IshPattern *pattern_from_param(ExpandContext *ctx, const IshSyntax *syn, uint32_t arg_index, IshError *err);
+static bool copy_pattern_locals(ExpandContext *ctx, size_t table_base, IshPatternLocal **out_locals, uint32_t *out_count);
+static bool bind_form_parts(const IshSyntax *form, const IshSyntax **out_name, size_t *out_rhs_start);
+static bool definition_like_form(const IshSyntax *form, const char **out_head);
+static bool for_syntax_form(const IshSyntax *form, const IshSyntax **out_body);
+static bool defn_form_parts(const IshSyntax *form, const IshSyntax **out_name, size_t *out_param_start, bool *out_export);
+static void defn_groups_destroy(DefnGroup *groups, size_t count);
+static DefnGroup *find_or_add_group(DefnGroup **groups, size_t *count, size_t *cap, const IshSyntax *name_syntax);
+static bool group_add_index(DefnGroup *group, size_t index);
+static void body_recs_destroy(BodyRec *recs, size_t count);
+static bool body_work_splice(IshSyntax ***work, size_t *work_count, size_t *work_cap, size_t at, const IshSyntax *body, IshError *err);
+static IshCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, const IshSyntax *head, IshSyntax *const *items, size_t param_start, size_t end, IshPattern ***out_patterns, uint32_t *out_pattern_count, IshPatternLocal **out_locals, uint32_t *out_local_count, IshCore **out_guard, uint32_t *out_arity, IshError *err);
+static bool defn_form_clause_block(const IshSyntax *def_form, size_t param_start, const IshSyntax **out_body);
+static IshCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, IshSyntax *const *items, IshError *err);
+static IshCore *expand_match_clause(ExpandContext *ctx, const IshSyntax *clause, IshPattern ***out_patterns, uint32_t *out_pattern_count, IshPatternLocal **out_locals, uint32_t *out_local_count, IshCore **out_guard, uint32_t *out_arity, IshError *err);
+static bool body_is_clauses(const IshSyntax *body);
+static IshCore *build_clause_fn_styled(ExpandContext *ctx, const IshSyntax *body, size_t clause_end, const char *debug_name, bool defn_style, IshError *err);
+static IshCore *build_clause_fn(ExpandContext *ctx, const IshSyntax *body, size_t clause_end, const char *debug_name, IshError *err);
+
+IshCore *literal_from_syntax(ExpandContext *ctx, const IshSyntax *syn, IshError *err) {
+    switch (syn->kind) {
+        case ISH_SYN_NIL:
+            return ish_core_literal(ish_nil(), syn->span);
+        case ISH_SYN_INT:
+            return ish_core_literal(ish_int(syn->as.integer), syn->span);
+        case ISH_SYN_FLOAT:
+            return ish_core_literal(ish_float(syn->as.real), syn->span);
+        case ISH_SYN_ATOM:
+            if (strcmp(syn->as.text, "nil") == 0) return ish_core_literal(ish_nil(), syn->span);
+            return ish_core_literal(ish_atom(ctx->rt, syn->as.text), syn->span);
+        case ISH_SYN_STRING: {
+            IshValue value = ish_string(ctx->rt, syn->as.text, err);
+            if (err && err->present) return NULL;
+            return ish_core_literal(value, syn->span);
+        }
+        default:
+            return NULL;
+    }
+}
+
+bool value_from_literal_syntax(ExpandContext *ctx, const IshSyntax *syn, IshValue *out, IshError *err) {
+    switch (syn->kind) {
+        case ISH_SYN_NIL:
+            *out = ish_nil();
+            return true;
+        case ISH_SYN_INT:
+            *out = ish_int(syn->as.integer);
+            return true;
+        case ISH_SYN_FLOAT:
+            *out = ish_float(syn->as.real);
+            return true;
+        case ISH_SYN_ATOM:
+            if (strcmp(syn->as.text, "nil") == 0) {
+                *out = ish_nil();
+                return true;
+            }
+            *out = ish_atom(ctx->rt, syn->as.text);
+            return true;
+        case ISH_SYN_STRING:
+            *out = ish_string(ctx->rt, syn->as.text, err);
+            return !(err && err->present);
+        case ISH_SYN_LIST: {
+            IshValue list = ish_nil();
+            for (size_t i = syn->as.seq.count; i > 0; i--) {
+                IshValue item = ish_nil();
+                if (!value_from_literal_syntax(ctx, syn->as.seq.items[i - 1u], &item, err)) return false;
+                list = ish_cons(ctx->rt, item, list, err);
+                if (err && err->present) return false;
+            }
+            *out = list;
+            return true;
+        }
+        case ISH_SYN_VECTOR:
+        case ISH_SYN_TUPLE: {
+            IshValue *items = NULL;
+            if (syn->as.seq.count != 0) {
+                items = calloc(syn->as.seq.count, sizeof(*items));
+                if (!items) {
+                    ish_error_oom(err, syn->span);
+                    return false;
+                }
+            }
+            for (size_t i = 0; i < syn->as.seq.count; i++) {
+                if (!value_from_literal_syntax(ctx, syn->as.seq.items[i], &items[i], err)) {
+                    free(items);
+                    return false;
+                }
+            }
+            *out = syn->kind == ISH_SYN_VECTOR ? ish_vector(ctx->rt, items, syn->as.seq.count, err) : ish_tuple(ctx->rt, items, syn->as.seq.count, err);
+            free(items);
+            return !(err && err->present);
+        }
+        case ISH_SYN_DICT: {
+            if (syn->as.seq.count % 2u != 0) {
+                ish_error_set(err, syn->span, "dict literal requires key/value pairs");
+                return false;
+            }
+            size_t count = syn->as.seq.count / 2u;
+            IshDictEntry *entries = count == 0 ? NULL : calloc(count, sizeof(*entries));
+            if (count != 0 && !entries) {
+                ish_error_oom(err, syn->span);
+                return false;
+            }
+            for (size_t i = 0; i < count; i++) {
+                if (!value_from_literal_syntax(ctx, syn->as.seq.items[i * 2u], &entries[i].key, err) ||
+                    !value_from_literal_syntax(ctx, syn->as.seq.items[i * 2u + 1u], &entries[i].value, err)) {
+                    free(entries);
+                    return false;
+                }
+            }
+            *out = ish_dict(ctx->rt, entries, count, err);
+            free(entries);
+            return !(err && err->present);
+        }
+        default:
+            return false;
+    }
+}
+
+static IshPattern *pattern_from_param_depth(ExpandContext *ctx, const IshSyntax *syn, uint32_t arg_index, bool allow_bind, IshError *err) {
+    if (syn->kind == ISH_SYN_WORD) {
+        if (strcmp(syn->as.text, "_") == 0) return ish_pat_wildcard(syn->span);
+        if (!allow_bind) {
+            const IshBinding *existing = resolve_default(ctx, syn, NULL);
+            bool have = existing && existing->kind == ISH_BIND_LOCAL && existing->frame_id == ctx->frame;
+            if (!have && !local_push_scoped(ctx, syn->as.text, syn, NULL)) {
+                ish_error_oom(err, syn->span);
+                return NULL;
+            }
+            return ish_pat_bind(syn->as.text, syn->span);
+        }
+        const IshBinding *existing = resolve_default(ctx, syn, NULL);
+        bool have = existing && existing->kind == ISH_BIND_ARG && existing->frame_id == ctx->frame;
+        if (!have && !arg_push_slot(ctx, syn, arg_index)) {
+            ish_error_oom(err, syn->span);
+            return NULL;
+        }
+        return ish_pat_bind(syn->as.text, syn->span);
+    }
+    IshValue literal = ish_nil();
+    if (syn->kind != ISH_SYN_DICT && value_from_literal_syntax(ctx, syn, &literal, err)) return ish_pat_literal(literal, syn->span);
+    if (syn->kind == ISH_SYN_LIST || syn->kind == ISH_SYN_VECTOR || syn->kind == ISH_SYN_TUPLE) {
+        if (syn->kind == ISH_SYN_LIST) {
+            size_t dot_index = SIZE_MAX;
+            for (size_t i = 0; i < syn->as.seq.count; i++) {
+                if (syn->as.seq.items[i]->kind == ISH_SYN_WORD && strcmp(syn->as.seq.items[i]->as.text, ".") == 0) {
+                    if (dot_index != SIZE_MAX) {
+                        ish_error_set(err, syn->as.seq.items[i]->span, "list rest pattern may contain only one dot");
+                        return NULL;
+                    }
+                    dot_index = i;
+                }
+            }
+            if (dot_index != SIZE_MAX) {
+                if (dot_index == 0 || dot_index + 2u != syn->as.seq.count) {
+                    ish_error_set(err, syn->span, "list rest pattern must have form [head ... . rest]");
+                    return NULL;
+                }
+                IshPattern *tail = pattern_from_param_depth(ctx, syn->as.seq.items[dot_index + 1u], (uint32_t)(dot_index + 1u), false, err);
+                if (!tail) return NULL;
+                for (size_t i = dot_index; i > 0; i--) {
+                    IshPattern *head = pattern_from_param_depth(ctx, syn->as.seq.items[i - 1u], (uint32_t)(i - 1u), false, err);
+                    if (!head) {
+                        ish_pat_free(tail);
+                        return NULL;
+                    }
+                    tail = ish_pat_pair(head, tail, syn->span);
+                    if (!tail) {
+                        ish_pat_free(head);
+                        return (IshPattern *)(uintptr_t)ish_error_oom(err, syn->span);
+                    }
+                }
+                return tail;
+            }
+        } else {
+            size_t dot_index = SIZE_MAX;
+            for (size_t i = 0; i < syn->as.seq.count; i++) {
+                if (syn->as.seq.items[i]->kind == ISH_SYN_WORD && strcmp(syn->as.seq.items[i]->as.text, ".") == 0) {
+                    if (dot_index != SIZE_MAX) {
+                        ish_error_set(err, syn->as.seq.items[i]->span, "sequence rest pattern may contain only one dot");
+                        return NULL;
+                    }
+                    dot_index = i;
+                }
+            }
+            if (dot_index != SIZE_MAX) {
+                if (dot_index == 0 || dot_index + 2u != syn->as.seq.count) {
+                    ish_error_set(err, syn->span, "sequence rest pattern must have form %[head ... . rest] or {head ... . rest}");
+                    return NULL;
+                }
+                IshPattern **items = calloc(dot_index, sizeof(*items));
+                if (!items) {
+                    ish_error_oom(err, syn->span);
+                    return NULL;
+                }
+                for (size_t i = 0; i < dot_index; i++) {
+                    items[i] = pattern_from_param_depth(ctx, syn->as.seq.items[i], (uint32_t)i, false, err);
+                    if (!items[i]) {
+                        for (size_t j = 0; j < i; j++) ish_pat_free(items[j]);
+                        free(items);
+                        return NULL;
+                    }
+                }
+                IshPattern *rest = pattern_from_param_depth(ctx, syn->as.seq.items[dot_index + 1u], (uint32_t)(dot_index + 1u), false, err);
+                if (!rest) {
+                    for (size_t i = 0; i < dot_index; i++) ish_pat_free(items[i]);
+                    free(items);
+                    return NULL;
+                }
+                IshPatternKind kind = syn->kind == ISH_SYN_VECTOR ? ISH_PAT_VECTOR_REST : ISH_PAT_TUPLE_REST;
+                IshPattern *pat = ish_pat_sequence_rest(kind, items, dot_index, rest, syn->span);
+                if (!pat) {
+                    for (size_t i = 0; i < dot_index; i++) ish_pat_free(items[i]);
+                    free(items);
+                    ish_pat_free(rest);
+                    ish_error_oom(err, syn->span);
+                    return NULL;
+                }
+                return pat;
+            }
+        }
+        IshPattern **items = NULL;
+        if (syn->as.seq.count != 0) {
+            items = calloc(syn->as.seq.count, sizeof(*items));
+            if (!items) {
+                ish_error_oom(err, syn->span);
+                return NULL;
+            }
+        }
+        for (size_t i = 0; i < syn->as.seq.count; i++) {
+            items[i] = pattern_from_param_depth(ctx, syn->as.seq.items[i], (uint32_t)i, false, err);
+            if (!items[i]) {
+                for (size_t j = 0; j < i; j++) ish_pat_free(items[j]);
+                free(items);
+                return NULL;
+            }
+        }
+        IshPatternKind kind = syn->kind == ISH_SYN_LIST ? ISH_PAT_LIST : (syn->kind == ISH_SYN_VECTOR ? ISH_PAT_VECTOR : ISH_PAT_TUPLE);
+        IshPattern *pat = ish_pat_sequence(kind, items, syn->as.seq.count, syn->span);
+        if (!pat) {
+            for (size_t i = 0; i < syn->as.seq.count; i++) ish_pat_free(items[i]);
+            free(items);
+            ish_error_oom(err, syn->span);
+            return NULL;
+        }
+        return pat;
+    }
+    if (syn->kind == ISH_SYN_DICT) {
+        if (syn->as.seq.count % 2u != 0) {
+            ish_error_set(err, syn->span, "dict pattern requires key/value pairs");
+            return NULL;
+        }
+        size_t count = syn->as.seq.count / 2u;
+        IshDictPatternEntry *entries = count == 0 ? NULL : calloc(count, sizeof(*entries));
+        if (count != 0 && !entries) {
+            ish_error_oom(err, syn->span);
+            return NULL;
+        }
+        for (size_t i = 0; i < count; i++) {
+            if (!value_from_literal_syntax(ctx, syn->as.seq.items[i * 2u], &entries[i].key, err)) {
+                for (size_t j = 0; j < i; j++) ish_pat_free(entries[j].pattern);
+                free(entries);
+                if (!err->present) ish_error_set(err, syn->as.seq.items[i * 2u]->span, "dict pattern key must be literal until expression-key pattern expansion is implemented");
+                return NULL;
+            }
+            entries[i].pattern = pattern_from_param_depth(ctx, syn->as.seq.items[i * 2u + 1u], (uint32_t)i, false, err);
+            if (!entries[i].pattern) {
+                for (size_t j = 0; j < i; j++) ish_pat_free(entries[j].pattern);
+                free(entries);
+                return NULL;
+            }
+        }
+        IshPattern *pat = ish_pat_dict(entries, count, syn->span);
+        if (!pat) {
+            for (size_t i = 0; i < count; i++) ish_pat_free(entries[i].pattern);
+            free(entries);
+            ish_error_oom(err, syn->span);
+            return NULL;
+        }
+        return pat;
+    }
+    ish_error_set(err, syn->span, "unsupported defn parameter pattern");
+    return NULL;
+}
+
+static IshPattern *pattern_from_param(ExpandContext *ctx, const IshSyntax *syn, uint32_t arg_index, IshError *err) {
+    return pattern_from_param_depth(ctx, syn, arg_index, true, err);
+}
+
+static bool copy_pattern_locals(ExpandContext *ctx, size_t table_base, IshPatternLocal **out_locals, uint32_t *out_count) {
+    const IshBindingTable *table = &ctx->bindings;
+    size_t total = 0;
+    for (size_t i = table_base; i < table->count; i++) {
+        if (table->items[i].kind == ISH_BIND_LOCAL && table->items[i].frame_id == ctx->frame) total++;
+    }
+    if (total == 0) {
+        *out_locals = NULL;
+        *out_count = 0;
+        return true;
+    }
+    IshPatternLocal *locals = calloc(total, sizeof(*locals));
+    if (!locals) return false;
+    size_t n = 0;
+    for (size_t i = table_base; i < table->count; i++) {
+        if (table->items[i].kind != ISH_BIND_LOCAL || table->items[i].frame_id != ctx->frame) continue;
+        locals[n].name = ish_strdup(table->items[i].name);
+        if (!locals[n].name) {
+            for (size_t j = 0; j < n; j++) free(locals[j].name);
+            free(locals);
+            return false;
+        }
+        locals[n].slot = table->items[i].payload;
+        n++;
+    }
+    *out_locals = locals;
+    *out_count = (uint32_t)total;
+    return true;
+}
+
+static bool bind_form_parts(const IshSyntax *form, const IshSyntax **out_name, size_t *out_rhs_start) {
+    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (form->as.seq.count < 4) return false;
+    if (form->as.seq.items[1]->kind != ISH_SYN_WORD) return false;
+    if (!syn_is_word(form->as.seq.items[2], "=")) return false;
+    if (form->as.seq.count > 4 && form->as.seq.items[2]->token_adjacent_previous && form->as.seq.items[3]->token_adjacent_previous) return false;
+    *out_name = form->as.seq.items[1];
+    *out_rhs_start = 3;
+    return true;
+}
+
+static bool definition_like_form(const IshSyntax *form, const char **out_head) {
+    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (form->as.seq.count < 2 || form->as.seq.items[1]->kind != ISH_SYN_WORD) return false;
+    size_t base = 1;
+    if (syn_is_word(form->as.seq.items[1], "export") && form->as.seq.count >= 3 && (syn_is_word(form->as.seq.items[2], "defn") || syn_is_word(form->as.seq.items[2], "defmacro"))) base = 2;
+    const char *head = form->as.seq.items[base]->as.text;
+    if (strcmp(head, "def") != 0 && strcmp(head, "defn") != 0 && strcmp(head, "defmacro") != 0) return false;
+    *out_head = head;
+    return true;
+}
+
+static bool for_syntax_form(const IshSyntax *form, const IshSyntax **out_body) {
+    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (form->as.seq.count != 3) return false;
+    if (!syn_is_word(form->as.seq.items[1], "for-syntax")) return false;
+    if (!syn_is_protocol(form->as.seq.items[2], "%-body")) return false;
+    *out_body = form->as.seq.items[2];
+    return true;
+}
+
+static bool defn_form_parts(const IshSyntax *form, const IshSyntax **out_name, size_t *out_param_start, bool *out_export) {
+    if (!syn_is_protocol(form, "%-expr")) return false;
+    size_t base = 1;
+    bool exported = false;
+    if (form->as.seq.count > 1 && syn_is_word(form->as.seq.items[1], "export")) { exported = true; base = 2; }
+    if (form->as.seq.count < base + 3u) return false;
+    if (!syn_is_word(form->as.seq.items[base], "defn")) return false;
+    if (form->as.seq.items[base + 1u]->kind != ISH_SYN_WORD) return false;
+    *out_name = form->as.seq.items[base + 1u];
+    *out_param_start = base + 2u;
+    if (out_export) *out_export = exported;
+    return true;
+}
+
+static void defn_groups_destroy(DefnGroup *groups, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        free(groups[i].indices);
+        ish_scope_set_destroy(&groups[i].scopes);
+    }
+    free(groups);
+}
+
+static DefnGroup *find_or_add_group(DefnGroup **groups, size_t *count, size_t *cap, const IshSyntax *name_syntax) {
+    for (size_t i = 0; i < *count; i++) {
+        if (strcmp((*groups)[i].name, name_syntax->as.text) == 0) {
+            IshScopeSet temp;
+            if (!syntax_scopes_copy(&temp, name_syntax)) return NULL;
+            bool same = ish_scope_set_equal(&(*groups)[i].scopes, &temp);
+            ish_scope_set_destroy(&temp);
+            if (same) return &(*groups)[i];
+        }
+    }
+    if (*count == *cap) {
+        size_t next_cap = *cap ? *cap * 2u : 4u;
+        DefnGroup *next = realloc(*groups, next_cap * sizeof(*next));
+        if (!next) return NULL;
+        *groups = next;
+        *cap = next_cap;
+    }
+    DefnGroup *group = &(*groups)[(*count)++];
+    group->name = name_syntax->as.text;
+    group->name_syntax = name_syntax;
+    if (!syntax_scopes_copy(&group->scopes, name_syntax)) return NULL;
+    group->slot = UINT32_MAX;
+    group->indices = NULL;
+    group->count = 0;
+    group->cap = 0;
+    group->exported = false;
+    return group;
+}
+
+static bool group_add_index(DefnGroup *group, size_t index) {
+    if (group->count == group->cap) {
+        size_t cap = group->cap ? group->cap * 2u : 4u;
+        size_t *indices = realloc(group->indices, cap * sizeof(*indices));
+        if (!indices) return false;
+        group->indices = indices;
+        group->cap = cap;
+    }
+    group->indices[group->count++] = index;
+    return true;
+}
+
+bool record_export(ExpandContext *ctx, const char *name, uint32_t global_id) {
+    if (ctx->export_count == ctx->export_cap) {
+        size_t cap = ctx->export_cap ? ctx->export_cap * 2u : 8u;
+        void *next = realloc(ctx->exports, cap * sizeof(*ctx->exports));
+        if (!next) return false;
+        ctx->exports = next;
+        ctx->export_cap = cap;
+    }
+    char *copy = ish_strdup(name);
+    if (!copy) return false;
+    ctx->exports[ctx->export_count].name = copy;
+    ctx->exports[ctx->export_count].global_id = global_id;
+    ctx->export_count++;
+    return true;
+}
+
+bool record_package_global(ExpandContext *ctx, const char *name, uint32_t global_id, const IshScopeSet *scopes) {
+    if (!ctx->in_package) return true;
+    if (ctx->package_global_count == ctx->package_global_cap) {
+        size_t cap = ctx->package_global_cap ? ctx->package_global_cap * 2u : 8u;
+        IshPkgGlobal *next = realloc(ctx->package_globals, cap * sizeof(*next));
+        if (!next) return false;
+        ctx->package_globals = next;
+        ctx->package_global_cap = cap;
+    }
+    IshPkgGlobal *global = &ctx->package_globals[ctx->package_global_count];
+    global->name = ish_strdup(name);
+    if (!global->name) return false;
+    global->slot = global_id;
+    if (!ish_scope_set_copy(&global->scopes, scopes)) {
+        free(global->name);
+        global->name = NULL;
+        return false;
+    }
+    ctx->package_global_count++;
+    return true;
+}
+
+static void body_recs_destroy(BodyRec *recs, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (recs[i].kind == BODY_REC_GROUPS) defn_groups_destroy(recs[i].groups, recs[i].group_count);
+        ish_core_free(recs[i].core);
+    }
+    free(recs);
+}
+
+static bool body_work_splice(IshSyntax ***work, size_t *work_count, size_t *work_cap, size_t at, const IshSyntax *body, IshError *err) {
+    size_t add = body->as.seq.count - 1u;
+    size_t needed = *work_count - 1u + add;
+    if (needed > *work_cap) {
+        size_t cap = *work_cap ? *work_cap : 8u;
+        while (cap < needed) cap *= 2u;
+        IshSyntax **grown = realloc(*work, cap * sizeof(*grown));
+        if (!grown) return ish_error_oom(err, body->span);
+        *work = grown;
+        *work_cap = cap;
+    }
+    memmove(*work + at + add, *work + at + 1u, (*work_count - at - 1u) * sizeof(**work));
+    for (size_t k = 0; k < add; k++) (*work)[at + k] = body->as.seq.items[1u + k];
+    *work_count = needed;
+    return true;
+}
+
+IshCore *expand_body_items(ExpandContext *ctx, IshSyntax *const *items, size_t index, size_t count, IshError *err) {
+    if (index >= count) return ish_core_literal(ish_nil(), ish_span_unknown(NULL));
+    size_t work_count = count - index;
+    size_t work_cap = work_count;
+    IshSyntax **work = malloc(work_cap * sizeof(*work));
+    if (!work) return (IshCore *)(uintptr_t)ish_error_oom(err, items[index]->span);
+    for (size_t i = 0; i < work_count; i++) work[i] = items[index + i];
+    IshSyntax **owned = NULL;
+    size_t owned_count = 0;
+    size_t owned_cap = 0;
+    BodyRec *recs = NULL;
+    size_t rec_count = 0;
+    size_t rec_cap = 0;
+    BodyDefCtx def_ctx;
+    ish_scope_set_init(&def_ctx.use_site);
+    def_ctx.prev = ctx->def_ctx;
+    ctx->def_ctx = &def_ctx;
+    bool failed = false;
+    bool boundary = false;
+    size_t boundary_index = 0;
+    size_t i = 0;
+
+    while (i < work_count && !failed && !boundary) {
+        const IshSyntax *form = work[i];
+        if (syn_is_protocol(form, "%-expr") && form->as.seq.count == 3 &&
+            syn_is_word(form->as.seq.items[1], "package") && form->as.seq.items[2]->kind == ISH_SYN_WORD) {
+            const char *declared = form->as.seq.items[2]->as.text;
+            if (ctx->package_name && strcmp(ctx->package_name, declared) != 0) {
+                expand_error(err, form->span, "conflicting package declarations '%s' and '%s' in one package", ctx->package_name, declared);
+                failed = true;
+                break;
+            }
+            const char *interned = ish_symbol_text(ish_intern(&ctx->rt->intern, ISH_SYMBOL_WORD, declared));
+            if (!interned) { ish_error_oom(err, form->span); failed = true; break; }
+            ctx->package_name = interned;
+            i++;
+            continue;
+        }
+        if (syn_is_protocol(form, "%-expr") && form->as.seq.count == 4 &&
+            syn_is_word(form->as.seq.items[1], "resolver") && form->as.seq.items[2]->kind == ISH_SYN_WORD &&
+            syn_is_protocol(form->as.seq.items[3], "%-body")) {
+            IshCore *fn = expand_function_literal(ctx, "%resolver", form->as.seq.items[1], form->as.seq.items, 2u, form->as.seq.count, err);
+            if (!fn) { failed = true; break; }
+            bool ok = register_resolver(ctx, fn, form->span, err);
+            ish_core_free(fn);
+            if (!ok) { failed = true; break; }
+            i++;
+            continue;
+        }
+        const IshSyntax *for_syntax_body = NULL;
+        if (for_syntax_form(form, &for_syntax_body)) {
+            IshCore *ignored = expand_body_items(ctx, for_syntax_body->as.seq.items, 1, for_syntax_body->as.seq.count, err);
+            if (!ignored) { failed = true; break; }
+            bool ran = run_phase_core(ctx, ignored, err);
+            ish_core_free(ignored);
+            if (!ran) {
+                if (err && err->present) ish_error_note(err, "during for-syntax evaluation (%s:%u:%u)", form->span.file ? form->span.file : "<unknown>", form->span.line, form->span.column);
+                failed = true;
+                break;
+            }
+            i++;
+            continue;
+        }
+        const char *definition_head = NULL;
+        if (definition_like_form(form, &definition_head)) {
+            if (strcmp(definition_head, "def") == 0) {
+                expand_error(err, form->as.seq.items[1]->span, "source 'def' is not a function declaration; use 'defn'");
+                failed = true;
+                break;
+            }
+            if (strcmp(definition_head, "defmacro") == 0) {
+                size_t mbase = (form->as.seq.count > 1 && syn_is_word(form->as.seq.items[1], "export")) ? 2u : 1u;
+                if (form->as.seq.count < mbase + 3u || form->as.seq.items[mbase + 1u]->kind != ISH_SYN_WORD) {
+                    expand_error(err, form->span, "defmacro expects a name, one syntax parameter, and a body");
+                    failed = true;
+                    break;
+                }
+                const char *macro_name = form->as.seq.items[mbase + 1u]->as.text;
+                IshCore *fn = expand_function_literal(ctx, macro_name, form->as.seq.items[mbase], form->as.seq.items, mbase + 2u, form->as.seq.count, err);
+                if (!fn) { failed = true; break; }
+                bool ok = register_macro(ctx, form->as.seq.items[mbase + 1u], fn, form->span, mbase == 2u, err);
+                ish_core_free(fn);
+                if (!ok) { failed = true; break; }
+                i++;
+                continue;
+            }
+            size_t j = i;
+            DefnGroup *groups = NULL;
+            size_t group_count = 0;
+            size_t group_cap = 0;
+            while (j < work_count) {
+                const IshSyntax *def_name = NULL;
+                size_t ignored_start = 0;
+                bool form_export = false;
+                if (!defn_form_parts(work[j], &def_name, &ignored_start, &form_export)) break;
+                DefnGroup *group = find_or_add_group(&groups, &group_count, &group_cap, def_name);
+                if (!group || !group_add_index(group, j)) {
+                    defn_groups_destroy(groups, group_count);
+                    ish_error_oom(err, work[j]->span);
+                    failed = true;
+                    break;
+                }
+                if (form_export) group->exported = true;
+                j++;
+            }
+            if (failed) break;
+            bool top_level = ctx->frame == ISH_FRAME_TOP;
+            for (size_t k = 0; k < group_count && !failed; k++) {
+                bool ok = top_level ? global_push_def_binder(ctx, groups[k].name, groups[k].name_syntax, &groups[k].slot)
+                                    : local_push_def_binder(ctx, groups[k].name, groups[k].name_syntax, &groups[k].slot);
+                if (!ok) { ish_error_oom(err, form->span); failed = true; break; }
+                if (top_level && ctx->in_package && !record_package_global(ctx, groups[k].name, groups[k].slot, &groups[k].scopes)) {
+                    ish_error_oom(err, form->span);
+                    failed = true;
+                    break;
+                }
+                if (top_level && ctx->in_package && groups[k].exported && !record_export(ctx, groups[k].name, groups[k].slot)) {
+                    ish_error_oom(err, form->span);
+                    failed = true;
+                    break;
+                }
+            }
+            if (failed) { defn_groups_destroy(groups, group_count); break; }
+            if (rec_count == rec_cap) {
+                size_t cap = rec_cap ? rec_cap * 2u : 8u;
+                BodyRec *grown = realloc(recs, cap * sizeof(*grown));
+                if (!grown) { defn_groups_destroy(groups, group_count); ish_error_oom(err, form->span); failed = true; break; }
+                recs = grown;
+                rec_cap = cap;
+            }
+            memset(&recs[rec_count], 0, sizeof(recs[rec_count]));
+            recs[rec_count].kind = BODY_REC_GROUPS;
+            recs[rec_count].form = form;
+            recs[rec_count].groups = groups;
+            recs[rec_count].group_count = group_count;
+            rec_count++;
+            i = j;
+            continue;
+        }
+        if (syn_is_protocol(form, "%-expr") && form->as.seq.count >= 2 && form->as.seq.items[1]->kind == ISH_SYN_WORD &&
+            !bind_form_parts(form, &(const IshSyntax *){NULL}, &(size_t){0})) {
+            bool is_boundary_word =
+                syn_is_word(form->as.seq.items[1], "implements") || syn_is_word(form->as.seq.items[1], "extend") ||
+                syn_is_word(form->as.seq.items[1], "record") || syn_is_word(form->as.seq.items[1], "use") ||
+                syn_is_word(form->as.seq.items[1], "import") || syn_is_word(form->as.seq.items[1], "method") ||
+                syn_is_word(form->as.seq.items[1], "protocol") ||
+                (syn_is_word(form->as.seq.items[1], "export") && form->as.seq.count >= 3 && syn_is_word(form->as.seq.items[2], "record"));
+            if (!is_boundary_word) {
+                uint32_t payload = 0;
+                if (resolve_transformer(ctx, form->as.seq.items[1], &payload, err)) {
+                    IshSyntax *use = ish_syn_clone(form);
+                    bool ok = use != NULL;
+                    ok = ok && ish_syn_property_set(use, "value-context", ctx->value_context ? "true" : "false");
+                    ok = ok && ish_syn_property_set(use, "command-sub", ctx->command_sub_context ? "true" : "false");
+                    IshScopeId use_site = ish_scope_fresh(&ctx->scope_store);
+                    ok = ok && ish_syn_scope_add_tree(use, 0, use_site);
+                    ok = ok && ish_scope_set_add(&def_ctx.use_site, use_site);
+                    IshSyntax *expanded = NULL;
+                    if (ok) ok = invoke_macro_to_syntax(ctx, use, form->as.seq.items[1], payload, &expanded, err);
+                    ish_syn_free(use);
+                    if (!ok) { failed = true; break; }
+                    if (owned_count == owned_cap) {
+                        size_t cap = owned_cap ? owned_cap * 2u : 8u;
+                        IshSyntax **grown = realloc(owned, cap * sizeof(*grown));
+                        if (!grown) { ish_syn_free(expanded); ish_error_oom(err, form->span); failed = true; break; }
+                        owned = grown;
+                        owned_cap = cap;
+                    }
+                    owned[owned_count++] = expanded;
+                    const IshSyntax *splice_body = NULL;
+                    if (syn_is_protocol(expanded, "%-body")) {
+                        splice_body = expanded;
+                    } else if (syn_is_protocol(expanded, "%-group") && expanded->as.seq.count == 2 &&
+                               syn_is_protocol(expanded->as.seq.items[1], "%-expr") && expanded->as.seq.items[1]->as.seq.count == 2 &&
+                               syn_is_protocol(expanded->as.seq.items[1]->as.seq.items[1], "%-body")) {
+                        splice_body = expanded->as.seq.items[1]->as.seq.items[1];
+                    }
+                    if (splice_body) {
+                        if (!body_work_splice(&work, &work_count, &work_cap, i, splice_body, err)) { failed = true; break; }
+                    } else {
+                        work[i] = expanded;
+                    }
+                    continue;
+                }
+                if (err && err->present) { failed = true; break; }
+            } else {
+                boundary = true;
+                boundary_index = i;
+                break;
+            }
+        }
+        if (rec_count == rec_cap) {
+            size_t cap = rec_cap ? rec_cap * 2u : 8u;
+            BodyRec *grown = realloc(recs, cap * sizeof(*grown));
+            if (!grown) { ish_error_oom(err, form->span); failed = true; break; }
+            recs = grown;
+            rec_cap = cap;
+        }
+        memset(&recs[rec_count], 0, sizeof(recs[rec_count]));
+        const IshSyntax *bind_name = NULL;
+        size_t rhs_start = 0;
+        if (bind_form_parts(form, &bind_name, &rhs_start)) {
+            recs[rec_count].kind = BODY_REC_BIND;
+            recs[rec_count].bind_name = bind_name;
+            recs[rec_count].rhs_start = rhs_start;
+        } else {
+            recs[rec_count].kind = BODY_REC_EXPR;
+        }
+        recs[rec_count].form = form;
+        rec_count++;
+        i++;
+    }
+
+    for (size_t r = 0; r < rec_count && !failed; r++) {
+        BodyRec *rec = &recs[r];
+        if (rec->kind == BODY_REC_BIND) {
+            bool saved_vc = ctx->value_context;
+            ctx->value_context = true;
+            rec->core = expand_parts(ctx, rec->form->as.seq.items, rec->rhs_start, rec->form->as.seq.count, err);
+            ctx->value_context = saved_vc;
+            if (!rec->core) { failed = true; break; }
+            if (!local_push_def_binder(ctx, rec->bind_name->as.text, rec->bind_name, &rec->bind_slot)) {
+                ish_error_oom(err, rec->form->span);
+                failed = true;
+                break;
+            }
+        } else if (rec->kind == BODY_REC_GROUPS) {
+            bool top_level = ctx->frame == ISH_FRAME_TOP;
+            IshCore *letrec = ish_core_letrec(rec->form->span);
+            if (!letrec) { ish_error_oom(err, rec->form->span); failed = true; break; }
+            if (top_level) ish_core_letrec_set_global(letrec);
+            for (size_t k = 0; k < rec->group_count; k++) {
+                IshCore *value = expand_defn_group(ctx, &rec->groups[k], work, err);
+                if (!value || !ish_core_letrec_add(letrec, rec->groups[k].name, rec->groups[k].slot, value)) {
+                    if (value) ish_core_free(value);
+                    ish_core_free(letrec);
+                    letrec = NULL;
+                    if (err && !err->present) ish_error_oom(err, rec->form->span);
+                    failed = true;
+                    break;
+                }
+            }
+            rec->core = letrec;
+        } else {
+            rec->core = syn_is_protocol(rec->form, "%-expr")
+                ? expand_parts(ctx, rec->form->as.seq.items, 1, rec->form->as.seq.count, err)
+                : expand_syntax(ctx, rec->form, err);
+            if (!rec->core) { failed = true; break; }
+        }
+    }
+
+    IshCore *core = NULL;
+    if (!failed) {
+        if (boundary) {
+            const IshSyntax *bform = work[boundary_index];
+            if (syn_is_word(bform->as.seq.items[1], "protocol") && bform->as.seq.count == 4 &&
+                bform->as.seq.items[2]->kind == ISH_SYN_WORD && syn_is_protocol(bform->as.seq.items[3], "%-body")) {
+                core = expand_protocol_decl(ctx, bform, work, boundary_index, work_count, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "implements") && bform->as.seq.count == 3 && bform->as.seq.items[2]->kind == ISH_SYN_WORD) {
+                core = expand_implements(ctx, bform->as.seq.items[2], work, boundary_index, work_count, bform->span, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "extend")) {
+                core = expand_extend_decl(ctx, bform, work, boundary_index, work_count, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "record") ||
+                       (syn_is_word(bform->as.seq.items[1], "export") && bform->as.seq.count >= 3 && syn_is_word(bform->as.seq.items[2], "record"))) {
+                core = expand_record_decl(ctx, bform, work, boundary_index, work_count, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "method")) {
+                core = expand_method_decl(ctx, bform, work, boundary_index, work_count, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "use") && bform->as.seq.count >= 3 && package_path_text(bform->as.seq.items[2]) != NULL) {
+                core = expand_use(ctx, package_path_text(bform->as.seq.items[2]), NULL, work, boundary_index + 1u, work_count, bform->span, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "import") && bform->as.seq.count >= 3 && package_path_text(bform->as.seq.items[2]) != NULL) {
+                const char *path = package_path_text(bform->as.seq.items[2]);
+                const char *alias = NULL;
+                if (bform->as.seq.count == 3) {
+                    const char *slash = strrchr(path, '/');
+                    alias = slash ? slash + 1u : path;
+                } else if (bform->as.seq.count == 5 && syn_is_word(bform->as.seq.items[3], "as") && bform->as.seq.items[4]->kind == ISH_SYN_WORD) {
+                    alias = bform->as.seq.items[4]->as.text;
+                } else {
+                    core = expand_error(err, bform->span, "import expects 'import path' or 'import path as alias'");
+                    failed = true;
+                }
+                if (!failed) core = expand_use(ctx, path, alias, work, boundary_index + 1u, work_count, bform->span, err);
+            } else {
+                BodyRec tail;
+                memset(&tail, 0, sizeof(tail));
+                tail.kind = BODY_REC_EXPR;
+                tail.form = bform;
+                core = syn_is_protocol(bform, "%-expr")
+                    ? expand_parts(ctx, bform->as.seq.items, 1, bform->as.seq.count, err)
+                    : expand_syntax(ctx, bform, err);
+                if (core && boundary_index + 1u < work_count) {
+                    IshCore *rest = expand_body_items(ctx, work, boundary_index + 1u, work_count, err);
+                    if (!rest) { ish_core_free(core); core = NULL; }
+                    else {
+                        IshCore *do_expr = ish_core_do(bform->span);
+                        if (!do_expr || !ish_core_do_add(do_expr, core) || !ish_core_do_add(do_expr, rest)) {
+                            ish_core_free(core);
+                            ish_core_free(rest);
+                            ish_core_free(do_expr);
+                            ish_error_oom(err, bform->span);
+                            core = NULL;
+                        } else {
+                            core = do_expr;
+                        }
+                    }
+                }
+            }
+            if (!core) failed = true;
+        } else if (rec_count != 0 && recs[rec_count - 1u].kind == BODY_REC_EXPR) {
+            core = recs[rec_count - 1u].core;
+            recs[rec_count - 1u].core = NULL;
+            rec_count--;
+        } else {
+            core = ish_core_literal(ish_nil(), ish_span_unknown(NULL));
+            if (!core) { ish_error_oom(err, ish_span_unknown(NULL)); failed = true; }
+        }
+    }
+
+    if (!failed) {
+        for (size_t r = rec_count; r > 0 && !failed; r--) {
+            BodyRec *rec = &recs[r - 1u];
+            IshCore *inner = rec->core;
+            rec->core = NULL;
+            if (rec->kind == BODY_REC_BIND) {
+                core = ish_core_bind_local(rec->bind_slot, inner, core, rec->form->span);
+                if (!core) { ish_core_free(inner); ish_error_oom(err, rec->form->span); failed = true; }
+            } else if (rec->kind == BODY_REC_GROUPS) {
+                if (!ish_core_letrec_set_body(inner, core)) {
+                    ish_core_free(inner);
+                    ish_core_free(core);
+                    core = NULL;
+                    ish_error_oom(err, rec->form->span);
+                    failed = true;
+                } else {
+                    core = inner;
+                }
+            } else {
+                IshCore *do_expr = ish_core_do(rec->form->span);
+                if (!do_expr || !ish_core_do_add(do_expr, inner) || !ish_core_do_add(do_expr, core)) {
+                    ish_core_free(inner);
+                    ish_core_free(core);
+                    ish_core_free(do_expr);
+                    core = NULL;
+                    ish_error_oom(err, rec->form->span);
+                    failed = true;
+                } else {
+                    core = do_expr;
+                }
+            }
+        }
+    }
+
+    ctx->def_ctx = def_ctx.prev;
+    ish_scope_set_destroy(&def_ctx.use_site);
+    body_recs_destroy(recs, rec_count);
+    for (size_t o = 0; o < owned_count; o++) ish_syn_free(owned[o]);
+    free(owned);
+    free(work);
+    if (failed) {
+        ish_core_free(core);
+        return NULL;
+    }
+    return core;
+}
+
+IshCore *expand_fn_parts(ExpandContext *ctx, IshSyntax *const *items, size_t start, size_t end, IshError *err) {
+    if (start >= end || items[start]->kind != ISH_SYN_WORD || strcmp(items[start]->as.text, "fn") != 0) {
+        return expand_error(err, items[start]->span, "expected fn literal");
+    }
+    if (end - start == 2u && body_is_clauses(items[start + 1u])) {
+        return build_clause_fn_styled(ctx, items[start + 1u], items[start + 1u]->as.seq.count, "<lambda>", true, err);
+    }
+    return expand_function_literal(ctx, "<lambda>", items[start], items, start + 1u, end, err);
+}
+
+IshCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, const IshSyntax *head, IshSyntax *const *items, size_t param_start, size_t end, IshError *err) {
+    size_t cursor = param_start;
+    size_t arrow = SIZE_MAX;
+    size_t body_index = SIZE_MAX;
+    IshCore *guard = NULL;
+
+    SavedFunctionContext saved;
+    begin_function_context(ctx, &saved);
+    bool params_ok = true;
+    while (cursor < end) {
+        if (items[cursor]->kind == ISH_SYN_WORD && strcmp(items[cursor]->as.text, "->") == 0) {
+            arrow = cursor;
+            cursor++;
+            break;
+        }
+        if (syn_is_protocol(items[cursor], "%-body")) {
+            body_index = cursor;
+            break;
+        }
+        if (items[cursor]->kind == ISH_SYN_WORD && strcmp(items[cursor]->as.text, "when") == 0) {
+            if (guard) {
+                expand_error(err, items[cursor]->span, "fn clause may have only one guard");
+                params_ok = false;
+                break;
+            }
+            size_t guard_start = cursor + 1u;
+            cursor++;
+            while (cursor < end) {
+                if (items[cursor]->kind == ISH_SYN_WORD && strcmp(items[cursor]->as.text, "->") == 0) {
+                    arrow = cursor;
+                    break;
+                }
+                if (syn_is_protocol(items[cursor], "%-body")) {
+                    body_index = cursor;
+                    break;
+                }
+                cursor++;
+            }
+            if (guard_start == cursor) {
+                expand_error(err, items[guard_start - 1u]->span, "fn guard requires an expression before the body");
+                params_ok = false;
+                break;
+            }
+            guard = expand_parts(ctx, items, guard_start, cursor, err);
+            if (!guard) {
+                params_ok = false;
+                break;
+            }
+            if (arrow != SIZE_MAX) cursor++;
+            break;
+        }
+        if (items[cursor]->kind != ISH_SYN_WORD) {
+            expand_error(err, items[cursor]->span, "fn parameter must be an identifier");
+            params_ok = false;
+            break;
+        }
+        if (!arg_push(ctx, items[cursor], NULL)) {
+            expand_error(err, items[cursor]->span, "duplicate fn parameter or out of memory: %s", items[cursor]->as.text);
+            params_ok = false;
+            break;
+        }
+        cursor++;
+    }
+    if (!params_ok) {
+        ish_core_free(guard);
+        end_function_context(ctx, &saved);
+        return NULL;
+    }
+
+    IshCore *body = NULL;
+    if (arrow != SIZE_MAX) {
+        if (cursor >= end) {
+            expand_error(err, head->span, "fn arrow requires a body");
+        } else {
+            body = expand_parts(ctx, items, cursor, end, err);
+        }
+    } else if (body_index != SIZE_MAX) {
+        if (body_index + 1u != end) {
+            expand_error(err, items[body_index]->span, "fn do/end body must be the final fn component");
+        } else {
+            body = expand_syntax(ctx, items[body_index], err);
+        }
+    } else {
+        expand_error(err, head->span, "fn literal requires -> or do/end body");
+    }
+
+    uint32_t arity = (uint32_t)ctx->arg_slots;
+    if (!body) {
+        ish_core_free(guard);
+        end_function_context(ctx, &saved);
+        return NULL;
+    }
+    IshCore *fn = ish_core_fn(debug_name, arity, body, head->span);
+    if (!fn || (guard && !ish_core_fn_set_guard_take(fn, guard))) {
+        ish_core_free(body);
+        ish_core_free(guard);
+        end_function_context(ctx, &saved);
+        ish_error_oom(err, head->span);
+        return NULL;
+    }
+    for (size_t i = 0; i < ctx->capture_count; i++) {
+        if (!ish_core_fn_add_capture(fn, ctx->captures[i].kind, ctx->captures[i].source_index)) {
+            ish_core_free(fn);
+            end_function_context(ctx, &saved);
+            ish_error_oom(err, head->span);
+            return NULL;
+        }
+    }
+    end_function_context(ctx, &saved);
+    return fn;
+}
+
+static IshCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, const IshSyntax *head, IshSyntax *const *items, size_t param_start, size_t end, IshPattern ***out_patterns, uint32_t *out_pattern_count, IshPatternLocal **out_locals, uint32_t *out_local_count, IshCore **out_guard, uint32_t *out_arity, IshError *err) {
+    size_t cursor = param_start;
+    size_t arrow = SIZE_MAX;
+    size_t body_index = SIZE_MAX;
+    IshCore *guard = NULL;
+    SavedClauseContext saved;
+    begin_clause_context(ctx, &saved);
+
+    IshPattern **patterns = NULL;
+    size_t pattern_count = 0;
+    size_t pattern_cap = 0;
+    while (cursor < end) {
+        if (items[cursor]->kind == ISH_SYN_WORD && strcmp(items[cursor]->as.text, "->") == 0) {
+            arrow = cursor;
+            cursor++;
+            break;
+        }
+        if (syn_is_protocol(items[cursor], "%-body")) {
+            body_index = cursor;
+            break;
+        }
+        if (items[cursor]->kind == ISH_SYN_WORD && strcmp(items[cursor]->as.text, "when") == 0) {
+            if (guard) {
+                expand_error(err, items[cursor]->span, "defn clause may have only one guard");
+                for (size_t i = 0; i < pattern_count; i++) ish_pat_free(patterns[i]);
+                free(patterns);
+                end_clause_context(ctx, &saved);
+                return NULL;
+            }
+            size_t guard_start = cursor + 1u;
+            cursor++;
+            while (cursor < end) {
+                if (items[cursor]->kind == ISH_SYN_WORD && strcmp(items[cursor]->as.text, "->") == 0) {
+                    arrow = cursor;
+                    break;
+                }
+                if (syn_is_protocol(items[cursor], "%-body")) {
+                    body_index = cursor;
+                    break;
+                }
+                cursor++;
+            }
+            if (guard_start == cursor) {
+                expand_error(err, items[guard_start - 1u]->span, "defn guard requires an expression before the body");
+                for (size_t i = 0; i < pattern_count; i++) ish_pat_free(patterns[i]);
+                free(patterns);
+                end_clause_context(ctx, &saved);
+                return NULL;
+            }
+            guard = expand_parts(ctx, items, guard_start, cursor, err);
+            if (!guard) {
+                for (size_t i = 0; i < pattern_count; i++) ish_pat_free(patterns[i]);
+                free(patterns);
+                end_clause_context(ctx, &saved);
+                return NULL;
+            }
+            if (arrow != SIZE_MAX) cursor++;
+            break;
+        }
+        if (pattern_count == pattern_cap) {
+            size_t cap = pattern_cap ? pattern_cap * 2u : 4u;
+            IshPattern **next = realloc(patterns, cap * sizeof(*next));
+            if (!next) {
+                for (size_t i = 0; i < pattern_count; i++) ish_pat_free(patterns[i]);
+                free(patterns);
+                end_clause_context(ctx, &saved);
+                return (IshCore *)(uintptr_t)ish_error_oom(err, items[cursor]->span);
+            }
+            patterns = next;
+            pattern_cap = cap;
+        }
+        IshPattern *pat = pattern_from_param(ctx, items[cursor], (uint32_t)pattern_count, err);
+        if (!pat) {
+            for (size_t i = 0; i < pattern_count; i++) ish_pat_free(patterns[i]);
+            free(patterns);
+            end_clause_context(ctx, &saved);
+            return NULL;
+        }
+        patterns[pattern_count++] = pat;
+        cursor++;
+    }
+
+    IshCore *body = NULL;
+    if (arrow != SIZE_MAX) {
+        if (cursor >= end) expand_error(err, head->span, "defn arrow requires a body");
+        else body = expand_parts(ctx, items, cursor, end, err);
+    } else if (body_index != SIZE_MAX) {
+        if (body_index + 1u != end) expand_error(err, items[body_index]->span, "defn do/end body must be final");
+        else body = expand_syntax(ctx, items[body_index], err);
+    } else {
+        expand_error(err, head->span, "defn requires -> or do/end body");
+    }
+    if (!body) {
+        ish_core_free(guard);
+        end_clause_context(ctx, &saved);
+        for (size_t i = 0; i < pattern_count; i++) ish_pat_free(patterns[i]);
+        free(patterns);
+        return NULL;
+    }
+    if (!copy_pattern_locals(ctx, saved.table_base, out_locals, out_local_count)) {
+        ish_core_free(guard);
+        end_clause_context(ctx, &saved);
+        for (size_t i = 0; i < pattern_count; i++) ish_pat_free(patterns[i]);
+        free(patterns);
+        ish_core_free(body);
+        return (IshCore *)(uintptr_t)ish_error_oom(err, head->span);
+    }
+    end_clause_context(ctx, &saved);
+    *out_patterns = patterns;
+    *out_pattern_count = (uint32_t)pattern_count;
+    *out_guard = guard;
+    *out_arity = (uint32_t)pattern_count;
+    (void)debug_name;
+    return body;
+}
+
+static bool defn_form_clause_block(const IshSyntax *def_form, size_t param_start, const IshSyntax **out_body) {
+    if (param_start + 1u != def_form->as.seq.count) return false;
+    const IshSyntax *body = def_form->as.seq.items[param_start];
+    if (!body_is_clauses(body)) return false;
+    *out_body = body;
+    return true;
+}
+
+static IshCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, IshSyntax *const *items, IshError *err) {
+    size_t total_clauses = 0;
+    for (size_t i = 0; i < group->count; i++) {
+        const IshSyntax *def_form = items[group->indices[i]];
+        const IshSyntax *def_name = NULL;
+        size_t param_start = 0;
+        (void)defn_form_parts(def_form, &def_name, &param_start, NULL);
+        const IshSyntax *clause_body = NULL;
+        total_clauses += defn_form_clause_block(def_form, param_start, &clause_body) ? clause_body->as.seq.count - 1u : 1u;
+    }
+    bool single = total_clauses == 1;
+    SavedFunctionContext saved;
+    begin_function_context(ctx, &saved);
+    IshCore *result = single ? NULL : ish_core_fn_multi(group->name, items[group->indices[0]]->span);
+    if (!single && !result) {
+        end_function_context(ctx, &saved);
+        return (IshCore *)(uintptr_t)ish_error_oom(err, items[group->indices[0]]->span);
+    }
+    IshCore *single_body = NULL;
+    IshPattern **single_patterns = NULL;
+    uint32_t single_pattern_count = 0;
+    IshPatternLocal *single_pattern_locals = NULL;
+    uint32_t single_pattern_local_count = 0;
+    IshCore *single_guard = NULL;
+    uint32_t single_arity = 0;
+
+    for (size_t i = 0; i < group->count; i++) {
+        const IshSyntax *def_form = items[group->indices[i]];
+        const IshSyntax *def_name = NULL;
+        size_t param_start = 0;
+        (void)defn_form_parts(def_form, &def_name, &param_start, NULL);
+        const IshSyntax *clause_block = NULL;
+        if (defn_form_clause_block(def_form, param_start, &clause_block)) {
+            bool block_ok = true;
+            for (size_t c = 1; c < clause_block->as.seq.count && block_ok; c++) {
+                const IshSyntax *clause = clause_block->as.seq.items[c];
+                IshPattern **patterns = NULL;
+                uint32_t pattern_count = 0;
+                IshPatternLocal *pattern_locals = NULL;
+                uint32_t pattern_local_count = 0;
+                IshCore *guard = NULL;
+                uint32_t arity = 0;
+                IshCore *body = expand_defn_clause(ctx, def_name ? def_name->as.text : group->name, clause->as.seq.count > 1 ? clause->as.seq.items[1] : clause, clause->as.seq.items, 1, clause->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
+                if (!body) { block_ok = false; break; }
+                if (single) {
+                    single_body = body;
+                    single_patterns = patterns;
+                    single_pattern_count = pattern_count;
+                    single_pattern_locals = pattern_locals;
+                    single_pattern_local_count = pattern_local_count;
+                    single_guard = guard;
+                    single_arity = arity;
+                } else if (!ish_core_fn_multi_add_clause_take(result, arity, patterns, pattern_count, pattern_locals, pattern_local_count, guard, body)) {
+                    for (uint32_t p = 0; p < pattern_count; p++) ish_pat_free(patterns[p]);
+                    free(patterns);
+                    for (uint32_t p = 0; p < pattern_local_count; p++) free(pattern_locals[p].name);
+                    free(pattern_locals);
+                    ish_core_free(guard);
+                    ish_core_free(body);
+                    block_ok = false;
+                    if (err && !err->present) ish_error_oom(err, clause->span);
+                }
+            }
+            if (!block_ok) {
+                ish_core_free(result);
+                end_function_context(ctx, &saved);
+                return NULL;
+            }
+            continue;
+        }
+        IshPattern **patterns = NULL;
+        uint32_t pattern_count = 0;
+        IshPatternLocal *pattern_locals = NULL;
+        uint32_t pattern_local_count = 0;
+        IshCore *guard = NULL;
+        uint32_t arity = 0;
+        IshCore *body = expand_defn_clause(ctx, def_name ? def_name->as.text : group->name, def_form->as.seq.items[1], def_form->as.seq.items, param_start, def_form->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
+        if (!body) {
+            ish_core_free(result);
+            end_function_context(ctx, &saved);
+            return NULL;
+        }
+        if (single) {
+            single_body = body;
+            single_patterns = patterns;
+            single_pattern_count = pattern_count;
+            single_pattern_locals = pattern_locals;
+            single_pattern_local_count = pattern_local_count;
+            single_guard = guard;
+            single_arity = arity;
+        } else if (!ish_core_fn_multi_add_clause_take(result, arity, patterns, pattern_count, pattern_locals, pattern_local_count, guard, body)) {
+            for (uint32_t p = 0; p < pattern_count; p++) ish_pat_free(patterns[p]);
+            free(patterns);
+            for (uint32_t p = 0; p < pattern_local_count; p++) free(pattern_locals[p].name);
+            free(pattern_locals);
+            ish_core_free(guard);
+            ish_core_free(body);
+            ish_core_free(result);
+            end_function_context(ctx, &saved);
+            return (IshCore *)(uintptr_t)ish_error_oom(err, def_form->span);
+        }
+    }
+
+    if (single) {
+        result = ish_core_fn(group->name, single_arity, single_body, items[group->indices[0]]->span);
+        if (!result || !ish_core_fn_set_param_patterns_take(result, single_patterns, single_pattern_count) || !ish_core_fn_set_pattern_locals_take(result, single_pattern_locals, single_pattern_local_count) || (single_guard && !ish_core_fn_set_guard_take(result, single_guard))) {
+            for (uint32_t p = 0; p < single_pattern_count; p++) ish_pat_free(single_patterns[p]);
+            free(single_patterns);
+            for (uint32_t p = 0; p < single_pattern_local_count; p++) free(single_pattern_locals[p].name);
+            free(single_pattern_locals);
+            ish_core_free(single_guard);
+            ish_core_free(single_body);
+            ish_core_free(result);
+            end_function_context(ctx, &saved);
+            return (IshCore *)(uintptr_t)ish_error_oom(err, items[group->indices[0]]->span);
+        }
+    }
+
+    for (size_t i = 0; i < ctx->capture_count; i++) {
+        bool ok = single ? ish_core_fn_add_capture(result, ctx->captures[i].kind, ctx->captures[i].source_index) : ish_core_fn_multi_add_capture(result, ctx->captures[i].kind, ctx->captures[i].source_index);
+        if (!ok) {
+            ish_core_free(result);
+            end_function_context(ctx, &saved);
+            return (IshCore *)(uintptr_t)ish_error_oom(err, items[group->indices[0]]->span);
+        }
+    }
+    end_function_context(ctx, &saved);
+    return result;
+}
+
+static IshCore *expand_match_clause(ExpandContext *ctx, const IshSyntax *clause, IshPattern ***out_patterns, uint32_t *out_pattern_count, IshPatternLocal **out_locals, uint32_t *out_local_count, IshCore **out_guard, uint32_t *out_arity, IshError *err) {
+    if (!syn_is_protocol(clause, "%-expr")) return expand_error(err, clause->span, "match clause must be an expression");
+    size_t arrow = SIZE_MAX;
+    for (size_t i = 1; i < clause->as.seq.count; i++) {
+        if (clause->as.seq.items[i]->kind == ISH_SYN_WORD && strcmp(clause->as.seq.items[i]->as.text, "->") == 0) {
+            arrow = i;
+            break;
+        }
+    }
+    if (arrow == SIZE_MAX || arrow == 1 || arrow + 1u >= clause->as.seq.count) return expand_error(err, clause->span, "match clause must have form pattern -> body");
+    bool has_guard = arrow > 2;
+    if (has_guard && (arrow <= 3 || !syn_is_word(clause->as.seq.items[2], "when"))) return expand_error(err, clause->span, "match guards must have form pattern when guard -> body");
+    if (!has_guard && arrow != 2) return expand_error(err, clause->span, "match currently expects one pattern per clause");
+
+    SavedClauseContext saved;
+    begin_clause_context(ctx, &saved);
+    IshPattern **patterns = calloc(1u, sizeof(*patterns));
+    if (!patterns) {
+        end_clause_context(ctx, &saved);
+        return (IshCore *)(uintptr_t)ish_error_oom(err, clause->span);
+    }
+    patterns[0] = pattern_from_param(ctx, clause->as.seq.items[1], 0, err);
+    if (!patterns[0]) {
+        free(patterns);
+        end_clause_context(ctx, &saved);
+        return NULL;
+    }
+    IshCore *guard = NULL;
+    if (has_guard) {
+        guard = expand_parts(ctx, clause->as.seq.items, 3, arrow, err);
+        if (!guard) {
+            ish_pat_free(patterns[0]);
+            free(patterns);
+            end_clause_context(ctx, &saved);
+            return NULL;
+        }
+    }
+    IshCore *body = expand_parts(ctx, clause->as.seq.items, arrow + 1u, clause->as.seq.count, err);
+    if (!body) {
+        ish_core_free(guard);
+        end_clause_context(ctx, &saved);
+        ish_pat_free(patterns[0]);
+        free(patterns);
+        return NULL;
+    }
+    if (!copy_pattern_locals(ctx, saved.table_base, out_locals, out_local_count)) {
+        ish_core_free(guard);
+        end_clause_context(ctx, &saved);
+        ish_pat_free(patterns[0]);
+        free(patterns);
+        ish_core_free(body);
+        return (IshCore *)(uintptr_t)ish_error_oom(err, clause->span);
+    }
+    end_clause_context(ctx, &saved);
+    *out_patterns = patterns;
+    *out_pattern_count = 1;
+    *out_guard = guard;
+    *out_arity = 1;
+    return body;
+}
+
+static bool body_is_clauses(const IshSyntax *body) {
+    if (!syn_is_protocol(body, "%-body") || body->as.seq.count < 2) return false;
+    const IshSyntax *first = body->as.seq.items[1];
+    if (!syn_is_protocol(first, "%-expr")) return false;
+    for (size_t i = 1; i < first->as.seq.count; i++) {
+        const IshSyntax *tok = first->as.seq.items[i];
+        if (syn_is_word(tok, "->")) return i > 1u;
+        if (syn_is_word(tok, "=") || syn_is_word(tok, "fn") || syn_is_word(tok, "defn") ||
+            syn_is_word(tok, "def") || syn_is_word(tok, "defmacro")) return false;
+    }
+    return false;
+}
+
+static IshCore *build_clause_fn_styled(ExpandContext *ctx, const IshSyntax *body, size_t clause_end, const char *debug_name, bool defn_style, IshError *err) {
+    if (!syn_is_protocol(body, "%-body") || clause_end < 2u || body->as.seq.count < clause_end) return expand_error(err, body->span, "clause body requires at least one clause");
+    SavedFunctionContext saved;
+    begin_function_context(ctx, &saved);
+    IshCore *multi = ish_core_fn_multi(debug_name, body->span);
+    if (!multi) {
+        end_function_context(ctx, &saved);
+        return (IshCore *)(uintptr_t)ish_error_oom(err, body->span);
+    }
+    for (size_t i = 1; i < clause_end; i++) {
+        IshPattern **patterns = NULL;
+        uint32_t pattern_count = 0;
+        IshPatternLocal *pattern_locals = NULL;
+        uint32_t pattern_local_count = 0;
+        IshCore *guard = NULL;
+        uint32_t arity = 0;
+        const IshSyntax *clause = body->as.seq.items[i];
+        IshCore *clause_body = defn_style
+            ? expand_defn_clause(ctx, debug_name, clause->as.seq.count > 1 ? clause->as.seq.items[1] : clause, clause->as.seq.items, 1, clause->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err)
+            : expand_match_clause(ctx, clause, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
+        if (!clause_body || !ish_core_fn_multi_add_clause_take(multi, arity, patterns, pattern_count, pattern_locals, pattern_local_count, guard, clause_body)) {
+            if (clause_body) ish_core_free(clause_body);
+            if (guard) ish_core_free(guard);
+            if (patterns) {
+                for (uint32_t p = 0; p < pattern_count; p++) ish_pat_free(patterns[p]);
+                free(patterns);
+            }
+            if (pattern_locals) {
+                for (uint32_t p = 0; p < pattern_local_count; p++) free(pattern_locals[p].name);
+                free(pattern_locals);
+            }
+            ish_core_free(multi);
+            end_function_context(ctx, &saved);
+            if (!err->present) ish_error_oom(err, body->as.seq.items[i]->span);
+            return NULL;
+        }
+    }
+    for (size_t i = 0; i < ctx->capture_count; i++) {
+        if (!ish_core_fn_multi_add_capture(multi, ctx->captures[i].kind, ctx->captures[i].source_index)) {
+            ish_core_free(multi);
+            end_function_context(ctx, &saved);
+            return (IshCore *)(uintptr_t)ish_error_oom(err, body->span);
+        }
+    }
+    end_function_context(ctx, &saved);
+    return multi;
+}
+
+static IshCore *build_clause_fn(ExpandContext *ctx, const IshSyntax *body, size_t clause_end, const char *debug_name, IshError *err) {
+    return build_clause_fn_styled(ctx, body, clause_end, debug_name, false, err);
+}
+
+IshCore *expand_receive_parts(ExpandContext *ctx, IshSyntax *const *items, size_t start, size_t end, IshError *err) {
+    size_t body_index = SIZE_MAX;
+    for (size_t i = start + 1u; i < end; i++) {
+        if (syn_is_protocol(items[i], "%-body")) {
+            body_index = i;
+            break;
+        }
+    }
+    if (body_index == SIZE_MAX || body_index + 1u != end) return expand_error(err, items[start]->span, "receive requires a final do/end clause body");
+    const IshSyntax *body = items[body_index];
+    if (body->as.seq.count < 2) return expand_error(err, body->span, "receive requires at least one clause");
+
+    size_t clause_total = body->as.seq.count;
+    const IshSyntax *after_clause = NULL;
+    size_t message_end = clause_total;
+    for (size_t i = 1; i < clause_total; i++) {
+        const IshSyntax *clause = body->as.seq.items[i];
+        if (syn_is_protocol(clause, "%-expr") && clause->as.seq.count >= 2 && syn_is_word(clause->as.seq.items[1], "after")) {
+            if (i + 1u != clause_total) return expand_error(err, clause->span, "receive 'after' clause must be last");
+            after_clause = clause;
+            message_end = i;
+            break;
+        }
+    }
+    if (message_end < 2) return expand_error(err, body->span, "receive requires at least one message clause");
+
+    IshCore *timeout = NULL;
+    IshCore *timeout_body = NULL;
+    if (after_clause) {
+        size_t arrow = SIZE_MAX;
+        for (size_t i = 2; i < after_clause->as.seq.count; i++) {
+            if (syn_is_word(after_clause->as.seq.items[i], "->")) {
+                arrow = i;
+                break;
+            }
+        }
+        if (arrow == SIZE_MAX || arrow == 2 || arrow + 1u >= after_clause->as.seq.count) return expand_error(err, after_clause->span, "receive 'after' clause must have form after timeout -> body");
+        timeout = expand_parts(ctx, after_clause->as.seq.items, 2, arrow, err);
+        if (!timeout) return NULL;
+        timeout_body = expand_parts(ctx, after_clause->as.seq.items, arrow + 1u, after_clause->as.seq.count, err);
+        if (!timeout_body) {
+            ish_core_free(timeout);
+            return NULL;
+        }
+    } else {
+        timeout = ish_core_literal(ish_atom(ctx->rt, "infinity"), items[start]->span);
+        timeout_body = ish_core_literal(ish_nil(), items[start]->span);
+        if (!timeout || !timeout_body) {
+            ish_core_free(timeout);
+            ish_core_free(timeout_body);
+            return (IshCore *)(uintptr_t)ish_error_oom(err, items[start]->span);
+        }
+    }
+
+    IshCore *multi = build_clause_fn(ctx, body, message_end, "<receive>", err);
+    if (!multi) {
+        ish_core_free(timeout);
+        ish_core_free(timeout_body);
+        return NULL;
+    }
+
+    IshCore *recv = ish_core_receive(multi, timeout, timeout_body, items[start]->span);
+    if (!recv) {
+        ish_core_free(multi);
+        ish_core_free(timeout);
+        ish_core_free(timeout_body);
+        return (IshCore *)(uintptr_t)ish_error_oom(err, items[start]->span);
+    }
+    return recv;
+}

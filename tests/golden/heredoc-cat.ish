@@ -1,0 +1,4 @@
+implements std/shell
+cat <<DONE
+golden-heredoc
+DONE

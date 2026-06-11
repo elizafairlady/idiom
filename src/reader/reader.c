@@ -11,8 +11,11 @@ typedef enum {
     TOK_SEMI,
     TOK_IDENT,
     TOK_ATOM,
+    TOK_KEYWORD,
     TOK_INT,
+    TOK_FLOAT,
     TOK_STRING,
+    TOK_STRING_INTERP,
     TOK_SHELL_WORD,
     TOK_SHELL_VAR,
     TOK_FN_VALUE,
@@ -34,7 +37,7 @@ typedef enum {
     TOK_PERCENT_QUASIQUOTE,
     TOK_PERCENT_COMMA,
     TOK_PERCENT_COMMA_AT,
-    TOK_REDIR
+    TOK_HEREDOC
 } TokenKind;
 
 typedef struct {
@@ -118,6 +121,10 @@ static bool is_ident_part(char ch) {
     return isalnum((unsigned char)ch) || ch == '_' || ch == '?' || ch == '!' || ch == '/' || ch == '-';
 }
 
+static bool is_operator_char(char ch) {
+    return ch == '>' || ch == '<' || ch == '=' || ch == '|' || ch == '+' || ch == '-' || ch == '*' || ch == '/' || ch == '%' || ch == '!' || ch == '&';
+}
+
 static bool is_delim(char ch) {
     return ch == '\0' || isspace((unsigned char)ch) || ch == '(' || ch == ')' || ch == '[' || ch == ']' || ch == '{' || ch == '}' || ch == ';' || ch == '"' || ch == '\'' || ch == '`' || ch == ',';
 }
@@ -148,7 +155,34 @@ static bool read_string_token(TokenVec *vec, Lexer *lx, size_t start, unsigned l
     ish_buf_init(&decoded);
     bool interpolation_seen = false;
     while (peek(lx) != '\0' && peek(lx) != '"') {
-        char ch = advance(lx);
+        char ch = peek(lx);
+        if ((ch == '$' && (peek_n(lx, 1) == '{' || peek_n(lx, 1) == '(')) || (ch == '#' && peek_n(lx, 1) == '{')) {
+            interpolation_seen = true;
+            char open = peek_n(lx, 1);
+            char close = open == '{' ? '}' : ')';
+            if (!ish_buf_append_char(&decoded, ch) || !ish_buf_append_char(&decoded, open)) {
+                ish_buf_destroy(&decoded);
+                return ish_error_oom(err, (IshSpan){lx->file, start, lx->pos, line, column});
+            }
+            advance(lx);
+            advance(lx);
+            int depth = 1;
+            while (peek(lx) != '\0' && depth > 0) {
+                char c = advance(lx);
+                if (c == open) depth++;
+                else if (c == close) depth--;
+                if (!ish_buf_append_char(&decoded, c)) {
+                    ish_buf_destroy(&decoded);
+                    return ish_error_oom(err, (IshSpan){lx->file, start, lx->pos, line, column});
+                }
+            }
+            if (depth != 0) {
+                ish_buf_destroy(&decoded);
+                return ish_error_set(err, (IshSpan){lx->file, start, lx->pos, line, column}, "unterminated string interpolation");
+            }
+            continue;
+        }
+        advance(lx);
         if (ch == '\\') {
             char e = advance(lx);
             switch (e) {
@@ -157,12 +191,12 @@ static bool read_string_token(TokenVec *vec, Lexer *lx, size_t start, unsigned l
                 case 't': ch = '\t'; break;
                 case '\\': ch = '\\'; break;
                 case '"': ch = '"'; break;
+                case '$': ch = '$'; break;
+                case '#': ch = '#'; break;
                 default:
                     ish_buf_destroy(&decoded);
                     return ish_error_set(err, (IshSpan){lx->file, lx->pos - 1u, lx->pos, lx->line, lx->column - 1u}, "unknown string escape");
             }
-        } else if (ch == '$' || (ch == '#' && peek(lx) == '{')) {
-            interpolation_seen = true;
         }
         if (!ish_buf_append_char(&decoded, ch)) {
             ish_buf_destroy(&decoded);
@@ -174,12 +208,8 @@ static bool read_string_token(TokenVec *vec, Lexer *lx, size_t start, unsigned l
         return ish_error_set(err, (IshSpan){lx->file, start, lx->pos, line, column}, "unterminated string");
     }
     advance(lx);
-    if (interpolation_seen) {
-        ish_buf_destroy(&decoded);
-        return ish_error_set(err, (IshSpan){lx->file, start, lx->pos, line, column}, "string interpolation is not implemented in the reader yet");
-    }
     Token tok;
-    tok.kind = TOK_STRING;
+    tok.kind = interpolation_seen ? TOK_STRING_INTERP : TOK_STRING;
     tok.lexeme = ish_buf_take(&decoded);
     if (!tok.lexeme) return ish_error_oom(err, (IshSpan){lx->file, start, lx->pos, line, column});
     tok.span = (IshSpan){lx->file, start, lx->pos, line, column};
@@ -202,9 +232,34 @@ static bool read_shell_word(TokenVec *vec, Lexer *lx, size_t start, unsigned lin
     return add_token(vec, lx, TOK_SHELL_WORD, start, line, column, leading_space);
 }
 
+static bool capture_heredoc_body(Lexer *lx, const char *delim, bool strip, char **out_body, IshError *err) {
+    size_t dlen = strlen(delim);
+    IshBuffer body;
+    ish_buf_init(&body);
+    for (;;) {
+        if (peek(lx) == '\0') { ish_buf_destroy(&body); return ish_error_set(err, (IshSpan){lx->file, lx->pos, lx->pos, lx->line, lx->column}, "unterminated heredoc (missing closing '%s')", delim); }
+        size_t line_start = lx->pos;
+        while (peek(lx) != '\0' && peek(lx) != '\n') advance(lx);
+        size_t line_end = lx->pos;
+        size_t off = 0;
+        if (strip) while (line_start + off < line_end && lx->src[line_start + off] == '\t') off++;
+        size_t content_len = line_end - line_start - off;
+        bool is_delim = content_len == dlen && memcmp(lx->src + line_start + off, delim, dlen) == 0;
+        bool had_newline = peek(lx) == '\n';
+        if (had_newline) advance(lx);
+        if (is_delim) break;
+        if (!ish_buf_append_n(&body, lx->src + line_start + off, content_len) || !ish_buf_append_char(&body, '\n')) { ish_buf_destroy(&body); return ish_error_oom(err, (IshSpan){lx->file, line_start, line_end, lx->line, lx->column}); }
+    }
+    char *taken = ish_buf_take(&body);
+    *out_body = taken ? taken : ish_strdup("");
+    return *out_body != NULL;
+}
+
 static bool lex_source(const char *file, const char *source, size_t len, TokenVec *out, IshError *err) {
     Lexer lx = {file, source, len, 0, 1, 1, 0};
     bool leading_space = false;
+    struct { size_t index; char *delim; bool strip; } pending_heredoc[8];
+    size_t pending_heredoc_count = 0;
     while (peek(&lx) != '\0') {
         char ch = peek(&lx);
         if (ch == ' ' || ch == '\t' || ch == '\r') {
@@ -223,7 +278,38 @@ static bool lex_source(const char *file, const char *source, size_t len, TokenVe
         if (ch == '\n') {
             advance(&lx);
             if (!add_token(out, &lx, TOK_NEWLINE, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
+            for (size_t h = 0; h < pending_heredoc_count; h++) {
+                char *bodytext = NULL;
+                if (!capture_heredoc_body(&lx, pending_heredoc[h].delim, pending_heredoc[h].strip, &bodytext, err)) {
+                    for (size_t j = h; j < pending_heredoc_count; j++) free(pending_heredoc[j].delim);
+                    return false;
+                }
+                free(out->items[pending_heredoc[h].index].lexeme);
+                out->items[pending_heredoc[h].index].lexeme = bodytext;
+                free(pending_heredoc[h].delim);
+            }
+            pending_heredoc_count = 0;
+            lx.previous_end = lx.pos;
             leading_space = true;
+            continue;
+        }
+        if (ch == '<' && peek_n(&lx, 1) == '<' && peek_n(&lx, 2) != '<') {
+            advance(&lx); advance(&lx);
+            bool strip = false;
+            if (peek(&lx) == '-') { strip = true; advance(&lx); }
+            while (peek(&lx) == ' ' || peek(&lx) == '\t') advance(&lx);
+            size_t dstart = lx.pos;
+            while (peek(&lx) != '\0' && !isspace((unsigned char)peek(&lx))) advance(&lx);
+            if (lx.pos == dstart) return ish_error_set(err, (IshSpan){file, start, lx.pos, line, column}, "heredoc requires a delimiter after <<");
+            char *delim = ish_strndup(lx.src + dstart, lx.pos - dstart);
+            if (!delim) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
+            if (pending_heredoc_count >= 8) { free(delim); return ish_error_set(err, (IshSpan){file, start, lx.pos, line, column}, "too many heredocs on one line"); }
+            if (!add_token(out, &lx, TOK_HEREDOC, start, line, column, leading_space)) { free(delim); return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); }
+            pending_heredoc[pending_heredoc_count].index = out->count - 1u;
+            pending_heredoc[pending_heredoc_count].delim = delim;
+            pending_heredoc[pending_heredoc_count].strip = strip;
+            pending_heredoc_count++;
+            leading_space = false;
             continue;
         }
         if (ch == ';') { advance(&lx); if (!add_token(out, &lx, TOK_SEMI, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
@@ -271,29 +357,52 @@ static bool lex_source(const char *file, const char *source, size_t len, TokenVe
         }
         if (isdigit((unsigned char)ch)) {
             while (isdigit((unsigned char)peek(&lx))) advance(&lx);
-            if ((peek(&lx) == '>' || peek(&lx) == '<') && peek_n(&lx, 1) == '&') {
-                advance(&lx); advance(&lx);
-                if (peek(&lx) == '-') advance(&lx);
-                else while (isdigit((unsigned char)peek(&lx))) advance(&lx);
-                if (!add_token(out, &lx, TOK_REDIR, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
-            } else if (peek(&lx) == '>' || peek(&lx) == '<') {
+            bool is_float = false;
+            if (peek(&lx) == '.' && isdigit((unsigned char)peek_n(&lx, 1))) {
+                is_float = true;
                 advance(&lx);
-                if (peek(&lx) == '>') advance(&lx);
-                if (!add_token(out, &lx, TOK_REDIR, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
-            } else {
-                if (!add_token(out, &lx, TOK_INT, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
+                while (isdigit((unsigned char)peek(&lx))) advance(&lx);
             }
+            if (peek(&lx) == 'e' || peek(&lx) == 'E') {
+                char e1 = peek_n(&lx, 1);
+                if (isdigit((unsigned char)e1) || ((e1 == '+' || e1 == '-') && isdigit((unsigned char)peek_n(&lx, 2)))) {
+                    is_float = true;
+                    advance(&lx);
+                    if (peek(&lx) == '+' || peek(&lx) == '-') advance(&lx);
+                    while (isdigit((unsigned char)peek(&lx))) advance(&lx);
+                }
+            }
+            if (!add_token(out, &lx, is_float ? TOK_FLOAT : TOK_INT, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
             leading_space = false;
             continue;
         }
         if (is_ident_start(ch)) {
             advance(&lx);
-            while (is_ident_part(peek(&lx))) advance(&lx);
+            while (true) {
+                while (is_ident_part(peek(&lx))) advance(&lx);
+                if (lx.pos > start && lx.src[lx.pos - 1u] == '-' && peek(&lx) == '>' && is_ident_start(peek_n(&lx, 1))) {
+                    advance(&lx);
+                    continue;
+                }
+                break;
+            }
+            if (peek(&lx) == '=' && peek_n(&lx, 1) == '?') {
+                advance(&lx);
+                advance(&lx);
+            }
+            if (peek(&lx) == ':' && peek_n(&lx, 1) != ':') {
+                advance(&lx);
+                if (!add_token(out, &lx, TOK_KEYWORD, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
+                leading_space = false;
+                continue;
+            }
             if (!add_token(out, &lx, TOK_IDENT, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
             leading_space = false;
             continue;
         }
+        if (ch == '.' && peek_n(&lx, 1) == '.' && peek_n(&lx, 2) == '.') { advance(&lx); advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_IDENT, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '.') { advance(&lx); if (!add_token(out, &lx, TOK_DOT, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
+        if (ch == '*' && peek_n(&lx, 1) == '*') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if ((ch == '-' && !isdigit((unsigned char)peek_n(&lx, 1)) && peek_n(&lx, 1) != '>' && !isspace((unsigned char)peek_n(&lx, 1))) ||
             ch == '~' ||
             ((ch == '/' || ch == '+' || ch == '*') && !is_delim(peek_n(&lx, 1)))) {
@@ -301,20 +410,14 @@ static bool lex_source(const char *file, const char *source, size_t len, TokenVe
             leading_space = false;
             continue;
         }
-        if (ch == '&' && (peek_n(&lx, 1) == '>' || peek_n(&lx, 1) == '>')) {
-            advance(&lx); advance(&lx); if (peek(&lx) == '>') advance(&lx);
-            if (!add_token(out, &lx, TOK_REDIR, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
-            leading_space = false;
-            continue;
-        }
         if (ch == '-' && peek_n(&lx, 1) == '>') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '|' && peek_n(&lx, 1) == '>' && peek_n(&lx, 2) == '>') { advance(&lx); advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
-        if ((ch == '|' || ch == '&') && peek_n(&lx, 1) == ch) { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
-        if ((ch == '|' && peek_n(&lx, 1) == '>') || (ch == '=' && peek_n(&lx, 1) == '=') || (ch == '!' && peek_n(&lx, 1) == '=') || (ch == '<' && peek_n(&lx, 1) == '=') || (ch == '>' && peek_n(&lx, 1) == '=')) {
-            advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue;
-        }
-        if (ch == '>' || ch == '<' || ch == '=' || ch == '|' || ch == '+' || ch == '-' || ch == '*' || ch == '/') {
-            advance(&lx); if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column}); leading_space = false; continue;
+        if (is_operator_char(ch)) {
+            advance(&lx);
+            while (is_operator_char(peek(&lx))) advance(&lx);
+            if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return ish_error_oom(err, (IshSpan){file, start, lx.pos, line, column});
+            leading_space = false;
+            continue;
         }
         return ish_error_set(err, (IshSpan){file, start, start + 1u, line, column}, "unexpected character '%c'", ch);
     }
@@ -333,10 +436,24 @@ static bool at(Parser *p, TokenKind kind) { return cur(p)->kind == kind; }
 static Token *take(Parser *p) { return &p->tokens[p->pos++]; }
 static void skip_separators(Parser *p) { while (at(p, TOK_NEWLINE) || at(p, TOK_SEMI)) p->pos++; }
 
-static bool is_stop(Parser *p, TokenKind a, TokenKind b, TokenKind c) {
+static bool is_stop(Parser *p, TokenKind a, TokenKind b, TokenKind c, bool separators_stop, bool end_stops, bool else_stops) {
     TokenKind k = cur(p)->kind;
-    if (k == TOK_IDENT && strcmp(cur(p)->lexeme, "end") == 0) return true;
-    return k == TOK_EOF || k == TOK_NEWLINE || k == TOK_SEMI || k == a || k == b || k == c;
+    if (end_stops && k == TOK_IDENT && strcmp(cur(p)->lexeme, "end") == 0) return true;
+    if (else_stops && k == TOK_IDENT && strcmp(cur(p)->lexeme, "else") == 0) return true;
+    if (separators_stop && (k == TOK_NEWLINE || k == TOK_SEMI)) return true;
+    return k == TOK_EOF || k == a || k == b || k == c;
+}
+
+static bool indented_newline_continues(Parser *p, unsigned expr_column, TokenKind a, TokenKind b, TokenKind c, bool end_stops, bool else_stops) {
+    if (!at(p, TOK_NEWLINE)) return false;
+    size_t i = p->pos;
+    while (i < p->count && p->tokens[i].kind == TOK_NEWLINE) i++;
+    if (i >= p->count) return false;
+    TokenKind k = p->tokens[i].kind;
+    if (k == TOK_EOF || k == TOK_SEMI || k == a || k == b || k == c) return false;
+    if (end_stops && k == TOK_IDENT && strcmp(p->tokens[i].lexeme, "end") == 0) return false;
+    if (else_stops && k == TOK_IDENT && strcmp(p->tokens[i].lexeme, "else") == 0) return false;
+    return p->tokens[i].span.column > expr_column;
 }
 
 static IshSyntax *protocol1(const char *head, IshSyntax *a, IshSpan span) {
@@ -349,94 +466,91 @@ static IshSyntax *protocol1(const char *head, IshSyntax *a, IshSpan span) {
     return list;
 }
 
-static IshSyntax *protocol2(const char *head, IshSyntax *a, IshSyntax *b, IshSpan span) {
-    IshSyntax *list = ish_syn_list(ISH_SEQ_PAREN, span);
-    if (!list || !ish_syn_append(list, ish_syn_word(head, span)) || !ish_syn_append(list, a) || !ish_syn_append(list, b)) {
-        ish_syn_free(list);
-        ish_syn_free(a);
-        ish_syn_free(b);
+
+static IshSyntax *read_interp_inner(const char *file, const char *inner, bool command, IshSpan span, IshError *err) {
+    IshSyntax *pkg = NULL;
+    if (!ish_reader_read_string(file, inner, &pkg, err)) return NULL;
+    if (!pkg || pkg->as.seq.count != 2) {
+        ish_syn_free(pkg);
+        ish_error_set(err, span, "string interpolation must contain a single expression");
         return NULL;
     }
-    return list;
+    IshSyntax *form = ish_syn_clone(pkg->as.seq.items[1]);
+    ish_syn_free(pkg);
+    if (!form) { ish_error_oom(err, span); return NULL; }
+    if (command) {
+        IshSyntax *wrapped = protocol1("%-command-sub", form, span);
+        if (!wrapped) { ish_error_oom(err, span); return NULL; }
+        return wrapped;
+    }
+    return form;
+}
+
+static IshSyntax *parse_string_interp(Parser *p, const char *body, IshSpan span) {
+    IshSyntax *result = ish_syn_list(ISH_SEQ_PAREN, span);
+    if (!result || !ish_syn_append(result, ish_syn_word("%-string", span))) {
+        ish_syn_free(result);
+        ish_error_oom(p->err, span);
+        return NULL;
+    }
+    IshBuffer chunk;
+    ish_buf_init(&chunk);
+    size_t i = 0;
+    while (body[i] != '\0') {
+        char ch = body[i];
+        bool command = ch == '$' && body[i + 1u] == '(';
+        bool interp = command || (ch == '$' && body[i + 1u] == '{') || (ch == '#' && body[i + 1u] == '{');
+        if (interp) {
+            if (chunk.len > 0) {
+                IshSyntax *lit = ish_syn_string_n(chunk.data, chunk.len, span);
+                if (!lit || !ish_syn_append(result, lit)) { ish_syn_free(lit); goto fail; }
+                ish_buf_destroy(&chunk);
+                ish_buf_init(&chunk);
+            }
+            char open = command ? '(' : '{';
+            char close = command ? ')' : '}';
+            size_t j = i + 2u;
+            int depth = 1;
+            while (body[j] != '\0' && depth > 0) {
+                if (body[j] == open) depth++;
+                else if (body[j] == close) { depth--; if (depth == 0) break; }
+                j++;
+            }
+            char *inner = ish_strndup(body + i + 2u, j - (i + 2u));
+            if (!inner) { ish_error_oom(p->err, span); goto fail; }
+            IshSyntax *part = read_interp_inner(p->file, inner, command, span, p->err);
+            free(inner);
+            if (!part || !ish_syn_append(result, part)) { ish_syn_free(part); goto fail; }
+            i = body[j] == '\0' ? j : j + 1u;
+        } else {
+            if (!ish_buf_append_char(&chunk, ch)) { ish_error_oom(p->err, span); goto fail; }
+            i++;
+        }
+    }
+    if (chunk.len > 0) {
+        IshSyntax *lit = ish_syn_string_n(chunk.data, chunk.len, span);
+        if (!lit || !ish_syn_append(result, lit)) { ish_syn_free(lit); goto fail; }
+    }
+    ish_buf_destroy(&chunk);
+    return result;
+fail:
+    ish_buf_destroy(&chunk);
+    ish_syn_free(result);
+    return NULL;
 }
 
 static IshSyntax *parse_expr(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3);
+static IshSyntax *parse_expr_delimited(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3);
+static IshSyntax *parse_expr_body(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3);
 static IshSyntax *parse_primary(Parser *p);
 
 static bool ident_is(Parser *p, const char *text) {
     return cur(p)->kind == TOK_IDENT && strcmp(cur(p)->lexeme, text) == 0;
 }
 
-static bool obvious_redir_target(Token *t) {
-    return t->kind == TOK_STRING || t->kind == TOK_SHELL_WORD || t->kind == TOK_IDENT || t->kind == TOK_LPAREN;
-}
 
-static IshSyntax *parse_redir_target(Parser *p) {
-    Token *t = cur(p);
-    if (t->kind == TOK_STRING) {
-        take(p);
-        return ish_syn_string(t->lexeme, t->span);
-    }
-    if (t->kind == TOK_LPAREN) return parse_expr(p, TOK_RPAREN, TOK_EOF, TOK_EOF);
-    IshBuffer raw;
-    ish_buf_init(&raw);
-    IshSpan span = t->span;
-    bool consumed = false;
-    while (cur(p)->kind == TOK_IDENT || cur(p)->kind == TOK_DOT || cur(p)->kind == TOK_SHELL_WORD || cur(p)->kind == TOK_INT) {
-        Token *part = take(p);
-        if (consumed && !part->adjacent_previous) {
-            p->pos--;
-            break;
-        }
-        if (!ish_buf_append(&raw, part->lexeme)) {
-            ish_buf_destroy(&raw);
-            return NULL;
-        }
-        span.end = part->span.end;
-        consumed = true;
-    }
-    if (!consumed) {
-        ish_buf_destroy(&raw);
-        return NULL;
-    }
-    char *s = ish_buf_take(&raw);
-    if (!s) return NULL;
-    IshSyntax *word = ish_syn_string(s, span);
-    free(s);
-    if (!word) return NULL;
-    return protocol1("%-word", word, span);
-}
 
-static IshSyntax *fd_node(long long fd, IshSpan span) {
-    return protocol1("%-fd", ish_syn_int(fd, span), span);
-}
 
-static IshSyntax *parse_redir(Parser *p) {
-    Token *tok = take(p);
-    const char *raw = tok->lexeme;
-    if (strstr(raw, ">&") || strstr(raw, "<&")) {
-        char *end = NULL;
-        long lhs = strtol(raw, &end, 10);
-        if (end == raw) lhs = raw[0] == '<' ? 0 : 1;
-        const char *amp = strstr(raw, "&");
-        long rhs = -1;
-        if (amp && amp[1] != '-') rhs = strtol(amp + 1, NULL, 10);
-        IshSyntax *lhs_node = fd_node(lhs, tok->span);
-        IshSyntax *rhs_node = rhs < 0 ? ish_syn_atom("close", tok->span) : fd_node(rhs, tok->span);
-        return protocol2("%-redirect", ish_syn_word(strchr(raw, '<') ? "<&" : ">&", tok->span), protocol2("%-redir-fds", lhs_node, rhs_node, tok->span), tok->span);
-    }
-    const char *op = raw;
-    char op_buf[4];
-    if (isdigit((unsigned char)raw[0])) {
-        size_t i = 0;
-        while (isdigit((unsigned char)raw[i])) i++;
-        snprintf(op_buf, sizeof(op_buf), "%s", raw + i);
-        op = op_buf;
-    }
-    IshSyntax *target = parse_redir_target(p);
-    if (!target) return NULL;
-    return protocol2("%-redirect", ish_syn_word(op, tok->span), target, tok->span);
-}
 
 static IshSyntax *parse_container(Parser *p, IshSyntaxKind kind, TokenKind close, IshSpan span) {
     IshSyntax *seq = NULL;
@@ -471,8 +585,8 @@ static IshSyntax *parse_body(Parser *p, IshSpan span) {
         return NULL;
     }
     skip_separators(p);
-    while (!at(p, TOK_EOF) && !ident_is(p, "end")) {
-        IshSyntax *form = parse_expr(p, TOK_EOF, TOK_EOF, TOK_EOF);
+    while (!at(p, TOK_EOF) && !ident_is(p, "end") && !ident_is(p, "else")) {
+        IshSyntax *form = parse_expr_body(p, TOK_EOF, TOK_EOF, TOK_EOF);
         if (!form || !ish_syn_append(body, form)) {
             ish_syn_free(form);
             ish_syn_free(body);
@@ -480,6 +594,7 @@ static IshSyntax *parse_body(Parser *p, IshSpan span) {
         }
         skip_separators(p);
     }
+    if (ident_is(p, "else")) return body;
     if (!ident_is(p, "end")) {
         ish_syn_free(body);
         ish_error_set(p->err, span, "unterminated do/end body");
@@ -505,6 +620,17 @@ static IshSyntax *parse_primary(Parser *p) {
         }
         case TOK_OP:
         case TOK_DOT: {
+            if (tok->kind == TOK_OP && (strcmp(tok->lexeme, "<") == 0 || strcmp(tok->lexeme, ">") == 0) &&
+                p->pos + 1u < p->count && p->tokens[p->pos + 1u].kind == TOK_LPAREN && p->tokens[p->pos + 1u].adjacent_previous) {
+                bool write = strcmp(tok->lexeme, ">") == 0;
+                take(p);
+                take(p);
+                IshSyntax *inner = parse_expr_delimited(p, TOK_RPAREN, TOK_EOF, TOK_EOF);
+                if (!inner) return NULL;
+                if (!at(p, TOK_RPAREN)) { ish_syn_free(inner); ish_error_set(p->err, tok->span, "unterminated process substitution"); return NULL; }
+                take(p);
+                return protocol1(write ? "%-procsub-write" : "%-procsub-read", inner, tok->span);
+            }
             take(p);
             IshSyntax *syn = ish_syn_word(tok->lexeme, tok->span);
             if (syn) ish_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
@@ -512,7 +638,17 @@ static IshSyntax *parse_primary(Parser *p) {
         }
         case TOK_ATOM: {
             take(p);
-            IshSyntax *syn = ish_syn_atom(tok->lexeme + 1, tok->span);
+            IshSyntax *syn = strcmp(tok->lexeme, ":nil") == 0 ? ish_syn_nil(tok->span) : ish_syn_atom(tok->lexeme + 1, tok->span);
+            if (syn) ish_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+            return syn;
+        }
+        case TOK_KEYWORD: {
+            take(p);
+            size_t len = strlen(tok->lexeme);
+            char *name = ish_strndup(tok->lexeme, len > 0 ? len - 1u : 0);
+            if (!name) { ish_error_oom(p->err, tok->span); return NULL; }
+            IshSyntax *syn = ish_syn_atom(name, tok->span);
+            free(name);
             if (syn) ish_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
             return syn;
         }
@@ -528,17 +664,43 @@ static IshSyntax *parse_primary(Parser *p) {
             if (syn) ish_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
             return syn;
         }
+        case TOK_FLOAT: {
+            take(p);
+            errno = 0;
+            double value = strtod(tok->lexeme, NULL);
+            if (errno != 0) {
+                ish_error_set(p->err, tok->span, "invalid float literal");
+                return NULL;
+            }
+            IshSyntax *syn = ish_syn_float(value, tok->span);
+            if (syn) ish_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+            return syn;
+        }
         case TOK_STRING: {
             take(p);
-            return ish_syn_string(tok->lexeme, tok->span);
+            IshSyntax *syn = ish_syn_string(tok->lexeme, tok->span);
+            if (syn) ish_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+            return syn;
+        }
+        case TOK_STRING_INTERP: {
+            take(p);
+            return parse_string_interp(p, tok->lexeme, tok->span);
         }
         case TOK_SHELL_WORD: {
             take(p);
-            return protocol1("%-word", ish_syn_string(tok->lexeme, tok->span), tok->span);
+            IshSyntax *syn = protocol1("%-word", ish_syn_string(tok->lexeme, tok->span), tok->span);
+            if (syn) ish_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+            return syn;
+        }
+        case TOK_HEREDOC: {
+            take(p);
+            return protocol1("%-heredoc", ish_syn_string(tok->lexeme, tok->span), tok->span);
         }
         case TOK_SHELL_VAR: {
             take(p);
-            return protocol1("%-shell-var", ish_syn_word(tok->lexeme + 1, tok->span), tok->span);
+            IshSyntax *syn = protocol1("%-shell-var", ish_syn_word(tok->lexeme + 1, tok->span), tok->span);
+            if (syn) ish_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+            return syn;
         }
         case TOK_FN_VALUE: {
             take(p);
@@ -546,7 +708,7 @@ static IshSyntax *parse_primary(Parser *p) {
         }
         case TOK_LPAREN: {
             take(p);
-            IshSyntax *inner = parse_expr(p, TOK_RPAREN, TOK_EOF, TOK_EOF);
+            IshSyntax *inner = parse_expr_delimited(p, TOK_RPAREN, TOK_EOF, TOK_EOF);
             if (!inner) return NULL;
             if (!at(p, TOK_RPAREN)) {
                 ish_syn_free(inner);
@@ -574,25 +736,26 @@ static IshSyntax *parse_primary(Parser *p) {
     }
 }
 
-static IshSyntax *parse_expr(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3) {
+static IshSyntax *parse_expr_impl(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3, bool separators_stop, bool end_stops, bool else_stops) {
     IshSpan span = cur(p)->span;
     IshSyntax *expr = ish_syn_list(ISH_SEQ_PAREN, span);
     if (!expr || !ish_syn_append(expr, ish_syn_word("%-expr", span))) {
         ish_syn_free(expr);
         return NULL;
     }
-    while (!is_stop(p, end1, end2, end3)) {
-        IshSyntax *part = NULL;
-        if (cur(p)->kind == TOK_REDIR) {
-            part = parse_redir(p);
-        } else if (cur(p)->kind == TOK_OP && (strcmp(cur(p)->lexeme, ">") == 0 || strcmp(cur(p)->lexeme, ">>") == 0 || strcmp(cur(p)->lexeme, "<") == 0) && p->pos + 1u < p->count && obvious_redir_target(&p->tokens[p->pos + 1u]) && p->tokens[p->pos + 1u].kind != TOK_INT) {
-            cur(p)->kind = TOK_REDIR;
-            part = parse_redir(p);
-        } else if (cur(p)->kind == TOK_OP && strcmp(cur(p)->lexeme, "&") == 0) {
-            part = parse_primary(p);
-        } else {
-            part = parse_primary(p);
+    while (true) {
+        if (separators_stop && at(p, TOK_SEMI)) break;
+        if (separators_stop && at(p, TOK_NEWLINE)) {
+            if (!indented_newline_continues(p, span.column, end1, end2, end3, end_stops, else_stops)) break;
+            skip_separators(p);
+            continue;
         }
+        if (is_stop(p, end1, end2, end3, false, end_stops, else_stops)) break;
+        if (!separators_stop && (at(p, TOK_NEWLINE) || at(p, TOK_SEMI))) {
+            skip_separators(p);
+            continue;
+        }
+        IshSyntax *part = parse_primary(p);
         if (!part || !ish_syn_append(expr, part)) {
             ish_syn_free(part);
             ish_syn_free(expr);
@@ -605,6 +768,19 @@ static IshSyntax *parse_expr(Parser *p, TokenKind end1, TokenKind end2, TokenKin
         return NULL;
     }
     return expr;
+}
+
+static IshSyntax *parse_expr(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3) {
+    return parse_expr_impl(p, end1, end2, end3, true, true, false);
+}
+
+static IshSyntax *parse_expr_delimited(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3) {
+    skip_separators(p);
+    return parse_expr_impl(p, end1, end2, end3, false, false, false);
+}
+
+static IshSyntax *parse_expr_body(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3) {
+    return parse_expr_impl(p, end1, end2, end3, true, true, true);
 }
 
 static IshSyntax *parse_program(Parser *p) {
