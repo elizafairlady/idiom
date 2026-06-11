@@ -1,0 +1,11 @@
+use std/string
+use std/enum
+implements std/shell
+
+greeting = args |> join " "
+counted = sh -c "printf abc | wc -c"
+line = match counted do
+  {:ok 0 out _} -> out |> trim
+end
+println (str "sealed:" greeting ":" line)
+[3 1 2] |> sort |> inspect |> println

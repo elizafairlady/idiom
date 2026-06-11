@@ -81,6 +81,18 @@ for f in tests/shell/*.ish; do
 done
 
 if [ "$MODE" = "output" ]; then
+    "$IDIOMC" build tests/seal/tool.id -o build/sealed-tool >/dev/null 2>build/seal.err
+    if [ -s build/seal.err ]; then
+        echo "SEAL BUILD FAIL"; cat build/seal.err; fail=1
+    else
+        env -u IDIOMROOT -u IDIOMPATH "$PWD/$IDIOMC" build/sealed-tool one two > build/sealed-run.out 2>build/sealed-run.err
+        if [ -s build/sealed-run.err ] || ! cmp -s tests/seal/tool.out build/sealed-run.out; then
+            echo "SEAL RUN FAIL"; cat build/sealed-run.err; diff tests/seal/tool.out build/sealed-run.out || true; fail=1
+        else
+            echo "sealed program passed (1 case)"
+        fi
+    fi
+
     "$IDIOMC" --dump-surface > build/dump-surface-default.out 2>/dev/null
     cmp -s tests/dump/surface-default.out build/dump-surface-default.out || { echo "DUMP FAIL: surface-default"; diff tests/dump/surface-default.out build/dump-surface-default.out; fail=1; }
     "$IDIOMC" --dump-surface 'implements std/shell' > build/dump-surface-shell.out 2>/dev/null

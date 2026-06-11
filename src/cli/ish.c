@@ -15,35 +15,6 @@
 #define IDM_VERSION "0.0.0-dev"
 #endif
 
-static IdmSyntax *with_shell(IdmSyntax *program, const char *file, IdmError *err) {
-    IdmSpan span = idm_span_unknown(file);
-    span.line = 1;
-    span.column = 1;
-    IdmSyntax *wrapped = idm_syn_list(IDM_SEQ_PAREN, span);
-    IdmSyntax *expr = idm_syn_list(IDM_SEQ_PAREN, span);
-    IdmSyntax *marker = idm_syn_word("%-package-begin", span);
-    IdmSyntax *expr_marker = idm_syn_word("%-expr", span);
-    IdmSyntax *head = idm_syn_word("implements", span);
-    IdmSyntax *target = idm_syn_word("std/shell", span);
-    bool ok = wrapped && expr && marker && expr_marker && head && target;
-    ok = ok && idm_syn_append(expr, expr_marker);
-    ok = ok && idm_syn_append(expr, head);
-    ok = ok && idm_syn_append(expr, target);
-    ok = ok && idm_syn_append(wrapped, marker);
-    ok = ok && idm_syn_append(wrapped, expr);
-    for (size_t i = 1; ok && i < program->as.seq.count; i++) {
-        IdmSyntax *item = idm_syn_clone(program->as.seq.items[i]);
-        ok = item != NULL && idm_syn_append(wrapped, item);
-        if (!ok) idm_syn_free(item);
-    }
-    if (!ok) {
-        idm_syn_free(wrapped);
-        if (expr && (!wrapped || wrapped->as.seq.count == 0)) idm_syn_free(expr);
-        idm_error_oom(err, span);
-        return NULL;
-    }
-    return wrapped;
-}
 
 static char **g_cli_args = NULL;
 static size_t g_cli_arg_count = 0;
@@ -63,8 +34,11 @@ static int run_shell_source(const char *file, const char *source, bool print_res
     idm_bc_init(&module);
     IdmScheduler *sched = NULL;
     if (!idm_reader_read_string(file, source, &program, &err)) goto done;
-    wrapped = with_shell(program, file, &err);
-    if (!wrapped) goto done;
+    wrapped = idm_syn_program_prepend_implements(program, "std/shell", file);
+    if (!wrapped) {
+        idm_error_oom(&err, idm_span_unknown(file));
+        goto done;
+    }
     if (!idm_expand_syntax(&rt, wrapped, &core, &err)) goto done;
     uint32_t main_fn = 0;
     if (!idm_core_compile_main(core, &module, &main_fn, &err)) goto done;

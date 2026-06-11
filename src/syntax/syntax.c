@@ -681,3 +681,29 @@ bool idm_syn_scope_visit_tree(const IdmSyntax *syn, bool (*visit)(void *user, Id
     }
     return true;
 }
+
+IdmSyntax *idm_syn_program_prepend_implements(const IdmSyntax *program, const char *protocol, const char *file) {
+    IdmSpan span = idm_span_unknown(file);
+    span.line = 1;
+    span.column = 1;
+    IdmSyntax *wrapped = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *expr = idm_syn_list(IDM_SEQ_PAREN, span);
+    bool ok = wrapped && expr;
+    ok = ok && idm_syn_append(expr, idm_syn_word("%-expr", span));
+    ok = ok && idm_syn_append(expr, idm_syn_word("implements", span));
+    ok = ok && idm_syn_append(expr, idm_syn_word(protocol, span));
+    ok = ok && idm_syn_append(wrapped, idm_syn_word("%-package-begin", span));
+    ok = ok && idm_syn_append(wrapped, expr);
+    if (ok) expr = NULL;
+    for (size_t i = 1; ok && i < program->as.seq.count; i++) {
+        IdmSyntax *item = idm_syn_clone(program->as.seq.items[i]);
+        ok = item != NULL && idm_syn_append(wrapped, item);
+        if (!ok) idm_syn_free(item);
+    }
+    if (!ok) {
+        idm_syn_free(expr);
+        idm_syn_free(wrapped);
+        return NULL;
+    }
+    return wrapped;
+}

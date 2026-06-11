@@ -137,6 +137,8 @@ static int dump_bytecode(const char *path) {
 static char **g_cli_args = NULL;
 static size_t g_cli_arg_count = 0;
 
+static int run_sealed(const char *file, const unsigned char *data, size_t len);
+
 static int run_source(const char *file, const char *source, bool print_result) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
@@ -182,18 +184,40 @@ static int run_file(const char *path) {
     IdmError err;
     idm_error_init(&err);
     char *source = NULL;
+    if (strcmp(path, "-") != 0) {
+        size_t len = 0;
+        if (!idm_read_file(path, &source, &len, &err)) {
+            idm_error_fprint(stderr, &err);
+            idm_error_clear(&err);
+            return 1;
+        }
+        const unsigned char *p = (const unsigned char *)source;
+        size_t remaining = len;
+        if (remaining >= 2 && p[0] == '#' && p[1] == '!') {
+            while (remaining > 0 && *p != '\n') { p++; remaining--; }
+            if (remaining > 0) { p++; remaining--; }
+        }
+        if (remaining >= 20 && memcmp(p, "IDMX", 4u) == 0) {
+            int status = run_sealed(path, p, remaining);
+            free(source);
+            return status;
+        }
+        int status = run_source(path, source, false);
+        free(source);
+        return status;
+    }
     if (!read_input_arg(path, &source, &err)) {
         idm_error_fprint(stderr, &err);
         idm_error_clear(&err);
         return 1;
     }
-    const char *file = strcmp(path, "-") == 0 ? "<stdin>" : path;
-    int status = run_source(file, source, false);
+    int status = run_source("<stdin>", source, false);
     free(source);
     return status;
 }
 
 #include <dirent.h>
+#include <sys/stat.h>
 
 static int collect_test_files(const char *dir_path, char ***out_files, size_t *out_count, size_t *out_cap) {
     DIR *dir = opendir(dir_path);
@@ -281,8 +305,123 @@ static int run_tests(int argc, char **argv) {
     return failed == 0 ? 0 : 1;
 }
 
+static int run_sealed(const char *file, const unsigned char *data, size_t len) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    rt.cli_args = g_cli_args;
+    rt.cli_arg_count = g_cli_arg_count;
+    IdmError err;
+    idm_error_init(&err);
+    int status = 1;
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    IdmScheduler *sched = NULL;
+    IdmByteReader r = { data, len, 0u, true };
+    r.pos = 4u;
+    uint32_t version = idm_rd_u32(&r);
+    uint32_t main_fn = idm_rd_u32(&r);
+    uint64_t blob_len = idm_rd_u64(&r);
+    if (!r.ok || version != 1u || blob_len > len - r.pos) {
+        idm_error_set(&err, idm_span_unknown(file), "corrupt sealed program header");
+        goto done;
+    }
+    if (!idm_ic_deserialize(&rt, data + r.pos, (size_t)blob_len, &module, &err)) goto done;
+    if (main_fn >= module.function_count) {
+        idm_error_set(&err, idm_span_unknown(file), "sealed program main function is out of bounds");
+        goto done;
+    }
+    sched = idm_sched_create(&rt, &module, &err);
+    if (!sched) goto done;
+    IdmValue out = idm_nil();
+    if (!idm_sched_run_main(sched, main_fn, &out, &err)) goto done;
+    status = 0;
+done:
+    if (err.present) idm_error_fprint(stderr, &err);
+    idm_error_clear(&err);
+    idm_sched_destroy(sched);
+    idm_bc_destroy(&module);
+    idm_runtime_destroy(&rt);
+    return status;
+}
+
+static int build_sealed(const char *src_path, const char *out_path) {
+    IdmError err;
+    idm_error_init(&err);
+    char *source = NULL;
+    size_t len = 0;
+    int status = 1;
+    IdmCore *core = NULL;
+    IdmSyntax *program = NULL;
+    IdmSyntax *wrapped = NULL;
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    IdmBuffer out;
+    idm_buf_init(&out);
+    if (!idm_read_file(src_path, &source, &len, &err)) goto done;
+    if (!idm_reader_read_string(src_path, source, &program, &err)) goto done;
+    size_t src_len = strlen(src_path);
+    if (src_len >= 4 && strcmp(src_path + src_len - 4, ".ish") == 0) {
+        wrapped = idm_syn_program_prepend_implements(program, "std/shell", src_path);
+        if (!wrapped) { idm_error_oom(&err, idm_span_unknown(src_path)); goto done; }
+    }
+    if (!idm_expand_syntax(&rt, wrapped ? wrapped : program, &core, &err)) goto done;
+    uint32_t main_fn = 0;
+    if (!idm_core_compile_main(core, &module, &main_fn, &err)) goto done;
+    if (!idm_ic_serialize(&module, &blob, &err)) goto done;
+    if (!idm_buf_append(&out, "#!/usr/bin/env idiomc\n") ||
+        !idm_buf_append_n(&out, "IDMX", 4u) ||
+        !idm_buf_put_u32(&out, 1u) ||
+        !idm_buf_put_u32(&out, main_fn) ||
+        !idm_buf_put_u64(&out, (uint64_t)blob.len) ||
+        !idm_buf_append_n(&out, blob.data, blob.len)) {
+        idm_error_oom(&err, idm_span_unknown(src_path));
+        goto done;
+    }
+    FILE *f = fopen(out_path, "wb");
+    if (!f || fwrite(out.data, 1u, out.len, f) != out.len || fclose(f) != 0) {
+        idm_error_set(&err, idm_span_unknown(out_path), "cannot write '%s'", out_path);
+        goto done;
+    }
+    chmod(out_path, 0755);
+    printf("sealed %s (%zu bytes)\n", out_path, out.len);
+    status = 0;
+done:
+    if (err.present) idm_error_fprint(stderr, &err);
+    idm_error_clear(&err);
+    idm_buf_destroy(&out);
+    idm_buf_destroy(&blob);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_syn_free(wrapped);
+    idm_syn_free(program);
+    free(source);
+    idm_runtime_destroy(&rt);
+    return status;
+}
+
 int main(int argc, char **argv) {
     if (argc >= 2 && strcmp(argv[1], "test") == 0) return run_tests(argc - 2, argv + 2);
+    if (argc >= 3 && strcmp(argv[1], "build") == 0) {
+        const char *out_path = NULL;
+        const char *src_path = argv[2];
+        if (argc == 5 && strcmp(argv[3], "-o") == 0) out_path = argv[4];
+        if (argc == 3) {
+            static char derived[1024];
+            snprintf(derived, sizeof(derived), "%s", src_path);
+            char *dot = strrchr(derived, '.');
+            if (dot && dot != derived) *dot = '\0';
+            out_path = derived;
+        }
+        if (!out_path) {
+            fprintf(stderr, "usage: idiomc build SRC [-o OUT]\n");
+            return 64;
+        }
+        return build_sealed(src_path, out_path);
+    }
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
 #ifndef IDM_VERSION
 #define IDM_VERSION "0.0.0-dev"
