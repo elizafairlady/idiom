@@ -12,6 +12,12 @@ suite do
     assert-eq (assert-raises (fn _ig do int-min / -1 end)) {:error {:overflow :div}}
     assert-eq (assert-raises (fn _ig do int-min % -1 end)) {:error {:overflow :mod}}
   end
+  test "int64-boundary-literals" do
+    assert-eq 9223372036854775807 (9223372036854775806 + 1)
+    assert-eq -9223372036854775808 (0 - 9223372036854775807 - 1)
+    assert-inspect 9223372036854775807 "9223372036854775807"
+    assert-inspect -9223372036854775808 "-9223372036854775808"
+  end
   test "one-arithmetic" do
     assert-eq (1 + 2.5) 3.5
     assert-eq (add 1 2.5) 3.5

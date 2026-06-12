@@ -382,8 +382,7 @@ resolver form do
   parts = collect-parts form 1 n
   check-amp parts
   chain = split-chain parts '() :first
-  grouped = eq? (syntax-property (syntax-nth form 1) "shell-group") "true"
-  capturing = cond background :true (cond grouped :true (eq? (syntax-property form "value-context") "true"))
+  capturing = cond background :true (eq? (syntax-property form "value-context") "true")
   cap = make-syntax-atom form (cond capturing "true" "false")
   checked = cond capturing :false :true
   wrap-cs (emit chain (find-pw parts) background cap checked)

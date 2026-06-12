@@ -28,6 +28,25 @@ suite do
     end
     assert-inspect got "42"
   end
+  test "glued-minus-argument" do
+    got = do
+      f = fn a b do {a b} end
+      f 1 -2
+    end
+    assert-inspect got "{1 -2}"
+  end
+  test "glued-minus-vs-infix" do
+    got = do
+      f = fn a b do {a b} end
+      raised = match (assert-raises (fn _ig do f 1 - 2 end)) do {:error _} -> :applied-one-arg end
+      x = 10
+      {raised (x - 1) (2 * -3)}
+    end
+    assert-inspect got "{:applied-one-arg 9 -6}"
+  end
+  test "glued-minus-no-spaces-is-ident" do
+    assert-expand-error "x-1" "unbound identifier 'x-1'"
+  end
   test "op-neq" do
     got = do
       if (3 != 4) do 42 else do 0 end

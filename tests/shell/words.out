@@ -5,6 +5,7 @@ premid.post
 --flag=mid
 https://example.com/a?b
 host:path
+abcdef
 bar
 
 oops

@@ -1159,6 +1159,8 @@ bool idm_sched_run_main(IdmScheduler *sched, uint32_t main_fn, IdmValue *out_res
         if (sched->crash_notes && err->notes == NULL) {
             err->notes = idm_strdup(sched->crash_notes);
         }
+        if (!err->reason) err->reason = malloc(sizeof(IdmValue));
+        if (err->reason) *(IdmValue *)err->reason = sched->main_reason;
         idm_buf_destroy(&buf);
         return false;
     }

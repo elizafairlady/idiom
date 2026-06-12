@@ -386,7 +386,8 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
             leading_space = false;
             continue;
         }
-        if (isdigit((unsigned char)ch)) {
+        if (isdigit((unsigned char)ch) || (ch == '-' && leading_space && isdigit((unsigned char)peek_n(&lx, 1)))) {
+            if (ch == '-') advance(&lx);
             while (isdigit((unsigned char)peek(&lx))) advance(&lx);
             bool is_float = false;
             if (peek(&lx) == '.' && isdigit((unsigned char)peek_n(&lx, 1))) {
@@ -761,12 +762,6 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
                 return NULL;
             }
             take(p);
-            if (inner->kind == IDM_SYN_LIST && inner->as.seq.count >= 2 &&
-                !idm_syn_property_set(inner->as.seq.items[1], "shell-group", "true")) {
-                idm_syn_free(inner);
-                idm_error_oom(p->err, tok->span);
-                return NULL;
-            }
             return protocol1("%-group", inner, tok->span);
         }
         case TOK_LBRACKET: take(p); return parse_container(p, IDM_SYN_VECTOR, TOK_RBRACKET, tok->span);

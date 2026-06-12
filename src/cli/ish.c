@@ -7,7 +7,6 @@
 #include "idiom/syntax.h"
 #include "idiom/value.h"
 
-#include <errno.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,48 +20,31 @@
 static char **g_cli_args = NULL;
 static size_t g_cli_arg_count = 0;
 
-static int masked_status(long n) {
-    int code = (int)(((n % 256) + 256) % 256);
-    return code;
+static int masked_status(int64_t n) {
+    return (int)(((n % 256) + 256) % 256);
 }
 
-static bool parse_whole_long(const char *text, const char *end, long *out) {
-    char *stop = NULL;
-    errno = 0;
-    long n = strtol(text, &stop, 10);
-    if (errno != 0 || stop != end || stop == text) return false;
-    *out = n;
-    return true;
+static bool atom_is(IdmValue v, const char *name) {
+    return v.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(v.as.symbol), name) == 0;
 }
 
-static int shell_report(const IdmError *err) {
-    static const char prefix[] = "main actor exited with reason ";
-    static const char command_prefix[] = "{:error {:command \"";
-    const char *msg = err->message ? err->message : "";
-    if (strncmp(msg, prefix, sizeof(prefix) - 1u) == 0) {
-        const char *reason = msg + sizeof(prefix) - 1u;
-        const char *end = reason + strlen(reason);
-        long n = 0;
-        if (parse_whole_long(reason, end, &n)) return masked_status(n);
-        if (strncmp(reason, command_prefix, sizeof(command_prefix) - 1u) == 0) {
-            const char *name = reason + sizeof(command_prefix) - 1u;
-            const char *cursor = name;
-            while (*cursor != '\0' && *cursor != '"') {
-                if (*cursor == '\\' && cursor[1] != '\0') cursor++;
-                cursor++;
-            }
-            size_t tail = strlen(cursor);
-            if (*cursor == '"' && cursor[1] == ' ' && tail >= 4u && strcmp(cursor + tail - 2u, "}}") == 0) {
-                const char *status_text = cursor + 2u;
-                const char *status_end = cursor + tail - 2u;
-                if (parse_whole_long(status_text, status_end, &n)) {
-                    fprintf(stderr, "ish: %.*s: exit status %ld\n", (int)(cursor - name), name, n);
-                    int code = masked_status(n);
+static int shell_report(IdmError *err) {
+    IdmValue reason;
+    if (idm_error_take_reason(err, &reason)) {
+        if (reason.tag == IDM_VAL_INT) return masked_status(reason.as.i);
+        if (idm_is_tuple(reason) && idm_sequence_count(reason) == 2 && atom_is(idm_sequence_item(reason, 0, NULL), "error")) {
+            IdmValue detail = idm_sequence_item(reason, 1, NULL);
+            if (idm_is_tuple(detail) && idm_sequence_count(detail) == 3 && atom_is(idm_sequence_item(detail, 0, NULL), "command") &&
+                idm_sequence_item(detail, 1, NULL).tag == IDM_VAL_STRING) {
+                const char *name = idm_string_bytes(idm_sequence_item(detail, 1, NULL));
+                IdmValue status = idm_sequence_item(detail, 2, NULL);
+                if (status.tag == IDM_VAL_INT) {
+                    fprintf(stderr, "ish: %s: exit status %lld\n", name, (long long)status.as.i);
+                    int code = masked_status(status.as.i);
                     return code == 0 ? 1 : code;
                 }
-                if (strncmp(status_text, ":capture-overflow", (size_t)(status_end - status_text)) == 0 &&
-                    status_end - status_text == (ptrdiff_t)strlen(":capture-overflow")) {
-                    fprintf(stderr, "ish: %.*s: capture overflow\n", (int)(cursor - name), name);
+                if (atom_is(status, "capture-overflow")) {
+                    fprintf(stderr, "ish: %s: capture overflow\n", name);
                     return 1;
                 }
             }

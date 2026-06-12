@@ -7,7 +7,8 @@ static void test_source_operator_surface(void) {
     check_operator_eval(&rt, "142 % 100\n", "(app (prim mod) 142 100)", 42);
     check_operator_eval(&rt, "2 ** 5 + 10\n", "(app (prim add) (app (prim pow) 2 5) 10)", 42);
     check_operator_eval(&rt, "2 ** 3 ** 2\n", "(app (prim pow) 2 (app (prim pow) 3 2))", 512);
-    check_operator_eval(&rt, "50 + -8\n", "(app (prim add) 50 (app (prim neg) 8))", 42);
+    check_operator_eval(&rt, "50 + -8\n", "(app (prim add) 50 -8)", 42);
+    check_operator_eval(&rt, "50 + - 8\n", "(app (prim add) 50 (app (prim neg) 8))", 42);
     check_operator_eval(&rt, "x = -5\nx + 47\n", NULL, 42);
     check_operator_eval(&rt, "if (3 != 4) do 42 else do 0 end\n", NULL, 42);
     check_operator_eval(&rt, "if (3 != 3) do 0 else do 42 end\n", NULL, 42);

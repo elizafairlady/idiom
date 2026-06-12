@@ -10,6 +10,7 @@ echo pre$SW.post
 echo --flag=$SW
 echo https://example.com/a?b
 echo host:path
+echo abc"def"
 FOO=bar printenv FOO
 FOO= printenv FOO
 sh -c "echo oops >&2" 2> err.log

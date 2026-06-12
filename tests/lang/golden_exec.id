@@ -20,7 +20,7 @@ suite do
   test "exec-error" do
     got = do
       implement std/shell
-      out = ls /no/such/path/zzz; match out do {tag code so se} -> tag end
+      out = ls /no/such/path/zzz 2> /dev/null; match out do {tag code so se} -> tag end
     end
     assert-inspect got ":error"
   end

@@ -343,6 +343,18 @@ IdmCore *expand_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start,
     return expand_parts_inner(ctx, items, start, end, err);
 }
 
+static bool reserved_prefix_string(IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
+    for (size_t i = start; i + 1u < end; i++) {
+        const IdmSyntax *word = items[i];
+        const IdmSyntax *str = items[i + 1u];
+        if (word->kind != IDM_SYN_WORD || !word->token_raw || str->kind != IDM_SYN_STRING) continue;
+        if (!str->token_adjacent_previous || str->token_leading_space) continue;
+        idm_error_set(err, word->span, "reserved prefixed string literal '%s\"…\"' (bitstrings and bytestrings arrive post-1.0)", word->as.text);
+        return true;
+    }
+    return false;
+}
+
 static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
     if (start >= end) return expand_error(err, idm_span_unknown(NULL), "empty expression");
     size_t len = end - start;
@@ -395,10 +407,12 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
         uint32_t resolver_payload = 0;
         if (resolve_head_resolver(ctx, items[start], &resolver_payload, err)) return expand_macro_use_from_parts(ctx, items, start, end, resolver_payload, err);
         if (err && err->present) return NULL;
+        if (reserved_prefix_string(items, start, end, err)) return NULL;
         expand_error(err, items[start]->span, "unbound identifier '%s'", items[start]->as.text);
         note_unbound_context(ctx, items[start], err);
         return NULL;
     }
+    if (reserved_prefix_string(items, start, end, err)) return NULL;
     if (len == 1) return expand_syntax(ctx, items[start], err);
 
     bool has_operator = false;
@@ -607,7 +621,11 @@ static IdmCore *expand_protocol_body(ExpandContext *ctx, const IdmSyntax *syn, I
 
 static IdmCore *expand_protocol_group(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count != 2) return expand_error(err, syn->span, "%-group expects one child");
-    return expand_syntax(ctx, syn->as.seq.items[1], err);
+    bool saved = ctx->value_context;
+    ctx->value_context = true;
+    IdmCore *core = expand_syntax(ctx, syn->as.seq.items[1], err);
+    ctx->value_context = saved;
+    return core;
 }
 
 static IdmCore *expand_protocol_expression(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
