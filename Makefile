@@ -27,7 +27,7 @@ TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(patsubst %.c,build/%.o,$(TEST_SRCS))
 DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) build/src/cli/ish.d $(TEST_OBJS:.o=.d)
 
-.PHONY: all test sanitize tsan conformance release clean
+.PHONY: all test sanitize tsan conformance release clean snapshots
 
 SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -92,3 +92,6 @@ clean:
 	rm -rf build
 
 -include $(DEPS)
+
+snapshots: build/unit_tests build/idiomc build/ish build/pty_driver
+	@sh tools/run_tests.sh ./build/idiomc ./build/ish update
