@@ -1,5 +1,6 @@
 use std/test
 implement std/test
+use std/enum
 use std/string
 
 suite do
@@ -38,5 +39,66 @@ suite do
   test "string-case" do
     assert-eq ("Mixed Case 9" |> upcase) "MIXED CASE 9"
     assert-eq ("Mixed Case 9" |> downcase) "mixed case 9"
+  end
+  test "string-enumerable-as-runes" do
+    assert-eq (to-list "abc") '(97 98 99)
+    assert-eq (to-list "") '()
+    assert-eq ("abc" |> map (fn b -> b + 1)) '(98 99 100)
+    assert-eq ("abc" |> sum) 294
+    assert-eq ("hé" |> to-list) '(104 233)
+    assert-eq (to-list "héllo") '(104 233 108 108 111)
+    assert-eq (to-list (byte-str 233)) '(65533)
+    assert-eq (to-list (str (byte-str 233) "a")) '(65533 97)
+    assert-eq ("héllo" |> str-len) 6
+    assert-eq ("héllo" |> str-byte 1) 195
+  end
+  test "rune-string-conversions" do
+    assert-eq (ord->str 233) "é"
+    assert-eq (ord->str 97) "a"
+    assert-eq (ord->str 128512 |> str->ord) 128512
+    assert-eq (ord->str 128512 |> str-len) 4
+    assert-eq (str->ord "héllo") 104
+    assert-eq (str->ord "é") 233
+    assert-eq (str->ord "") :nil
+    assert-eq (str->ord (byte-str 233)) 65533
+    assert-eq (from-runes '(104 233 108 108 111)) "héllo"
+    assert-eq (from-runes (to-list "héllo")) "héllo"
+    assert-eq (from-runes '()) ""
+    assert-inspect (assert-raises (fn _ig do ord->str 55296 end)) "{:error {:type-error :ord->str 55296}}"
+    assert-inspect (assert-raises (fn _ig do ord->str (neg 1) end)) "{:error {:type-error :ord->str -1}}"
+    assert-inspect (assert-raises (fn _ig do ord->str 1114112 end)) "{:error {:type-error :ord->str 1114112}}"
+    assert-eq (assert-raises (fn _ig do from-runes '(104 55296) end)) {:error {:type-error :from-runes 55296}}
+    assert-eq (assert-raises (fn _ig do from-runes "x" end)) {:error {:type-error :from-runes "x"}}
+  end
+  test "parse-int-whole-string" do
+    assert-eq ("42" |> parse-int) {:ok 42}
+    assert-eq ("-17" |> parse-int) {:ok -17}
+    assert-eq ("+5" |> parse-int) {:ok 5}
+    assert-eq (parse-int "9223372036854775807") {:ok 9223372036854775807}
+    assert-eq (parse-int "-9223372036854775808") {:ok -9223372036854775808}
+    assert-inspect (parse-int "") "{:error {:parse :int \"\"}}"
+    assert-inspect (parse-int " 42") "{:error {:parse :int \" 42\"}}"
+    assert-inspect (parse-int "42 ") "{:error {:parse :int \"42 \"}}"
+    assert-inspect (parse-int "42x") "{:error {:parse :int \"42x\"}}"
+    assert-inspect (parse-int "4.2") "{:error {:parse :int \"4.2\"}}"
+    assert-inspect (parse-int "0x10") "{:error {:parse :int \"0x10\"}}"
+    assert-inspect (parse-int "9223372036854775808") "{:error {:parse :int \"9223372036854775808\"}}"
+    assert-inspect (parse-int "-9223372036854775809") "{:error {:parse :int \"-9223372036854775809\"}}"
+    assert-eq ("42" |> parse-int!) 42
+    assert-eq (assert-raises (fn _ig do "nope" |> parse-int! end)) {:error {:parse :int "nope"}}
+    assert-eq (assert-raises (fn _ig do parse-int :nope end)) {:error {:type-error :parse-int :nope}}
+  end
+  test "parse-float-whole-string" do
+    assert-eq ("2.5" |> parse-float) {:ok 2.5}
+    assert-eq (parse-float "-0.25") {:ok -0.25}
+    assert-eq (parse-float "1e3") {:ok 1000.0}
+    assert-eq (parse-float ".5") {:ok 0.5}
+    assert-eq (parse-float "7") {:ok 7.0}
+    assert-inspect (parse-float "") "{:error {:parse :float \"\"}}"
+    assert-inspect (parse-float " 2.5") "{:error {:parse :float \" 2.5\"}}"
+    assert-inspect (parse-float "2.5x") "{:error {:parse :float \"2.5x\"}}"
+    assert-inspect (parse-float "1e") "{:error {:parse :float \"1e\"}}"
+    assert-eq ("2.5" |> parse-float!) 2.5
+    assert-eq (assert-raises (fn _ig do "x" |> parse-float! end)) {:error {:parse :float "x"}}
   end
 end

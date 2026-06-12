@@ -28,6 +28,49 @@ suite do
     assert-eq (dir? "/tmp") :true
     remove p
   end
+  test "file-mkdir" do
+    d = "/tmp/idiom_test_mkdir"
+    remove d
+    assert-eq (mkdir d) :ok
+    assert-eq (dir? d) :true
+    assert-inspect (mkdir d) "{:error :eexist}"
+    assert-eq (remove d) :ok
+    assert-eq (d |> mkdir!) :ok
+    r = assert-raises (fn _ig do mkdir! d end)
+    assert-eq r {:error {:file-mkdir d :eexist}}
+    assert-inspect (mkdir "/tmp/idiom_no_such_parent/x") "{:error :enoent}"
+    remove d
+  end
+  test "file-mkdir-p" do
+    base = "/tmp/idiom_test_mkdir_p"
+    assert-eq (mkdir-p (str base "/a/b/c")) :ok
+    assert-eq (dir? (str base "/a/b/c")) :true
+    assert-eq (mkdir-p (str base "/a/b/c")) :ok
+    assert-eq (mkdir-p! (str base "/a/b")) :ok
+    f = str base "/a/file"
+    write! f "x"
+    assert-inspect (mkdir-p f) "{:error :eexist}"
+    r = assert-raises (fn _ig do mkdir-p! f end)
+    assert-eq r {:error {:file-mkdir f :eexist}}
+    remove f
+    remove (str base "/a/b/c")
+    remove (str base "/a/b")
+    remove (str base "/a")
+    assert-eq (remove base) :ok
+  end
+  test "file-append" do
+    p = "/tmp/idiom_test_append"
+    remove p
+    assert-eq (append p "one") :ok
+    assert-eq (p |> append "-two") :ok
+    assert-eq (read! p) "one-two"
+    assert-eq (append! p "-three") :ok
+    assert-eq (read! p) "one-two-three"
+    assert-inspect (append "/tmp/idiom_no_such_parent/x" "data") "{:error :enoent}"
+    r = assert-raises (fn _ig do append! "/tmp/idiom_no_such_parent/x" "data" end)
+    assert-eq r {:error {:file-append "/tmp/idiom_no_such_parent/x" :enoent}}
+    assert-eq (remove p) :ok
+  end
   test "file-list" do
     p = "/tmp/idiom_test_dir_probe"
     write! p "x"

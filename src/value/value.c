@@ -187,6 +187,7 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->gc_value_cap = 0;
     rt->expand_cache = NULL;
     rt->expand_cache_free = NULL;
+    rt->phase_reads = NULL;
     rt->owned_temps = NULL;
     rt->owned_temp_count = 0;
     rt->owned_temp_cap = 0;

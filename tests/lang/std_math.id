@@ -1,0 +1,68 @@
+use std/test
+implement std/test
+
+suite do
+  test "abs" do
+    assert-eq (abs 5) 5
+    assert-eq (abs -5) 5
+    assert-eq (abs 0) 0
+    assert-eq (abs 2.5) 2.5
+    assert-eq (abs (neg 2.5)) 2.5
+    assert-eq (-5 |> abs) 5
+    int-min = 0 - 9223372036854775807 - 1
+    assert-eq (assert-raises (fn _ig do abs int-min end)) {:error {:overflow :abs}}
+    assert-eq (assert-raises (fn _ig do abs :x end)) {:error {:type-error :abs :x}}
+  end
+  test "floor-and-round-keep-their-kind" do
+    assert-eq (floor 2.7) 2.0
+    assert-eq (floor (neg 2.7)) -3.0
+    assert-eq (floor 5) 5
+    assert-eq (floor -5) -5
+    assert-eq (round 2.4) 2.0
+    assert-eq (round 2.5) 3.0
+    assert-eq (round (neg 2.5)) -3.0
+    assert-eq (round 7) 7
+    assert-eq (2.7 |> floor) 2.0
+    assert-eq (assert-raises (fn _ig do floor "2.7" end)) {:error {:type-error :floor "2.7"}}
+    assert-eq (assert-raises (fn _ig do round :nil end)) {:error {:type-error :round :nil}}
+  end
+  test "sqrt-always-float" do
+    assert-eq (sqrt 4) 2.0
+    assert-eq (sqrt 2.25) 1.5
+    assert-eq (sqrt 0) 0.0
+    assert-eq (9 |> sqrt) 3.0
+    assert-eq (assert-raises (fn _ig do sqrt -4 end)) {:error {:type-error :sqrt -4}}
+    assert-eq (assert-raises (fn _ig do sqrt (neg 0.5) end)) {:error {:type-error :sqrt -0.5}}
+    assert-eq (assert-raises (fn _ig do sqrt "4" end)) {:error {:type-error :sqrt "4"}}
+  end
+  test "floor-div-sign-matrix" do
+    assert-eq (7 // 2) 3
+    assert-eq (-7 // 2) -4
+    assert-eq (7 // -2) -4
+    assert-eq (-7 // -2) 3
+    assert-eq (6 // 3) 2
+    assert-eq (-6 // 3) -2
+    assert-eq (floor-div -7 2) -4
+    assert-eq (7.5 // 2) 3.0
+    assert-eq (-7.5 // 2) -4.0
+  end
+  test "floor-mod-sign-follows-divisor" do
+    assert-eq (7 %% 2) 1
+    assert-eq (-7 %% 2) 1
+    assert-eq (7 %% -2) -1
+    assert-eq (-7 %% -2) -1
+    assert-eq (-6 %% 3) 0
+    assert-eq (floor-mod -7 2) 1
+    assert-eq (7.5 %% 2) 1.5
+    assert-eq (-7.5 %% 2) 0.5
+    assert-eq (-7 % 2) -1
+  end
+  test "floor-div-mod-traps" do
+    assert-eq (assert-raises (fn _ig do 7 // 0 end)) {:error {:div-by-zero :floor-div}}
+    assert-eq (assert-raises (fn _ig do 7 %% 0 end)) {:error {:div-by-zero :floor-mod}}
+    int-min = 0 - 9223372036854775807 - 1
+    assert-eq (assert-raises (fn _ig do int-min // -1 end)) {:error {:overflow :floor-div}}
+    assert-eq (assert-raises (fn _ig do int-min %% -1 end)) {:error {:overflow :floor-mod}}
+    assert-eq (assert-raises (fn _ig do :x // 2 end)) {:error {:type-error :floor-div :x 2}}
+  end
+end

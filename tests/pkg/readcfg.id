@@ -1,0 +1,18 @@
+package readcfg
+
+for-syntax do
+  defn payload do
+    {:ok s} -> s
+    _ -> ""
+  end
+  defn flag do
+    :true -> 1
+    _ -> 0
+  end
+  data = payload (file-read "tests/pkg/readcfg.data")
+  missing = flag (file-exists? "tests/pkg/readcfg-absent.data")
+  defmacro datam stx -> make-syntax-int stx (str-byte data 0)
+  defmacro missingm stx -> make-syntax-int stx missing
+end
+export defn cfg-byte _ -> datam x
+export defn cfg-missing _ -> missingm x

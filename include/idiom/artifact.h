@@ -69,10 +69,25 @@ typedef struct {
     uint32_t slot;
 } IdmPkgExport;
 
+typedef enum {
+    IDM_DEP_PACKAGE,
+    IDM_DEP_FILE_HASH,
+    IDM_DEP_FILE_PRESENT,
+    IDM_DEP_FILE_ABSENT
+} IdmArtifactDepKind;
+
 typedef struct {
     char *path;
     unsigned char hash[32];
+    uint8_t kind;
 } IdmArtifactDep;
+
+struct IdmPhaseReads {
+    IdmArtifactDep *items;
+    size_t count;
+    size_t cap;
+    bool failed;
+};
 
 typedef struct {
     char *name;
@@ -136,5 +151,7 @@ bool idm_artifact_cache_disabled(void);
 bool idm_artifact_cache_load(IdmRuntime *rt, const char *path, const unsigned char src_hash[32], IdmArtifact *out);
 void idm_artifact_cache_write(const char *path, const IdmArtifact *art);
 bool idm_artifact_path_verified(IdmRuntime *rt, const char *path, const unsigned char want[32]);
+bool idm_artifact_dep_verified(IdmRuntime *rt, const IdmArtifactDep *dep);
+void idm_phase_reads_destroy(IdmPhaseReads *reads);
 
 #endif

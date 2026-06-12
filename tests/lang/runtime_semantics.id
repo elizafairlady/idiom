@@ -11,6 +11,17 @@ suite do
     assert-eq (assert-raises (fn _ig do neg int-min end)) {:error {:overflow :neg}}
     assert-eq (assert-raises (fn _ig do int-min / -1 end)) {:error {:overflow :div}}
     assert-eq (assert-raises (fn _ig do int-min % -1 end)) {:error {:overflow :mod}}
+    assert-eq (assert-raises (fn _ig do int-min // -1 end)) {:error {:overflow :floor-div}}
+    assert-eq (assert-raises (fn _ig do abs int-min end)) {:error {:overflow :abs}}
+  end
+  test "floor-division-operators" do
+    assert-eq (-7 // 2) -4
+    assert-eq (-7 %% 2) 1
+    assert-eq (-7 / 2) -3
+    assert-eq (-7 % 2) -1
+    assert-eq (1 + -7 // 2 * 2) -7
+    assert-eq (assert-raises (fn _ig do 1 // 0 end)) {:error {:div-by-zero :floor-div}}
+    assert-eq (assert-raises (fn _ig do 1 %% 0 end)) {:error {:div-by-zero :floor-mod}}
   end
   test "int64-boundary-literals" do
     assert-eq 9223372036854775807 (9223372036854775806 + 1)
@@ -72,10 +83,13 @@ suite do
     assert-neq (dict :a 1) (dict :a 2)
     assert-inspect (dict-put (dict :a 1 :b 2) :a 9) "%{:a 9 :b 2}"
   end
-  test "strings-are-bytes" do
+  test "strings-byte-storage-rune-iteration" do
     assert-eq (str-len "héllo") 6
     assert-eq (str-byte "é" 0) 195
     assert-eq (str-byte "é" 1) 169
+    assert-eq (to-list "abc") '(97 98 99)
+    assert-eq (to-list "") '()
+    assert-inspect (to-list "é") "(233)"
   end
   test "tail-call-constant-stack" do
     got = do

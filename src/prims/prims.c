@@ -6,6 +6,7 @@
 #include "idiom/syntax.h"
 #include "idiom/vm.h"
 
+#include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
@@ -186,6 +187,46 @@ static bool prim_tuple_get(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
     return !(err && err->present);
 }
 
+static size_t utf8_decode(const unsigned char *s, size_t len, int32_t *cp) {
+    unsigned char b = s[0];
+    if (b < 0x80) { *cp = (int32_t)b; return 1u; }
+    size_t need;
+    int32_t min, c;
+    if ((b & 0xE0u) == 0xC0u) { need = 2u; min = 0x80; c = b & 0x1F; }
+    else if ((b & 0xF0u) == 0xE0u) { need = 3u; min = 0x800; c = b & 0x0F; }
+    else if ((b & 0xF8u) == 0xF0u) { need = 4u; min = 0x10000; c = b & 0x07; }
+    else { *cp = 0xFFFD; return 1u; }
+    if (len < need) { *cp = 0xFFFD; return 1u; }
+    for (size_t i = 1; i < need; i++) {
+        if ((s[i] & 0xC0u) != 0x80u) { *cp = 0xFFFD; return 1u; }
+        c = (c << 6) | (s[i] & 0x3F);
+    }
+    if (c < min || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) { *cp = 0xFFFD; return 1u; }
+    *cp = c;
+    return need;
+}
+
+static size_t utf8_encode(int64_t cp, char buf[4]) {
+    if (cp < 0 || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return 0u;
+    if (cp < 0x80) { buf[0] = (char)cp; return 1u; }
+    if (cp < 0x800) {
+        buf[0] = (char)(0xC0 | (cp >> 6));
+        buf[1] = (char)(0x80 | (cp & 0x3F));
+        return 2u;
+    }
+    if (cp < 0x10000) {
+        buf[0] = (char)(0xE0 | (cp >> 12));
+        buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = (char)(0x80 | (cp & 0x3F));
+        return 3u;
+    }
+    buf[0] = (char)(0xF0 | (cp >> 18));
+    buf[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    buf[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    buf[3] = (char)(0x80 | (cp & 0x3F));
+    return 4u;
+}
+
 static bool prim_to_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
     if (idm_is_empty_list(v) || idm_is_pair(v)) { *out = v; return true; }
@@ -217,7 +258,25 @@ static bool prim_to_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError
         *out = result;
         return true;
     }
-    return type_error(rt, err, "to-list", v, "a list, vector, tuple, or dict");
+    if (idm_is_string(v)) {
+        const unsigned char *bytes = (const unsigned char *)idm_string_bytes(v);
+        size_t len = idm_string_length(v);
+        IdmValue runes = idm_empty_list();
+        for (size_t i = 0; i < len;) {
+            int32_t cp;
+            i += utf8_decode(bytes + i, len - i, &cp);
+            runes = idm_cons(rt, idm_int((int64_t)cp), runes, err);
+            if (err && err->present) return false;
+        }
+        IdmValue result = idm_empty_list();
+        for (; idm_is_pair(runes); runes = idm_cdr(runes, err)) {
+            result = idm_cons(rt, idm_car(runes, err), result, err);
+            if (err && err->present) return false;
+        }
+        *out = result;
+        return true;
+    }
+    return type_error(rt, err, "to-list", v, "a list, vector, tuple, dict, or string");
 }
 
 static bool prim_cd(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
@@ -1091,11 +1150,17 @@ static const char *resolve_cwd(const char *path, char *buf, size_t cap) {
     return buf;
 }
 
+static const char *resolve_cwd_record(IdmRuntime *rt, const char *path, char *buf, size_t cap) {
+    const char *resolved = resolve_cwd(path, buf, cap);
+    if (resolved) idm_phase_io_record(rt, resolved);
+    return resolved;
+}
+
 static bool prim_file_read(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     if (!require_string_arg(rt, args[0], &path, &plen, "file-read", err)) return false;
     char pb[PATH_MAX];
-    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
+    if (!(path = resolve_cwd_record(rt, path, pb, sizeof(pb)))) return result_error(rt, out, err);
     char *data = NULL;
     size_t len = 0;
     IdmError inner;
@@ -1130,7 +1195,7 @@ static bool prim_file_exists(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmE
     const char *path; size_t plen;
     if (!require_string_arg(rt, args[0], &path, &plen, "file-exists?", err)) return false;
     char pb[PATH_MAX];
-    path = resolve_cwd(path, pb, sizeof(pb));
+    path = resolve_cwd_record(rt, path, pb, sizeof(pb));
     *out = path && access(path, F_OK) == 0 ? idm_atom(rt, "true") : idm_atom(rt, "false");
     return true;
 }
@@ -1139,7 +1204,7 @@ static bool prim_file_stat(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
     const char *path; size_t plen;
     if (!require_string_arg(rt, args[0], &path, &plen, "file-stat", err)) return false;
     char pb[PATH_MAX];
-    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
+    if (!(path = resolve_cwd_record(rt, path, pb, sizeof(pb)))) return result_error(rt, out, err);
     struct stat st;
     if (stat(path, &st) != 0) return result_error(rt, out, err);
     IdmValue items[4];
@@ -1671,6 +1736,161 @@ static bool prim_bind_bang(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
     return wrap_owned_syntax(rt, syn, out, err);
 }
 
+static bool prim_abs(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag == IDM_VAL_FLOAT) { *out = idm_float(fabs(args[0].as.f)); return true; }
+    if (args[0].tag != IDM_VAL_INT) return type_error(rt, err, "abs", args[0], "a number");
+    if (args[0].as.i == INT64_MIN) return overflow_error(rt, "abs", err);
+    *out = idm_int(args[0].as.i < 0 ? -args[0].as.i : args[0].as.i);
+    return true;
+}
+
+static bool prim_float_unary(IdmRuntime *rt, const char *name, double (*fn)(double), IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag == IDM_VAL_INT) { *out = args[0]; return true; }
+    if (args[0].tag != IDM_VAL_FLOAT) return type_error(rt, err, name, args[0], "a number");
+    *out = idm_float(fn(args[0].as.f));
+    return true;
+}
+
+static bool prim_sqrt(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    double x = 0.0;
+    if (!num_as_double(args[0], &x)) return type_error(rt, err, "sqrt", args[0], "a number");
+    if (x < 0.0) {
+        idm_error_set(err, idm_span_unknown(NULL), "sqrt of a negative number");
+        return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "sqrt"), args[0]);
+    }
+    *out = idm_float(sqrt(x));
+    return true;
+}
+
+static bool prim_floor_divmod(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *name = idm_primitive_name(prim);
+    bool ints = false;
+    int64_t a = 0, b = 0;
+    double x = 0.0, y = 0.0;
+    if (!num_pair(rt, name, args, &ints, &a, &b, &x, &y, err)) return false;
+    if (!ints) {
+        if (y == 0.0) return div_zero_error(rt, name, err);
+        if (prim == IDM_PRIM_FLOOR_DIV) { *out = idm_float(floor(x / y)); return true; }
+        double r = fmod(x, y);
+        if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
+        *out = idm_float(r);
+        return true;
+    }
+    if (b == 0) return div_zero_error(rt, name, err);
+    if (a == INT64_MIN && b == -1) return overflow_error(rt, name, err);
+    int64_t q = a / b;
+    int64_t r = a % b;
+    if (r != 0 && ((r < 0) != (b < 0))) { q -= 1; r += b; }
+    *out = idm_int(prim == IDM_PRIM_FLOOR_DIV ? q : r);
+    return true;
+}
+
+static bool parse_result_error(IdmRuntime *rt, const char *what, IdmValue input, IdmValue *out, IdmError *err) {
+    IdmValue d[3] = { idm_atom(rt, "parse"), idm_atom(rt, what), input };
+    IdmValue detail = idm_tuple(rt, d, 3u, err);
+    if (err && err->present) return false;
+    IdmValue items[2] = { idm_atom(rt, "error"), detail };
+    *out = idm_tuple(rt, items, 2u, err);
+    return !(err && err->present);
+}
+
+static bool parse_prelude(IdmRuntime *rt, const char *name, IdmValue arg, char **out_buf, IdmError *err) {
+    const char *s; size_t len;
+    if (!require_string_arg(rt, arg, &s, &len, name, err)) return false;
+    if (len == 0 || isspace((unsigned char)s[0])) { *out_buf = NULL; return true; }
+    char *buf = idm_strndup(s, len);
+    if (!buf) return idm_error_oom(err, idm_span_unknown(NULL));
+    *out_buf = buf;
+    return true;
+}
+
+static bool prim_parse_int(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    char *buf = NULL;
+    if (!parse_prelude(rt, "parse-int", args[0], &buf, err)) return false;
+    if (!buf) return parse_result_error(rt, "int", args[0], out, err);
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(buf, &end, 10);
+    bool ok = end == buf + idm_string_length(args[0]) && errno == 0;
+    free(buf);
+    if (!ok) return parse_result_error(rt, "int", args[0], out, err);
+    return result_ok(rt, idm_int((int64_t)v), out, err);
+}
+
+static bool prim_parse_float(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    char *buf = NULL;
+    if (!parse_prelude(rt, "parse-float", args[0], &buf, err)) return false;
+    if (!buf) return parse_result_error(rt, "float", args[0], out, err);
+    char *end = NULL;
+    double v = strtod(buf, &end);
+    bool ok = end == buf + idm_string_length(args[0]);
+    free(buf);
+    if (!ok) return parse_result_error(rt, "float", args[0], out, err);
+    return result_ok(rt, idm_float(v), out, err);
+}
+
+static bool prim_file_mkdir(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-mkdir", err)) return false;
+    char pb[PATH_MAX];
+    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
+    if (mkdir(path, 0777) != 0) return result_error(rt, out, err);
+    *out = idm_atom(rt, "ok");
+    return true;
+}
+
+static bool prim_file_append(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    const char *data; size_t dlen;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-append", err)) return false;
+    if (!require_string_arg(rt, args[1], &data, &dlen, "file-append", err)) return false;
+    char pb[PATH_MAX];
+    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
+    FILE *f = fopen(path, "ab");
+    if (!f) return result_error(rt, out, err);
+    bool ok = fwrite(data, 1u, dlen, f) == dlen;
+    ok = (fclose(f) == 0) && ok;
+    if (!ok) return result_error(rt, out, err);
+    *out = idm_atom(rt, "ok");
+    return true;
+}
+
+static bool prim_ord_str(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    char buf[4];
+    size_t n = args[0].tag == IDM_VAL_INT ? utf8_encode(args[0].as.i, buf) : 0u;
+    if (n == 0u) return type_error(rt, err, "ord->str", args[0], "a Unicode codepoint");
+    *out = idm_string_n(rt, buf, n, err);
+    return !(err && err->present);
+}
+
+static bool prim_str_ord(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *s; size_t len;
+    if (!require_string_arg(rt, args[0], &s, &len, "str->ord", err)) return false;
+    if (len == 0) { *out = idm_nil(); return true; }
+    int32_t cp;
+    utf8_decode((const unsigned char *)s, len, &cp);
+    *out = idm_int((int64_t)cp);
+    return true;
+}
+
+static bool prim_from_runes(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    IdmValue v = args[0];
+    IdmBuffer buf;
+    idm_buf_init(&buf);
+    for (; idm_is_pair(v); v = idm_cdr(v, err)) {
+        IdmValue item = idm_car(v, err);
+        if (err && err->present) { idm_buf_destroy(&buf); return false; }
+        char enc[4];
+        size_t n = item.tag == IDM_VAL_INT ? utf8_encode(item.as.i, enc) : 0u;
+        if (n == 0u) { idm_buf_destroy(&buf); return type_error(rt, err, "from-runes", item, "a Unicode codepoint"); }
+        if (!idm_buf_append_n(&buf, enc, n)) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
+    }
+    if (!idm_is_empty_list(v)) { idm_buf_destroy(&buf); return type_error(rt, err, "from-runes", v, "a list of codepoints"); }
+    *out = idm_string_n(rt, buf.data ? buf.data : "", buf.len, err);
+    idm_buf_destroy(&buf);
+    return !(err && err->present);
+}
+
 bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
     if (!require_arity(rt, prim, argc, err)) return false;
     switch (prim) {
@@ -1787,6 +2007,19 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_RECORD_PRED: return prim_record_pred(rt, args, out, err);
         case IDM_PRIM_RECORD_TYPE: return prim_record_type(rt, args, out, err);
         case IDM_PRIM_RECORD_FIELD: return prim_record_field(rt, args, out, err);
+        case IDM_PRIM_ABS: return prim_abs(rt, args, out, err);
+        case IDM_PRIM_FLOOR: return prim_float_unary(rt, "floor", floor, args, out, err);
+        case IDM_PRIM_ROUND: return prim_float_unary(rt, "round", round, args, out, err);
+        case IDM_PRIM_SQRT: return prim_sqrt(rt, args, out, err);
+        case IDM_PRIM_FLOOR_DIV:
+        case IDM_PRIM_FLOOR_MOD: return prim_floor_divmod(rt, prim, args, out, err);
+        case IDM_PRIM_PARSE_INT: return prim_parse_int(rt, args, out, err);
+        case IDM_PRIM_PARSE_FLOAT: return prim_parse_float(rt, args, out, err);
+        case IDM_PRIM_FILE_MKDIR: return prim_file_mkdir(rt, args, out, err);
+        case IDM_PRIM_FILE_APPEND: return prim_file_append(rt, args, out, err);
+        case IDM_PRIM_ORD_STR: return prim_ord_str(rt, args, out, err);
+        case IDM_PRIM_STR_ORD: return prim_str_ord(rt, args, out, err);
+        case IDM_PRIM_FROM_RUNES: return prim_from_runes(rt, args, out, err);
     }
     return idm_error_set(err, idm_span_unknown(NULL), "unimplemented primitive '%s'", idm_primitive_name(prim));
 }

@@ -435,6 +435,7 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
         if (ch == '.' && peek_n(&lx, 1) == '.' && peek_n(&lx, 2) == '.') { advance(&lx); advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_IDENT, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '.') { advance(&lx); if (!add_token(out, &lx, TOK_DOT, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '*' && peek_n(&lx, 1) == '*') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
+        if (ch == '/' && peek_n(&lx, 1) == '/' && is_delim(peek_n(&lx, 2))) { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_OP, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if ((ch == '-' && !isdigit((unsigned char)peek_n(&lx, 1)) && peek_n(&lx, 1) != '>' && !isspace((unsigned char)peek_n(&lx, 1))) ||
             ch == '~' ||
             ((ch == '/' || ch == '+' || ch == '*') && !is_delim(peek_n(&lx, 1)))) {

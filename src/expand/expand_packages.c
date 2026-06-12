@@ -3,7 +3,7 @@
 static void expand_cache_destroy(void *p);
 static ExpandCache *expand_cache_get(IdmRuntime *rt);
 static ExpandCache *kernel_artifact_get(IdmRuntime *rt, IdmError *err);
-static bool ctx_record_dep(ExpandContext *ctx, const char *path, const unsigned char hash[32], IdmError *err);
+static bool ctx_record_dep(ExpandContext *ctx, const char *path, const unsigned char hash[32], uint8_t kind, IdmError *err);
 static bool artifact_record_consumer_deps(ExpandContext *ctx, const char *path, const IdmArtifact *art, IdmError *err);
 static IdmModuleRef *relocated_module_ref(ExpandContext *ctx, IdmModuleRef *src, IdmScopeId min_id, int64_t delta, IdmError *err);
 static bool install_macro_twin(ExpandContext *ctx, const char *name, IdmScopeId base, size_t macros_before, IdmError *err);
@@ -238,7 +238,7 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
     ExpandCache *cache = kernel_artifact_get(ctx->rt, err);
     if (!cache) return false;
     IdmArtifact *k = &cache->kernel;
-    if (!ctx_record_dep(ctx, cache->kernel_path, k->src_hash, err)) return false;
+    if (!artifact_record_consumer_deps(ctx, cache->kernel_path, k, err)) return false;
     if (!record_activation(ctx, "std/kernel", idm_span_unknown(NULL), err)) return false;
     if (ctx->scope_store.next_scope < cache->kernel_scope_end) ctx->scope_store.next_scope = cache->kernel_scope_end;
     const char *kernel_name = k->name ? k->name : "std/kernel";
@@ -412,7 +412,7 @@ bool install_artifact_protocols(ExpandContext *ctx, const IdmPkgProtocol *protoc
     return true;
 }
 
-static bool ctx_record_dep(ExpandContext *ctx, const char *path, const unsigned char hash[32], IdmError *err) {
+static bool ctx_record_dep(ExpandContext *ctx, const char *path, const unsigned char hash[32], uint8_t kind, IdmError *err) {
     for (size_t i = 0; i < ctx->dep_count; i++) {
         if (strcmp(ctx->deps[i].path, path) == 0) return true;
     }
@@ -426,14 +426,15 @@ static bool ctx_record_dep(ExpandContext *ctx, const char *path, const unsigned 
     ctx->deps[ctx->dep_count].path = idm_strdup(path);
     if (!ctx->deps[ctx->dep_count].path) return idm_error_oom(err, idm_span_unknown(NULL));
     memcpy(ctx->deps[ctx->dep_count].hash, hash, 32u);
+    ctx->deps[ctx->dep_count].kind = kind;
     ctx->dep_count++;
     return true;
 }
 
 static bool artifact_record_consumer_deps(ExpandContext *ctx, const char *path, const IdmArtifact *art, IdmError *err) {
-    if (!ctx_record_dep(ctx, path, art->src_hash, err)) return false;
+    if (!ctx_record_dep(ctx, path, art->src_hash, IDM_DEP_PACKAGE, err)) return false;
     for (size_t i = 0; i < art->dep_count; i++) {
-        if (!ctx_record_dep(ctx, art->deps[i].path, art->deps[i].hash, err)) return false;
+        if (!ctx_record_dep(ctx, art->deps[i].path, art->deps[i].hash, art->deps[i].kind, err)) return false;
     }
     return true;
 }
@@ -726,6 +727,10 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
         ctx_destroy(&ctx);
         return false;
     }
+    IdmPhaseReads reads;
+    memset(&reads, 0, sizeof(reads));
+    IdmPhaseReads *old_reads = rt->phase_reads;
+    rt->phase_reads = &reads;
     SavedHooks saved;
     hooks_install(rt, &ctx, &saved);
     bool ok = ctx_seed(&ctx, err) && (kernel_mode || ctx_activate_kernel(&ctx, err));
@@ -750,6 +755,19 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
     if (ok && ctx.protocol_name && !predeclare_protocol_methods(&ctx, scoped_pkg->as.seq.items, 1, scoped_pkg->as.seq.count, err)) ok = false;
     IdmCore *body = ok ? expand_body_items(&ctx, scoped_pkg->as.seq.items, 1, scoped_pkg->as.seq.count, false, err) : NULL;
     idm_syn_free(scoped_pkg);
+    rt->phase_reads = old_reads;
+    if (body && reads.failed) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        idm_core_free(body);
+        body = NULL;
+    }
+    for (size_t i = 0; body && i < reads.count; i++) {
+        if (!ctx_record_dep(&ctx, reads.items[i].path, reads.items[i].hash, reads.items[i].kind, err)) {
+            idm_core_free(body);
+            body = NULL;
+        }
+    }
+    idm_phase_reads_destroy(&reads);
     if (!body) {
         hooks_restore(rt, &saved);
         *store = ctx.scope_store;

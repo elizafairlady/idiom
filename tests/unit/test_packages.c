@@ -2,6 +2,8 @@
 
 #include "idiom/artifact.h"
 
+#include <utime.h>
+
 static void test_kernel_runtime_exports(void) {
     const char *old = getenv("IDIOMROOT");
     char *saved = old ? idm_strdup(old) : NULL;
@@ -234,6 +236,124 @@ static void test_stale_cache_runs_no_phase_init(void) {
     remove("build/stalecache.ic");
 }
 
+static void test_phase_read_invalidation(void) {
+    struct utimbuf old_time = { 1000, 1000 };
+    struct stat st;
+    remove("build/readpkg.ic");
+    CHECK(write_text_file("build/readpkg-data.txt", "A"));
+    CHECK(write_text_file("build/readpkg.id",
+        "package readpkg\n"
+        "for-syntax do\n"
+        "  defn payload do\n"
+        "    {:ok s} -> s\n"
+        "    _ -> \"\"\n"
+        "  end\n"
+        "  data = payload (file-read \"build/readpkg-data.txt\")\n"
+        "  defmacro bakedm stx -> make-syntax-int stx (str-byte data 0)\n"
+        "end\n"
+        "export defn baked _ -> bakedm x\n"));
+    check_pkg_value("use build/readpkg\nbaked 0\n", "65");
+    CHECK(utime("build/readpkg.ic", &old_time) == 0);
+    check_pkg_value("use build/readpkg\nbaked 0\n", "65");
+    CHECK(stat("build/readpkg.ic", &st) == 0 && st.st_mtime == 1000);
+    CHECK(write_text_file("build/readpkg-data.txt", "B"));
+    check_pkg_value("use build/readpkg\nbaked 0\n", "66");
+    CHECK(stat("build/readpkg.ic", &st) == 0 && st.st_mtime != 1000);
+
+    remove("build/readuser.ic");
+    CHECK(write_text_file("build/readuser.id", "package readuser\nuse build/readpkg\nexport defn ubaked x -> baked x\n"));
+    check_pkg_value("use build/readuser\nubaked 0\n", "66");
+    CHECK(write_text_file("build/readpkg-data.txt", "C"));
+    check_pkg_value("use build/readuser\nubaked 0\n", "67");
+
+    remove("build/probepkg.ic");
+    remove("build/probe-target.txt");
+    CHECK(write_text_file("build/probepkg.id",
+        "package probepkg\n"
+        "for-syntax do\n"
+        "  defn flag do\n"
+        "    :true -> 1\n"
+        "    _ -> 0\n"
+        "  end\n"
+        "  seen = flag (file-exists? \"build/probe-target.txt\")\n"
+        "  defmacro seenm stx -> make-syntax-int stx seen\n"
+        "end\n"
+        "export defn probed _ -> seenm x\n"));
+    check_pkg_value("use build/probepkg\nprobed 0\n", "0");
+    check_pkg_value("use build/probepkg\nprobed 0\n", "0");
+    CHECK(write_text_file("build/probe-target.txt", "now"));
+    check_pkg_value("use build/probepkg\nprobed 0\n", "1");
+    remove("build/probe-target.txt");
+    check_pkg_value("use build/probepkg\nprobed 0\n", "0");
+
+    remove("build/noreads.ic");
+    CHECK(write_text_file("build/noreads.id", "package noreads\nexport defn nr x -> add x 1\n"));
+    check_pkg_value("use build/noreads\nnr 41\n", "42");
+    CHECK(utime("build/noreads.ic", &old_time) == 0);
+    CHECK(write_text_file("build/readpkg-data.txt", "D"));
+    check_pkg_value("use build/noreads\nnr 41\n", "42");
+    CHECK(stat("build/noreads.ic", &st) == 0 && st.st_mtime == 1000);
+
+    remove("build/readpkg.ic");
+    setenv("IDIOMCACHE", "0", 1);
+    check_pkg_value("use build/readpkg\nbaked 0\n", "68");
+    FILE *probe = fopen("build/readpkg.ic", "rb");
+    CHECK(probe == NULL);
+    if (probe) fclose(probe);
+    unsetenv("IDIOMCACHE");
+}
+
+static void test_read_set_roundtrip(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmArtifact art;
+    memset(&art, 0, sizeof(art));
+    idm_sha256("roundtrip-src", 13u, art.src_hash);
+    art.module = malloc(sizeof(*art.module));
+    CHECK(art.module != NULL);
+    idm_bc_init(art.module);
+    uint32_t nil_const = 0;
+    CHECK(idm_bc_add_const(art.module, idm_nil(), &nil_const));
+    CHECK(idm_bc_add_function(art.module, "init", 0, 0, 0, &art.init_fn));
+    CHECK(idm_bc_emit_u32(art.module, IDM_OP_LOAD_CONST, nil_const, NULL));
+    CHECK(idm_bc_emit_op(art.module, IDM_OP_RETURN, NULL));
+    art.deps = calloc(4u, sizeof(*art.deps));
+    CHECK(art.deps != NULL);
+    art.dep_count = 4u;
+    art.deps[0].path = idm_strdup("std/kernel");
+    art.deps[0].kind = IDM_DEP_PACKAGE;
+    idm_sha256("kernel", 6u, art.deps[0].hash);
+    art.deps[1].path = idm_strdup("/abs/data.txt");
+    art.deps[1].kind = IDM_DEP_FILE_HASH;
+    idm_sha256("data", 4u, art.deps[1].hash);
+    art.deps[2].path = idm_strdup("/abs/somedir");
+    art.deps[2].kind = IDM_DEP_FILE_PRESENT;
+    art.deps[3].path = idm_strdup("/abs/missing.txt");
+    art.deps[3].kind = IDM_DEP_FILE_ABSENT;
+    for (size_t i = 0; i < art.dep_count; i++) CHECK(art.deps[i].path != NULL);
+
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(idm_artifact_serialize(&art, &blob, &err));
+    CHECK(!err.present);
+    IdmArtifact back;
+    CHECK(idm_artifact_deserialize(&rt, (const unsigned char *)blob.data, blob.len, &back, &err));
+    CHECK(!err.present);
+    CHECK(back.dep_count == art.dep_count);
+    for (size_t i = 0; i < art.dep_count && i < back.dep_count; i++) {
+        CHECK_STR(back.deps[i].path, art.deps[i].path);
+        CHECK(back.deps[i].kind == art.deps[i].kind);
+        CHECK(memcmp(back.deps[i].hash, art.deps[i].hash, 32u) == 0);
+    }
+    idm_buf_destroy(&blob);
+    idm_artifact_destroy(&back);
+    idm_artifact_destroy(&art);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
 static void test_package_cycle_detected(void) {
     CHECK(write_text_file("build/cyclea.id", "package cyclea\nuse build/cycleb\nexport defn aval x -> x\n"));
     CHECK(write_text_file("build/cycleb.id", "package cycleb\nuse build/cyclea\nexport defn bval x -> x\n"));
@@ -269,6 +389,8 @@ void run_package_suite(void) {
     test_ishc_cache_invalidation();
     test_ishc_std_root_identity();
     test_stale_cache_runs_no_phase_init();
+    test_phase_read_invalidation();
+    test_read_set_roundtrip();
     test_package_cycle_detected();
     test_idiompath_lookup();
 }

@@ -4,6 +4,8 @@
 #include "idiom/vm.h"
 
 #include <dirent.h>
+#include <limits.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -321,7 +323,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 10u
+#define IDM_ARTIFACT_VERSION 11u
 
 static bool artifact_noop_register_operator(void *user, IdmRuntime *rt, const IdmSyntax *name, int64_t precedence, const char *assoc, const char *fixity, const IdmSyntax *target, IdmError *err) {
     (void)user; (void)rt; (void)name; (void)precedence; (void)assoc; (void)fixity; (void)target; (void)err;
@@ -413,6 +415,7 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     for (size_t i = 0; ok && i < art->dep_count; i++) {
         ok = idm_buf_put_str(out, art->deps[i].path, strlen(art->deps[i].path));
         ok = ok && idm_buf_append_n(out, (const char *)art->deps[i].hash, 32u);
+        ok = ok && idm_buf_put_u8(out, art->deps[i].kind);
     }
     ok = ok && idm_buf_put_u32(out, art->scope_base) && idm_buf_put_u32(out, art->scope_end);
     ok = ok && idm_buf_put_u8(out, art->name ? 1u : 0u);
@@ -498,6 +501,8 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
                 memcpy(out->deps[i].hash, r.data + r.pos, 32u);
                 r.pos += 32u;
             }
+            out->deps[i].kind = ok ? idm_rd_u8(&r) : 0;
+            if (ok && !r.ok) ok = false;
         }
     }
     out->scope_base = ok ? idm_rd_u32(&r) : 0;
@@ -716,6 +721,86 @@ void idm_artifact_cache_write(const char *path, const IdmArtifact *art) {
     idm_error_clear(&werr);
 }
 
+static pthread_mutex_t g_phase_reads_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void file_state_observe(const char *path, unsigned char hash[32], uint8_t *kind) {
+    char *data = NULL;
+    size_t len = 0;
+    IdmError rerr;
+    idm_error_init(&rerr);
+    bool readable = idm_read_file(path, &data, &len, &rerr);
+    idm_error_clear(&rerr);
+    memset(hash, 0, 32u);
+    if (readable) {
+        idm_sha256(data ? data : "", len, hash);
+        free(data);
+        *kind = IDM_DEP_FILE_HASH;
+    } else {
+        *kind = access(path, F_OK) == 0 ? IDM_DEP_FILE_PRESENT : IDM_DEP_FILE_ABSENT;
+    }
+}
+
+void idm_phase_io_record(IdmRuntime *rt, const char *path) {
+    IdmPhaseReads *reads = rt->phase_reads;
+    if (!reads || !rt->protocol_phase) return;
+    char abs[PATH_MAX];
+    if (path[0] != '/') {
+        char cwd[PATH_MAX];
+        if (!getcwd(cwd, sizeof(cwd)) || snprintf(abs, sizeof(abs), "%s/%s", cwd, path) >= (int)sizeof(abs)) {
+            reads->failed = true;
+            return;
+        }
+        path = abs;
+    }
+    unsigned char hash[32];
+    uint8_t kind = 0;
+    file_state_observe(path, hash, &kind);
+    pthread_mutex_lock(&g_phase_reads_mutex);
+    for (size_t i = 0; i < reads->count; i++) {
+        if (strcmp(reads->items[i].path, path) == 0) {
+            pthread_mutex_unlock(&g_phase_reads_mutex);
+            return;
+        }
+    }
+    if (reads->count == reads->cap) {
+        size_t cap = reads->cap ? reads->cap * 2u : 8u;
+        IdmArtifactDep *grown = realloc(reads->items, cap * sizeof(*grown));
+        if (!grown) {
+            reads->failed = true;
+            pthread_mutex_unlock(&g_phase_reads_mutex);
+            return;
+        }
+        reads->items = grown;
+        reads->cap = cap;
+    }
+    IdmArtifactDep *dep = &reads->items[reads->count];
+    dep->path = idm_strdup(path);
+    if (!dep->path) {
+        reads->failed = true;
+        pthread_mutex_unlock(&g_phase_reads_mutex);
+        return;
+    }
+    memcpy(dep->hash, hash, 32u);
+    dep->kind = kind;
+    reads->count++;
+    pthread_mutex_unlock(&g_phase_reads_mutex);
+}
+
+void idm_phase_reads_destroy(IdmPhaseReads *reads) {
+    for (size_t i = 0; i < reads->count; i++) free(reads->items[i].path);
+    free(reads->items);
+    memset(reads, 0, sizeof(*reads));
+}
+
+bool idm_artifact_dep_verified(IdmRuntime *rt, const IdmArtifactDep *dep) {
+    if (dep->kind == IDM_DEP_PACKAGE) return idm_artifact_path_verified(rt, dep->path, dep->hash);
+    unsigned char hash[32];
+    uint8_t kind = 0;
+    file_state_observe(dep->path, hash, &kind);
+    if (kind != dep->kind) return false;
+    return kind != IDM_DEP_FILE_HASH || memcmp(hash, dep->hash, 32u) == 0;
+}
+
 bool idm_artifact_path_verified(IdmRuntime *rt, const char *path, const unsigned char want[32]) {
     IdmBuffer src;
     idm_buf_init(&src);
@@ -753,7 +838,7 @@ bool idm_artifact_cache_load(IdmRuntime *rt, const char *path, const unsigned ch
     if (ok) {
         ok = memcmp(out->src_hash, src_hash, 32u) == 0;
         for (size_t i = 0; ok && i < out->dep_count; i++) {
-            ok = idm_artifact_path_verified(rt, out->deps[i].path, out->deps[i].hash);
+            ok = idm_artifact_dep_verified(rt, &out->deps[i]);
         }
         if (ok) ok = artifact_run_phase_inits(rt, out, &derr);
         if (!ok) idm_artifact_destroy(out);

@@ -1,0 +1,12 @@
+use std/test
+use tests/pkg/readcfg
+implement std/test
+
+suite do
+  test "phase-one-file-read-bakes-into-artifact" do
+    assert-eq (cfg-byte 0) 105
+  end
+  test "phase-one-absent-probe-bakes-zero" do
+    assert-eq (cfg-missing 0) 0
+  end
+end

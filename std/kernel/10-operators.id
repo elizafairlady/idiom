@@ -9,6 +9,8 @@ operator - precedence: 50 assoc: left fixity: infix -> sub
 operator * precedence: 60 assoc: left fixity: infix -> mul
 operator / precedence: 60 assoc: left fixity: infix -> div
 operator % precedence: 60 assoc: left fixity: infix -> mod
+operator // precedence: 60 assoc: left fixity: infix -> floor-div
+operator %% precedence: 60 assoc: left fixity: infix -> floor-mod
 operator ** precedence: 70 assoc: right fixity: infix -> pow
 operator - precedence: 80 fixity: prefix -> neg
 operator |> precedence: 10 assoc: left fixity: infix -> thread-first

@@ -100,3 +100,17 @@ defn downbyte b -> if (and (gte? b 65) (lte? b 90)) do add b 32 else do b end
 
 export defn upcase s -> map-bytes s 0 (str-len s) &upbyte ""
 export defn downcase s -> map-bytes s 0 (str-len s) &downbyte ""
+
+export defn parse-int! do
+  s -> match (parse-int s) do
+    {:ok n} -> n
+    {:error reason} -> error reason
+  end
+end
+
+export defn parse-float! do
+  s -> match (parse-float s) do
+    {:ok f} -> f
+    {:error reason} -> error reason
+  end
+end

@@ -1,11 +1,15 @@
 package file
 
+use std/path
+
 export defn read path -> file-read path
 export defn write path data -> file-write path data
 export defn exists? path -> file-exists? path
 export defn stat path -> file-stat path
 export defn ls path -> file-list path
 export defn remove path -> file-remove path
+export defn mkdir path -> file-mkdir path
+export defn append path data -> file-append path data
 
 export defn read! do
   path -> match (file-read path) do
@@ -32,5 +36,41 @@ export defn dir? do
   path -> match (file-stat path) do
     {:ok {:stat :dir _ _}} -> :true
     _ -> :false
+  end
+end
+
+export defn mkdir! do
+  path -> match (file-mkdir path) do
+    :ok -> :ok
+    {:error reason} -> error (tuple :file-mkdir path reason)
+  end
+end
+
+export defn append! do
+  path data -> match (file-append path data) do
+    :ok -> :ok
+    {:error reason} -> error (tuple :file-append path reason)
+  end
+end
+
+defn mkdir-step do
+  path -> match (file-mkdir path) do
+    {:error :eexist} -> if (dir? path) do :ok else do tuple :error :eexist end
+    r -> r
+  end
+end
+
+export defn mkdir-p do
+  path when (dir? path) -> :ok
+  path -> match (mkdir-p (dirname path)) do
+    :ok -> mkdir-step path
+    e -> e
+  end
+end
+
+export defn mkdir-p! do
+  path -> match (mkdir-p path) do
+    :ok -> :ok
+    {:error reason} -> error (tuple :file-mkdir path reason)
   end
 end

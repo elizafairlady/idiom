@@ -835,6 +835,19 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_DICT_SIZE] = {"dict-size", 1, 1},
     [IDM_PRIM_RECORD_FIELD] = {"record-field", 2, 2},
     [IDM_PRIM_RECORD_NEW] = {"%record-new", 2, 2},
+    [IDM_PRIM_ABS] = {"abs", 1, 1},
+    [IDM_PRIM_FLOOR] = {"floor", 1, 1},
+    [IDM_PRIM_ROUND] = {"round", 1, 1},
+    [IDM_PRIM_SQRT] = {"sqrt", 1, 1},
+    [IDM_PRIM_FLOOR_DIV] = {"floor-div", 2, 2},
+    [IDM_PRIM_FLOOR_MOD] = {"floor-mod", 2, 2},
+    [IDM_PRIM_PARSE_INT] = {"parse-int", 1, 1},
+    [IDM_PRIM_PARSE_FLOAT] = {"parse-float", 1, 1},
+    [IDM_PRIM_FILE_MKDIR] = {"file-mkdir", 1, 1},
+    [IDM_PRIM_FILE_APPEND] = {"file-append", 2, 2},
+    [IDM_PRIM_ORD_STR] = {"ord->str", 1, 1},
+    [IDM_PRIM_STR_ORD] = {"str->ord", 1, 1},
+    [IDM_PRIM_FROM_RUNES] = {"from-runes", 1, 1},
 };
 
 size_t idm_primitive_count(void) {

@@ -126,6 +126,8 @@ typedef struct IdmNamespace {
     size_t slot_cap;
 } IdmNamespace;
 
+typedef struct IdmPhaseReads IdmPhaseReads;
+
 struct IdmRuntime {
     IdmIntern intern;
     IdmHeap heap;
@@ -157,6 +159,7 @@ struct IdmRuntime {
     size_t gc_value_cap;
     void *expand_cache;
     void (*expand_cache_free)(void *cache);
+    IdmPhaseReads *phase_reads;
     char **owned_temps;
     size_t owned_temp_count;
     size_t owned_temp_cap;
@@ -169,6 +172,7 @@ IdmValue idm_ns_slot_get(const IdmNamespace *ns, uint32_t id);
 
 void idm_runtime_init(IdmRuntime *rt);
 void idm_runtime_destroy(IdmRuntime *rt);
+void idm_phase_io_record(IdmRuntime *rt, const char *path);
 bool idm_runtime_own_temp(IdmRuntime *rt, const char *path);
 bool idm_runtime_register_gc_module(IdmRuntime *rt, const IdmBytecodeModule *module);
 void idm_runtime_unregister_gc_module(IdmRuntime *rt, const IdmBytecodeModule *module);
