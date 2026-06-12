@@ -1,6 +1,7 @@
 #define _XOPEN_SOURCE 700
 
 #include "idiom/prims.h"
+#include "idiom/actor.h"
 #include "idiom/bytecode.h"
 #include "idiom/expand.h"
 #include "idiom/syntax.h"
@@ -1891,6 +1892,81 @@ static bool prim_from_runes(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmEr
     return !(err && err->present);
 }
 
+static bool require_session(IdmRuntime *rt, const char *name, IdmError *err) {
+    if (rt->repl) return true;
+    return idm_error_set(err, idm_span_unknown(NULL), "%s requires a session context", name);
+}
+
+static bool prim_repl_compile(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (!require_session(rt, "repl-compile", err)) return false;
+    size_t len = 0;
+    const char *source = require_string(args[0], &len, err);
+    if (!source) return false;
+    IdmValue thunk = idm_nil();
+    uint64_t token = 0;
+    IdmReplStatus status = idm_repl_compile(rt->repl, source, &thunk, &token, err);
+    if (status == IDM_REPL_INCOMPLETE) {
+        *out = idm_atom(rt, "incomplete");
+        return true;
+    }
+    if (status == IDM_REPL_ERROR) {
+        IdmBuffer buf;
+        idm_buf_init(&buf);
+        bool rendered = idm_error_render(err, &buf);
+        idm_error_clear(err);
+        IdmValue items[2];
+        items[0] = idm_atom(rt, "error");
+        items[1] = idm_string_n(rt, rendered && buf.data ? buf.data : "", buf.len, err);
+        idm_buf_destroy(&buf);
+        if (err && err->present) return false;
+        *out = idm_tuple(rt, items, 2u, err);
+        return !(err && err->present);
+    }
+    IdmValue items[3];
+    items[0] = idm_atom(rt, "ok");
+    items[1] = thunk;
+    items[2] = idm_int((int64_t)token);
+    *out = idm_tuple(rt, items, 3u, err);
+    return !(err && err->present);
+}
+
+static bool prim_repl_abort(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (!require_session(rt, "repl-abort", err)) return false;
+    if (args[0].tag != IDM_VAL_INT) return type_error(rt, err, "repl-abort", args[0], "a compile token");
+    idm_repl_abort(rt->repl, (uint64_t)args[0].as.i);
+    *out = idm_atom(rt, "ok");
+    return true;
+}
+
+static bool prim_repl_spawn(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (!require_session(rt, "repl-spawn", err)) return false;
+    if (!idm_is_closure(args[0])) return type_error(rt, err, "repl-spawn", args[0], "a function value");
+    IdmScheduler *sched = idm_repl_scheduler(rt->repl);
+    IdmValue pid = idm_nil();
+    if (!idm_sched_spawn(sched, args[0], idm_current_exec(), &pid, err)) return false;
+    idm_sched_watch(sched, pid.as.id);
+    *out = pid;
+    return true;
+}
+
+static bool prim_repl_diagnostic(IdmRuntime *rt, IdmValue *out, IdmError *err) {
+    if (!require_session(rt, "repl-diagnostic", err)) return false;
+    char *diag = idm_sched_take_diagnostic(idm_repl_scheduler(rt->repl));
+    if (!diag) {
+        *out = idm_nil();
+        return true;
+    }
+    *out = idm_string(rt, diag, err);
+    free(diag);
+    return !(err && err->present);
+}
+
+static bool prim_ish_session(IdmRuntime *rt, IdmValue *out) {
+    uint64_t pid = rt->repl ? idm_repl_session_pid(rt->repl) : 0;
+    *out = pid != 0 ? idm_pid(pid) : idm_nil();
+    return true;
+}
+
 bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
     if (!require_arity(rt, prim, argc, err)) return false;
     switch (prim) {
@@ -2020,6 +2096,11 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_ORD_STR: return prim_ord_str(rt, args, out, err);
         case IDM_PRIM_STR_ORD: return prim_str_ord(rt, args, out, err);
         case IDM_PRIM_FROM_RUNES: return prim_from_runes(rt, args, out, err);
+        case IDM_PRIM_REPL_COMPILE: return prim_repl_compile(rt, args, out, err);
+        case IDM_PRIM_REPL_ABORT: return prim_repl_abort(rt, args, out, err);
+        case IDM_PRIM_REPL_SPAWN: return prim_repl_spawn(rt, args, out, err);
+        case IDM_PRIM_REPL_DIAGNOSTIC: return prim_repl_diagnostic(rt, out, err);
+        case IDM_PRIM_ISH_SESSION: return prim_ish_session(rt, out);
     }
     return idm_error_set(err, idm_span_unknown(NULL), "unimplemented primitive '%s'", idm_primitive_name(prim));
 }

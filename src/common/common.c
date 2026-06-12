@@ -100,6 +100,15 @@ void idm_error_fprint(FILE *out, const IdmError *err) {
     }
 }
 
+bool idm_error_render(const IdmError *err, IdmBuffer *out) {
+    if (!err || !err->present) return false;
+    const char *file = err->span.file ? err->span.file : "<unknown>";
+    if (err->span.line != 0) {
+        return idm_buf_appendf(out, "%s:%u:%u: error: %s%s", file, err->span.line, err->span.column, err->message ? err->message : "error", err->notes ? err->notes : "");
+    }
+    return idm_buf_appendf(out, "%s: error: %s%s", file, err->message ? err->message : "error", err->notes ? err->notes : "");
+}
+
 void idm_buf_init(IdmBuffer *buf) {
     buf->data = NULL;
     buf->len = 0;

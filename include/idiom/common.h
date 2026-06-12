@@ -38,6 +38,7 @@ bool idm_error_note(IdmError *err, const char *fmt, ...);
 bool idm_error_setv(IdmError *err, IdmSpan span, const char *fmt, va_list ap);
 bool idm_error_oom(IdmError *err, IdmSpan span);
 void idm_error_fprint(FILE *out, const IdmError *err);
+bool idm_error_render(const IdmError *err, IdmBuffer *out);
 
 void idm_buf_init(IdmBuffer *buf);
 void idm_buf_destroy(IdmBuffer *buf);

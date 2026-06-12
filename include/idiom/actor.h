@@ -12,6 +12,10 @@ typedef enum {
 IdmScheduler *idm_sched_create(IdmRuntime *rt, const IdmBytecodeModule *module, IdmError *err);
 void idm_sched_destroy(IdmScheduler *sched);
 bool idm_sched_run_main(IdmScheduler *sched, uint32_t main_fn, IdmValue *out_result, IdmError *err);
+bool idm_sched_eval(IdmScheduler *sched, IdmValue thunk, IdmValue *out_value, IdmError *err);
+void idm_sched_watch(IdmScheduler *sched, uint64_t pid);
+char *idm_sched_take_diagnostic(IdmScheduler *sched);
+bool idm_signals_install(IdmError *err);
 
 uint64_t idm_actor_pid(const IdmActor *actor);
 bool idm_actor_trap_exit_get(const IdmActor *actor);

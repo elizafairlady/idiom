@@ -10,6 +10,7 @@ typedef struct IdmSyntax IdmSyntax;
 typedef struct IdmRuntime IdmRuntime;
 typedef struct IdmBytecodeModule IdmBytecodeModule;
 typedef struct IdmExec IdmExec;
+typedef struct IdmRepl IdmRepl;
 
 typedef bool (*IdmLocalExpandFn)(void *user, IdmRuntime *rt, const IdmSyntax *syntax, IdmSyntax **out_syntax, IdmError *err);
 typedef bool (*IdmFreeIdentifierEqFn)(void *user, IdmRuntime *rt, const IdmSyntax *a, const IdmSyntax *b, bool *out_equal, IdmError *err);
@@ -163,6 +164,8 @@ struct IdmRuntime {
     char **owned_temps;
     size_t owned_temp_count;
     size_t owned_temp_cap;
+    IdmRepl *repl;
+    bool interactive;
 };
 
 IdmNamespace *idm_namespace_get_or_create(IdmRuntime *rt, const char *name);

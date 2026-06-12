@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #ifndef IDM_VERSION
 #define IDM_VERSION "0.0.0-dev"
@@ -136,6 +137,20 @@ int main(int argc, char **argv) {
         g_cli_args = argv + 2;
         g_cli_arg_count = (size_t)(argc - 2);
         return run_shell_file(argv[1]);
+    }
+    if (argc == 1 && !isatty(0)) {
+        IdmError err;
+        idm_error_init(&err);
+        char *source = NULL;
+        size_t len = 0;
+        if (!idm_read_stream(stdin, "<stdin>", &source, &len, &err)) {
+            idm_error_fprint(stderr, &err);
+            idm_error_clear(&err);
+            return 1;
+        }
+        int status = run_shell_source("<stdin>", source, false);
+        free(source);
+        return status;
     }
     usage(stderr);
     return 64;

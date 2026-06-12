@@ -8,6 +8,7 @@ int main(void) {
     run_protocol_suite();
     run_package_suite();
     run_diagnostics_suite();
+    run_session_suite();
     if (failures != 0) {
         fprintf(stderr, "%d test failure(s)\n", failures);
         return 1;

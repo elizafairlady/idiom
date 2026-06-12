@@ -848,6 +848,11 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_ORD_STR] = {"ord->str", 1, 1},
     [IDM_PRIM_STR_ORD] = {"str->ord", 1, 1},
     [IDM_PRIM_FROM_RUNES] = {"from-runes", 1, 1},
+    [IDM_PRIM_REPL_COMPILE] = {"repl-compile", 1, 1},
+    [IDM_PRIM_REPL_ABORT] = {"repl-abort", 1, 1},
+    [IDM_PRIM_REPL_SPAWN] = {"repl-spawn", 1, 1},
+    [IDM_PRIM_REPL_DIAGNOSTIC] = {"repl-diagnostic", 0, 0},
+    [IDM_PRIM_ISH_SESSION] = {"ish-session", 0, 0},
 };
 
 size_t idm_primitive_count(void) {

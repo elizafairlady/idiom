@@ -191,6 +191,8 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->owned_temps = NULL;
     rt->owned_temp_count = 0;
     rt->owned_temp_cap = 0;
+    rt->repl = NULL;
+    rt->interactive = false;
 }
 
 bool idm_runtime_own_temp(IdmRuntime *rt, const char *path) {

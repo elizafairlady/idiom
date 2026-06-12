@@ -19,3 +19,29 @@ add p q
 {r s} = tuple 7
 add r 1
 p
+counter = spawn (fn do
+  defn serve total -> receive do
+    {:add n} -> serve (total + n)
+    {:get from} -> do
+      send from (tuple :total total)
+      serve total
+    end
+  end
+  serve 0
+end)
+send counter (tuple :add 5)
+send counter (tuple :add 2)
+do
+  send counter (tuple :get (self))
+  receive do {:total n} -> n end
+end
+{:ok f tok} = repl-compile "20 + 22"
+do
+  w = repl-spawn f
+  monitor w
+  receive do {:down _ p r} -> r end
+end
+raise :pinned-diag
+repl-diagnostic
+repl-diagnostic
+inspect (ish-session)

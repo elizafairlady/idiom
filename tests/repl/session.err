@@ -3,3 +3,4 @@
 <repl>:1:15: error: main actor exited with reason {:error {:no-clause :{r s} {{7}}}}
   in main (<repl>:1)
 <repl>:1:5: error: unbound identifier 'r'
+<unknown>: error: main actor exited with reason :pinned-diag

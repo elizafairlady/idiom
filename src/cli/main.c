@@ -4,6 +4,7 @@
 #include "idiom/reader.h"
 #include "idiom/vm.h"
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -411,6 +412,7 @@ done:
 static int run_repl(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
+    rt.interactive = isatty(0) != 0;
     IdmError err;
     idm_error_init(&err);
     IdmRepl *repl = idm_repl_create(&rt, &err);
@@ -420,42 +422,57 @@ static int run_repl(void) {
         idm_runtime_destroy(&rt);
         return 1;
     }
-    bool tty = isatty(0);
+    bool tty = rt.interactive;
     if (tty) printf("idiom %s — :quit or ^D to exit\n", IDM_VERSION);
     char *line = NULL;
     size_t cap = 0;
     IdmBuffer pending;
     idm_buf_init(&pending);
+    int status = 0;
     for (;;) {
         if (tty) {
             fputs(pending.len == 0 ? "idiom> " : "  ...> ", stdout);
             fflush(stdout);
         }
+        errno = 0;
         ssize_t n = getline(&line, &cap, stdin);
-        if (n < 0) break;
+        if (n < 0) {
+            if (errno == EINTR) {
+                clearerr(stdin);
+                if (tty) putchar('\n');
+                pending.len = 0;
+                if (pending.data) pending.data[0] = '\0';
+                continue;
+            }
+            break;
+        }
         if (pending.len == 0 && strcmp(line, ":quit\n") == 0) break;
         if (!idm_buf_append(&pending, line)) break;
-        IdmSyntax *probe = NULL;
-        IdmError parse_err;
-        idm_error_init(&parse_err);
-        bool parsed = idm_reader_read_string("<repl>", pending.data, &probe, &parse_err);
-        if (!parsed && parse_err.message && strstr(parse_err.message, "unterminated")) {
-            idm_error_clear(&parse_err);
-            continue;
-        }
-        idm_syn_free(probe);
-        idm_error_clear(&parse_err);
-        IdmValue out = idm_nil();
-        bool has_value = false;
-        bool ok = idm_repl_eval(repl, pending.data, &out, &has_value, &err);
+        IdmValue thunk = idm_nil();
+        uint64_t token = 0;
+        IdmReplStatus compiled = idm_repl_compile(repl, pending.data, &thunk, &token, &err);
+        if (compiled == IDM_REPL_INCOMPLETE) continue;
         pending.len = 0;
         if (pending.data) pending.data[0] = '\0';
-        if (!ok) {
+        if (compiled == IDM_REPL_ERROR) {
             idm_error_fprint(stderr, &err);
             idm_error_clear(&err);
             continue;
         }
-        if (has_value && !idm_is_nil(out)) {
+        IdmValue out = idm_nil();
+        if (!idm_repl_run(repl, thunk, &out, &err)) {
+            IdmValue reason = idm_nil();
+            if (idm_error_take_reason(&err, &reason) && reason.tag == IDM_VAL_INT) {
+                idm_error_clear(&err);
+                status = (int)(((reason.as.i % 256) + 256) % 256);
+                break;
+            }
+            idm_error_fprint(stderr, &err);
+            idm_error_clear(&err);
+            idm_repl_abort(repl, token);
+            continue;
+        }
+        if (!idm_is_nil(out)) {
             IdmBuffer buf;
             idm_buf_init(&buf);
             if (idm_value_write(&buf, out) && idm_buf_append_char(&buf, '\n')) fputs(buf.data, stdout);
@@ -467,7 +484,7 @@ static int run_repl(void) {
     idm_repl_destroy(repl);
     idm_runtime_destroy(&rt);
     if (tty) putchar('\n');
-    return 0;
+    return status;
 }
 
 int main(int argc, char **argv) {

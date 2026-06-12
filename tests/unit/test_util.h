@@ -46,5 +46,6 @@ void run_protocol_suite(void);
 void run_runtime_suite(void);
 void run_package_suite(void);
 void run_diagnostics_suite(void);
+void run_session_suite(void);
 
 #endif

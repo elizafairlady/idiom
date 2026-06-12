@@ -77,6 +77,7 @@ build/tsan/idiomc: $(LIB_SRCS) src/cli/main.c
 
 tsan: build/tsan/idiomc
 	./build/tsan/idiomc test tests/lang
+	./build/tsan/idiomc repl < tests/repl/session.in >/dev/null
 
 conformance: test sanitize tsan
 	@sh tools/conformance_check.sh

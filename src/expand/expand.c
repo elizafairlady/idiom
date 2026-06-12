@@ -1,5 +1,7 @@
 #include "internal.h"
 
+#include <pthread.h>
+
 static IdmPrimitive primitive_from_binding(const IdmBinding *binding);
 static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, bool callee_position, IdmError *err);
 static IdmCore *expand_word_ref(ExpandContext *ctx, const IdmSyntax *word, IdmError *err);
@@ -728,6 +730,15 @@ struct IdmRepl {
     IdmBytecodeModule **modules;
     size_t module_count;
     size_t module_cap;
+    IdmBytecodeModule boot;
+    IdmScheduler *sched;
+    pthread_mutex_t mu;
+    uint64_t next_token;
+    uint64_t token;
+    SurfaceCheckpoint checkpoint;
+    uint32_t cp_global_seq;
+    uint32_t cp_next_slot;
+    uint64_t session_pid;
 };
 
 static void repl_install_hooks(IdmRepl *repl) {
@@ -742,6 +753,8 @@ IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
     }
     repl->rt = rt;
     ctx_init(&repl->ctx, rt);
+    idm_bc_init(&repl->boot);
+    pthread_mutex_init(&repl->mu, NULL);
     unsigned char session_hash[32];
     idm_sha256("<repl>", 6u, session_hash);
     ctx_set_unit(&repl->ctx, "<repl>", session_hash);
@@ -749,53 +762,70 @@ IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
     repl->ctx.phase_env = idm_phase_env_create(rt, repl->ctx.phase_ns);
     if (!repl->ctx.phase_env) {
         idm_error_oom(err, idm_span_unknown(NULL));
-        ctx_destroy(&repl->ctx);
-        free(repl);
+        idm_repl_destroy(repl);
         return NULL;
     }
     repl->ctx.runner = &repl->ctx.local_runner;
     repl->session_scope = idm_scope_fresh(&repl->ctx.scope_store);
     repl_install_hooks(repl);
     if (!ctx_seed(&repl->ctx, err) || !ctx_activate_kernel(&repl->ctx, err)) {
-        ctx_destroy(&repl->ctx);
-        free(repl);
+        idm_repl_destroy(repl);
         return NULL;
     }
+    repl->sched = idm_sched_create(rt, &repl->boot, err);
+    if (!repl->sched) {
+        idm_repl_destroy(repl);
+        return NULL;
+    }
+    if (rt->interactive && !idm_signals_install(err)) {
+        idm_repl_destroy(repl);
+        return NULL;
+    }
+    rt->repl = repl;
     return repl;
 }
 
-static bool repl_rollback(IdmRepl *repl, const SurfaceCheckpoint *checkpoint, uint32_t global_seq, uint32_t next_slot) {
-    surface_rollback(&repl->ctx, checkpoint);
-    repl->ctx.global_seq = global_seq;
-    repl->ctx.next_slot = next_slot;
-    return false;
+static IdmReplStatus repl_compile_fail(IdmRepl *repl, IdmError *err) {
+    if (err && !err->present) idm_error_oom(err, idm_span_unknown(NULL));
+    surface_rollback(&repl->ctx, &repl->checkpoint);
+    repl->ctx.global_seq = repl->cp_global_seq;
+    repl->ctx.next_slot = repl->cp_next_slot;
+    pthread_mutex_unlock(&repl->mu);
+    return IDM_REPL_ERROR;
 }
 
-bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool *out_has_value, IdmError *err) {
-    *out_has_value = false;
+IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_thunk, uint64_t *out_token, IdmError *err) {
+    *out_thunk = idm_nil();
+    *out_token = 0;
     IdmSyntax *program = NULL;
-    if (!idm_reader_read_string("<repl>", source, &program, err)) return false;
-    if (program->as.seq.count < 2) {
-        idm_syn_free(program);
-        return true;
+    if (!idm_reader_read_string("<repl>", source, &program, err)) {
+        if (err->message && strstr(err->message, "unterminated")) {
+            idm_error_clear(err);
+            return IDM_REPL_INCOMPLETE;
+        }
+        return IDM_REPL_ERROR;
     }
+    pthread_mutex_lock(&repl->mu);
     repl_install_hooks(repl);
     if (!idm_syn_scope_add_tree(program, 0, repl->session_scope)) {
         idm_syn_free(program);
-        return idm_error_oom(err, idm_span_unknown(NULL));
+        idm_error_oom(err, idm_span_unknown(NULL));
+        pthread_mutex_unlock(&repl->mu);
+        return IDM_REPL_ERROR;
     }
-    SurfaceCheckpoint checkpoint;
-    surface_checkpoint(&repl->ctx, &checkpoint);
-    uint32_t global_seq = repl->ctx.global_seq;
-    uint32_t next_slot = repl->ctx.next_slot;
-    IdmCore *core = expand_body_items(&repl->ctx, program->as.seq.items, 1, program->as.seq.count, false, err);
+    surface_checkpoint(&repl->ctx, &repl->checkpoint);
+    repl->cp_global_seq = repl->ctx.global_seq;
+    repl->cp_next_slot = repl->ctx.next_slot;
+    repl->token = 0;
+    IdmCore *core = program->as.seq.count < 2
+        ? idm_core_literal(idm_nil(), program->span)
+        : expand_body_items(&repl->ctx, program->as.seq.items, 1, program->as.seq.count, false, err);
     idm_syn_free(program);
-    if (!core) return repl_rollback(repl, &checkpoint, global_seq, next_slot);
+    if (!core) return repl_compile_fail(repl, err);
     IdmBytecodeModule *module = malloc(sizeof(*module));
     if (!module) {
         idm_core_free(core);
-        idm_error_oom(err, idm_span_unknown(NULL));
-        return repl_rollback(repl, &checkpoint, global_seq, next_slot);
+        return repl_compile_fail(repl, err);
     }
     idm_bc_init(module);
     uint32_t main_fn = 0;
@@ -804,7 +834,7 @@ bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool 
     if (!compiled) {
         idm_bc_destroy(module);
         free(module);
-        return repl_rollback(repl, &checkpoint, global_seq, next_slot);
+        return repl_compile_fail(repl, err);
     }
     if (repl->module_count == repl->module_cap) {
         size_t cap = repl->module_cap ? repl->module_cap * 2u : 8u;
@@ -812,36 +842,57 @@ bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool 
         if (!grown) {
             idm_bc_destroy(module);
             free(module);
-            idm_error_oom(err, idm_span_unknown(NULL));
-            return repl_rollback(repl, &checkpoint, global_seq, next_slot);
+            return repl_compile_fail(repl, err);
         }
         repl->modules = grown;
         repl->module_cap = cap;
     }
     repl->modules[repl->module_count++] = module;
-    if (!idm_runtime_register_gc_module(repl->rt, module)) {
-        idm_error_oom(err, idm_span_unknown(NULL));
-        return repl_rollback(repl, &checkpoint, global_seq, next_slot);
+    if (!idm_runtime_register_gc_module(repl->rt, module)) return repl_compile_fail(repl, err);
+    IdmValue thunk = idm_closure_in_module(repl->rt, module, main_fn, NULL, 0, repl->rt->main_ns, err);
+    if (err->present) return repl_compile_fail(repl, err);
+    repl->token = ++repl->next_token;
+    *out_token = repl->token;
+    *out_thunk = thunk;
+    pthread_mutex_unlock(&repl->mu);
+    return IDM_REPL_OK;
+}
+
+void idm_repl_abort(IdmRepl *repl, uint64_t token) {
+    pthread_mutex_lock(&repl->mu);
+    if (token != 0 && token == repl->token) {
+        surface_rollback(&repl->ctx, &repl->checkpoint);
+        repl->ctx.global_seq = repl->cp_global_seq;
+        repl->ctx.next_slot = repl->cp_next_slot;
+        repl->token = 0;
     }
-    IdmScheduler *sched = idm_sched_create(repl->rt, module, err);
-    if (!sched) return repl_rollback(repl, &checkpoint, global_seq, next_slot);
-    IdmValue out = idm_nil();
-    bool ran = idm_sched_run_main(sched, main_fn, &out, err);
-    idm_sched_destroy(sched);
-    if (!ran) return repl_rollback(repl, &checkpoint, global_seq, next_slot);
-    *out_value = out;
-    *out_has_value = true;
-    return true;
+    pthread_mutex_unlock(&repl->mu);
+}
+
+bool idm_repl_run(IdmRepl *repl, IdmValue thunk, IdmValue *out_value, IdmError *err) {
+    return idm_sched_eval(repl->sched, thunk, out_value, err);
+}
+
+IdmScheduler *idm_repl_scheduler(IdmRepl *repl) {
+    return repl->sched;
+}
+
+uint64_t idm_repl_session_pid(const IdmRepl *repl) {
+    return repl->session_pid;
 }
 
 void idm_repl_destroy(IdmRepl *repl) {
     if (!repl) return;
+    if (repl->rt && repl->rt->repl == repl) repl->rt->repl = NULL;
+    idm_sched_destroy(repl->sched);
     for (size_t i = 0; i < repl->module_count; i++) {
         idm_runtime_unregister_gc_module(repl->rt, repl->modules[i]);
         idm_bc_destroy(repl->modules[i]);
         free(repl->modules[i]);
     }
     free(repl->modules);
+    idm_bc_destroy(&repl->boot);
+    pthread_mutex_destroy(&repl->mu);
     ctx_destroy(&repl->ctx);
     free(repl);
 }

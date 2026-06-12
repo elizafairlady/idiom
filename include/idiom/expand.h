@@ -3,6 +3,7 @@
 
 #include "idiom/core.h"
 #include "idiom/reader.h"
+#include "idiom/vm.h"
 
 typedef struct IdmMacroRunner IdmMacroRunner;
 
@@ -16,10 +17,19 @@ struct IdmMacroRunner {
 bool idm_expand_syntax(IdmRuntime *rt, const IdmSyntax *syntax, IdmCore **out, IdmError *err);
 bool idm_expand_syntax_with_runner(IdmRuntime *rt, const IdmSyntax *syntax, IdmMacroRunner *runner, IdmCore **out, IdmError *err);
 bool idm_expand_string(IdmRuntime *rt, const char *file, const char *source, IdmCore **out, IdmError *err);
-typedef struct IdmRepl IdmRepl;
+typedef enum {
+    IDM_REPL_OK,
+    IDM_REPL_INCOMPLETE,
+    IDM_REPL_ERROR
+} IdmReplStatus;
+
 IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err);
-bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool *out_has_value, IdmError *err);
 void idm_repl_destroy(IdmRepl *repl);
+IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_thunk, uint64_t *out_token, IdmError *err);
+void idm_repl_abort(IdmRepl *repl, uint64_t token);
+bool idm_repl_run(IdmRepl *repl, IdmValue thunk, IdmValue *out_value, IdmError *err);
+IdmScheduler *idm_repl_scheduler(IdmRepl *repl);
+uint64_t idm_repl_session_pid(const IdmRepl *repl);
 
 bool idm_expand_string_with_runner(IdmRuntime *rt, const char *file, const char *source, IdmMacroRunner *runner, IdmCore **out, IdmError *err);
 

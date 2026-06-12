@@ -119,8 +119,12 @@ if [ "$MODE" = "output" ]; then
     "$IDIOMC" repl < tests/repl/session.in > build/repl-session.out 2>build/repl-session.err
     if ! cmp -s tests/repl/session.err build/repl-session.err || ! cmp -s tests/repl/session.out build/repl-session.out; then
         echo "REPL FAIL"; diff tests/repl/session.err build/repl-session.err || true; diff tests/repl/session.out build/repl-session.out || true; fail=1
+    fi
+    IDIOMMAXPROCS=1 "$IDIOMC" repl < tests/repl/session.in > build/repl-session-n1.out 2>build/repl-session-n1.err
+    if ! cmp -s tests/repl/session.err build/repl-session-n1.err || ! cmp -s tests/repl/session.out build/repl-session-n1.out; then
+        echo "REPL FAIL (IDIOMMAXPROCS=1)"; diff tests/repl/session.err build/repl-session-n1.err || true; diff tests/repl/session.out build/repl-session-n1.out || true; fail=1
     else
-        echo "repl session passed (1 case)"
+        echo "repl session passed (2 cases)"
     fi
 
     "$IDIOMC" --dump-surface > build/dump-surface-default.out 2>/dev/null
