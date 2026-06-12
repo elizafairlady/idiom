@@ -41,6 +41,10 @@ struct IdmExec {
     IdmValue port_request;
     bool has_await;
     IdmValue await_port;
+    bool has_tty_request;
+    bool tty_line_mode;
+    bool tty_has_timeout;
+    int64_t tty_timeout_ms;
     Handler *handlers;
     size_t handler_count;
     size_t handler_cap;
@@ -190,6 +194,30 @@ static bool generic_prim_call(Vm *vm, uint32_t primitive, uint32_t argc, IdmErro
     free(args);
     if (!ok) return false;
     return push(vm, out, err);
+}
+
+static bool op_tty_block(Vm *vm, IdmPrimitive prim, uint32_t argc, IdmError *err) {
+    uint32_t want = prim == IDM_PRIM_TTY_READ ? 1u : 0u;
+    if (argc != want) {
+        idm_error_set(err, idm_span_unknown(NULL), "primitive '%s' arity mismatch: got %u, want %u..%u", idm_primitive_name(prim), argc, want, want);
+        return idm_error_reason(vm->rt, err, "arity", 4, idm_atom(vm->rt, idm_primitive_name(prim)), idm_int((int64_t)argc), idm_int((int64_t)want), idm_int((int64_t)want));
+    }
+    vm->tty_has_timeout = false;
+    vm->tty_timeout_ms = 0;
+    if (prim == IDM_PRIM_TTY_READ) {
+        IdmValue timeout;
+        if (!pop(vm, &timeout, err)) return false;
+        if (timeout.tag == IDM_VAL_INT && timeout.as.i >= 0) {
+            vm->tty_has_timeout = true;
+            vm->tty_timeout_ms = timeout.as.i;
+        } else if (timeout.tag != IDM_VAL_NIL) {
+            idm_error_set(err, idm_span_unknown(NULL), "tty-read timeout must be a non-negative integer or :nil");
+            return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "tty-read"), timeout);
+        }
+    }
+    vm->tty_line_mode = prim == IDM_PRIM_TTY_READ_LINE;
+    vm->has_tty_request = true;
+    return true;
 }
 
 #define IDM_GUARD_BUDGET (1 << 20)
@@ -758,6 +786,11 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
             case IDM_OP_PRIM_CALL: {
                 uint32_t prim = module->code[frame->ip++];
                 uint32_t argc = module->code[frame->ip++];
+                if (vm->self && vm->sched && (prim == IDM_PRIM_TTY_READ || prim == IDM_PRIM_TTY_READ_LINE)) {
+                    if (!op_tty_block(vm, (IdmPrimitive)prim, argc, err)) return false;
+                    *status = IDM_EXEC_BLOCK_TTY;
+                    return true;
+                }
                 if (!generic_prim_call(vm, prim, argc, err)) return false;
                 break;
             }
@@ -1309,6 +1342,15 @@ bool idm_exec_take_await(IdmExec *exec, IdmValue *out_port) {
     *out_port = exec->await_port;
     exec->has_await = false;
     exec->await_port = idm_nil();
+    return true;
+}
+
+bool idm_exec_take_tty(IdmExec *exec, bool *out_line_mode, bool *out_has_timeout, int64_t *out_timeout_ms) {
+    if (!exec->has_tty_request) return false;
+    *out_line_mode = exec->tty_line_mode;
+    *out_has_timeout = exec->tty_has_timeout;
+    *out_timeout_ms = exec->tty_timeout_ms;
+    exec->has_tty_request = false;
     return true;
 }
 

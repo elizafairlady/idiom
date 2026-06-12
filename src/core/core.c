@@ -853,6 +853,13 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_REPL_SPAWN] = {"repl-spawn", 1, 1},
     [IDM_PRIM_REPL_DIAGNOSTIC] = {"repl-diagnostic", 0, 0},
     [IDM_PRIM_ISH_SESSION] = {"ish-session", 0, 0},
+    [IDM_PRIM_TTY_PRED] = {"tty?", 0, 0},
+    [IDM_PRIM_TTY_RAW] = {"tty-raw!", 0, 0},
+    [IDM_PRIM_TTY_RESTORE] = {"tty-restore!", 0, 0},
+    [IDM_PRIM_TTY_READ] = {"tty-read", 1, 1},
+    [IDM_PRIM_TTY_READ_LINE] = {"tty-read-line", 0, 0},
+    [IDM_PRIM_TTY_WRITE] = {"tty-write", 1, 1},
+    [IDM_PRIM_TTY_SIZE] = {"tty-size", 0, 0},
 };
 
 size_t idm_primitive_count(void) {

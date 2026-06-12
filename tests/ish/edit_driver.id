@@ -1,0 +1,22 @@
+use std/string
+use std/ish
+
+defn serve state -> match (read state) do
+  {:line text st} ->
+    if (ends-with? text "\\") do
+      serve (continue st)
+    else do
+      tty-write "\r\n"
+      println (str "GOT[" text "]")
+      serve (push-history (reset st) text)
+    end
+  {:cancel st} -> do
+    tty-write "\r\n"
+    println "CANCELLED"
+    serve st
+  end
+  {:eof _st} -> println "BYE"
+end
+
+println "READY"
+serve (initial-state "> ")

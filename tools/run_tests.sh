@@ -69,6 +69,25 @@ for f in tests/diag/*.id; do
     fi
 done
 
+for f in tests/ish/*.keys; do
+    name=$(basename "$f" .keys)
+    prog="tests/ish/$name.id"
+    [ -e "$prog" ] || prog="tests/ish/edit_driver.id"
+    if [ "$MODE" = "output" ]; then
+        ./build/pty_driver "$f" "$IDIOMC" "$prog" >"build/ish-$name.out" 2>"build/ish-$name.err"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "ISH PTY FAIL: $name (status $rc)"; cat "build/ish-$name.err"; fail=1
+        elif ! cmp -s "tests/ish/$name.out" "build/ish-$name.out"; then
+            echo "ISH PTY FAIL: $name"; diff "tests/ish/$name.out" "build/ish-$name.out" || true; fail=1
+        fi
+    else
+        ./build/pty_driver "$f" "$IDIOMC" "$prog" >"build/san-ish-$name.out" 2>/dev/null || true
+        san_check "build/san-ish-$name.out" "ish pty $name"
+    fi
+done
+[ "$MODE" = "output" ] && echo "ish pty goldens passed ($(ls tests/ish/*.keys | wc -l) cases)"
+
 for f in tests/shell/*.ish; do
     name=$(basename "$f" .ish)
     if [ "$MODE" = "output" ]; then

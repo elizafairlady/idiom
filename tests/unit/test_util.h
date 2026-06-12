@@ -47,5 +47,6 @@ void run_runtime_suite(void);
 void run_package_suite(void);
 void run_diagnostics_suite(void);
 void run_session_suite(void);
+void run_tty_suite(void);
 
 #endif

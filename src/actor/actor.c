@@ -1,7 +1,9 @@
 #include "idiom/actor.h"
 
 #include "idiom/ports.h"
+#include "idiom/tty.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
@@ -20,6 +22,7 @@ typedef enum {
     ACT_WAITING_RECEIVE,
     ACT_WAITING_PORT,
     ACT_WAITING_AWAIT,
+    ACT_WAITING_TTY,
     ACT_EXITED
 } ActorStatus;
 
@@ -71,6 +74,13 @@ struct IdmActor {
 
     uint64_t await_port_id;
 
+    bool tty_line;
+    bool tty_has_deadline;
+    uint64_t tty_deadline_ms;
+    char *tty_buf;
+    size_t tty_buf_len;
+    size_t tty_buf_cap;
+
     bool diag_retain;
     bool exited;
     IdmValue exit_reason;
@@ -108,6 +118,7 @@ struct IdmScheduler {
     IdmSpan crash_span;
     size_t gc_threshold;
 
+    size_t tty_waiting;
     uint64_t eval_pid;
     bool eval_done;
     IdmValue eval_value;
@@ -137,8 +148,8 @@ static void sched_unlock(IdmScheduler *sched) { pthread_mutex_unlock(&sched->mu)
 static int g_sig_pipe[2] = {-1, -1};
 
 static void sig_handler(int signo) {
-    (void)signo;
-    ssize_t ignored = write(g_sig_pipe[1], "i", 1u);
+    char tag = signo == SIGWINCH ? 'r' : 'i';
+    ssize_t ignored = write(g_sig_pipe[1], &tag, 1u);
     (void)ignored;
 }
 
@@ -157,6 +168,7 @@ bool idm_signals_install(IdmError *err) {
     sa.sa_handler = sig_handler;
     sigemptyset(&sa.sa_mask);
     sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGWINCH, &sa, NULL);
     return true;
 }
 
@@ -327,6 +339,10 @@ static PortEntry *sched_find_port(IdmScheduler *sched, uint64_t id) {
 
 static void actor_release_resources(IdmActor *actor) {
     if (actor->exec) { idm_exec_destroy(actor->exec); actor->exec = NULL; }
+    free(actor->tty_buf);
+    actor->tty_buf = NULL;
+    actor->tty_buf_len = 0;
+    actor->tty_buf_cap = 0;
     free(actor->mailbox);
     actor->mailbox = NULL;
     actor->mb_count = 0;
@@ -585,6 +601,7 @@ static void mon_in_remove(IdmActor *actor, uint64_t ref) {
 static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason) {
     if (actor->exited) return;
     bool running = actor->status == ACT_RUNNING;
+    if (actor->status == ACT_WAITING_TTY) sched->tty_waiting--;
     actor->exited = true;
     actor->status = ACT_EXITED;
     actor->exit_reason = reason;
@@ -639,24 +656,121 @@ static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason) {
     if (!running) actor_release_resources(actor);
 }
 
+static bool tty_finish(IdmScheduler *sched, IdmActor *actor, IdmValue result, IdmError *err) {
+    free(actor->tty_buf);
+    actor->tty_buf = NULL;
+    actor->tty_buf_len = 0;
+    actor->tty_buf_cap = 0;
+    sched->tty_waiting--;
+    if (!idm_exec_push_result(actor->exec, result, err)) return false;
+    if (!ready_push(sched, actor->pid, err)) return false;
+    actor->status = ACT_READY;
+    return true;
+}
+
+static bool tty_line_finish(IdmScheduler *sched, IdmActor *actor, IdmError *err) {
+    IdmValue text = idm_string_n(sched->rt, actor->tty_buf ? actor->tty_buf : "", actor->tty_buf_len, err);
+    if (err->present) return false;
+    return tty_finish(sched, actor, make_signal(sched, "line", text, idm_nil(), idm_nil(), 2), err);
+}
+
+static bool tty_fd_readable(int fd) {
+    struct pollfd p;
+    p.fd = fd;
+    p.events = POLLIN;
+    p.revents = 0;
+    return poll(&p, 1u, 0) > 0 && (p.revents & (POLLIN | POLLHUP | POLLERR)) != 0;
+}
+
+static bool tty_buf_push(IdmActor *actor, char c, IdmError *err) {
+    if (actor->tty_buf_len == actor->tty_buf_cap) {
+        size_t cap = actor->tty_buf_cap ? actor->tty_buf_cap * 2u : 64u;
+        char *next = realloc(actor->tty_buf, cap);
+        if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+        actor->tty_buf = next;
+        actor->tty_buf_cap = cap;
+    }
+    actor->tty_buf[actor->tty_buf_len++] = c;
+    return true;
+}
+
+static bool tty_service(IdmScheduler *sched, IdmActor *actor, IdmError *err) {
+    int fd = idm_tty_in_fd();
+    if (!actor->tty_line) {
+        if (tty_fd_readable(fd)) {
+            unsigned char b = 0;
+            ssize_t n = read(fd, &b, 1u);
+            if (n == 1) return tty_finish(sched, actor, make_signal(sched, "byte", idm_int((int64_t)b), idm_nil(), idm_nil(), 2), err);
+            if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
+                return tty_finish(sched, actor, idm_atom(sched->rt, "eof"), err);
+            }
+        }
+    } else {
+        while (tty_fd_readable(fd)) {
+            unsigned char b = 0;
+            ssize_t n = read(fd, &b, 1u);
+            if (n == 1) {
+                if (b == '\n') return tty_line_finish(sched, actor, err);
+                if (!tty_buf_push(actor, (char)b, err)) return false;
+                continue;
+            }
+            if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
+            if (n < 0 && errno == EINTR) continue;
+            if (actor->tty_buf_len != 0) return tty_line_finish(sched, actor, err);
+            return tty_finish(sched, actor, idm_atom(sched->rt, "eof"), err);
+        }
+    }
+    if (actor->tty_has_deadline && now_ms() >= actor->tty_deadline_ms) {
+        return tty_finish(sched, actor, idm_atom(sched->rt, "timeout"), err);
+    }
+    return true;
+}
+
+static bool sched_service_tty(IdmScheduler *sched, IdmError *err) {
+    if (sched->tty_waiting == 0) return true;
+    for (size_t i = 0; i < sched->actor_count && sched->tty_waiting != 0; i++) {
+        IdmActor *a = sched->actors[i];
+        if (a->exited || a->status != ACT_WAITING_TTY) continue;
+        if (!tty_service(sched, a, err)) return false;
+    }
+    return true;
+}
+
+static IdmActor *tty_signal_target(IdmScheduler *sched) {
+    for (size_t i = 0; i < sched->actor_count; i++) {
+        IdmActor *a = sched->actors[i];
+        if (!a->exited && a->status == ACT_WAITING_TTY && !a->tty_line) return a;
+    }
+    return NULL;
+}
+
 static void sched_check_signals(IdmScheduler *sched) {
     if (g_sig_pipe[0] < 0) return;
     char buf[16];
     ssize_t n;
-    size_t hits = 0;
-    while ((n = read(g_sig_pipe[0], buf, sizeof(buf))) > 0) hits += (size_t)n;
-    for (; hits > 0; hits--) {
-        IdmActor *target = sched->interrupt_pid != 0 ? sched_lookup(sched, sched->interrupt_pid) : NULL;
-        if (!target || target->exited) {
-            sched->interrupt_pid = 0;
-            sched->interrupt_struck = false;
-            continue;
-        }
-        if (sched->interrupt_struck) {
-            terminate(sched, target, idm_atom(sched->rt, "killed"));
-        } else {
-            sched->interrupt_struck = true;
-            apply_exit_signal(sched, target, 0, idm_atom(sched->rt, "interrupt"));
+    while ((n = read(g_sig_pipe[0], buf, sizeof(buf))) > 0) {
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] != 'r') {
+                IdmActor *target = sched->interrupt_pid != 0 ? sched_lookup(sched, sched->interrupt_pid) : NULL;
+                if (target && !target->exited) {
+                    if (sched->interrupt_struck) {
+                        terminate(sched, target, idm_atom(sched->rt, "killed"));
+                    } else {
+                        sched->interrupt_struck = true;
+                        apply_exit_signal(sched, target, 0, idm_atom(sched->rt, "interrupt"));
+                    }
+                    continue;
+                }
+                sched->interrupt_pid = 0;
+                sched->interrupt_struck = false;
+            }
+            IdmActor *waiter = tty_signal_target(sched);
+            if (!waiter) continue;
+            IdmValue signal = make_signal(sched, "signal", idm_atom(sched->rt, buf[i] == 'r' ? "resize" : "interrupt"), idm_nil(), idm_nil(), 2);
+            IdmError ignore;
+            idm_error_init(&ignore);
+            tty_finish(sched, waiter, signal, &ignore);
+            idm_error_clear(&ignore);
         }
     }
 }
@@ -923,12 +1037,19 @@ static bool sched_poll(IdmScheduler *sched, bool mt, bool block, IdmError *err) 
                 any_deadline = true;
             }
         }
+        if (a->status == ACT_WAITING_TTY && a->tty_has_deadline) {
+            if (!any_deadline || a->tty_deadline_ms < nearest) {
+                nearest = a->tty_deadline_ms;
+                any_deadline = true;
+            }
+        }
     }
     sched->deadline_hint = any_deadline ? nearest : UINT64_MAX;
     bool any_port = sched->ports_pending != 0;
+    bool any_tty = sched->tty_waiting != 0;
     if (block) {
         if (!any_live) return true;
-        if (!any_port && !any_deadline) {
+        if (!any_port && !any_deadline && !any_tty) {
             bool has_sig = g_sig_pipe[0] >= 0 && sched->interrupt_pid != 0;
             if ((!mt || sched->parked == sched->nworkers - 1u) && !has_sig) {
                 return idm_error_set(err, idm_span_unknown(NULL), "deadlock: all actors are blocked with no way to make progress");
@@ -955,7 +1076,7 @@ static bool sched_poll(IdmScheduler *sched, bool mt, bool block, IdmError *err) 
             sched_check_signals(sched);
             return true;
         }
-        size_t fd_cap = sched->ports_pending * 2u + (mt ? 1u : 0u) + 1u;
+        size_t fd_cap = sched->ports_pending * 2u + (mt ? 1u : 0u) + 2u;
         struct pollfd *fds = fd_cap != 0 ? calloc(fd_cap, sizeof(*fds)) : NULL;
         if (fd_cap != 0 && !fds) return idm_error_oom(err, idm_span_unknown(NULL));
         nfds_t nfds = 0;
@@ -967,6 +1088,12 @@ static bool sched_poll(IdmScheduler *sched, bool mt, bool block, IdmError *err) 
         }
         if (g_sig_pipe[0] >= 0) {
             fds[nfds].fd = g_sig_pipe[0];
+            fds[nfds].events = POLLIN;
+            fds[nfds].revents = 0;
+            nfds++;
+        }
+        if (any_tty) {
+            fds[nfds].fd = idm_tty_in_fd();
             fds[nfds].events = POLLIN;
             fds[nfds].revents = 0;
             nfds++;
@@ -1004,6 +1131,7 @@ static bool sched_poll(IdmScheduler *sched, bool mt, bool block, IdmError *err) 
         free(fds);
     }
 
+    if (!sched_service_tty(sched, err)) return false;
     for (size_t i = 0; i < sched->port_count; i++) {
         PortEntry *e = &sched->ports[i];
         if (e->done || !e->port) continue;
@@ -1125,6 +1253,23 @@ static bool run_slice(IdmScheduler *sched, uint64_t pid, IdmError *err) {
                     }
                     break;
                 }
+                case IDM_EXEC_BLOCK_TTY: {
+                    bool line_mode = false;
+                    bool has_timeout = false;
+                    int64_t timeout_ms = 0;
+                    if (!idm_exec_take_tty(actor->exec, &line_mode, &has_timeout, &timeout_ms)) {
+                        terminate(sched, actor, idm_atom(sched->rt, "noproc"));
+                        break;
+                    }
+                    actor->tty_line = line_mode;
+                    actor->tty_has_deadline = has_timeout;
+                    actor->tty_deadline_ms = has_timeout ? now_ms() + (uint64_t)timeout_ms : 0;
+                    actor->tty_buf_len = 0;
+                    actor->status = ACT_WAITING_TTY;
+                    sched->tty_waiting++;
+                    if (has_timeout && actor->tty_deadline_ms < sched->deadline_hint) sched->deadline_hint = actor->tty_deadline_ms;
+                    break;
+                }
                 case IDM_EXEC_EXIT:
                     terminate(sched, actor, reason);
                     break;
@@ -1132,7 +1277,7 @@ static bool run_slice(IdmScheduler *sched, uint64_t pid, IdmError *err) {
     }
     bool ok = true;
     sched_check_signals(sched);
-    if (sched->ports_pending != 0 || now_ms() >= sched->deadline_hint) ok = sched_poll(sched, sched->nworkers > 1u, false, err);
+    if (sched->ports_pending != 0 || sched->tty_waiting != 0 || now_ms() >= sched->deadline_hint) ok = sched_poll(sched, sched->nworkers > 1u, false, err);
     sched_unlock(sched);
     return ok;
 }

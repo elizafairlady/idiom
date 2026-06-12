@@ -17,6 +17,7 @@ LIB_SRCS := \
   src/core/core.c \
   src/actor/actor.c \
   src/ports/ports.c \
+  src/tty/tty.c \
  src/artifact/artifact.c \
  $(wildcard src/expand/*.c)
 
@@ -45,7 +46,11 @@ build/%.o: %.c
 	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-test: build/unit_tests build/idiomc build/ish
+build/pty_driver: tools/pty_driver.c
+	mkdir -p build
+	$(CC) $(CFLAGS) -o $@ tools/pty_driver.c
+
+test: build/unit_tests build/idiomc build/ish build/pty_driver
 	./build/unit_tests
 	@sh tools/run_tests.sh ./build/idiomc ./build/ish output
 
@@ -61,7 +66,7 @@ build/san/idiomc: $(LIB_SRCS) src/cli/main.c
 	mkdir -p build/san
 	$(CC) $(CFLAGS) $(SAN_FLAGS) -o $@ $(LIB_SRCS) src/cli/main.c $(LDFLAGS)
 
-sanitize: build/unit_tests_san build/san/idiomc build/san/ish
+sanitize: build/unit_tests_san build/san/idiomc build/san/ish build/pty_driver
 	ASAN_OPTIONS=detect_leaks=1 ./build/unit_tests_san
 	@ASAN_OPTIONS=detect_leaks=1 sh tools/run_tests.sh ./build/san/idiomc ./build/san/ish san
 

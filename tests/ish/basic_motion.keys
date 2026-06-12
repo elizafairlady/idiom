@@ -1,0 +1,9 @@
+w READY
+s echo hi
+s \x01X
+s \r
+w GOT
+s junk
+s \x03
+w CANCELLED
+s \x04

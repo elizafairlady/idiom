@@ -5,6 +5,7 @@
 #include "idiom/bytecode.h"
 #include "idiom/expand.h"
 #include "idiom/syntax.h"
+#include "idiom/tty.h"
 #include "idiom/vm.h"
 
 #include <ctype.h>
@@ -2064,6 +2065,8 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_TRAP_EXIT:
         case IDM_PRIM_EXEC:
         case IDM_PRIM_AWAIT:
+        case IDM_PRIM_TTY_READ:
+        case IDM_PRIM_TTY_READ_LINE:
             return idm_error_set(err, idm_span_unknown(NULL), "primitive '%s' must be invoked under the actor scheduler", idm_primitive_name(prim));
         case IDM_PRIM_APPLY:
             return idm_error_set(err, idm_span_unknown(NULL), "primitive 'apply' is compiled directly and cannot be invoked generically");
@@ -2101,6 +2104,11 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_REPL_SPAWN: return prim_repl_spawn(rt, args, out, err);
         case IDM_PRIM_REPL_DIAGNOSTIC: return prim_repl_diagnostic(rt, out, err);
         case IDM_PRIM_ISH_SESSION: return prim_ish_session(rt, out);
+        case IDM_PRIM_TTY_PRED: return idm_prim_tty_pred(rt, out, err);
+        case IDM_PRIM_TTY_RAW: return idm_prim_tty_raw(rt, out, err);
+        case IDM_PRIM_TTY_RESTORE: return idm_prim_tty_restore(rt, out, err);
+        case IDM_PRIM_TTY_WRITE: return idm_prim_tty_write(rt, args, out, err);
+        case IDM_PRIM_TTY_SIZE: return idm_prim_tty_size(rt, out, err);
     }
     return idm_error_set(err, idm_span_unknown(NULL), "unimplemented primitive '%s'", idm_primitive_name(prim));
 }

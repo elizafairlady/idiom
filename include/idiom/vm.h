@@ -18,6 +18,7 @@ typedef enum {
     IDM_EXEC_BLOCK_RECEIVE,
     IDM_EXEC_LAUNCH_PORT,
     IDM_EXEC_BLOCK_AWAIT,
+    IDM_EXEC_BLOCK_TTY,
     IDM_EXEC_EXIT
 } IdmExecStatus;
 
@@ -35,6 +36,7 @@ bool idm_exec_setup_thunk(IdmExec *exec, IdmValue closure, IdmError *err);
 bool idm_exec_step(IdmExec *exec, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
 bool idm_exec_take_port_request(IdmExec *exec, IdmValue *out_graph);
 bool idm_exec_take_await(IdmExec *exec, IdmValue *out_port);
+bool idm_exec_take_tty(IdmExec *exec, bool *out_line_mode, bool *out_has_timeout, int64_t *out_timeout_ms);
 bool idm_exec_push_result(IdmExec *exec, IdmValue value, IdmError *err);
 IdmExec *idm_current_exec(void);
 

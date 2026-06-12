@@ -1,0 +1,457 @@
+package ish
+
+use std/string
+
+defn csi text -> str (byte-str 27) "[" text
+
+defn sget state k -> dict-get state k :nil
+defn sput state k v -> dict-put state k v
+
+defn buffer-of state -> sget state :buffer
+defn cursor-of state -> sget state :cursor
+
+defn imax a b -> if (gt? a b) do a else do b end
+defn imin a b -> if (lt? a b) do a else do b end
+
+defn edited state -> tuple :render state
+
+defn insert-text state text -> do
+  b = buffer-of state
+  c = cursor-of state
+  b2 = str (str-slice b 0 c) text (str-slice b c (str-len b))
+  edited (state |> sput :buffer b2 |> sput :cursor (add c (str-len text)))
+end
+
+defn line-start do
+  _b 0 -> 0
+  b i when (eq? (str-byte b (sub i 1)) 10) -> i
+  b i -> line-start b (sub i 1)
+end
+
+defn line-stop do
+  b i when (eq? i (str-len b)) -> i
+  b i when (eq? (str-byte b i) 10) -> i
+  b i -> line-stop b (add i 1)
+end
+
+defn word-byte? do
+  :nil -> :false
+  b when (and (gte? b 48) (lte? b 57)) -> :true
+  b when (and (gte? b 65) (lte? b 90)) -> :true
+  b when (and (gte? b 97) (lte? b 122)) -> :true
+  b when (gte? b 128) -> :true
+  _ -> :false
+end
+
+defn plain-byte? do
+  :nil -> :false
+  b -> if (word-byte? b) do :false else do :true end
+end
+
+defn space-byte? do
+  32 -> :true
+  9 -> :true
+  10 -> :true
+  _ -> :false
+end
+
+defn filled-byte? do
+  :nil -> :false
+  b -> if (space-byte? b) do :false else do :true end
+end
+
+defn skip-back b i pred -> if (and (gt? i 0) (pred (str-byte b (sub i 1)))) do skip-back b (sub i 1) pred else do i end
+defn skip-fwd b i pred -> if (and (lt? i (str-len b)) (pred (str-byte b i))) do skip-fwd b (add i 1) pred else do i end
+
+defn word-back b i -> skip-back b (skip-back b i &plain-byte?) &word-byte?
+defn word-fwd b i -> skip-fwd b (skip-fwd b i &plain-byte?) &word-byte?
+
+defn move-to state c -> edited (sput state :cursor c)
+
+defn key-left state -> move-to state (imax 0 (sub (cursor-of state) 1))
+defn key-right state -> move-to state (imin (add (cursor-of state) 1) (str-len (buffer-of state)))
+defn key-home state -> move-to state (line-start (buffer-of state) (cursor-of state))
+defn key-line-end state -> move-to state (line-stop (buffer-of state) (cursor-of state))
+defn key-word-back state -> move-to state (word-back (buffer-of state) (cursor-of state))
+defn key-word-fwd state -> move-to state (word-fwd (buffer-of state) (cursor-of state))
+
+defn delete-range state a z -> do
+  b = buffer-of state
+  edited (state |> sput :buffer (str (str-slice b 0 a) (str-slice b z (str-len b))) |> sput :cursor a)
+end
+
+defn kill-range state a z -> do
+  b = buffer-of state
+  match (delete-range state a z) do
+    {:render st} -> edited (sput st :kill (str-slice b a z))
+  end
+end
+
+defn key-backspace state -> do
+  c = cursor-of state
+  if (eq? c 0) do edited state else do delete-range state (sub c 1) c end
+end
+
+defn key-delete state -> do
+  c = cursor-of state
+  if (eq? c (str-len (buffer-of state))) do edited state else do delete-range state c (add c 1) end
+end
+
+defn key-eof-or-delete state -> if (eq? (str-len (buffer-of state)) 0) do tuple :eof state else do key-delete state end
+
+defn key-kill-line-end state -> do
+  b = buffer-of state
+  c = cursor-of state
+  e = line-stop b c
+  if (and (eq? c e) (lt? c (str-len b))) do kill-range state c (add c 1) else do kill-range state c e end
+end
+
+defn key-kill-line-start state -> kill-range state (line-start (buffer-of state) (cursor-of state)) (cursor-of state)
+
+defn key-kill-word state -> do
+  b = buffer-of state
+  c = cursor-of state
+  kill-range state (skip-back b (skip-back b c &space-byte?) &filled-byte?) c
+end
+
+defn key-yank state -> do
+  k = sget state :kill
+  if (eq? k "") do edited state else do insert-text state k end
+end
+
+defn list-len do
+  '() -> 0
+  (list _ . t) -> add 1 (list-len t)
+end
+
+defn nth-entry do
+  '() _ -> ""
+  (list h . _) 0 -> h
+  (list _ . t) n -> nth-entry t (sub n 1)
+end
+
+defn show-history state pos text ->
+  edited (state |> sput :hist-pos pos |> sput :buffer text |> sput :cursor (str-len text))
+
+defn key-history-back state -> do
+  h = sget state :history
+  p = sget state :hist-pos
+  n = add p 1
+  if (lt? n (list-len h)) do
+    st = if (eq? p (sub 0 1)) do sput state :saved (buffer-of state) else do state end
+    show-history st n (nth-entry h n)
+  else do
+    edited state
+  end
+end
+
+defn key-history-fwd state -> do
+  p = sget state :hist-pos
+  if (eq? p (sub 0 1)) do
+    edited state
+  else do
+    if (eq? p 0) do
+      show-history state (sub 0 1) (sget state :saved)
+    else do
+      show-history state (sub p 1) (nth-entry (sget state :history) (sub p 1))
+    end
+  end
+end
+
+defn drop-entries do
+  xs 0 -> xs
+  '() _ -> '()
+  (list _ . t) n -> drop-entries t (sub n 1)
+end
+
+defn search-scan do
+  '() _q _i -> :nil
+  (list h . _) q i when (contains? h q) -> tuple i h
+  (list _ . t) q i -> search-scan t q (add i 1)
+end
+
+defn search-apply state from -> do
+  q = sget state :search
+  if (eq? q "") do
+    edited state
+  else do
+    match (search-scan (drop-entries (sget state :history) from) q from) do
+      :nil -> edited state
+      {i text} -> edited (state |> sput :search-idx i |> sput :buffer text |> sput :cursor (str-len text))
+    end
+  end
+end
+
+defn search-exit state -> sput state :mode :edit
+
+defn key-search state ->
+  edited (state |> sput :mode :search |> sput :search "" |> sput :search-idx (sub 0 1) |> sput :saved-buffer (buffer-of state) |> sput :saved-cursor (cursor-of state))
+
+defn search-step state key -> match key do
+  {:char c} -> search-apply (sput state :search (str (sget state :search) c)) (imax 0 (sget state :search-idx))
+  :c-r -> search-apply state (add (sget state :search-idx) 1)
+  :backspace -> do
+    q = sget state :search
+    q2 = if (eq? q "") do "" else do str-slice q 0 (sub (str-len q) 1) end
+    search-apply (state |> sput :search q2 |> sput :search-idx (sub 0 1)) 0
+  end
+  :enter -> tuple :submit (search-exit state)
+  :c-c -> edited ((search-exit state) |> sput :buffer (sget state :saved-buffer) |> sput :cursor (sget state :saved-cursor))
+  :c-g -> edited ((search-exit state) |> sput :buffer (sget state :saved-buffer) |> sput :cursor (sget state :saved-cursor))
+  _ -> edited (search-exit state)
+end
+
+defn key-enter state -> tuple :submit state
+defn key-cancel state -> tuple :cancel state
+defn key-tab state -> edited state
+defn key-clear state -> tuple :clear state
+
+export defn bind-key state key handler -> sput state :keymap (dict-put (sget state :keymap) key handler)
+
+export defn initial-state prompt ->
+  dict :buffer "" :cursor 0 :history '() :hist-pos (sub 0 1) :saved "" :kill "" :mode :edit :search "" :search-idx (sub 0 1) :saved-buffer "" :saved-cursor 0 :prompt prompt :cont-prompt "...> " :cols 80 :row 0 :below 0 :dumb :false :keymap (dict :c-a &key-home :home &key-home :c-e &key-line-end :end &key-line-end :c-b &key-left :left &key-left :c-f &key-right :right &key-right :m-b &key-word-back :m-f &key-word-fwd :backspace &key-backspace :delete &key-delete :c-d &key-eof-or-delete :c-k &key-kill-line-end :c-u &key-kill-line-start :c-w &key-kill-word :c-y &key-yank :c-l &key-clear :up &key-history-back :c-p &key-history-back :down &key-history-fwd :c-n &key-history-fwd :c-r &key-search :enter &key-enter :c-c &key-cancel :tab &key-tab)
+
+export defn step state key ->
+  if (eq? (sget state :mode) :search) do
+    search-step state key
+  else do
+    match (dict-get (sget state :keymap) key :nil) do
+      :nil -> match key do
+        {:char c} -> insert-text state c
+        _ -> edited state
+      end
+      handler -> handler state
+    end
+  end
+
+export defn reset state ->
+  state |> sput :buffer "" |> sput :cursor 0 |> sput :mode :edit |> sput :hist-pos (sub 0 1) |> sput :row 0 |> sput :below 0
+
+export defn continue state -> do
+  b = str (buffer-of state) "\n"
+  state |> sput :buffer b |> sput :cursor (str-len b) |> sput :mode :edit
+end
+
+export defn push-history do
+  state "" -> state
+  state line -> match (sget state :history) do
+    (list h . _) when (eq? h line) -> sput state :hist-pos (sub 0 1)
+    _ -> state |> sput :history (cons line (sget state :history)) |> sput :hist-pos (sub 0 1)
+  end
+end
+
+defn skip-csi-bytes do
+  s i when (eq? i (str-len s)) -> i
+  s i when (and (gte? (str-byte s i) 64) (lte? (str-byte s i) 126)) -> add i 1
+  s i -> skip-csi-bytes s (add i 1)
+end
+
+defn visible-scan do
+  s i n when (eq? i (str-len s)) -> n
+  s i n when (and (eq? (str-byte s i) 27) (eq? (str-byte s (add i 1)) 91)) -> visible-scan s (skip-csi-bytes s (add i 2)) n
+  s i n -> visible-scan s (add i 1) (add n 1)
+end
+
+defn visible-len s -> visible-scan s 0 0
+
+defn end-pos off cols ->
+  if (and (gt? off 0) (eq? (mod off cols) 0)) do
+    tuple (sub (div off cols) 1) cols
+  else do
+    tuple (div off cols) (mod off cols)
+  end
+
+defn line-rows len cols -> match (end-pos len cols) do
+  {r _} -> add r 1
+end
+
+defn locate do
+  (list h . t) c i when (gt? c (str-len h)) -> locate t (sub c (add (str-len h) 1)) (add i 1)
+  (list _ . _) c i -> tuple i c
+  '() c i -> tuple i c
+end
+
+defn prompt-for state i -> do
+  p = if (eq? (sget state :mode) :search) do str "(reverse-i-search)'" (sget state :search) "': " else do sget state :prompt end
+  if (eq? i 0) do p else do sget state :cont-prompt end
+end
+
+defn rows-upto do
+  _state '() _i _cols _n acc -> acc
+  _state _lines _i _cols 0 acc -> acc
+  state (list h . t) i cols n acc -> rows-upto state t (add i 1) cols (sub n 1) (add acc (line-rows (add (visible-len (prompt-for state i)) (str-len h)) cols))
+end
+
+defn render-lines do
+  _state '() _i -> '()
+  state (list h . t) i -> cons (str (prompt-for state i) h) (render-lines state t (add i 1))
+end
+
+defn join-crlf do
+  '() -> ""
+  (list h) -> h
+  (list h . t) -> str h "\r\n" (join-crlf t)
+end
+
+export defn redraw state -> do
+  cols = imax 1 (sget state :cols)
+  b = buffer-of state
+  lines = split b "\n"
+  {li lc} = locate lines (cursor-of state) 0
+  coff = add (visible-len (prompt-for state li)) lc
+  cvis = add (visible-len (prompt-for state li)) (str-len (nth-entry lines li))
+  {cr cc} = if (eq? coff cvis) do end-pos coff cols else do tuple (div coff cols) (mod coff cols) end
+  cursor-row = add (rows-upto state lines 0 cols li 0) cr
+  last-index = sub (list-len lines) 1
+  {er _ec} = end-pos (add (visible-len (prompt-for state last-index)) (str-len (nth-entry lines last-index))) cols
+  end-row = add (rows-upto state lines 0 cols last-index 0) er
+  up-old = if (gt? (sget state :row) 0) do csi (str (sget state :row) "A") else do "" end
+  up-new = if (gt? (sub end-row cursor-row) 0) do csi (str (sub end-row cursor-row) "A") else do "" end
+  right = if (gt? cc 0) do csi (str cc "C") else do "" end
+  out = str "\r" up-old (csi "J") (join-crlf (render-lines state lines 0)) up-new "\r" right
+  tuple (state |> sput :row cursor-row |> sput :below (sub end-row cursor-row)) out
+end
+
+export defn decode-byte do
+  1 -> :c-a
+  2 -> :c-b
+  3 -> :c-c
+  4 -> :c-d
+  5 -> :c-e
+  6 -> :c-f
+  9 -> :tab
+  10 -> :enter
+  11 -> :c-k
+  12 -> :c-l
+  13 -> :enter
+  14 -> :c-n
+  16 -> :c-p
+  18 -> :c-r
+  21 -> :c-u
+  23 -> :c-w
+  25 -> :c-y
+  8 -> :backspace
+  127 -> :backspace
+  b when (gte? b 32) -> tuple :char (byte-str b)
+  _ -> :unknown
+end
+
+export defn csi-key do
+  65 _ -> :up
+  66 _ -> :down
+  67 _ -> :right
+  68 _ -> :left
+  72 _ -> :home
+  70 _ -> :end
+  126 "3" -> :delete
+  126 "1" -> :home
+  126 "7" -> :home
+  126 "4" -> :end
+  126 "8" -> :end
+  _ _ -> :unknown
+end
+
+defn read-csi-seq acc -> match (tty-read 50) do
+  {:byte b} when (and (gte? b 64) (lte? b 126)) -> csi-key b acc
+  {:byte b} -> read-csi-seq (str acc (byte-str b))
+  _ -> :unknown
+end
+
+defn read-ss3 _tag -> match (tty-read 50) do
+  {:byte b} -> csi-key b ""
+  _ -> :unknown
+end
+
+defn read-escape _tag -> match (tty-read 50) do
+  :timeout -> :esc
+  :eof -> :eof
+  {:byte 91} -> read-csi-seq ""
+  {:byte 79} -> read-ss3 :go
+  {:byte 98} -> :m-b
+  {:byte 102} -> :m-f
+  {:byte _} -> :unknown
+  other -> other
+end
+
+defn read-key _tag -> match (tty-read :nil) do
+  :eof -> :eof
+  {:signal s} -> tuple :signal s
+  {:byte 27} -> read-escape :go
+  {:byte b} -> decode-byte b
+  _ -> :unknown
+end
+
+defn term-cols _tag -> match tty-size do
+  {c _r} -> c
+end
+
+defn paint state -> do
+  {st out} = redraw state
+  tty-write out
+  st
+end
+
+defn to-block-end state ->
+  if (gt? (sget state :below) 0) do tty-write (csi (str (sget state :below) "B")) else do :ok end
+
+defn finish-line state -> do
+  to-block-end state
+  tuple :line (buffer-of state) (state |> sput :row 0 |> sput :below 0)
+end
+
+defn finish-cancel state -> do
+  to-block-end state
+  tuple :cancel (reset state)
+end
+
+defn edit-loop state -> match (read-key :go) do
+  :eof -> tuple :eof state
+  {:signal :resize} -> edit-loop (paint (sput state :cols (term-cols :go)))
+  {:signal _} -> finish-cancel state
+  :unknown -> edit-loop state
+  :esc -> edit-loop state
+  key -> match (step state key) do
+    {:render st} -> edit-loop (paint st)
+    {:clear st} -> do
+      tty-write (str (csi "H") (csi "2J"))
+      edit-loop (paint (sput st :row 0))
+    end
+    {:submit st} -> finish-line st
+    {:cancel st} -> finish-cancel st
+    {:eof st} -> tuple :eof st
+  end
+end
+
+defn raw-read state -> do
+  tty-raw!
+  result = edit-loop (paint state)
+  tty-restore!
+  result
+end
+
+defn cooked-read state -> do
+  tty-write (if (eq? (buffer-of state) "") do sget state :prompt else do sget state :cont-prompt end)
+  match tty-read-line do
+    :eof -> tuple :eof state
+    {:line l} -> do
+      full = str (buffer-of state) l
+      tuple :line full (sput state :buffer full)
+    end
+  end
+end
+
+defn cooked? state -> or (eq? (sget state :dumb) :true) (eq? (env-get "TERM") "dumb")
+
+defn guarded-raw state -> match (try do tuple :ok (raw-read state); rescue r -> tuple :fallback r end) do
+  {:ok result} -> result
+  {:fallback reason} -> do
+    tty-restore!
+    println (str "ish: editor disabled, falling back to plain input: " (inspect reason))
+    cooked-read (sput state :dumb :true)
+  end
+end
+
+export defn read state -> do
+  st = sput state :cols (term-cols :go)
+  if (cooked? st) do cooked-read st else do guarded-raw st end
+end
