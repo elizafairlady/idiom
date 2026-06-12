@@ -151,7 +151,6 @@ struct IdmRuntime {
     size_t gc_value_cap;
     void *expand_cache;
     void (*expand_cache_free)(void *cache);
-    IdmExec *current_exec;
     char **owned_temps;
     size_t owned_temp_count;
     size_t owned_temp_cap;

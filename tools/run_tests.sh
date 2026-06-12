@@ -15,9 +15,13 @@ san_check() {
 
 if [ "$MODE" = "output" ]; then
     "$IDIOMC" test tests/lang || fail=1
+    IDIOMMAXPROCS=1 "$IDIOMC" test tests/lang >/dev/null 2>build/lang-n1.err || { echo "LANG FAIL (IDIOMMAXPROCS=1)"; cat build/lang-n1.err; fail=1; }
+    echo "lang suites passed (IDIOMMAXPROCS=1)"
 else
     "$IDIOMC" test tests/lang >/dev/null 2>build/san-lang.err || true
     san_check build/san-lang.err "lang suites"
+    IDIOMMAXPROCS=1 "$IDIOMC" test tests/lang >/dev/null 2>build/san-lang-n1.err || true
+    san_check build/san-lang-n1.err "lang suites (IDIOMMAXPROCS=1)"
 fi
 
 for f in tests/golden/*.id; do

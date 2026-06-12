@@ -12,4 +12,49 @@ suite do
     assert-eq (str-byte "é" 0) 195
     assert-eq (str-byte "é" 1) 169
   end
+  test "tail-call-constant-stack" do
+    got = do
+      defn count do
+        0 -> :done
+        n -> count (n - 1)
+      end
+      count 1000000
+    end
+    assert-inspect got ":done"
+  end
+  test "tail-call-alternating-clauses" do
+    got = do
+      defn parity do
+        0 :even -> :even
+        0 :odd -> :odd
+        n p -> parity (n - 1) (if (eq? p :even) do :odd else do :even end)
+      end
+      parity 100001 :even
+    end
+    assert-inspect got ":odd"
+  end
+  test "guard-budget-bounded" do
+    got = assert-raises (fn _ig do
+      defn spin-guard n -> spin-guard n
+      defn pick do
+        n when (spin-guard n) -> n
+      end
+      pick 1
+    end)
+    match got do
+      {:error msg} -> assert (str-contains? msg "exceeded its budget")
+    end
+  end
+  test "tail-method-dispatch" do
+    got = do
+      protocol Down do
+        method down n -> if (eq? n 0) do :done else do down (n - 1) end
+      end
+      implements Down
+      extend int with Down do
+      end
+      down 200000
+    end
+    assert-inspect got ":done"
+  end
 end

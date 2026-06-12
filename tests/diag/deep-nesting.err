@@ -1,0 +1,1 @@
+tests/diag/deep-nesting.id:1:1025: error: source nested too deeply

@@ -237,7 +237,7 @@ uint64_t idm_rd_u64(IdmByteReader *r) {
     return v;
 }
 
-char *idm_rd_string(IdmByteReader *r) {
+char *idm_rd_string(IdmByteReader *r, size_t *out_len) {
     uint32_t n = idm_rd_u32(r);
     if (!r->ok || r->pos + n > r->len) {
         r->ok = false;
@@ -251,6 +251,7 @@ char *idm_rd_string(IdmByteReader *r) {
     memcpy(s, r->data + r->pos, n);
     s[n] = '\0';
     r->pos += n;
+    if (out_len) *out_len = n;
     return s;
 }
 

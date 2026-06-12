@@ -93,8 +93,8 @@ static void test_runtime_call_trace(void) {
         "in level3");
     expect_runtime_error_note(&rt, "<call-trace-outer>",
         "defn level3 x -> add x :not-a-number\n"
-        "defn level2 x -> level3 x\n"
-        "defn level1 x -> level2 x\n"
+        "defn level2 x -> add (level3 x) 1\n"
+        "defn level1 x -> add (level2 x) 1\n"
         "level1 1\n",
         "ADD expects numeric operands",
         "in level1");

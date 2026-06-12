@@ -52,6 +52,8 @@ bool idm_buf_put_u32(IdmBuffer *buf, uint32_t v);
 bool idm_buf_put_u64(IdmBuffer *buf, uint64_t v);
 bool idm_buf_put_str(IdmBuffer *buf, const char *data, size_t len);
 
+#define IDM_IC_MAX_DEPTH 1024u
+
 typedef struct {
     const unsigned char *data;
     size_t len;
@@ -63,7 +65,7 @@ void idm_byte_reader_init(IdmByteReader *r, const unsigned char *data, size_t le
 uint8_t idm_rd_u8(IdmByteReader *r);
 uint32_t idm_rd_u32(IdmByteReader *r);
 uint64_t idm_rd_u64(IdmByteReader *r);
-char *idm_rd_string(IdmByteReader *r);
+char *idm_rd_string(IdmByteReader *r, size_t *out_len);
 
 void idm_sha256(const void *data, size_t len, unsigned char out[32]);
 void idm_sha256_hex(const void *data, size_t len, char out[65]);

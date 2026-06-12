@@ -446,10 +446,9 @@ bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn) {
     return false;
 }
 
-#define IDM_SYN_SER_MAX_DEPTH 1024u
-
-bool idm_syn_serialize(IdmBuffer *out, const IdmSyntax *syn, IdmError *err) {
+static bool syn_serialize_depth(IdmBuffer *out, const IdmSyntax *syn, unsigned depth, IdmError *err) {
     if (!syn) return idm_error_set(err, idm_span_unknown(NULL), "cannot serialize null syntax");
+    if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, syn->span, "syntax nested too deeply to serialize");
     if (!idm_buf_put_u8(out, (uint8_t)syn->kind)) return idm_error_oom(err, syn->span);
     bool ok = idm_buf_put_u8(out, syn->span.file ? 1u : 0u);
     if (ok && syn->span.file) ok = idm_buf_put_str(out, syn->span.file, strlen(syn->span.file));
@@ -504,15 +503,19 @@ bool idm_syn_serialize(IdmBuffer *out, const IdmSyntax *syn, IdmError *err) {
             if (!idm_buf_put_u8(out, (uint8_t)syn->as.seq.shape)) return idm_error_oom(err, syn->span);
             if (!idm_buf_put_u32(out, (uint32_t)syn->as.seq.count)) return idm_error_oom(err, syn->span);
             for (size_t i = 0; i < syn->as.seq.count; i++) {
-                if (!idm_syn_serialize(out, syn->as.seq.items[i], err)) return false;
+                if (!syn_serialize_depth(out, syn->as.seq.items[i], depth + 1u, err)) return false;
             }
             return true;
     }
     return idm_error_set(err, syn->span, "unknown syntax kind %u cannot be serialized", (unsigned)syn->kind);
 }
 
+bool idm_syn_serialize(IdmBuffer *out, const IdmSyntax *syn, IdmError *err) {
+    return syn_serialize_depth(out, syn, 0u, err);
+}
+
 static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsigned depth, IdmError *err) {
-    if (depth > IDM_SYN_SER_MAX_DEPTH) {
+    if (depth > IDM_IC_MAX_DEPTH) {
         idm_error_set(err, idm_span_unknown(NULL), "serialized syntax nested too deeply");
         return NULL;
     }
@@ -524,7 +527,7 @@ static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsign
     }
     IdmSpan span = idm_span_unknown(NULL);
     if (has_file) {
-        char *file = idm_rd_string(r);
+        char *file = idm_rd_string(r, NULL);
         if (!file) {
             idm_error_set(err, idm_span_unknown(NULL), "truncated serialized syntax span file");
             return NULL;
@@ -567,7 +570,7 @@ static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsign
     }
     uint8_t has_token = ok ? idm_rd_u8(r) : 0u;
     if (ok && has_token) {
-        char *raw = idm_rd_string(r);
+        char *raw = idm_rd_string(r, NULL);
         uint8_t leading = idm_rd_u8(r);
         uint8_t adjacent = idm_rd_u8(r);
         if (!raw || !r->ok) ok = false;
@@ -577,15 +580,15 @@ static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsign
     }
     uint32_t property_count = ok ? idm_rd_u32(r) : 0u;
     for (uint32_t i = 0; ok && i < property_count; i++) {
-        char *key = idm_rd_string(r);
-        char *value = key ? idm_rd_string(r) : NULL;
+        char *key = idm_rd_string(r, NULL);
+        char *value = key ? idm_rd_string(r, NULL) : NULL;
         if (!key || !value || !idm_syn_property_set(syn, key, value)) ok = false;
         free(key);
         free(value);
     }
     uint32_t origin_count = ok ? idm_rd_u32(r) : 0u;
     for (uint32_t i = 0; ok && i < origin_count; i++) {
-        char *origin = idm_rd_string(r);
+        char *origin = idm_rd_string(r, NULL);
         if (!origin || !idm_syn_origin_push(syn, origin)) ok = false;
         free(origin);
     }
@@ -600,7 +603,7 @@ static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsign
         case IDM_SYN_WORD:
         case IDM_SYN_ATOM:
         case IDM_SYN_STRING: {
-            char *text = idm_rd_string(r);
+            char *text = idm_rd_string(r, NULL);
             if (!text) {
                 idm_error_set(err, span, "truncated serialized syntax text");
                 idm_syn_free(syn);

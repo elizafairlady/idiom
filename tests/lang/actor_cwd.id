@@ -1,0 +1,38 @@
+use std/test
+use std/enum
+
+suite do
+  test "cwd-relative-file-prims" do
+    got = do
+      implements std/shell
+      cd "/"
+      cd "tmp"
+      w = file-write "idiom_actor_cwd_inner.txt" "inner"
+      r = file-read "/tmp/idiom_actor_cwd_inner.txt"
+      e = file-exists? "idiom_actor_cwd_inner.txt"
+      c = cat idiom_actor_cwd_inner.txt
+      rm = file-remove "idiom_actor_cwd_inner.txt"
+      g = file-exists? "/tmp/idiom_actor_cwd_inner.txt"
+      tuple w r e c rm g (pwd)
+    end
+    assert-inspect got "{:ok {:ok \"inner\"} :true {:ok 0 \"inner\" \"\"} :ok :false \"/tmp\"}"
+  end
+  test "cwd-isolated-under-load" do
+    got = do
+      file-write "/tmp/idiom_actor_cwd_marker.txt" "m"
+      parent = self
+      spawn (fn do
+        cd "/tmp"
+        results = map (range 0 300) (fn _i -> file-exists? "idiom_actor_cwd_marker.txt")
+        misses = length (filter results (fn r -> eq? r :false))
+        send parent misses
+      end)
+      cd "/"
+      map (range 0 100) (fn _i -> await (exec (tuple :exec (tuple :stage (list (tuple :lit "true")) (list) (list)) :false)))
+      misses = receive do m -> m end
+      file-remove "/tmp/idiom_actor_cwd_marker.txt"
+      misses
+    end
+    assert-inspect got "0"
+  end
+end

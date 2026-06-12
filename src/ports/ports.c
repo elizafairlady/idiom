@@ -145,12 +145,24 @@ static bool resolve_argv_part(IdmValue part, const IdmExec *exec_ctx, Stage *sta
     if (value_is_atom(tag, "glob")) {
         char *pattern = dup_string_value(payload);
         if (!pattern) return false;
+        const char *base = idm_exec_cwd(exec_ctx);
+        size_t skip = 0;
+        char *lookup = pattern;
+        if (base && pattern[0] != '/') {
+            skip = strlen(base) + 1u;
+            lookup = malloc(skip + strlen(pattern) + 1u);
+            if (!lookup) { free(pattern); return false; }
+            memcpy(lookup, base, skip - 1u);
+            lookup[skip - 1u] = '/';
+            strcpy(lookup + skip, pattern);
+        }
         glob_t g;
         memset(&g, 0, sizeof(g));
-        int rc = glob(pattern, 0, NULL, &g);
+        int rc = glob(lookup, 0, NULL, &g);
+        if (lookup != pattern) free(lookup);
         if (rc == 0 && g.gl_pathc > 0) {
             bool ok = true;
-            for (size_t i = 0; i < g.gl_pathc && ok; i++) ok = argv_push(argv, count, cap, idm_strdup(g.gl_pathv[i]));
+            for (size_t i = 0; i < g.gl_pathc && ok; i++) ok = argv_push(argv, count, cap, idm_strdup(g.gl_pathv[i] + skip));
             globfree(&g);
             free(pattern);
             return ok;
@@ -335,16 +347,7 @@ static void child_apply_redirs(const Stage *stage) {
 
 IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx, IdmError *err) {
     (void)rt;
-    char saved_cwd[4096];
-    bool restore_cwd = false;
     const char *launch_cwd = idm_exec_cwd(exec_ctx);
-    if (launch_cwd) {
-        if (!getcwd(saved_cwd, sizeof(saved_cwd)) || chdir(launch_cwd) != 0) {
-            idm_error_set(err, idm_span_unknown(NULL), "cwd '%s' is not accessible: %s", launch_cwd, strerror(errno));
-            return NULL;
-        }
-        restore_cwd = true;
-    }
     IdmPort *port = calloc(1u, sizeof(*port));
     if (!port) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
     port->out_fd = -1;
@@ -353,7 +356,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
     idm_buf_init(&port->out_buf);
     idm_buf_init(&port->err_buf);
 
-    if (!idm_is_tuple(graph) || idm_sequence_count(graph) < 3) { idm_error_set(err, idm_span_unknown(NULL), "invalid command graph"); if (restore_cwd && chdir(saved_cwd) != 0) {} idm_port_free(port); return NULL; }
+    if (!idm_is_tuple(graph) || idm_sequence_count(graph) < 3) { idm_error_set(err, idm_span_unknown(NULL), "invalid command graph"); idm_port_free(port); return NULL; }
     IdmError ignore;
     idm_error_init(&ignore);
     IdmValue tag = idm_sequence_item(graph, 0, &ignore);
@@ -363,7 +366,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         port->capture = value_is_atom(cap, "true");
         port->stage_count = 1;
         port->stages = calloc(1u, sizeof(*port->stages));
-        if (!port->stages || !parse_stage(stage, exec_ctx, &port->stages[0])) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid command stage"); if (restore_cwd && chdir(saved_cwd) != 0) {} idm_port_free(port); return NULL; }
+        if (!port->stages || !parse_stage(stage, exec_ctx, &port->stages[0])) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid command stage"); idm_port_free(port); return NULL; }
     } else if (value_is_atom(tag, "pipeline")) {
         IdmValue list = idm_sequence_item(graph, 1, &ignore);
         IdmValue cap = idm_sequence_item(graph, 2, &ignore);
@@ -377,13 +380,12 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         if (!port->stages) { free(sv); idm_error_clear(&ignore); idm_error_oom(err, idm_span_unknown(NULL)); idm_port_free(port); return NULL; }
         port->stage_count = sc;
         for (size_t i = 0; i < sc; i++) {
-            if (!parse_stage(sv[i], exec_ctx, &port->stages[i])) { free(sv); idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid pipeline stage"); if (restore_cwd && chdir(saved_cwd) != 0) {} idm_port_free(port); return NULL; }
+            if (!parse_stage(sv[i], exec_ctx, &port->stages[i])) { free(sv); idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid pipeline stage"); idm_port_free(port); return NULL; }
         }
         free(sv);
     } else {
         idm_error_clear(&ignore);
         idm_error_set(err, idm_span_unknown(NULL), "unknown command graph kind");
-        if (restore_cwd && chdir(saved_cwd) != 0) {}
         idm_port_free(port);
         return NULL;
     }
@@ -392,7 +394,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
     int cap_out[2] = {-1, -1};
     int cap_err[2] = {-1, -1};
     if (port->capture) {
-        if (pipe(cap_out) < 0 || pipe(cap_err) < 0) { idm_error_set(err, idm_span_unknown(NULL), "pipe failed: %s", strerror(errno)); if (restore_cwd && chdir(saved_cwd) != 0) {} idm_port_free(port); return NULL; }
+        if (pipe(cap_out) < 0 || pipe(cap_err) < 0) { idm_error_set(err, idm_span_unknown(NULL), "pipe failed: %s", strerror(errno)); idm_port_free(port); return NULL; }
     }
 
     int prev_read = -1;
@@ -406,6 +408,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         pid_t pid = fork();
         if (pid < 0) { idm_error_set(err, idm_span_unknown(NULL), "fork failed: %s", strerror(errno)); if (stage_pipe[0] >= 0) { close(stage_pipe[0]); close(stage_pipe[1]); } failed = true; break; }
         if (pid == 0) {
+            if (launch_cwd && chdir(launch_cwd) != 0) _exit(126);
             if (prev_read >= 0) { dup2(prev_read, 0); }
             if (!last) { dup2(stage_pipe[1], 1); }
             else if (port->capture) { dup2(cap_out[1], 1); dup2(cap_err[1], 2); }
@@ -441,10 +444,6 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
             set_nonblocking(port->out_fd);
             set_nonblocking(port->err_fd);
         }
-    }
-    if (restore_cwd && chdir(saved_cwd) != 0) {
-        idm_error_set(err, idm_span_unknown(NULL), "failed to restore working directory: %s", strerror(errno));
-        failed = true;
     }
     if (failed) {
         for (size_t i = 0; i < port->stage_count; i++) {

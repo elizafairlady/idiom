@@ -2,6 +2,7 @@
 
 #include "idiom/syntax.h"
 
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -79,7 +80,16 @@ struct IdmSymbol {
     IdmSymbolKind kind;
 };
 
-static IdmObject *heap_alloc(IdmHeap *heap, IdmObjectKind kind) {
+static pthread_mutex_t g_alloc_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_intern_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_ns_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_gcreg_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text);
+static IdmNamespace *namespace_get_or_create_unlocked(IdmRuntime *rt, const char *name);
+static bool register_gc_module_unlocked(IdmRuntime *rt, const IdmBytecodeModule *module);
+
+static IdmObject *heap_alloc_unlocked(IdmHeap *heap, IdmObjectKind kind) {
     IdmObject *obj = calloc(1u, sizeof(*obj));
     if (!obj) return NULL;
     obj->kind = kind;
@@ -92,9 +102,18 @@ static IdmObject *heap_alloc(IdmHeap *heap, IdmObjectKind kind) {
     return obj;
 }
 
+static IdmObject *heap_alloc(IdmHeap *heap, IdmObjectKind kind) {
+    pthread_mutex_lock(&g_alloc_mu);
+    IdmObject *obj = heap_alloc_unlocked(heap, kind);
+    pthread_mutex_unlock(&g_alloc_mu);
+    return obj;
+}
+
 static void heap_account(IdmHeap *heap, IdmObject *obj, size_t extra) {
+    pthread_mutex_lock(&g_alloc_mu);
     obj->bytes += extra;
     heap->bytes_allocated += extra;
+    pthread_mutex_unlock(&g_alloc_mu);
 }
 
 static size_t syn_footprint(const IdmSyntax *syn) {
@@ -153,6 +172,7 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->expander_surface = NULL;
     rt->cli_args = NULL;
     rt->cli_arg_count = 0;
+
     rt->namespaces = NULL;
     rt->ns_count = 0;
     rt->ns_cap = 0;
@@ -174,7 +194,6 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->gc_value_cap = 0;
     rt->expand_cache = NULL;
     rt->expand_cache_free = NULL;
-    rt->current_exec = NULL;
     rt->owned_temps = NULL;
     rt->owned_temp_count = 0;
     rt->owned_temp_cap = 0;
@@ -195,6 +214,13 @@ bool idm_runtime_own_temp(IdmRuntime *rt, const char *path) {
 }
 
 bool idm_runtime_register_gc_module(IdmRuntime *rt, const IdmBytecodeModule *module) {
+    pthread_mutex_lock(&g_gcreg_mu);
+    bool ok = register_gc_module_unlocked(rt, module);
+    pthread_mutex_unlock(&g_gcreg_mu);
+    return ok;
+}
+
+static bool register_gc_module_unlocked(IdmRuntime *rt, const IdmBytecodeModule *module) {
     if (!module) return false;
     if (rt->gc_module_count == rt->gc_module_cap) {
         size_t cap = rt->gc_module_cap ? rt->gc_module_cap * 2u : 16u;
@@ -311,6 +337,13 @@ void idm_runtime_destroy(IdmRuntime *rt) {
 }
 
 IdmNamespace *idm_namespace_get_or_create(IdmRuntime *rt, const char *name) {
+    pthread_mutex_lock(&g_ns_mu);
+    IdmNamespace *found = namespace_get_or_create_unlocked(rt, name);
+    pthread_mutex_unlock(&g_ns_mu);
+    return found;
+}
+
+static IdmNamespace *namespace_get_or_create_unlocked(IdmRuntime *rt, const char *name) {
     for (size_t i = 0; i < rt->ns_count; i++) {
         if (strcmp(rt->namespaces[i]->name, name) == 0) return rt->namespaces[i];
     }
@@ -330,27 +363,40 @@ IdmNamespace *idm_namespace_get_or_create(IdmRuntime *rt, const char *name) {
 }
 
 bool idm_ns_slot_ensure(IdmNamespace *ns, uint32_t id, IdmError *err) {
+    pthread_mutex_lock(&g_ns_mu);
     size_t needed = (size_t)id + 1u;
-    if (needed <= ns->slot_count) return true;
+    if (needed <= ns->slot_count) {
+        pthread_mutex_unlock(&g_ns_mu);
+        return true;
+    }
     if (needed > ns->slot_cap) {
         size_t cap = ns->slot_cap ? ns->slot_cap * 2u : 16u;
         while (cap < needed) cap *= 2u;
         IdmValue *grown = realloc(ns->slots, cap * sizeof(*grown));
-        if (!grown) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (!grown) {
+            pthread_mutex_unlock(&g_ns_mu);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
         ns->slots = grown;
         ns->slot_cap = cap;
     }
     for (size_t i = ns->slot_count; i < needed; i++) ns->slots[i] = idm_nil();
     ns->slot_count = needed;
+    pthread_mutex_unlock(&g_ns_mu);
     return true;
 }
 
 void idm_ns_slot_set(IdmNamespace *ns, uint32_t id, IdmValue value) {
+    pthread_mutex_lock(&g_ns_mu);
     if ((size_t)id < ns->slot_count) ns->slots[id] = value;
+    pthread_mutex_unlock(&g_ns_mu);
 }
 
 IdmValue idm_ns_slot_get(const IdmNamespace *ns, uint32_t id) {
-    return (size_t)id < ns->slot_count ? ns->slots[id] : idm_nil();
+    pthread_mutex_lock(&g_ns_mu);
+    IdmValue out = (size_t)id < ns->slot_count ? ns->slots[id] : idm_nil();
+    pthread_mutex_unlock(&g_ns_mu);
+    return out;
 }
 
 void idm_intern_init(IdmIntern *intern) {
@@ -371,6 +417,13 @@ void idm_intern_destroy(IdmIntern *intern) {
 }
 
 IdmSymbol *idm_intern(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
+    pthread_mutex_lock(&g_intern_mu);
+    IdmSymbol *sym = idm_intern_unlocked(intern, kind, text);
+    pthread_mutex_unlock(&g_intern_mu);
+    return sym;
+}
+
+static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
     for (size_t i = 0; i < intern->count; i++) {
         if (intern->symbols[i]->kind == kind && strcmp(intern->symbols[i]->text, text) == 0) return intern->symbols[i];
     }
@@ -469,8 +522,12 @@ void idm_heap_sweep(IdmHeap *heap) {
 }
 
 size_t idm_heap_bytes(const IdmHeap *heap) {
-    return heap->bytes_allocated;
+    pthread_mutex_lock(&g_alloc_mu);
+    size_t n = heap->bytes_allocated;
+    pthread_mutex_unlock(&g_alloc_mu);
+    return n;
 }
+
 
 void idm_heap_collect(IdmHeap *heap, const IdmValue *roots, size_t root_count) {
     for (size_t i = 0; i < root_count; i++) value_mark(roots[i]);
@@ -1078,19 +1135,34 @@ bool idm_is_record(IdmValue value) {
     return value.tag == IDM_VAL_RECORD;
 }
 
-IdmValue idm_cell_get(IdmValue cell, IdmError *err) {
+static pthread_mutex_t g_cell_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static IdmValue cell_get_unlocked(IdmValue cell, IdmError *err) {
     if (cell.tag != IDM_VAL_CELL) {
         idm_error_set(err, idm_span_unknown(NULL), "expected cell");
         return idm_nil();
     }
     return cell.as.obj->as.cell.value;
 }
+IdmValue idm_cell_get(IdmValue cell, IdmError *err) {
+    pthread_mutex_lock(&g_cell_mu);
+    IdmValue out = cell_get_unlocked(cell, err);
+    pthread_mutex_unlock(&g_cell_mu);
+    return out;
+}
 
-bool idm_cell_set(IdmValue cell, IdmValue value, IdmError *err) {
+static bool cell_set_unlocked(IdmValue cell, IdmValue value, IdmError *err) {
     if (cell.tag != IDM_VAL_CELL) return idm_error_set(err, idm_span_unknown(NULL), "expected cell");
     cell.as.obj->as.cell.value = value;
     return true;
 }
+bool idm_cell_set(IdmValue cell, IdmValue value, IdmError *err) {
+    pthread_mutex_lock(&g_cell_mu);
+    bool ok = cell_set_unlocked(cell, value, err);
+    pthread_mutex_unlock(&g_cell_mu);
+    return ok;
+}
+
 
 uint32_t idm_closure_function_index(IdmValue value) {
     return value.tag == IDM_VAL_CLOSURE ? value.as.obj->as.closure.function_index : UINT32_MAX;

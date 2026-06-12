@@ -1,0 +1,145 @@
+use std/test
+use std/enum
+
+suite do
+  test "fan-out-fan-in" do
+    got = do
+      parent = self
+      map (range 0 50) (fn i -> spawn (fn -> send parent (tuple :res (i * i))))
+      defn gather do
+        0 acc -> acc
+        n acc -> receive do {:res sq} -> gather (n - 1) (acc + sq) end
+      end
+      gather 50 0
+    end
+    assert-inspect got "40425"
+  end
+  test "pairwise-fifo" do
+    got = do
+      parent = self
+      spawn (fn -> map (range 0 20) (fn k -> send parent (tuple :seq k)))
+      defn drain do
+        0 acc -> reverse acc
+        n acc -> receive do {:seq k} -> drain (n - 1) (cons k acc) end
+      end
+      eq? (inspect (drain 20 :nil)) (inspect (range 0 20))
+    end
+    assert-inspect got ":true"
+  end
+  test "ping-pong-rally" do
+    got = do
+      parent = self
+      ponger = spawn (fn do
+        defn serve served -> receive do
+          {:ping from k} -> do
+            send from (tuple :pong k)
+            serve (served + 1)
+          end
+        end
+        serve 0
+      end)
+      defn rally do
+        0 -> :done
+        n -> do
+          send ponger (tuple :ping parent n)
+          receive do {:pong k} -> rally (n - 1) end
+        end
+      end
+      rally 100
+    end
+    assert-inspect got ":done"
+  end
+  test "parallel-gc-load" do
+    got = do
+      parent = self
+      defn build do
+        0 acc -> acc
+        n acc -> build (n - 1) (cons n acc)
+      end
+      map (range 0 8) (fn _i -> spawn (fn -> send parent (tuple :sum (sum (build 5000 :nil)))))
+      defn gather do
+        0 acc -> acc
+        n acc -> receive do {:sum s} -> gather (n - 1) (acc + s) end
+      end
+      gather 8 0
+    end
+    assert-inspect got "100020000"
+  end
+  test "rescued-value-survives-gc" do
+    got = do
+      defn build do
+        0 acc -> acc
+        n acc -> build (n - 1) (cons n acc)
+      end
+      defn churn do
+        0 -> :ok
+        n -> do
+          build 2000 :nil
+          churn (n - 1)
+        end
+      end
+      spawn (fn -> churn 5000)
+      defn hammer do
+        0 -> :done
+        n -> do
+          r = try do raise (tuple :v n (build 200 :nil)); rescue e -> e end
+          match r do {:v k [h . _]} -> if (and (eq? k n) (eq? h 1)) do hammer (n - 1) else do :corrupt end end
+        end
+      end
+      hammer 5000
+    end
+    assert-inspect got ":done"
+  end
+  test "receive-after-fires-under-load" do
+    got = do
+      map (range 0 8) (fn _i -> spawn (fn do
+        defn spin k -> spin (k + 1)
+        spin 0
+      end))
+      receive do
+        {:never x} -> x
+        after 50 -> :woke
+      end
+    end
+    assert-inspect got ":woke"
+  end
+  test "kill-running-actor" do
+    got = do
+      victim = spawn (fn do
+        defn spin n -> spin (n + 1)
+        spin 0
+      end)
+      monitor victim
+      spawn (fn do
+        link victim
+        raise :boom
+      end)
+      receive do
+        {:down _ref _pid reason} -> reason
+        after 5000 -> :timeout
+      end
+    end
+    assert-inspect got ":boom"
+  end
+  test "trap-exit-toggle-under-exit" do
+    got = do
+      victim = spawn (fn do
+        defn flip n -> do
+          trap-exit :true
+          trap-exit :false
+          flip (n + 1)
+        end
+        flip 0
+      end)
+      spawn (fn do
+        link victim
+        raise :boom
+      end)
+      receive do
+        {:never x} -> x
+        after 200 -> :ok
+      end
+    end
+    assert-inspect got ":ok"
+  end
+end

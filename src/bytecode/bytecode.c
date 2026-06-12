@@ -2,27 +2,31 @@
 
 #include "idiom/core.h"
 #include "idiom/syntax.h"
+#include "idiom/value.h"
 
 #include <stdlib.h>
 #include <string.h>
 
+static IdmIntern g_span_files;
+
 static bool span_file_index(IdmBytecodeModule *module, const char *file, uint32_t *out_index) {
+    const IdmSymbol *sym = idm_intern(&g_span_files, IDM_SYMBOL_WORD, file);
+    if (!sym) return false;
+    const char *name = idm_symbol_text(sym);
     for (size_t i = 0; i < module->span_file_count; i++) {
-        if (strcmp(module->span_files[i], file) == 0) {
+        if (module->span_files[i] == name) {
             *out_index = (uint32_t)i;
             return true;
         }
     }
     if (module->span_file_count == module->span_file_cap) {
         size_t cap = module->span_file_cap ? module->span_file_cap * 2u : 4u;
-        char **grown = realloc(module->span_files, cap * sizeof(*grown));
+        const char **grown = realloc(module->span_files, cap * sizeof(*grown));
         if (!grown) return false;
         module->span_files = grown;
         module->span_file_cap = cap;
     }
-    char *copy = idm_strdup(file);
-    if (!copy) return false;
-    module->span_files[module->span_file_count] = copy;
+    module->span_files[module->span_file_count] = name;
     *out_index = (uint32_t)module->span_file_count;
     module->span_file_count++;
     return true;
@@ -95,7 +99,6 @@ void idm_bc_destroy(IdmBytecodeModule *module) {
     if (!module) return;
     free(module->code);
     free(module->constants);
-    for (size_t i = 0; i < module->span_file_count; i++) free(module->span_files[i]);
     free(module->span_files);
     free(module->spans);
     for (size_t i = 0; i < module->function_count; i++) {
@@ -265,6 +268,7 @@ const char *idm_opcode_name(IdmOpcode op) {
         case IDM_OP_DEFINE_PROTOCOL: return "DEFINE_PROTOCOL";
         case IDM_OP_EXTEND_PROTOCOL: return "EXTEND_PROTOCOL";
         case IDM_OP_CALL_METHOD: return "CALL_METHOD";
+        case IDM_OP_TAIL_CALL_METHOD: return "TAIL_CALL_METHOD";
     }
     return "<bad-op>";
 }
@@ -350,7 +354,8 @@ bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
                 }
                 break;
             }
-            case IDM_OP_CALL_METHOD: {
+            case IDM_OP_CALL_METHOD:
+            case IDM_OP_TAIL_CALL_METHOD: {
                 uint32_t protocol_const = 0;
                 uint32_t method_const = 0;
                 uint32_t ignored = 0;
@@ -504,6 +509,7 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 break;
             }
             case IDM_OP_CALL_METHOD:
+            case IDM_OP_TAIL_CALL_METHOD:
                 if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
                 if (!idm_buf_appendf(buf, " %u %u %u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
                 ip += 3u;
@@ -516,7 +522,8 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
     return true;
 }
 
-static bool serialize_value(IdmBuffer *out, IdmValue v, IdmError *err) {
+static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError *err) {
+    if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "value nested too deeply for .ic");
     switch (v.tag) {
         case IDM_VAL_NIL: return idm_buf_put_u8(out, 0u);
         case IDM_VAL_INT: return idm_buf_put_u8(out, 1u) && idm_buf_put_u64(out, (uint64_t)v.as.i);
@@ -528,7 +535,7 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, IdmError *err) {
             IdmError ignore; idm_error_init(&ignore);
             IdmValue car = idm_car(v, &ignore), cdr = idm_cdr(v, &ignore);
             idm_error_clear(&ignore);
-            return idm_buf_put_u8(out, 6u) && serialize_value(out, car, err) && serialize_value(out, cdr, err);
+            return idm_buf_put_u8(out, 6u) && serialize_value(out, car, depth + 1u, err) && serialize_value(out, cdr, depth + 1u, err);
         }
         case IDM_VAL_TUPLE:
         case IDM_VAL_VECTOR: {
@@ -538,7 +545,7 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, IdmError *err) {
                 IdmError ignore; idm_error_init(&ignore);
                 IdmValue item = idm_sequence_item(v, i, &ignore);
                 idm_error_clear(&ignore);
-                if (!serialize_value(out, item, err)) return false;
+                if (!serialize_value(out, item, depth + 1u, err)) return false;
             }
             return true;
         }
@@ -548,7 +555,7 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, IdmError *err) {
             for (size_t i = 0; i < n; i++) {
                 IdmValue key, val;
                 if (!idm_dict_entry(v, i, &key, &val)) return idm_error_set(err, idm_span_unknown(NULL), "dict entry serialization failed");
-                if (!serialize_value(out, key, err) || !serialize_value(out, val, err)) return false;
+                if (!serialize_value(out, key, depth + 1u, err) || !serialize_value(out, val, depth + 1u, err)) return false;
             }
             return true;
         }
@@ -560,7 +567,7 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, IdmError *err) {
             const char *type = idm_record_type(v, &ignore);
             IdmValue fields = idm_record_fields(v, &ignore);
             idm_error_clear(&ignore);
-            return idm_buf_put_u8(out, 11u) && idm_buf_put_str(out, type ? type : "", type ? strlen(type) : 0u) && serialize_value(out, fields, err);
+            return idm_buf_put_u8(out, 11u) && idm_buf_put_str(out, type ? type : "", type ? strlen(type) : 0u) && serialize_value(out, fields, depth + 1u, err);
         }
         case IDM_VAL_SYNTAX: {
             const IdmSyntax *syn = idm_syntax_get(v, err);
@@ -573,32 +580,33 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, IdmError *err) {
     }
 }
 
-static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, IdmError *err) {
+static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned depth, IdmError *err) {
+    if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "pattern nested too deeply for .ic");
     if (!idm_buf_put_u8(out, (uint8_t)pat->kind)) return idm_error_oom(err, idm_span_unknown(NULL));
     switch (pat->kind) {
         case IDM_PAT_WILDCARD: return true;
         case IDM_PAT_BIND:
         case IDM_PAT_PIN: return idm_buf_put_str(out, pat->as.name, strlen(pat->as.name)) ? true : idm_error_oom(err, idm_span_unknown(NULL));
-        case IDM_PAT_LITERAL: return serialize_value(out, pat->as.literal, err);
-        case IDM_PAT_PAIR: return serialize_pattern(out, pat->as.pair.left, err) && serialize_pattern(out, pat->as.pair.right, err);
+        case IDM_PAT_LITERAL: return serialize_value(out, pat->as.literal, depth + 1u, err);
+        case IDM_PAT_PAIR: return serialize_pattern(out, pat->as.pair.left, depth + 1u, err) && serialize_pattern(out, pat->as.pair.right, depth + 1u, err);
         case IDM_PAT_LIST:
         case IDM_PAT_VECTOR:
         case IDM_PAT_TUPLE: {
             if (!idm_buf_put_u32(out, (uint32_t)pat->as.seq.count)) return idm_error_oom(err, idm_span_unknown(NULL));
-            for (size_t i = 0; i < pat->as.seq.count; i++) if (!serialize_pattern(out, pat->as.seq.items[i], err)) return false;
+            for (size_t i = 0; i < pat->as.seq.count; i++) if (!serialize_pattern(out, pat->as.seq.items[i], depth + 1u, err)) return false;
             return true;
         }
         case IDM_PAT_VECTOR_REST:
         case IDM_PAT_TUPLE_REST: {
             if (!idm_buf_put_u32(out, (uint32_t)pat->as.seq_rest.count)) return idm_error_oom(err, idm_span_unknown(NULL));
-            for (size_t i = 0; i < pat->as.seq_rest.count; i++) if (!serialize_pattern(out, pat->as.seq_rest.items[i], err)) return false;
-            return serialize_pattern(out, pat->as.seq_rest.rest, err);
+            for (size_t i = 0; i < pat->as.seq_rest.count; i++) if (!serialize_pattern(out, pat->as.seq_rest.items[i], depth + 1u, err)) return false;
+            return serialize_pattern(out, pat->as.seq_rest.rest, depth + 1u, err);
         }
         case IDM_PAT_DICT: {
             if (!idm_buf_put_u32(out, (uint32_t)pat->as.dict.count)) return idm_error_oom(err, idm_span_unknown(NULL));
             for (size_t i = 0; i < pat->as.dict.count; i++) {
-                if (!serialize_value(out, pat->as.dict.entries[i].key, err)) return false;
-                if (!serialize_pattern(out, pat->as.dict.entries[i].pattern, err)) return false;
+                if (!serialize_value(out, pat->as.dict.entries[i].key, depth + 1u, err)) return false;
+                if (!serialize_pattern(out, pat->as.dict.entries[i].pattern, depth + 1u, err)) return false;
             }
             return true;
         }
@@ -610,7 +618,7 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, IdmError *e
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err) {
     if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, 2u)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u32(out, (uint32_t)module->const_count)) return idm_error_oom(err, idm_span_unknown(NULL));
-    for (size_t i = 0; i < module->const_count; i++) if (!serialize_value(out, module->constants[i], err)) return false;
+    for (size_t i = 0; i < module->const_count; i++) if (!serialize_value(out, module->constants[i], 0u, err)) return false;
     if (!idm_buf_put_u32(out, (uint32_t)module->function_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->function_count; i++) {
         const IdmBcFunction *f = &module->functions[i];
@@ -618,7 +626,7 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
         if (!idm_buf_put_u32(out, f->arity) || !idm_buf_put_u32(out, f->local_count) || !idm_buf_put_u64(out, (uint64_t)f->entry)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!idm_buf_put_u8(out, f->has_guard ? 1u : 0u) || !idm_buf_put_u32(out, f->guard_function)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!idm_buf_put_u32(out, f->pattern_count)) return idm_error_oom(err, idm_span_unknown(NULL));
-        for (uint32_t p = 0; p < f->pattern_count; p++) if (!serialize_pattern(out, f->param_patterns[p], err)) return false;
+        for (uint32_t p = 0; p < f->pattern_count; p++) if (!serialize_pattern(out, f->param_patterns[p], 0u, err)) return false;
         if (!idm_buf_put_u32(out, f->pattern_local_count)) return idm_error_oom(err, idm_span_unknown(NULL));
         for (uint32_t p = 0; p < f->pattern_local_count; p++) {
             if (!idm_buf_put_str(out, f->pattern_locals[p].name, strlen(f->pattern_locals[p].name)) || !idm_buf_put_u32(out, f->pattern_locals[p].slot)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -640,8 +648,6 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
     return true;
 }
 
-#define IDM_IC_MAX_DEPTH 1024u
-
 static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, unsigned depth, IdmError *err) {
     if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), ".ic value nested too deeply");
     uint8_t tag = idm_rd_u8(r);
@@ -650,9 +656,9 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
         case 0u: *out = idm_nil(); return true;
         case 1u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated int"); *out = idm_int((int64_t)bits); return true; }
         case 2u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated float"); double d; memcpy(&d, &bits, 8u); *out = idm_float(d); return true; }
-        case 3u: { char *s = idm_rd_string(r); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated string"); *out = idm_string(rt, s, err); free(s); return !(err && err->present); }
-        case 4u: { char *s = idm_rd_string(r); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated atom"); *out = idm_atom(rt, s); free(s); return true; }
-        case 5u: { char *s = idm_rd_string(r); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated word"); *out = idm_word(rt, s); free(s); return true; }
+        case 3u: { size_t n = 0; char *s = idm_rd_string(r, &n); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated string"); *out = idm_string_n(rt, s, n, err); free(s); return !(err && err->present); }
+        case 4u: { char *s = idm_rd_string(r, NULL); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated atom"); *out = idm_atom(rt, s); free(s); return true; }
+        case 5u: { char *s = idm_rd_string(r, NULL); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated word"); *out = idm_word(rt, s); free(s); return true; }
         case 6u: {
             IdmValue car, cdr;
             if (!deserialize_value(rt, r, &car, depth + 1u, err) || !deserialize_value(rt, r, &cdr, depth + 1u, err)) return false;
@@ -681,7 +687,7 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
         }
         case 10u: { uint32_t p = idm_rd_u32(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated primitive"); *out = idm_primitive_value(p); return true; }
         case 11u: {
-            char *type = idm_rd_string(r);
+            char *type = idm_rd_string(r, NULL);
             if (!type) return idm_error_set(err, idm_span_unknown(NULL), "truncated record type");
             IdmValue fields = idm_nil();
             bool ok = deserialize_value(rt, r, &fields, depth + 1u, err);
@@ -711,8 +717,8 @@ static IdmPattern *deserialize_pattern(IdmRuntime *rt, IdmByteReader *r, unsigne
     IdmSpan span = idm_span_unknown(NULL);
     switch (kind) {
         case IDM_PAT_WILDCARD: return idm_pat_wildcard(span);
-        case IDM_PAT_BIND: { char *s = idm_rd_string(r); if (!s) { idm_error_set(err, span, "truncated pattern name"); return NULL; } IdmPattern *p = idm_pat_bind(s, span); free(s); return p; }
-        case IDM_PAT_PIN: { char *s = idm_rd_string(r); if (!s) { idm_error_set(err, span, "truncated pattern name"); return NULL; } IdmPattern *p = idm_pat_pin(s, span); free(s); return p; }
+        case IDM_PAT_BIND: { char *s = idm_rd_string(r, NULL); if (!s) { idm_error_set(err, span, "truncated pattern name"); return NULL; } IdmPattern *p = idm_pat_bind(s, span); free(s); return p; }
+        case IDM_PAT_PIN: { char *s = idm_rd_string(r, NULL); if (!s) { idm_error_set(err, span, "truncated pattern name"); return NULL; } IdmPattern *p = idm_pat_pin(s, span); free(s); return p; }
         case IDM_PAT_LITERAL: { IdmValue v; if (!deserialize_value(rt, r, &v, depth + 1u, err)) return NULL; return idm_pat_literal(v, span); }
         case IDM_PAT_PAIR: {
             IdmPattern *left = deserialize_pattern(rt, r, depth + 1u, err); if (!left) return NULL;
@@ -785,7 +791,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
         for (uint32_t i = 0; i < function_count; i++) deferred_guards[i] = UINT32_MAX;
     }
     for (uint32_t i = 0; i < function_count && r.ok; i++) {
-        char *name = idm_rd_string(&r);
+        char *name = idm_rd_string(&r, NULL);
         if (!name) { free(deferred_guards); idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "truncated function name"); }
         uint32_t arity = idm_rd_u32(&r);
         uint32_t local_count = idm_rd_u32(&r);
@@ -816,7 +822,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
             if (!locals) { free(deferred_guards); idm_bc_destroy(module); return idm_error_oom(err, idm_span_unknown(NULL)); }
             bool ok = true;
             for (uint32_t p = 0; p < pattern_local_count && ok; p++) {
-                char *lname = idm_rd_string(&r);
+                char *lname = idm_rd_string(&r, NULL);
                 uint32_t slot = idm_rd_u32(&r);
                 if (!lname || !r.ok) { free(lname); ok = false; break; }
                 locals[p].name = lname;
@@ -846,7 +852,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     }
     uint32_t span_file_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < span_file_count && r.ok; i++) {
-        char *name = idm_rd_string(&r);
+        char *name = idm_rd_string(&r, NULL);
         if (!name) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "truncated span file"); }
         uint32_t idx = 0;
         bool ok = span_file_index(module, name, &idx);
@@ -916,6 +922,7 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
                 break;
             }
             case IDM_OP_CALL_METHOD:
+            case IDM_OP_TAIL_CALL_METHOD:
                 if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL) || !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) || !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             case IDM_OP_LOAD_CONST:

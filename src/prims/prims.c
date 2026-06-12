@@ -218,7 +218,7 @@ static bool prim_cd(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err
     size_t len = 0;
     const char *bytes = require_string(args[0], &len, err);
     if (!bytes) return false;
-    if (!rt->current_exec) return idm_error_set(err, idm_span_unknown(NULL), "cd requires an actor context");
+    if (!idm_current_exec()) return idm_error_set(err, idm_span_unknown(NULL), "cd requires an actor context");
     char *path = idm_strndup(bytes, len);
     if (!path) return idm_error_oom(err, idm_span_unknown(NULL));
     char *candidate = NULL;
@@ -226,7 +226,7 @@ static bool prim_cd(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err
         candidate = path;
         path = NULL;
     } else {
-        const char *base = idm_exec_cwd(rt->current_exec);
+        const char *base = idm_exec_cwd(idm_current_exec());
         char buf[PATH_MAX];
         if (!base) {
             if (!getcwd(buf, sizeof(buf))) {
@@ -253,14 +253,14 @@ static bool prim_cd(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err
         return false;
     }
     free(candidate);
-    if (!idm_exec_set_cwd(rt->current_exec, resolved)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_exec_set_cwd(idm_current_exec(), resolved)) return idm_error_oom(err, idm_span_unknown(NULL));
     *out = idm_atom(rt, "ok");
     return true;
 }
 
 static bool prim_pwd(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     (void)args;
-    const char *cwd = idm_exec_cwd(rt->current_exec);
+    const char *cwd = idm_exec_cwd(idm_current_exec());
     if (cwd) {
         *out = idm_string(rt, cwd, err);
         return !(err && err->present);
@@ -277,7 +277,7 @@ static bool prim_env_get(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError
     if (!bytes) return false;
     char *name = idm_strndup(bytes, len);
     if (!name) return idm_error_oom(err, idm_span_unknown(NULL));
-    const char *value = idm_exec_env_get(rt->current_exec, name);
+    const char *value = idm_exec_env_get(idm_current_exec(), name);
     if (!value) value = getenv(name);
     free(name);
     if (!value) {
@@ -295,10 +295,10 @@ static bool prim_env_set(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError
     size_t value_len = 0;
     const char *value_bytes = require_string(args[1], &value_len, err);
     if (!value_bytes) return false;
-    if (!rt->current_exec) return idm_error_set(err, idm_span_unknown(NULL), "env-set requires an actor context");
+    if (!idm_current_exec()) return idm_error_set(err, idm_span_unknown(NULL), "env-set requires an actor context");
     char *name = idm_strndup(name_bytes, name_len);
     char *value = idm_strndup(value_bytes, value_len);
-    bool ok = name && value && idm_exec_env_set(rt->current_exec, name, value);
+    bool ok = name && value && idm_exec_env_set(idm_current_exec(), name, value);
     free(name);
     free(value);
     if (!ok) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -409,11 +409,30 @@ static bool checked_sub(int64_t a, int64_t b, int64_t *out) {
 
 static bool checked_mul(int64_t a, int64_t b, int64_t *out) {
     if (a == 0 || b == 0) { *out = 0; return true; }
-    if (a == -1 && b == INT64_MIN) return false;
-    if (b == -1 && a == INT64_MIN) return false;
-    int64_t r = a * b;
-    if (r / b != a) return false;
-    *out = r;
+    if (a == -1) {
+        if (b == INT64_MIN) return false;
+        *out = -b;
+        return true;
+    }
+    if (b == -1) {
+        if (a == INT64_MIN) return false;
+        *out = -a;
+        return true;
+    }
+    if (a > 0) {
+        if (b > 0) {
+            if (a > INT64_MAX / b) return false;
+        } else {
+            if (b < INT64_MIN / a) return false;
+        }
+    } else {
+        if (b > 0) {
+            if (a < INT64_MIN / b) return false;
+        } else {
+            if (b < INT64_MAX / a) return false;
+        }
+    }
+    *out = a * b;
     return true;
 }
 
@@ -1066,9 +1085,19 @@ static bool result_error(IdmRuntime *rt, IdmValue *out, IdmError *err) {
     return !(err && err->present);
 }
 
+static const char *resolve_cwd(const char *path, char *buf, size_t cap) {
+    const char *base = idm_exec_cwd(idm_current_exec());
+    if (!base || !*path || path[0] == '/') return path;
+    int n = snprintf(buf, cap, "%s/%s", base, path);
+    if (n < 0 || (size_t)n >= cap) { errno = ENAMETOOLONG; return NULL; }
+    return buf;
+}
+
 static bool prim_file_read(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     if (!require_string_arg(args[0], &path, &plen, "file-read", err)) return false;
+    char pb[PATH_MAX];
+    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     char *data = NULL;
     size_t len = 0;
     IdmError inner;
@@ -1088,6 +1117,8 @@ static bool prim_file_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmEr
     const char *data; size_t dlen;
     if (!require_string_arg(args[0], &path, &plen, "file-write", err)) return false;
     if (!require_string_arg(args[1], &data, &dlen, "file-write", err)) return false;
+    char pb[PATH_MAX];
+    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     FILE *f = fopen(path, "wb");
     if (!f) return result_error(rt, out, err);
     bool ok = fwrite(data, 1u, dlen, f) == dlen;
@@ -1100,13 +1131,17 @@ static bool prim_file_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmEr
 static bool prim_file_exists(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     if (!require_string_arg(args[0], &path, &plen, "file-exists?", err)) return false;
-    *out = access(path, F_OK) == 0 ? idm_atom(rt, "true") : idm_atom(rt, "false");
+    char pb[PATH_MAX];
+    path = resolve_cwd(path, pb, sizeof(pb));
+    *out = path && access(path, F_OK) == 0 ? idm_atom(rt, "true") : idm_atom(rt, "false");
     return true;
 }
 
 static bool prim_file_stat(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     if (!require_string_arg(args[0], &path, &plen, "file-stat", err)) return false;
+    char pb[PATH_MAX];
+    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     struct stat st;
     if (stat(path, &st) != 0) return result_error(rt, out, err);
     IdmValue items[4];
@@ -1122,6 +1157,8 @@ static bool prim_file_stat(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 static bool prim_file_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     if (!require_string_arg(args[0], &path, &plen, "file-list", err)) return false;
+    char pb[PATH_MAX];
+    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     DIR *dir = opendir(path);
     if (!dir) return result_error(rt, out, err);
     IdmValue acc = idm_nil();
@@ -1140,6 +1177,8 @@ static bool prim_file_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 static bool prim_file_remove(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     if (!require_string_arg(args[0], &path, &plen, "file-remove", err)) return false;
+    char pb[PATH_MAX];
+    if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     if (remove(path) != 0) return result_error(rt, out, err);
     *out = idm_atom(rt, "ok");
     return true;

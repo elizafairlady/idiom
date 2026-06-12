@@ -794,6 +794,97 @@ static void test_module_syntax_constant_roundtrip(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_string_constant_nul_roundtrip(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmBytecodeModule m1;
+    idm_bc_init(&m1);
+    const char bytes[] = "nul\0byte";
+    IdmValue s = idm_string_n(&rt, bytes, sizeof(bytes) - 1u, &err);
+    CHECK(!err.present);
+    CHECK(idm_string_length(s) == sizeof(bytes) - 1u);
+    uint32_t const_index = 0;
+    CHECK(idm_bc_add_const(&m1, s, &const_index));
+    uint32_t fn = 0;
+    CHECK(idm_bc_add_function(&m1, "main", 0, 0, 0, &fn));
+    CHECK(idm_bc_emit_u32(&m1, IDM_OP_LOAD_CONST, const_index, NULL));
+    CHECK(idm_bc_emit_op(&m1, IDM_OP_RETURN, NULL));
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(idm_ic_serialize(&m1, &blob, &err));
+    CHECK(!err.present);
+    IdmBytecodeModule m2;
+    idm_bc_init(&m2);
+    CHECK(idm_ic_deserialize(&rt, (const unsigned char *)blob.data, blob.len, &m2, &err));
+    CHECK(!err.present);
+    CHECK(m2.const_count == 1 && m2.constants[0].tag == IDM_VAL_STRING);
+    CHECK(idm_string_length(m2.constants[0]) == sizeof(bytes) - 1u);
+    CHECK(memcmp(idm_string_bytes(m2.constants[0]), bytes, sizeof(bytes) - 1u) == 0);
+    idm_buf_destroy(&blob);
+    idm_bc_destroy(&m1);
+    idm_bc_destroy(&m2);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_reader_depth_guard(void) {
+    size_t n = 5000;
+    IdmBuffer src;
+    idm_buf_init(&src);
+    for (size_t i = 0; i < n; i++) CHECK(idm_buf_append_char(&src, '['));
+    for (size_t i = 0; i < n; i++) CHECK(idm_buf_append_char(&src, ']'));
+    CHECK(idm_buf_append_char(&src, '\n'));
+    IdmError err;
+    idm_error_init(&err);
+    IdmSyntax *program = NULL;
+    CHECK(!idm_reader_read_string("<deep>", src.data, &program, &err));
+    CHECK(err.present && err.message != NULL && strstr(err.message, "nested too deeply") != NULL);
+    CHECK(err.span.file != NULL && strcmp(err.span.file, "<deep>") == 0);
+    idm_error_clear(&err);
+    idm_buf_destroy(&src);
+}
+
+static void test_serialize_depth_guard(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmSpan span = idm_span_unknown("deep.id");
+    IdmSyntax *deep = idm_syn_int(1, span);
+    CHECK(deep != NULL);
+    for (size_t i = 0; i < 2000; i++) {
+        IdmSyntax *wrap = idm_syn_list(IDM_SEQ_PAREN, span);
+        CHECK(wrap != NULL && idm_syn_append(wrap, deep));
+        deep = wrap;
+    }
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(!idm_syn_serialize(&blob, deep, &err));
+    CHECK(err.present && err.message != NULL && strstr(err.message, "nested too deeply") != NULL);
+    idm_error_clear(&err);
+    idm_syn_free(deep);
+    idm_buf_destroy(&blob);
+
+    IdmValue list = idm_nil();
+    for (size_t i = 0; i < 2000; i++) {
+        list = idm_cons(&rt, idm_int((int64_t)i), list, &err);
+        CHECK(!err.present);
+    }
+    IdmBytecodeModule m;
+    idm_bc_init(&m);
+    uint32_t const_index = 0;
+    CHECK(idm_bc_add_const(&m, list, &const_index));
+    idm_buf_init(&blob);
+    CHECK(!idm_ic_serialize(&m, &blob, &err));
+    CHECK(err.present && err.message != NULL && strstr(err.message, "nested too deeply") != NULL);
+    idm_error_clear(&err);
+    idm_buf_destroy(&blob);
+    idm_bc_destroy(&m);
+    idm_runtime_destroy(&rt);
+}
+
 void run_substrate_suite(void) {
     test_values();
     test_reader_basic();
@@ -818,4 +909,7 @@ void run_substrate_suite(void) {
     test_bytecode_serialize_roundtrip();
     test_syntax_serialize_roundtrip();
     test_module_syntax_constant_roundtrip();
+    test_string_constant_nul_roundtrip();
+    test_reader_depth_guard();
+    test_serialize_depth_guard();
 }

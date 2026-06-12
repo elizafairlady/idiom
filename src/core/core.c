@@ -455,7 +455,7 @@ void idm_core_free(IdmCore *core) {
     free(core);
 }
 
-static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err);
+static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err);
 
 static uint32_t core_max_local_plus_one(IdmCore *core) {
     if (!core) return 0;
@@ -714,7 +714,7 @@ static bool add_compiled_function(IdmBytecodeModule *module, const char *name, u
 
 static bool compile_function_code(IdmBytecodeModule *module, uint32_t function_index, IdmCore *body, IdmError *err, IdmSpan span) {
     if (!idm_bc_set_function_entry(module, function_index, module->code_count)) return idm_error_set(err, span, "failed to set function entry");
-    if (!compile_expr(body, module, err)) return false;
+    if (!compile_expr(body, module, true, err)) return false;
     if (!idm_bc_emit_op(module, IDM_OP_RETURN, NULL)) return idm_error_oom(err, span);
     return true;
 }
@@ -876,7 +876,7 @@ static bool add_const_value(IdmBytecodeModule *module, IdmValue value, uint32_t 
     return true;
 }
 
-static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err) {
     if (!idm_bc_note_span(module, core->span)) return idm_error_oom(err, core->span);
     if (!core) return idm_error_set(err, idm_span_unknown(NULL), "cannot compile null core expression");
     switch (core->kind) {
@@ -906,7 +906,7 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
         case IDM_CORE_APP:
             if (core->as.app.callee && core->as.app.callee->kind == IDM_CORE_PRIMITIVE) {
                 for (size_t i = 0; i < core->as.app.arg_count; i++) {
-                    if (!compile_expr(core->as.app.args[i], module, err)) return false;
+                    if (!compile_expr(core->as.app.args[i], module, false, err)) return false;
                 }
                 IdmOpcode actor_op = IDM_OP_HALT;
                 uint32_t actor_arity = 0;
@@ -926,23 +926,23 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
                 if (!idm_bc_emit(module, (uint32_t)core->as.app.arg_count, NULL)) return idm_error_oom(err, core->span);
                 return true;
             }
-            if (!compile_expr(core->as.app.callee, module, err)) return false;
+            if (!compile_expr(core->as.app.callee, module, false, err)) return false;
             for (size_t i = 0; i < core->as.app.arg_count; i++) {
-                if (!compile_expr(core->as.app.args[i], module, err)) return false;
+                if (!compile_expr(core->as.app.args[i], module, false, err)) return false;
             }
             if (core->as.app.arg_count > UINT32_MAX) return idm_error_set(err, core->span, "too many call arguments");
-            if (!idm_bc_emit_u32(module, IDM_OP_CALL, (uint32_t)core->as.app.arg_count, NULL)) return idm_error_oom(err, core->span);
+            if (!idm_bc_emit_u32(module, tail ? IDM_OP_TAIL_CALL : IDM_OP_CALL, (uint32_t)core->as.app.arg_count, NULL)) return idm_error_oom(err, core->span);
             return true;
         case IDM_CORE_COND: {
-            if (!compile_expr(core->as.cond_expr.cond, module, err)) return false;
+            if (!compile_expr(core->as.cond_expr.cond, module, false, err)) return false;
             size_t jump_false_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP_IF_FALSE, 0, &jump_false_op)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.cond_expr.then_branch, module, err)) return false;
+            if (!compile_expr(core->as.cond_expr.then_branch, module, tail, err)) return false;
             size_t jump_end_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_end_op)) return idm_error_oom(err, core->span);
             if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
             if (!idm_bc_patch_u32(module, jump_false_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch cond false jump");
-            if (!compile_expr(core->as.cond_expr.else_branch, module, err)) return false;
+            if (!compile_expr(core->as.cond_expr.else_branch, module, tail, err)) return false;
             if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
             if (!idm_bc_patch_u32(module, jump_end_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch cond end jump");
             return true;
@@ -955,15 +955,15 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
                 return true;
             }
             for (size_t i = 0; i < core->as.do_expr.count; i++) {
-                if (!compile_expr(core->as.do_expr.items[i], module, err)) return false;
+                if (!compile_expr(core->as.do_expr.items[i], module, i + 1u == core->as.do_expr.count ? tail : false, err)) return false;
                 if (i + 1u < core->as.do_expr.count && !idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
             }
             return true;
         case IDM_CORE_BIND_LOCAL:
-            if (!compile_expr(core->as.bind_local.value, module, err)) return false;
+            if (!compile_expr(core->as.bind_local.value, module, false, err)) return false;
             if (!idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit_u32(module, IDM_OP_STORE_LOCAL, core->as.bind_local.slot, NULL)) return idm_error_oom(err, core->span);
-            return compile_expr(core->as.bind_local.body, module, err);
+            return compile_expr(core->as.bind_local.body, module, tail, err);
         case IDM_CORE_FN: {
             uint32_t fn_index = 0;
             uint32_t pattern_locals = pattern_local_max_plus_one(core->as.fn.pattern_locals, core->as.fn.pattern_local_count);
@@ -1046,10 +1046,10 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
         case IDM_CORE_LETREC: {
             if (core->as.letrec.global) {
                 for (size_t i = 0; i < core->as.letrec.count; i++) {
-                    if (!compile_expr(core->as.letrec.bindings[i].value, module, err)) return false;
+                    if (!compile_expr(core->as.letrec.bindings[i].value, module, false, err)) return false;
                     if (!idm_bc_emit_u32(module, IDM_OP_STORE_GLOBAL, core->as.letrec.bindings[i].slot, NULL)) return idm_error_oom(err, core->span);
                 }
-                return compile_expr(core->as.letrec.body, module, err);
+                return compile_expr(core->as.letrec.body, module, tail, err);
             }
             uint32_t nil_const = 0;
             if (!idm_bc_add_const(module, idm_nil(), &nil_const)) return idm_error_oom(err, core->span);
@@ -1060,28 +1060,28 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
             }
             for (size_t i = 0; i < core->as.letrec.count; i++) {
                 if (!idm_bc_emit_u32(module, IDM_OP_LOAD_LOCAL, core->as.letrec.bindings[i].slot, NULL)) return idm_error_oom(err, core->span);
-                if (!compile_expr(core->as.letrec.bindings[i].value, module, err)) return false;
+                if (!compile_expr(core->as.letrec.bindings[i].value, module, false, err)) return false;
                 if (!idm_bc_emit_op(module, IDM_OP_STORE_CELL, NULL)) return idm_error_oom(err, core->span);
             }
-            return compile_expr(core->as.letrec.body, module, err);
+            return compile_expr(core->as.letrec.body, module, tail, err);
         }
         case IDM_CORE_RECEIVE: {
             if (!core->as.receive.receiver || !core->as.receive.timeout || !core->as.receive.timeout_body) return idm_error_set(err, core->span, "receive is missing a required component");
-            if (!compile_expr(core->as.receive.timeout, module, err)) return false;
-            if (!compile_expr(core->as.receive.receiver, module, err)) return false;
+            if (!compile_expr(core->as.receive.timeout, module, false, err)) return false;
+            if (!compile_expr(core->as.receive.receiver, module, false, err)) return false;
             size_t recv_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_RECV, 0, &recv_op)) return idm_error_oom(err, core->span);
             size_t jump_done_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
             if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
             if (!idm_bc_patch_u32(module, recv_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch receive timeout target");
-            if (!compile_expr(core->as.receive.timeout_body, module, err)) return false;
+            if (!compile_expr(core->as.receive.timeout_body, module, tail, err)) return false;
             if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
             if (!idm_bc_patch_u32(module, jump_done_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch receive done jump");
             return true;
         }
         case IDM_CORE_RAISE:
-            if (!compile_expr(core->as.raise.value, module, err)) return false;
+            if (!compile_expr(core->as.raise.value, module, false, err)) return false;
             if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
             return true;
         case IDM_CORE_RAISED:
@@ -1090,13 +1090,13 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
         case IDM_CORE_RESCUE: {
             size_t push_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.rescue.body, module, err)) return false;
+            if (!compile_expr(core->as.rescue.body, module, false, err)) return false;
             if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
             size_t jump_done_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
             if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
             if (!idm_bc_patch_u32(module, push_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch rescue catch target");
-            if (!compile_expr(core->as.rescue.handler, module, err)) return false;
+            if (!compile_expr(core->as.rescue.handler, module, false, err)) return false;
             if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
             if (!idm_bc_patch_u32(module, jump_done_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch rescue done jump");
             return true;
@@ -1104,9 +1104,9 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
         case IDM_CORE_ENSURE: {
             size_t push_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.ensure.body, module, err)) return false;
+            if (!compile_expr(core->as.ensure.body, module, false, err)) return false;
             if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.ensure.cleanup, module, err)) return false;
+            if (!compile_expr(core->as.ensure.cleanup, module, false, err)) return false;
             if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
             size_t jump_done_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
@@ -1115,7 +1115,7 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
             if (!idm_bc_emit_op(module, IDM_OP_LOAD_RAISED, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit_u32(module, IDM_OP_STORE_LOCAL, core->as.ensure.tmp_slot, NULL)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.ensure.cleanup, module, err)) return false;
+            if (!compile_expr(core->as.ensure.cleanup, module, false, err)) return false;
             if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit_u32(module, IDM_OP_LOAD_LOCAL, core->as.ensure.tmp_slot, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit_op(module, IDM_OP_LOAD_CELL, NULL)) return idm_error_oom(err, core->span);
@@ -1144,14 +1144,14 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
                 if (!idm_bc_emit(module, core->as.use_package.export_dst[i], NULL)) return idm_error_oom(err, core->span);
             }
             if (!idm_bc_emit_op(module, IDM_OP_LEAVE_NAMESPACE, NULL)) return idm_error_oom(err, core->span);
-            return compile_expr(core->as.use_package.cont, module, err);
+            return compile_expr(core->as.use_package.cont, module, tail, err);
         }
         case IDM_CORE_DEFINE_PROTOCOL: {
             if (core->as.define_protocol.count > UINT32_MAX) return idm_error_set(err, core->span, "protocol has too many methods");
             for (size_t i = 0; i < core->as.define_protocol.count; i++) {
                 IdmCoreProtocolMethod *method = &core->as.define_protocol.methods[i];
                 if (method->has_default) {
-                    if (!compile_expr(method->default_fn, module, err)) return false;
+                    if (!compile_expr(method->default_fn, module, false, err)) return false;
                 } else {
                     if (!emit_load_value(module, idm_nil(), err, core->span)) return false;
                 }
@@ -1173,7 +1173,7 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
         case IDM_CORE_EXTEND_PROTOCOL: {
             if (core->as.extend_protocol.count > UINT32_MAX) return idm_error_set(err, core->span, "extend has too many methods");
             for (size_t i = 0; i < core->as.extend_protocol.count; i++) {
-                if (!compile_expr(core->as.extend_protocol.impls[i].impl_fn, module, err)) return false;
+                if (!compile_expr(core->as.extend_protocol.impls[i].impl_fn, module, false, err)) return false;
             }
             uint32_t protocol_const = 0;
             uint32_t type_const = 0;
@@ -1195,13 +1195,13 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
             if (core->as.method_call.arg_count == 0) return idm_error_set(err, core->span, "method call requires a receiver");
             if (core->as.method_call.arg_count > UINT32_MAX) return idm_error_set(err, core->span, "method call has too many arguments");
             for (size_t i = 0; i < core->as.method_call.arg_count; i++) {
-                if (!compile_expr(core->as.method_call.args[i], module, err)) return false;
+                if (!compile_expr(core->as.method_call.args[i], module, false, err)) return false;
             }
             uint32_t protocol_const = 0;
             uint32_t method_const = 0;
             if (!add_const_value(module, core->as.method_call.protocol, &protocol_const, err, core->span)) return false;
             if (!add_const_value(module, core->as.method_call.method, &method_const, err, core->span)) return false;
-            if (!idm_bc_emit_u32(module, IDM_OP_CALL_METHOD, protocol_const, NULL)) return idm_error_oom(err, core->span);
+            if (!idm_bc_emit_u32(module, tail ? IDM_OP_TAIL_CALL_METHOD : IDM_OP_CALL_METHOD, protocol_const, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit(module, method_const, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit(module, (uint32_t)core->as.method_call.arg_count, NULL)) return idm_error_oom(err, core->span);
             return true;
@@ -1211,7 +1211,7 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err
 }
 
 bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
-    return compile_expr(core, module, err);
+    return compile_expr(core, module, false, err);
 }
 
 bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t arity, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
@@ -1229,7 +1229,7 @@ bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *o
     uint32_t locals = core_max_local_plus_one(core);
     if (!idm_bc_add_function(module, "main", 0, locals, 0, &fn)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_bc_set_function_entry(module, fn, module->code_count)) return idm_error_set(err, idm_span_unknown(NULL), "failed to set main entry");
-    if (!compile_expr(core, module, err)) return false;
+    if (!compile_expr(core, module, true, err)) return false;
     if (!idm_bc_emit_op(module, IDM_OP_RETURN, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (out_function) *out_function = fn;
     return true;

@@ -71,6 +71,7 @@ typedef struct {
     const char *file;
     IdmError *err;
     bool body_paused_on_else;
+    unsigned depth;
 } Parser;
 
 static void tokens_destroy(TokenVec *vec) {
@@ -544,6 +545,7 @@ static IdmSyntax *parse_expr(Parser *p, TokenKind end1, TokenKind end2, TokenKin
 static IdmSyntax *parse_expr_delimited(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3);
 static IdmSyntax *parse_expr_body(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3);
 static IdmSyntax *parse_primary(Parser *p);
+static IdmSyntax *parse_primary_at_depth(Parser *p);
 
 static bool ident_is(Parser *p, const char *text) {
     return cur(p)->kind == TOK_IDENT && strcmp(cur(p)->lexeme, text) == 0;
@@ -609,6 +611,17 @@ static IdmSyntax *parse_body(Parser *p, IdmSpan span) {
 }
 
 static IdmSyntax *parse_primary(Parser *p) {
+    if (p->depth >= IDM_IC_MAX_DEPTH) {
+        idm_error_set(p->err, cur(p)->span, "source nested too deeply");
+        return NULL;
+    }
+    p->depth++;
+    IdmSyntax *syn = parse_primary_at_depth(p);
+    p->depth--;
+    return syn;
+}
+
+static IdmSyntax *parse_primary_at_depth(Parser *p) {
     Token *tok = cur(p);
     switch (tok->kind) {
         case TOK_IDENT: {
@@ -822,7 +835,7 @@ bool idm_reader_read_string(const char *file, const char *source, IdmSyntax **ou
         tokens_destroy(&tokens);
         return false;
     }
-    Parser p = {tokens.items, tokens.count, 0, file, err, false};
+    Parser p = {tokens.items, tokens.count, 0, file, err, false, 0};
     IdmSyntax *program = parse_program(&p);
     tokens_destroy(&tokens);
     if (!program) return false;

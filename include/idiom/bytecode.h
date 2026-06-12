@@ -52,7 +52,8 @@ typedef enum {
     IDM_OP_LEAVE_NAMESPACE,
     IDM_OP_DEFINE_PROTOCOL,
     IDM_OP_EXTEND_PROTOCOL,
-    IDM_OP_CALL_METHOD
+    IDM_OP_CALL_METHOD,
+    IDM_OP_TAIL_CALL_METHOD
 } IdmOpcode;
 
 typedef struct {
@@ -83,7 +84,7 @@ typedef struct IdmBytecodeModule {
     IdmBcFunction *functions;
     size_t function_count;
     size_t function_cap;
-    char **span_files;
+    const char **span_files;
     size_t span_file_count;
     size_t span_file_cap;
     struct { uint32_t offset; uint32_t file; uint32_t line; uint32_t column; } *spans;

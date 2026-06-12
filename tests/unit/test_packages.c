@@ -1,5 +1,7 @@
 #include "test_util.h"
 
+#include "idiom/artifact.h"
+
 static void test_kernel_runtime_exports(void) {
     const char *old = getenv("IDIOMROOT");
     char *saved = old ? idm_strdup(old) : NULL;
@@ -156,6 +158,82 @@ static void test_ishc_std_root_identity(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_stale_cache_runs_no_phase_init(void) {
+    const char *marker = "build/phase-init-marker.txt";
+    remove(marker);
+    remove("build/stalecache.ic");
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+
+    IdmArtifact art;
+    memset(&art, 0, sizeof(art));
+    idm_sha256("stalecache-src", 14u, art.src_hash);
+    art.module = malloc(sizeof(*art.module));
+    CHECK(art.module != NULL);
+    idm_bc_init(art.module);
+    uint32_t nil_const = 0;
+    CHECK(idm_bc_add_const(art.module, idm_nil(), &nil_const));
+    CHECK(idm_bc_add_function(art.module, "init", 0, 0, 0, &art.init_fn));
+    CHECK(idm_bc_emit_u32(art.module, IDM_OP_LOAD_CONST, nil_const, NULL));
+    CHECK(idm_bc_emit_op(art.module, IDM_OP_RETURN, NULL));
+
+    IdmNamespace *phase_ns = idm_fresh_phase_namespace(&rt, &err);
+    CHECK(phase_ns != NULL && !err.present);
+    art.phase_env = idm_phase_env_create(&rt, phase_ns);
+    CHECK(art.phase_env != NULL);
+    IdmBytecodeModule *phase = malloc(sizeof(*phase));
+    CHECK(phase != NULL);
+    idm_bc_init(phase);
+    uint32_t path_const = 0;
+    uint32_t text_const = 0;
+    CHECK(idm_bc_add_const(phase, idm_string(&rt, marker, &err), &path_const));
+    CHECK(idm_bc_add_const(phase, idm_string(&rt, "ran", &err), &text_const));
+    CHECK(!err.present);
+    uint32_t phase_fn = 0;
+    CHECK(idm_bc_add_function(phase, "phase-init", 0, 0, 0, &phase_fn));
+    CHECK(idm_bc_emit_u32(phase, IDM_OP_LOAD_CONST, path_const, NULL));
+    CHECK(idm_bc_emit_u32(phase, IDM_OP_LOAD_CONST, text_const, NULL));
+    CHECK(idm_bc_emit_u32(phase, IDM_OP_PRIM_CALL, (uint32_t)IDM_PRIM_FILE_WRITE, NULL));
+    CHECK(idm_bc_emit(phase, 2u, NULL));
+    CHECK(idm_bc_emit_op(phase, IDM_OP_RETURN, NULL));
+    CHECK(idm_phase_env_add_module(art.phase_env, phase, phase_fn));
+
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(idm_artifact_serialize(&art, &blob, &err));
+    CHECK(!err.present);
+    FILE *f = fopen("build/stalecache.ic", "wb");
+    CHECK(f != NULL);
+    if (f) {
+        CHECK(fwrite(blob.data, 1u, blob.len, f) == blob.len);
+        CHECK(fclose(f) == 0);
+    }
+    idm_buf_destroy(&blob);
+
+    IdmArtifact fresh;
+    CHECK(idm_artifact_cache_load(&rt, "build/stalecache", art.src_hash, &fresh));
+    FILE *probe = fopen(marker, "rb");
+    CHECK(probe != NULL);
+    if (probe) fclose(probe);
+    idm_artifact_destroy(&fresh);
+    remove(marker);
+
+    unsigned char stale_hash[32];
+    idm_sha256("different-src", 13u, stale_hash);
+    IdmArtifact stale;
+    CHECK(!idm_artifact_cache_load(&rt, "build/stalecache", stale_hash, &stale));
+    probe = fopen(marker, "rb");
+    CHECK(probe == NULL);
+    if (probe) fclose(probe);
+
+    idm_artifact_destroy(&art);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+    remove("build/stalecache.ic");
+}
+
 static void test_package_cycle_detected(void) {
     CHECK(write_text_file("build/cyclea.id", "package cyclea\nuse build/cycleb\nexport defn aval x -> x\n"));
     CHECK(write_text_file("build/cycleb.id", "package cycleb\nuse build/cyclea\nexport defn bval x -> x\n"));
@@ -190,6 +268,7 @@ void run_package_suite(void) {
     test_artifact_cache_relocation();
     test_ishc_cache_invalidation();
     test_ishc_std_root_identity();
+    test_stale_cache_runs_no_phase_init();
     test_package_cycle_detected();
     test_idiompath_lookup();
 }

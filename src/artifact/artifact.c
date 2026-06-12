@@ -287,7 +287,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 5u
+#define IDM_ARTIFACT_VERSION 6u
 
 static bool artifact_noop_register_operator(void *user, IdmRuntime *rt, const IdmSyntax *name, int64_t precedence, const char *assoc, const char *fixity, const IdmSyntax *target, IdmError *err) {
     (void)user; (void)rt; (void)name; (void)precedence; (void)assoc; (void)fixity; (void)target; (void)err;
@@ -398,7 +398,7 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
 }
 
 static bool artifact_read_str(IdmByteReader *r, char **out, IdmError *err) {
-    char *s = idm_rd_string(r);
+    char *s = idm_rd_string(r, NULL);
     if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated artifact string");
     *out = s;
     return true;
@@ -422,12 +422,12 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         out->deps = calloc(dep_count, sizeof(*out->deps));
         if (!out->deps) ok = false;
         for (uint32_t i = 0; ok && i < dep_count; i++) {
+            out->dep_count = i + 1u;
             ok = artifact_read_str(&r, &out->deps[i].path, err);
             if (ok && r.pos + 32u > r.len) ok = false;
             if (ok) {
                 memcpy(out->deps[i].hash, r.data + r.pos, 32u);
                 r.pos += 32u;
-                out->dep_count = i + 1u;
             }
         }
     }
@@ -456,10 +456,10 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         out->exports = calloc(export_count, sizeof(*out->exports));
         if (!out->exports) ok = false;
         for (uint32_t i = 0; ok && i < export_count; i++) {
+            out->export_count = i + 1u;
             ok = artifact_read_str(&r, &out->exports[i].name, err);
             out->exports[i].slot = ok ? idm_rd_u32(&r) : 0;
             if (ok && !r.ok) ok = false;
-            if (ok) out->export_count = i + 1u;
         }
     }
     uint32_t global_count = ok ? idm_rd_u32(&r) : 0;
@@ -468,12 +468,12 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         out->globals = calloc(global_count, sizeof(*out->globals));
         if (!out->globals) ok = false;
         for (uint32_t i = 0; ok && i < global_count; i++) {
+            out->global_count = i + 1u;
             ok = artifact_read_str(&r, &out->globals[i].name, err);
             out->globals[i].slot = ok ? idm_rd_u32(&r) : 0;
             if (ok && !r.ok) ok = false;
             idm_scope_set_init(&out->globals[i].scopes);
             if (ok) ok = read_scope_set(&r, &out->globals[i].scopes);
-            if (ok) out->global_count = i + 1u;
         }
     }
     uint32_t operator_count = ok ? idm_rd_u32(&r) : 0;
@@ -483,6 +483,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         if (!out->operators) ok = false;
         for (uint32_t i = 0; ok && i < operator_count; i++) {
             IdmOperatorDef *op = &out->operators[i];
+            out->operator_count = i + 1u;
             ok = artifact_read_str(&r, &op->name, err);
             op->precedence = ok ? idm_rd_u8(&r) : 0;
             op->assoc = (IdmOpAssoc)(ok ? idm_rd_u8(&r) : 0);
@@ -495,7 +496,6 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             op->exported = true;
             idm_scope_set_init(&op->scopes);
             if (ok) ok = read_scope_set(&r, &op->scopes);
-            if (ok) out->operator_count = i + 1u;
         }
     }
     uint32_t macro_count = ok ? idm_rd_u32(&r) : 0;
@@ -504,6 +504,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         out->macros = calloc(macro_count, sizeof(*out->macros));
         if (!out->macros) ok = false;
         for (uint32_t i = 0; ok && i < macro_count; i++) {
+            out->macro_count = i + 1u;
             ok = artifact_read_str(&r, &out->macros[i].name, err);
             out->macros[i].function_index = ok ? idm_rd_u32(&r) : 0;
             if (ok && !r.ok) ok = false;
@@ -512,8 +513,6 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
                 if (!out->macros[i].module) ok = false;
                 else if (!read_module_blob(rt, &r, &out->macros[i].module->module, err)) ok = false;
             }
-            if (ok) out->macro_count = i + 1u;
-            else if (out->macros[i].name) out->macro_count = i + 1u;
         }
     }
     uint32_t method_count = ok ? idm_rd_u32(&r) : 0;
@@ -523,6 +522,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         if (!out->methods) ok = false;
         for (uint32_t i = 0; ok && i < method_count; i++) {
             IdmProtocolMethodDef *m = &out->methods[i];
+            out->method_count = i + 1u;
             ok = artifact_read_str(&r, &m->name, err);
             m->arity = ok ? idm_rd_u32(&r) : 0;
             m->has_default = ok && idm_rd_u8(&r) != 0;
@@ -531,7 +531,6 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             m->exported = true;
             idm_scope_set_init(&m->scopes);
             if (ok) ok = read_scope_set(&r, &m->scopes);
-            if (ok) out->method_count = i + 1u;
         }
     }
     uint8_t has_resolver = ok ? idm_rd_u8(&r) : 0;
@@ -560,29 +559,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         IdmBytecodeModule *module = malloc(sizeof(*module));
         if (!module) { ok = false; break; }
         idm_bc_init(module);
-        if (!read_module_blob(rt, &r, module, err)) {
-            free(module);
-            ok = false;
-            break;
-        }
-        IdmNamespace *old_main_ns = rt->main_ns;
-        void *old_op_user = rt->register_operator_user;
-        IdmRegisterOperatorFn old_op = rt->register_operator;
-        void *old_mac_user = rt->register_macro_user;
-        IdmRegisterMacroFn old_mac = rt->register_macro;
-        rt->main_ns = phase_ns;
-        rt->register_operator_user = NULL;
-        rt->register_operator = artifact_noop_register_operator;
-        rt->register_macro_user = NULL;
-        rt->register_macro = artifact_noop_register_macro;
-        IdmValue ignored = idm_nil();
-        bool ran = idm_vm_run(rt, module, main_fn, &ignored, err);
-        rt->main_ns = old_main_ns;
-        rt->register_operator_user = old_op_user;
-        rt->register_operator = old_op;
-        rt->register_macro_user = old_mac_user;
-        rt->register_macro = old_mac;
-        if (!ran || !idm_phase_env_add_module(phase_env, module, main_fn)) {
+        if (!read_module_blob(rt, &r, module, err) || !idm_phase_env_add_module(phase_env, module, main_fn)) {
             idm_bc_destroy(module);
             free(module);
             ok = false;
@@ -609,6 +586,32 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         return false;
     }
     return true;
+}
+
+static bool artifact_run_phase_inits(IdmRuntime *rt, const IdmArtifact *art, IdmError *err) {
+    const IdmPhaseEnv *env = art->phase_env;
+    if (!env || env->module_count == 0) return true;
+    IdmNamespace *old_main_ns = rt->main_ns;
+    void *old_op_user = rt->register_operator_user;
+    IdmRegisterOperatorFn old_op = rt->register_operator;
+    void *old_mac_user = rt->register_macro_user;
+    IdmRegisterMacroFn old_mac = rt->register_macro;
+    rt->main_ns = env->ns;
+    rt->register_operator_user = NULL;
+    rt->register_operator = artifact_noop_register_operator;
+    rt->register_macro_user = NULL;
+    rt->register_macro = artifact_noop_register_macro;
+    bool ok = true;
+    for (size_t i = 0; ok && i < env->module_count; i++) {
+        IdmValue ignored = idm_nil();
+        ok = idm_vm_run(rt, env->modules[i], env->module_main_fns[i], &ignored, err);
+    }
+    rt->main_ns = old_main_ns;
+    rt->register_operator_user = old_op_user;
+    rt->register_operator = old_op;
+    rt->register_macro_user = old_mac_user;
+    rt->register_macro = old_mac;
+    return ok;
 }
 
 bool idm_artifact_cache_disabled(void) {
@@ -680,17 +683,14 @@ bool idm_artifact_cache_load(IdmRuntime *rt, const char *path, const unsigned ch
     idm_error_init(&derr);
     ok = idm_artifact_deserialize(rt, (const unsigned char *)data, len, out, &derr);
     free(data);
-    idm_error_clear(&derr);
-    if (!ok) return false;
-    if (memcmp(out->src_hash, src_hash, 32u) != 0) {
-        idm_artifact_destroy(out);
-        return false;
-    }
-    for (size_t i = 0; i < out->dep_count; i++) {
-        if (!idm_artifact_path_verified(rt, out->deps[i].path, out->deps[i].hash)) {
-            idm_artifact_destroy(out);
-            return false;
+    if (ok) {
+        ok = memcmp(out->src_hash, src_hash, 32u) == 0;
+        for (size_t i = 0; ok && i < out->dep_count; i++) {
+            ok = idm_artifact_path_verified(rt, out->deps[i].path, out->deps[i].hash);
         }
+        if (ok) ok = artifact_run_phase_inits(rt, out, &derr);
+        if (!ok) idm_artifact_destroy(out);
     }
-    return true;
+    idm_error_clear(&derr);
+    return ok;
 }

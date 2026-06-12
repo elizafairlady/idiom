@@ -36,6 +36,7 @@ bool idm_exec_step(IdmExec *exec, int64_t budget, IdmExecStatus *status, IdmValu
 bool idm_exec_take_port_request(IdmExec *exec, IdmValue *out_graph);
 bool idm_exec_take_await(IdmExec *exec, IdmValue *out_port);
 bool idm_exec_push_result(IdmExec *exec, IdmValue value, IdmError *err);
+IdmExec *idm_current_exec(void);
 
 typedef void (*IdmRootVisitor)(void *user, IdmValue value);
 void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user);

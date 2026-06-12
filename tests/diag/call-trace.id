@@ -1,4 +1,4 @@
 defn level3 x -> add x :not-a-number
-defn level2 x -> level3 x
-defn level1 x -> level2 x
+defn level2 x -> add (level3 x) 1
+defn level1 x -> add (level2 x) 1
 level1 1

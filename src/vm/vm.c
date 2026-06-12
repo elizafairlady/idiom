@@ -186,11 +186,30 @@ static bool checked_sub(int64_t a, int64_t b, int64_t *out) {
 
 static bool checked_mul(int64_t a, int64_t b, int64_t *out) {
     if (a == 0 || b == 0) { *out = 0; return true; }
-    if (a == -1 && b == INT64_MIN) return false;
-    if (b == -1 && a == INT64_MIN) return false;
-    int64_t r = a * b;
-    if (r / b != a) return false;
-    *out = r;
+    if (a == -1) {
+        if (b == INT64_MIN) return false;
+        *out = -b;
+        return true;
+    }
+    if (b == -1) {
+        if (a == INT64_MIN) return false;
+        *out = -a;
+        return true;
+    }
+    if (a > 0) {
+        if (b > 0) {
+            if (a > INT64_MAX / b) return false;
+        } else {
+            if (b < INT64_MIN / a) return false;
+        }
+    } else {
+        if (b > 0) {
+            if (a < INT64_MIN / b) return false;
+        } else {
+            if (b < INT64_MAX / a) return false;
+        }
+    }
+    *out = a * b;
     return true;
 }
 
@@ -236,8 +255,10 @@ static bool generic_prim_call(Vm *vm, uint32_t primitive, uint32_t argc, IdmErro
     return push(vm, out, err);
 }
 
+#define IDM_GUARD_BUDGET (1 << 20)
+
 static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
-static bool vm_run_loop_inner(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
+static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
 
 static IdmValue make_error_reason(Vm *vm, IdmError *err) {
     IdmError ignore;
@@ -293,8 +314,13 @@ static bool run_guard_function(Vm *caller, const IdmBytecodeModule *callee_modul
     idm_error_init(&guard_err);
     IdmValue result = idm_nil();
     IdmExecStatus guard_status = IDM_EXEC_DONE;
-    bool ok = vm_run_loop(&guard_vm, -1, &guard_status, &result, NULL, &guard_err);
+    bool ok = vm_run_loop(&guard_vm, IDM_GUARD_BUDGET, &guard_status, &result, NULL, &guard_err);
     vm_reset(&guard_vm);
+    if (ok && guard_status == IDM_EXEC_YIELD) {
+        idm_error_clear(&guard_err);
+        return idm_error_set(err, idm_span_unknown(NULL), "guard of '%s' exceeded its budget of %d reductions",
+                             candidate->name && candidate->name[0] ? candidate->name : "<fn>", IDM_GUARD_BUDGET);
+    }
     if (!ok || guard_err.present || guard_status != IDM_EXEC_DONE) {
         idm_error_clear(&guard_err);
         *out_pass = false;
@@ -609,7 +635,7 @@ static bool op_extend_protocol(Vm *vm, Frame *frame, IdmError *err) {
     return push(vm, idm_atom(vm->rt, "ok"), err);
 }
 
-static bool op_call_method(Vm *vm, Frame *frame, IdmError *err) {
+static bool op_call_method(Vm *vm, Frame *frame, bool tail, IdmError *err) {
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     uint32_t protocol_const = module->code[frame->ip++];
     uint32_t method_const = module->code[frame->ip++];
@@ -628,21 +654,20 @@ static bool op_call_method(Vm *vm, Frame *frame, IdmError *err) {
     memmove(&vm->stack[arg_base + 1u], &vm->stack[arg_base], argc * sizeof(*vm->stack));
     vm->stack[arg_base] = impl;
     vm->sp++;
-    return call_value(vm, argc, false, err);
+    return call_value(vm, argc, tail, err);
 }
 
-static bool vm_run_loop_inner(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
+static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
         IdmRuntime *rt = vm->rt;
-    int64_t left = budget;
     IdmValue result = idm_nil();
     *status = IDM_EXEC_DONE;
     for (;;) {
         Frame *frame = current_frame(vm);
         if (!frame) break;
         const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
-        if (budget >= 0) {
-            if (left <= 0) { *status = IDM_EXEC_YIELD; return true; }
-            left--;
+        if (*budget >= 0) {
+            if (*budget == 0) { *status = IDM_EXEC_YIELD; return true; }
+            (*budget)--;
         }
         size_t instr_ip = frame->ip;
         if (frame->ip >= module->code_count) {
@@ -971,7 +996,10 @@ static bool vm_run_loop_inner(Vm *vm, int64_t budget, IdmExecStatus *status, Idm
                 if (!op_extend_protocol(vm, frame, err)) return false;
                 break;
             case IDM_OP_CALL_METHOD:
-                if (!op_call_method(vm, frame, err)) return false;
+                if (!op_call_method(vm, frame, false, err)) return false;
+                break;
+            case IDM_OP_TAIL_CALL_METHOD:
+                if (!op_call_method(vm, frame, true, err)) return false;
                 break;
             case IDM_OP_RESCUE_PUSH: {
                 operand = module->code[frame->ip++];
@@ -1031,7 +1059,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t budget, IdmExecStatus *status, Idm
 
 static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
     for (;;) {
-        bool ok = vm_run_loop_inner(vm, budget, status, out_result, out_reason, err);
+        bool ok = vm_run_loop_inner(vm, &budget, status, out_result, out_reason, err);
         if (ok) return true;
         if (vm->handler_count == 0) {
             if (vm->has_raised) {
@@ -1079,7 +1107,7 @@ static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue 
         }
         idm_error_clear(err);
         frame->ip = handler.catch_ip;
-        if (budget >= 0) {
+        if (budget >= 0 && vm->sched) {
             *status = IDM_EXEC_YIELD;
             return true;
         }
@@ -1311,16 +1339,22 @@ bool idm_exec_setup_thunk(IdmExec *exec, IdmValue closure, IdmError *err) {
     return call_value(exec, 0, false, err);
 }
 
+static _Thread_local IdmExec *g_current_exec = NULL;
+
+IdmExec *idm_current_exec(void) {
+    return g_current_exec;
+}
+
 bool idm_exec_step(IdmExec *exec, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
     if (exec->frame_count == 0) {
         *status = IDM_EXEC_DONE;
         *out_result = idm_nil();
         return true;
     }
-    IdmExec *prev = exec->rt->current_exec;
-    exec->rt->current_exec = exec;
+    IdmExec *prev = g_current_exec;
+    g_current_exec = exec;
     bool ok = vm_run_loop(exec, budget, status, out_result, out_reason, err);
-    exec->rt->current_exec = prev;
+    g_current_exec = prev;
     return ok;
 }
 
@@ -1352,7 +1386,7 @@ void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user)
         visit(user, frame->closure);
         for (uint32_t l = 0; l < frame->local_count; l++) visit(user, frame->locals[l]);
     }
-    if (exec->has_raised) visit(user, exec->raised);
+    visit(user, exec->raised);
     if (exec->has_await) visit(user, exec->await_port);
     if (exec->has_port_request) visit(user, exec->port_request);
 }
