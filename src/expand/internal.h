@@ -13,9 +13,6 @@
 #define IDM_FRAME_GLOBAL 0u
 #define IDM_FRAME_TOP 1u
 
-#define IDM_FRAME_GLOBAL 0u
-#define IDM_FRAME_TOP 1u
-
 typedef struct {
     char *name;
     IdmScopeSet scopes;
@@ -78,6 +75,18 @@ typedef struct {
     int phase;
     IdmScopeSet scopes;
 } SurfaceInstall;
+typedef struct {
+    void *local_expand_user;
+    IdmLocalExpandFn local_expand;
+    void *free_identifier_eq_user;
+    IdmFreeIdentifierEqFn free_identifier_eq;
+    void *register_operator_user;
+    IdmRegisterOperatorFn register_operator;
+    void *register_macro_user;
+    IdmRegisterMacroFn register_macro;
+    void *expander_surface_user;
+    IdmExpanderSurfaceFn expander_surface;
+} SavedHooks;
 typedef struct {
     size_t binding_count;
     size_t macro_count;
@@ -160,6 +169,12 @@ typedef struct {
     IdmArtifactDep *deps;
     size_t dep_count;
     size_t dep_cap;
+    const char *unit;
+    char unit_key[17];
+    const IdmSyntax **pat_binders;
+    size_t pat_binder_count;
+    size_t pat_binder_cap;
+    bool pat_binder_collect;
 } ExpandContext;
 typedef struct BodyDefCtx {
     IdmScopeSet use_site;
@@ -194,13 +209,19 @@ typedef struct {
     size_t compiling_count;
     size_t compiling_cap;
 } ExpandCache;
-typedef enum { BODY_REC_BIND, BODY_REC_EXPR, BODY_REC_GROUPS } BodyRecKind;
+typedef enum { BODY_REC_BIND, BODY_REC_BIND_PATTERN, BODY_REC_EXPR, BODY_REC_GROUPS } BodyRecKind;
 typedef struct {
     BodyRecKind kind;
     const IdmSyntax *form;
     const IdmSyntax *bind_name;
     size_t rhs_start;
     uint32_t bind_slot;
+    const IdmSyntax *pattern_syntax;
+    IdmPattern *pattern;
+    const IdmSyntax **pattern_names;
+    size_t pattern_name_count;
+    uint32_t *pattern_slots;
+    uint32_t pattern_tmp_slot;
     DefnGroup *groups;
     size_t group_count;
     IdmCore *core;
@@ -215,7 +236,7 @@ const IdmArtifact *artifact_get(ExpandContext *ctx, const char *path, IdmSpan sp
 void begin_clause_context(ExpandContext *ctx, SavedClauseContext *saved);
 void begin_function_context(ExpandContext *ctx, SavedFunctionContext *saved);
 bool capture_lookup_existing(const CaptureBinding *captures, size_t count, const IdmSyntax *word, uint32_t *out);
-bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const char *protocol_name_hint, IdmArtifact *out, IdmError *err);
+bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const char *protocol_name_hint, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err);
 bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err);
 void ctx_destroy(ExpandContext *ctx);
 void ctx_init(ExpandContext *ctx, IdmRuntime *rt);
@@ -267,7 +288,7 @@ bool record_export(ExpandContext *ctx, const char *name, uint32_t global_id);
 bool record_package_global(ExpandContext *ctx, const char *name, uint32_t global_id, const IdmScopeSet *scopes);
 bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *fn, IdmSpan span, bool exported, IdmError *err);
 bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_syntax, IdmValue transformer, IdmError *err);
-bool register_operator(ExpandContext *ctx, const char *name, uint8_t precedence, IdmOpAssoc assoc, IdmOpFixity fixity, IdmOpTargetKind target_kind, IdmPrimitive primitive, const char *target_name, const IdmScopeSet *scopes, const IdmScopeSet *binding_scopes, IdmError *err);
+bool register_operator(ExpandContext *ctx, const char *name, uint8_t precedence, IdmOpAssoc assoc, IdmOpFixity fixity, IdmOpTargetKind target_kind, IdmPrimitive primitive, const char *target_name, const IdmScopeSet *scopes, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, bool exported, IdmError *err);
 bool register_operator_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_syntax, int64_t precedence, const char *assoc_text, const char *fixity_text, const IdmSyntax *target_syntax, IdmError *err);
 bool register_resolver(ExpandContext *ctx, IdmCore *fn, IdmSpan span, IdmError *err);
 IdmBytecodeModule *relocated_module_copy(ExpandContext *ctx, const IdmBytecodeModule *src, IdmScopeId min_id, int64_t delta, uint32_t *out_fn_off, IdmError *err);
@@ -283,9 +304,13 @@ bool syn_is_protocol(const IdmSyntax *syn, const char *head);
 bool syn_is_word(const IdmSyntax *syn, const char *word);
 bool syntax_scopes_copy(IdmScopeSet *dst, const IdmSyntax *syn);
 bool value_from_literal_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmValue *out, IdmError *err);
+bool expand_quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, IdmError *err);
 IdmCore *wrap_kernel_use(ExpandContext *ctx, IdmCore *body, IdmError *err);
 
 bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, IdmValue *out, IdmError *err);
+void hooks_install(IdmRuntime *rt, ExpandContext *ctx, SavedHooks *saved);
+void hooks_restore(IdmRuntime *rt, const SavedHooks *saved);
+void ctx_set_unit(ExpandContext *ctx, const char *name, const unsigned char hash[32]);
 bool record_activation(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err);
 int surface_install_guard(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, const IdmScopeSet *scopes, IdmError *err);
 void artifact_provider_key(const unsigned char hash[32], char out[17]);

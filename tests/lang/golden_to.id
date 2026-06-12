@@ -22,7 +22,7 @@ suite do
   end
   test "to-list-vector" do
     got = do
-      to-list %[1 2 3]
+      to-list [1 2 3]
     end
     assert-inspect got "(1 2 3)"
   end

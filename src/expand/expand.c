@@ -713,17 +713,7 @@ struct IdmRepl {
 };
 
 static void repl_install_hooks(IdmRepl *repl) {
-    IdmRuntime *rt = repl->rt;
-    rt->local_expand_user = &repl->ctx;
-    rt->local_expand = local_expand_callback;
-    rt->free_identifier_eq_user = &repl->ctx;
-    rt->free_identifier_eq = free_identifier_eq_callback;
-    rt->register_operator_user = &repl->ctx;
-    rt->register_operator = register_operator_callback;
-    rt->register_macro_user = &repl->ctx;
-    rt->register_macro = register_macro_callback;
-    rt->expander_surface_user = &repl->ctx;
-    rt->expander_surface = expander_surface_callback;
+    hooks_install(repl->rt, &repl->ctx, NULL);
 }
 
 IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
@@ -734,6 +724,9 @@ IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
     }
     repl->rt = rt;
     ctx_init(&repl->ctx, rt);
+    unsigned char session_hash[32];
+    idm_sha256("<repl>", 6u, session_hash);
+    ctx_set_unit(&repl->ctx, "<repl>", session_hash);
     repl->ctx.repl_global_binds = true;
     repl->ctx.phase_env = idm_phase_env_create(rt, repl->ctx.phase_ns);
     if (!repl->ctx.phase_env) {
@@ -838,6 +831,17 @@ void idm_repl_destroy(IdmRepl *repl) {
 bool idm_expand_syntax_with_runner(IdmRuntime *rt, const IdmSyntax *syntax, IdmMacroRunner *runner, IdmCore **out, IdmError *err) {
     ExpandContext ctx;
     ctx_init(&ctx, rt);
+    IdmBuffer ser;
+    idm_buf_init(&ser);
+    if (!idm_syn_serialize(&ser, syntax, err)) {
+        idm_buf_destroy(&ser);
+        ctx_destroy(&ctx);
+        return false;
+    }
+    unsigned char unit_hash[32];
+    idm_sha256(ser.data ? ser.data : "", ser.len, unit_hash);
+    idm_buf_destroy(&ser);
+    ctx_set_unit(&ctx, syntax->span.file ? syntax->span.file : "<program>", unit_hash);
     ctx.phase_ns = idm_fresh_phase_namespace(rt, err);
     if (!ctx.phase_ns) {
         ctx_destroy(&ctx);
@@ -850,78 +854,14 @@ bool idm_expand_syntax_with_runner(IdmRuntime *rt, const IdmSyntax *syntax, IdmM
         return false;
     }
     ctx.runner = runner ? runner : &ctx.local_runner;
-    void *old_local_expand_user = rt->local_expand_user;
-    IdmLocalExpandFn old_local_expand = rt->local_expand;
-    void *old_free_identifier_eq_user = rt->free_identifier_eq_user;
-    IdmFreeIdentifierEqFn old_free_identifier_eq = rt->free_identifier_eq;
-    rt->local_expand_user = &ctx;
-    rt->local_expand = local_expand_callback;
-    rt->free_identifier_eq_user = &ctx;
-    rt->free_identifier_eq = free_identifier_eq_callback;
-    void *old_register_operator_user = rt->register_operator_user;
-    IdmRegisterOperatorFn old_register_operator = rt->register_operator;
-    rt->register_operator_user = &ctx;
-    rt->register_operator = register_operator_callback;
-    void *old_register_macro_user = rt->register_macro_user;
-    IdmRegisterMacroFn old_register_macro = rt->register_macro;
-    rt->register_macro_user = &ctx;
-    rt->register_macro = register_macro_callback;
-    void *old_expander_surface_user = rt->expander_surface_user;
-    IdmExpanderSurfaceFn old_expander_surface = rt->expander_surface;
-    rt->expander_surface_user = &ctx;
-    rt->expander_surface = expander_surface_callback;
-    if (!ctx_seed(&ctx, err)) {
-        rt->local_expand_user = old_local_expand_user;
-        rt->local_expand = old_local_expand;
-        rt->free_identifier_eq_user = old_free_identifier_eq_user;
-        rt->free_identifier_eq = old_free_identifier_eq;
-    rt->register_operator_user = old_register_operator_user;
-    rt->register_operator = old_register_operator;
-    rt->register_macro_user = old_register_macro_user;
-    rt->register_macro = old_register_macro;
-    rt->expander_surface_user = old_expander_surface_user;
-    rt->expander_surface = old_expander_surface;
-        rt->register_operator_user = old_register_operator_user;
-        rt->register_operator = old_register_operator;
-        rt->register_macro_user = old_register_macro_user;
-        rt->register_macro = old_register_macro;
-        rt->expander_surface_user = old_expander_surface_user;
-        rt->expander_surface = old_expander_surface;
-        ctx_destroy(&ctx);
-        return false;
+    SavedHooks saved;
+    hooks_install(rt, &ctx, &saved);
+    IdmCore *core = NULL;
+    if (ctx_seed(&ctx, err) && ctx_activate_kernel(&ctx, err)) {
+        core = expand_syntax(&ctx, syntax, err);
+        if (core && !(err && err->present)) core = wrap_kernel_use(&ctx, core, err);
     }
-    if (!ctx_activate_kernel(&ctx, err)) {
-        rt->local_expand_user = old_local_expand_user;
-        rt->local_expand = old_local_expand;
-        rt->free_identifier_eq_user = old_free_identifier_eq_user;
-        rt->free_identifier_eq = old_free_identifier_eq;
-    rt->register_operator_user = old_register_operator_user;
-    rt->register_operator = old_register_operator;
-    rt->register_macro_user = old_register_macro_user;
-    rt->register_macro = old_register_macro;
-    rt->expander_surface_user = old_expander_surface_user;
-    rt->expander_surface = old_expander_surface;
-        rt->register_operator_user = old_register_operator_user;
-        rt->register_operator = old_register_operator;
-        rt->register_macro_user = old_register_macro_user;
-        rt->register_macro = old_register_macro;
-        rt->expander_surface_user = old_expander_surface_user;
-        rt->expander_surface = old_expander_surface;
-        ctx_destroy(&ctx);
-        return false;
-    }
-    IdmCore *core = expand_syntax(&ctx, syntax, err);
-    if (core && !(err && err->present)) core = wrap_kernel_use(&ctx, core, err);
-    rt->local_expand_user = old_local_expand_user;
-    rt->local_expand = old_local_expand;
-    rt->free_identifier_eq_user = old_free_identifier_eq_user;
-    rt->free_identifier_eq = old_free_identifier_eq;
-    rt->register_operator_user = old_register_operator_user;
-    rt->register_operator = old_register_operator;
-    rt->register_macro_user = old_register_macro_user;
-    rt->register_macro = old_register_macro;
-    rt->expander_surface_user = old_expander_surface_user;
-    rt->expander_surface = old_expander_surface;
+    hooks_restore(rt, &saved);
     ctx_destroy(&ctx);
     if (!core || (err && err->present)) {
         idm_core_free(core);

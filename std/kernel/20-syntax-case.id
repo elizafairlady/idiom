@@ -1,6 +1,6 @@
 export defmacro syntax-case stx do
   defn collect_from do
-    i n _syn when (i == n) -> :nil
+    i n _syn when (i == n) -> '()
     i n syn -> cons (syntax-nth syn i) (collect_from (i + 1) n syn)
   end
 

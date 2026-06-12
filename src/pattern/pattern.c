@@ -290,7 +290,7 @@ bool idm_pattern_match(IdmRuntime *rt, IdmPattern *pat, IdmValue value, IdmPatte
                 if (!idm_pattern_match(rt, pat->as.seq.items[i], car, bindings, err)) { ok = false; break; }
                 cur = cdr;
             }
-            ok = ok && idm_is_nil(cur);
+            ok = ok && idm_is_empty_list(cur);
             break;
         }
         case IDM_PAT_VECTOR:

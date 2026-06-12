@@ -80,6 +80,55 @@ void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     ctx->deps = NULL;
     ctx->dep_count = 0;
     ctx->dep_cap = 0;
+    ctx->unit = "<unit>";
+    memcpy(ctx->unit_key, "0000000000000000", sizeof ctx->unit_key);
+    ctx->pat_binders = NULL;
+    ctx->pat_binder_count = 0;
+    ctx->pat_binder_cap = 0;
+    ctx->pat_binder_collect = false;
+}
+
+void ctx_set_unit(ExpandContext *ctx, const char *name, const unsigned char hash[32]) {
+    ctx->unit = name;
+    artifact_provider_key(hash, ctx->unit_key);
+}
+
+void hooks_install(IdmRuntime *rt, ExpandContext *ctx, SavedHooks *saved) {
+    if (saved) {
+        saved->local_expand_user = rt->local_expand_user;
+        saved->local_expand = rt->local_expand;
+        saved->free_identifier_eq_user = rt->free_identifier_eq_user;
+        saved->free_identifier_eq = rt->free_identifier_eq;
+        saved->register_operator_user = rt->register_operator_user;
+        saved->register_operator = rt->register_operator;
+        saved->register_macro_user = rt->register_macro_user;
+        saved->register_macro = rt->register_macro;
+        saved->expander_surface_user = rt->expander_surface_user;
+        saved->expander_surface = rt->expander_surface;
+    }
+    rt->local_expand_user = ctx;
+    rt->local_expand = local_expand_callback;
+    rt->free_identifier_eq_user = ctx;
+    rt->free_identifier_eq = free_identifier_eq_callback;
+    rt->register_operator_user = ctx;
+    rt->register_operator = register_operator_callback;
+    rt->register_macro_user = ctx;
+    rt->register_macro = register_macro_callback;
+    rt->expander_surface_user = ctx;
+    rt->expander_surface = expander_surface_callback;
+}
+
+void hooks_restore(IdmRuntime *rt, const SavedHooks *saved) {
+    rt->local_expand_user = saved->local_expand_user;
+    rt->local_expand = saved->local_expand;
+    rt->free_identifier_eq_user = saved->free_identifier_eq_user;
+    rt->free_identifier_eq = saved->free_identifier_eq;
+    rt->register_operator_user = saved->register_operator_user;
+    rt->register_operator = saved->register_operator;
+    rt->register_macro_user = saved->register_macro_user;
+    rt->register_macro = saved->register_macro;
+    rt->expander_surface_user = saved->expander_surface_user;
+    rt->expander_surface = saved->expander_surface;
 }
 
 static void capture_bindings_destroy(CaptureBinding *captures, size_t count) {
@@ -145,12 +194,11 @@ static void surface_install_destroy(SurfaceInstall *install) {
 }
 
 int surface_install_guard(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, const IdmScopeSet *scopes, IdmError *err) {
-    if (!provider) return 1;
-    if (!provider_key) provider_key = provider;
+    bool local = strcmp(provider_key, ctx->unit_key) == 0;
     for (size_t i = 0; i < ctx->surface_install_count; i++) {
         SurfaceInstall *e = &ctx->surface_installs[i];
         if (e->space != space || e->phase != ctx->phase || strcmp(e->name, key) != 0 || !idm_scope_set_equal(&e->scopes, scopes)) continue;
-        if (strcmp(e->provider_key, provider_key) == 0) return 0;
+        if (local || strcmp(e->provider_key, provider_key) == 0) return local ? 1 : 0;
         idm_error_set(err, idm_span_unknown(NULL), "surface '%s' from '%s' is already active in this context; activating '%s' would conflict", display, e->provider, provider);
         return -1;
     }
@@ -251,6 +299,7 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->artifact_bases);
     for (size_t i = 0; i < ctx->dep_count; i++) free(ctx->deps[i].path);
     free(ctx->deps);
+    free(ctx->pat_binders);
 }
 
 static bool seed_primitive(ExpandContext *ctx, const char *name, IdmPrimitive primitive) {
@@ -276,18 +325,32 @@ char *operator_binding_key(const char *name, IdmOpFixity fixity) {
     return idm_buf_take(&key);
 }
 
-bool register_operator(ExpandContext *ctx, const char *name, uint8_t precedence, IdmOpAssoc assoc, IdmOpFixity fixity, IdmOpTargetKind target_kind, IdmPrimitive primitive, const char *target_name, const IdmScopeSet *scopes, const IdmScopeSet *binding_scopes, IdmError *err) {
+bool register_operator(ExpandContext *ctx, const char *name, uint8_t precedence, IdmOpAssoc assoc, IdmOpFixity fixity, IdmOpTargetKind target_kind, IdmPrimitive primitive, const char *target_name, const IdmScopeSet *scopes, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, bool exported, IdmError *err) {
+    if (!binding_scopes) binding_scopes = scopes ? scopes : &ctx->empty_scopes;
+    char *key = operator_binding_key(name, fixity);
+    if (!key) return idm_error_oom(err, idm_span_unknown(NULL));
+    int guard = surface_install_guard(ctx, provider, provider_key, key, name, IDM_BIND_SPACE_OPERATOR, binding_scopes, err);
+    if (guard <= 0) {
+        free(key);
+        return guard == 0;
+    }
     if (ctx->operator_count == ctx->operator_cap) {
         size_t cap = ctx->operator_cap ? ctx->operator_cap * 2u : 16u;
         IdmOperatorDef *next = realloc(ctx->operators, cap * sizeof(*next));
-        if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (!next) {
+            free(key);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
         ctx->operators = next;
         ctx->operator_cap = cap;
     }
     IdmOperatorDef *op = &ctx->operators[ctx->operator_count];
     memset(op, 0, sizeof(*op));
     op->name = idm_strdup(name);
-    if (!op->name) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!op->name) {
+        free(key);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
     op->precedence = precedence;
     op->assoc = assoc;
     op->fixity = fixity;
@@ -296,26 +359,26 @@ bool register_operator(ExpandContext *ctx, const char *name, uint8_t precedence,
     op->target_name = NULL;
     if (target_name) {
         op->target_name = idm_strdup(target_name);
-        if (!op->target_name) { free(op->name); return idm_error_oom(err, idm_span_unknown(NULL)); }
+        if (!op->target_name) {
+            free(op->name);
+            free(key);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
     }
     if (!idm_scope_set_copy(&op->scopes, scopes ? scopes : &ctx->empty_scopes)) {
         free(op->name);
         free(op->target_name);
-        return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    char *key = operator_binding_key(name, fixity);
-    if (!key) {
-        idm_operator_def_destroy(op);
+        free(key);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
     uint32_t payload = (uint32_t)ctx->operator_count;
-    if (!idm_binding_table_add(&ctx->bindings, key, IDM_PHASE_ANY, IDM_BIND_SPACE_OPERATOR, IDM_BIND_OPERATOR, binding_scopes ? binding_scopes : &op->scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, key, IDM_PHASE_ANY, IDM_BIND_SPACE_OPERATOR, IDM_BIND_OPERATOR, binding_scopes, payload, ctx->frame, NULL)) {
         free(key);
         idm_operator_def_destroy(op);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
     free(key);
-    op->exported = true;
+    op->exported = exported;
     ctx->operator_count++;
     return true;
 }
@@ -628,7 +691,7 @@ bool syn_is_word(const IdmSyntax *syn, const char *word) {
 }
 
 bool syn_is_protocol(const IdmSyntax *syn, const char *head) {
-    return syn && syn->kind == IDM_SYN_LIST && syn->as.seq.shape == IDM_SEQ_PAREN && syn->as.seq.count > 0 && syn_is_word(syn->as.seq.items[0], head);
+    return syn && syn->kind == IDM_SYN_LIST && syn->as.seq.count > 0 && syn_is_word(syn->as.seq.items[0], head);
 }
 
 const char *package_path_text(const IdmSyntax *syn) {
@@ -687,7 +750,7 @@ static const char *assoc_atom_name(IdmOpAssoc assoc) {
 
 bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, IdmValue *out, IdmError *err) {
     ExpandContext *ctx = user;
-    IdmValue acc = idm_nil();
+    IdmValue acc = idm_empty_list();
     if (strcmp(kind, "operators") == 0) {
         for (size_t i = ctx->operator_count; i > 0; i--) {
             const IdmOperatorDef *op = &ctx->operators[i - 1u];

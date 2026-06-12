@@ -124,11 +124,8 @@ IdmSyntax *idm_syn_string(const char *text, IdmSpan span) {
     return idm_syn_string_n(text, strlen(text), span);
 }
 
-IdmSyntax *idm_syn_list(IdmSequenceShape shape, IdmSpan span) {
-    IdmSyntax *syn = syn_alloc(IDM_SYN_LIST, span);
-    if (!syn) return NULL;
-    syn->as.seq.shape = shape;
-    return syn;
+IdmSyntax *idm_syn_list(IdmSpan span) {
+    return syn_alloc(IDM_SYN_LIST, span);
 }
 
 IdmSyntax *idm_syn_vector(IdmSpan span) {
@@ -327,7 +324,7 @@ IdmSyntax *idm_syn_clone(const IdmSyntax *syn) {
             clone = idm_syn_string(syn->as.text, syn->span);
             break;
         case IDM_SYN_LIST:
-            clone = idm_syn_list(syn->as.seq.shape, syn->span);
+            clone = idm_syn_list(syn->span);
             break;
         case IDM_SYN_VECTOR:
             clone = idm_syn_vector(syn->span);
@@ -437,9 +434,8 @@ bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn) {
         case IDM_SYN_INT: return idm_buf_appendf(buf, "%lld", (long long)syn->as.integer);
         case IDM_SYN_FLOAT: return idm_buf_appendf(buf, "%g", syn->as.real);
         case IDM_SYN_STRING: return dump_escaped(buf, syn->as.text);
-        case IDM_SYN_LIST:
-            return syn->as.seq.shape == IDM_SEQ_BRACKET ? dump_seq(buf, syn, "[", "]") : dump_seq(buf, syn, "(", ")");
-        case IDM_SYN_VECTOR: return dump_seq(buf, syn, "%[", "]");
+        case IDM_SYN_LIST: return dump_seq(buf, syn, "(", ")");
+        case IDM_SYN_VECTOR: return dump_seq(buf, syn, "[", "]");
         case IDM_SYN_TUPLE: return dump_seq(buf, syn, "{", "}");
         case IDM_SYN_DICT: return dump_seq(buf, syn, "%{", "}");
     }
@@ -500,7 +496,6 @@ static bool syn_serialize_depth(IdmBuffer *out, const IdmSyntax *syn, unsigned d
         case IDM_SYN_VECTOR:
         case IDM_SYN_TUPLE:
         case IDM_SYN_DICT:
-            if (!idm_buf_put_u8(out, (uint8_t)syn->as.seq.shape)) return idm_error_oom(err, syn->span);
             if (!idm_buf_put_u32(out, (uint32_t)syn->as.seq.count)) return idm_error_oom(err, syn->span);
             for (size_t i = 0; i < syn->as.seq.count; i++) {
                 if (!syn_serialize_depth(out, syn->as.seq.items[i], depth + 1u, err)) return false;
@@ -626,14 +621,12 @@ static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsign
         case IDM_SYN_VECTOR:
         case IDM_SYN_TUPLE:
         case IDM_SYN_DICT: {
-            uint8_t shape = idm_rd_u8(r);
             uint32_t child_count = idm_rd_u32(r);
-            if (!r->ok || shape > (uint8_t)IDM_SEQ_BRACKET) {
+            if (!r->ok) {
                 idm_error_set(err, span, "truncated serialized syntax sequence");
                 idm_syn_free(syn);
                 return NULL;
             }
-            syn->as.seq.shape = (IdmSequenceShape)shape;
             for (uint32_t i = 0; i < child_count; i++) {
                 IdmSyntax *child = syn_deserialize_depth(rt, r, depth + 1u, err);
                 if (!child || !idm_syn_append(syn, child)) {
@@ -689,8 +682,8 @@ IdmSyntax *idm_syn_program_prepend_implement(const IdmSyntax *program, const cha
     IdmSpan span = idm_span_unknown(file);
     span.line = 1;
     span.column = 1;
-    IdmSyntax *wrapped = idm_syn_list(IDM_SEQ_PAREN, span);
-    IdmSyntax *expr = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *wrapped = idm_syn_list(span);
+    IdmSyntax *expr = idm_syn_list(span);
     bool ok = wrapped && expr;
     ok = ok && idm_syn_append(expr, idm_syn_word("%-expr", span));
     ok = ok && idm_syn_append(expr, idm_syn_word("implement", span));

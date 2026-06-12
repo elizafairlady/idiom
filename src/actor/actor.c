@@ -68,7 +68,6 @@ struct IdmActor {
     uint64_t recv_deadline_ms;
     size_t recv_cursor;
 
-    IdmPort *port;
     uint64_t await_port_id;
 
     bool exited;
@@ -131,8 +130,12 @@ static uint64_t now_ms(void) {
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
+static bool reason_is_atom(IdmValue reason, const char *name) {
+    return reason.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(reason.as.symbol), name) == 0;
+}
+
 static bool reason_is_normal(IdmValue reason) {
-    return reason.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(reason.as.symbol), "normal") == 0;
+    return reason_is_atom(reason, "normal");
 }
 
 static size_t gc_threshold_from_env(void) {
@@ -298,9 +301,8 @@ static void actor_release_resources(IdmActor *actor) {
 }
 
 static void actor_free(IdmActor *actor) {
-    if (actor) pthread_mutex_destroy(&actor->mbox_mu);
     if (!actor) return;
-    if (actor->port) idm_port_free(actor->port);
+    pthread_mutex_destroy(&actor->mbox_mu);
     actor_release_resources(actor);
     free(actor);
 }
@@ -469,7 +471,7 @@ static bool links_add(IdmActor *actor, uint64_t pid, IdmError *err) {
 static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason);
 static bool sched_spawn_locked(IdmScheduler *sched, IdmValue thunk, const IdmExec *parent, IdmValue *out_pid, IdmError *err);
 
-static void apply_link_signal(IdmScheduler *sched, IdmActor *target, uint64_t from_pid, IdmValue reason) {
+static void apply_exit_signal(IdmScheduler *sched, IdmActor *target, uint64_t from_pid, IdmValue reason) {
     if (target->trap_exit) {
         IdmValue signal = make_signal(sched, "exit", idm_pid(from_pid), reason, idm_nil(), 3);
         IdmError ignore;
@@ -482,23 +484,50 @@ static void apply_link_signal(IdmScheduler *sched, IdmActor *target, uint64_t fr
     terminate(sched, target, reason);
 }
 
+static void mon_out_remove(IdmActor *actor, uint64_t ref) {
+    for (size_t i = 0; i < actor->mon_out_count; i++) {
+        if (actor->mon_out[i].ref == ref) {
+            actor->mon_out[i] = actor->mon_out[actor->mon_out_count - 1u];
+            actor->mon_out_count--;
+            return;
+        }
+    }
+}
+
+static void mon_in_remove(IdmActor *actor, uint64_t ref) {
+    for (size_t i = 0; i < actor->mon_in_count; i++) {
+        if (actor->mon_in[i].ref == ref) {
+            actor->mon_in[i] = actor->mon_in[actor->mon_in_count - 1u];
+            actor->mon_in_count--;
+            return;
+        }
+    }
+}
+
 static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason) {
     if (actor->exited) return;
     bool running = actor->status == ACT_RUNNING;
     actor->exited = true;
     actor->status = ACT_EXITED;
     actor->exit_reason = reason;
-    if (actor->port) { idm_port_free(actor->port); actor->port = NULL; }
+
+    for (size_t i = 0; i < actor->mon_out_count; i++) {
+        IdmActor *target = sched_lookup(sched, actor->mon_out[i].target);
+        if (target && !target->exited) mon_in_remove(target, actor->mon_out[i].ref);
+    }
+    actor->mon_out_count = 0;
 
     for (size_t i = 0; i < actor->mon_in_count; i++) {
         IdmActor *watcher = sched_lookup(sched, actor->mon_in[i].watcher);
         if (!watcher || watcher->exited) continue;
+        mon_out_remove(watcher, actor->mon_in[i].ref);
         IdmValue down = make_signal(sched, "down", idm_ref(actor->mon_in[i].ref), idm_pid(actor->pid), reason, 4);
         IdmError ignore;
         idm_error_init(&ignore);
         if (mailbox_push(watcher, down, &ignore)) wake_for_message(sched, watcher);
         idm_error_clear(&ignore);
     }
+    actor->mon_in_count = 0;
 
     size_t link_count = actor->link_count;
     uint64_t *links = NULL;
@@ -510,7 +539,7 @@ static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason) {
         IdmActor *partner = sched_lookup(sched, links[i]);
         if (!partner || partner->exited) continue;
         links_remove(partner, actor->pid);
-        apply_link_signal(sched, partner, actor->pid, reason);
+        apply_exit_signal(sched, partner, actor->pid, reason);
     }
     free(links);
 
@@ -585,6 +614,36 @@ bool idm_sched_link(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, bo
     return true;
 }
 
+bool idm_sched_exit_signal(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, IdmValue reason, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err) {
+    sched_lock(sched);
+    *self_should_exit = false;
+    bool untrappable = reason_is_atom(reason, "kill");
+    IdmValue applied = untrappable ? idm_atom(sched->rt, "killed") : reason;
+    if (target_pid == self->pid) {
+        if (untrappable) {
+            *self_should_exit = true;
+            *self_exit_reason = applied;
+        } else if (self->trap_exit) {
+            IdmValue signal = make_signal(sched, "exit", idm_pid(self->pid), reason, idm_nil(), 3);
+            bool ok = mailbox_push(self, signal, err);
+            sched_unlock(sched);
+            return ok;
+        } else if (!reason_is_normal(reason)) {
+            *self_should_exit = true;
+            *self_exit_reason = reason;
+        }
+        sched_unlock(sched);
+        return true;
+    }
+    IdmActor *target = sched_lookup(sched, target_pid);
+    if (target && !target->exited) {
+        if (untrappable) terminate(sched, target, applied);
+        else apply_exit_signal(sched, target, self->pid, reason);
+    }
+    sched_unlock(sched);
+    return true;
+}
+
 bool idm_sched_unlink(IdmScheduler *sched, IdmActor *self, uint64_t target_pid) {
     sched_lock(sched);
     links_remove(self, target_pid);
@@ -650,22 +709,13 @@ bool idm_sched_demonitor(IdmScheduler *sched, IdmActor *self, IdmValue ref) {
     for (size_t i = 0; i < self->mon_out_count; i++) {
         if (self->mon_out[i].ref == ref_id) {
             target_pid = self->mon_out[i].target;
-            self->mon_out[i] = self->mon_out[self->mon_out_count - 1u];
-            self->mon_out_count--;
             break;
         }
     }
+    mon_out_remove(self, ref_id);
     if (target_pid != 0) {
         IdmActor *target = sched_lookup(sched, target_pid);
-        if (target) {
-            for (size_t i = 0; i < target->mon_in_count; i++) {
-                if (target->mon_in[i].ref == ref_id) {
-                    target->mon_in[i] = target->mon_in[target->mon_in_count - 1u];
-                    target->mon_in_count--;
-                    break;
-                }
-            }
-        }
+        if (target) mon_in_remove(target, ref_id);
     }
     sched_unlock(sched);
     return true;

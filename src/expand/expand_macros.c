@@ -219,7 +219,7 @@ bool free_identifier_eq_callback(void *user, IdmRuntime *rt, const IdmSyntax *a,
 }
 
 IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t payload, IdmError *err) {
-    IdmSyntax *use = idm_syn_list(IDM_SEQ_PAREN, items[start]->span);
+    IdmSyntax *use = idm_syn_list(items[start]->span);
     if (!use || !idm_syn_append(use, idm_syn_word("%-expr", items[start]->span))) {
         idm_syn_free(use);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
@@ -285,10 +285,11 @@ bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *f
         macro_def_destroy(macro);
         return idm_error_oom(err, span);
     }
-    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, ctx->frame, NULL)) {
+    if (surface_install_guard(ctx, ctx->unit, ctx->unit_key, name, name, IDM_BIND_SPACE_DEFAULT, &scopes, err) < 0 ||
+        !idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, ctx->frame, NULL)) {
         idm_scope_set_destroy(&scopes);
         macro_def_destroy(macro);
-        return idm_error_oom(err, span);
+        return (err && err->present) ? false : idm_error_oom(err, span);
     }
     idm_scope_set_destroy(&scopes);
     ctx->macro_count++;
@@ -351,10 +352,11 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
         macro_def_destroy(macro);
         return idm_error_oom(err, name_syntax->span);
     }
-    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, ctx->frame, NULL)) {
+    if (surface_install_guard(ctx, ctx->unit, ctx->unit_key, name, name, IDM_BIND_SPACE_DEFAULT, &scopes, err) < 0 ||
+        !idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, ctx->frame, NULL)) {
         idm_scope_set_destroy(&scopes);
         macro_def_destroy(macro);
-        return idm_error_oom(err, name_syntax->span);
+        return (err && err->present) ? false : idm_error_oom(err, name_syntax->span);
     }
     idm_scope_set_destroy(&scopes);
     ctx->macro_count++;
@@ -390,15 +392,7 @@ bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScope
 }
 
 bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err) {
-    if (!binding_scopes) binding_scopes = &ctx->empty_scopes;
-    char *key = operator_binding_key(op->name, op->fixity);
-    if (!key) return idm_error_oom(err, idm_span_unknown(NULL));
-    int guard = surface_install_guard(ctx, provider, provider_key, key, op->name, IDM_BIND_SPACE_OPERATOR, binding_scopes, err);
-    free(key);
-    if (guard <= 0) return guard == 0;
-    if (!register_operator(ctx, op->name, op->precedence, op->assoc, op->fixity, op->target_kind, op->primitive, op->target_name, &op->scopes, binding_scopes, err)) return false;
-    ctx->operators[ctx->operator_count - 1u].exported = false;
-    return true;
+    return register_operator(ctx, op->name, op->precedence, op->assoc, op->fixity, op->target_kind, op->primitive, op->target_name, &op->scopes, binding_scopes ? binding_scopes : &ctx->empty_scopes, provider, provider_key, false, err);
 }
 
 static const char *operator_decl_token_text(const IdmSyntax *syn) {
@@ -453,7 +447,7 @@ bool register_operator_callback(void *user, IdmRuntime *rt, const IdmSyntax *nam
         idm_scope_set_destroy(&target_scopes);
         return idm_error_oom(err, target_syntax->span);
     }
-    bool ok = register_operator(ctx, name, (uint8_t)precedence, assoc, fixity, tk, prim, target_name, tk == IDM_OP_TGT_NAMED ? &target_scopes : &decl_scopes, &decl_scopes, err);
+    bool ok = register_operator(ctx, name, (uint8_t)precedence, assoc, fixity, tk, prim, target_name, tk == IDM_OP_TGT_NAMED ? &target_scopes : &decl_scopes, &decl_scopes, ctx->unit, ctx->unit_key, true, err);
     idm_scope_set_destroy(&decl_scopes);
     idm_scope_set_destroy(&target_scopes);
     return ok;

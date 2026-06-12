@@ -247,6 +247,7 @@ const char *idm_opcode_name(IdmOpcode op) {
         case IDM_OP_SPAWN: return "SPAWN";
         case IDM_OP_SEND: return "SEND";
         case IDM_OP_EXIT: return "EXIT";
+        case IDM_OP_EXIT_SIGNAL: return "EXIT_SIGNAL";
         case IDM_OP_LINK: return "LINK";
         case IDM_OP_UNLINK: return "UNLINK";
         case IDM_OP_MONITOR: return "MONITOR";
@@ -306,6 +307,7 @@ bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
             case IDM_OP_SPAWN:
             case IDM_OP_SEND:
             case IDM_OP_EXIT:
+            case IDM_OP_EXIT_SIGNAL:
             case IDM_OP_LINK:
             case IDM_OP_UNLINK:
             case IDM_OP_MONITOR:
@@ -526,6 +528,7 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
     if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "value nested too deeply for .ic");
     switch (v.tag) {
         case IDM_VAL_NIL: return idm_buf_put_u8(out, 0u);
+        case IDM_VAL_EMPTY_LIST: return idm_buf_put_u8(out, 13u);
         case IDM_VAL_INT: return idm_buf_put_u8(out, 1u) && idm_buf_put_u64(out, (uint64_t)v.as.i);
         case IDM_VAL_FLOAT: { uint64_t bits; double d = v.as.f; memcpy(&bits, &d, 8u); return idm_buf_put_u8(out, 2u) && idm_buf_put_u64(out, bits); }
         case IDM_VAL_STRING: return idm_buf_put_u8(out, 3u) && idm_buf_put_str(out, idm_string_bytes(v), idm_string_length(v));
@@ -654,6 +657,7 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
     if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic value");
     switch (tag) {
         case 0u: *out = idm_nil(); return true;
+        case 13u: *out = idm_empty_list(); return true;
         case 1u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated int"); *out = idm_int((int64_t)bits); return true; }
         case 2u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated float"); double d; memcpy(&d, &bits, 8u); *out = idm_float(d); return true; }
         case 3u: { size_t n = 0; char *s = idm_rd_string(r, &n); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated string"); *out = idm_string_n(rt, s, n, err); free(s); return !(err && err->present); }
@@ -893,6 +897,7 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
             case IDM_OP_HALT: case IDM_OP_RETURN: case IDM_OP_POP: case IDM_OP_ADD: case IDM_OP_SUB:
             case IDM_OP_MUL: case IDM_OP_EQ: case IDM_OP_LT: case IDM_OP_MAKE_CELL: case IDM_OP_LOAD_CELL:
             case IDM_OP_STORE_CELL: case IDM_OP_SELF: case IDM_OP_SPAWN: case IDM_OP_SEND: case IDM_OP_EXIT:
+            case IDM_OP_EXIT_SIGNAL:
             case IDM_OP_LINK: case IDM_OP_UNLINK: case IDM_OP_MONITOR: case IDM_OP_DEMONITOR: case IDM_OP_TRAP_EXIT:
             case IDM_OP_EXEC: case IDM_OP_AWAIT: case IDM_OP_APPLY: case IDM_OP_LEAVE_NAMESPACE:
             case IDM_OP_RESCUE_POP: case IDM_OP_RAISE: case IDM_OP_LOAD_RAISED:

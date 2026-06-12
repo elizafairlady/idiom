@@ -27,10 +27,11 @@ static void test_source_quote(void) {
     check_value_written(&rt, "':ok\n", ":ok");
     check_value_written(&rt, "'(a b c)\n", "(a b c)");
     check_value_written(&rt, "'(a (b c))\n", "(a (b c))");
-    check_value_written(&rt, "'%[1 2]\n", "%[1 2]");
+    check_value_written(&rt, "'()\n", "()");
+    check_value_written(&rt, "'[1 2]\n", "[1 2]");
     check_value_written(&rt, "x = 5\n`(a ,x c)\n", "(a 5 c)");
-    check_value_written(&rt, "xs = [1 2 3]\n`(a ,@xs z)\n", "(a 1 2 3 z)");
-    check_value_written(&rt, "x = 9\n`[1 ,x 3]\n", "(1 9 3)");
+    check_value_written(&rt, "xs = '(1 2 3)\n`(a ,@xs z)\n", "(a 1 2 3 z)");
+    check_value_written(&rt, "x = 9\n`[1 ,x 3]\n", "[1 9 3]");
     idm_runtime_destroy(&rt);
 }
 
@@ -307,7 +308,7 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match %[1 2] do\n  %[1 2] -> 42\n  _ -> 0\nend\n", &core, &err));
+    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match [1 2] do\n  [1 2] -> 42\n  _ -> 0\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -317,14 +318,14 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match %[1 2 3] do\n  %[h . t] -> t\nend\n", &core, &err));
+    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match [1 2 3] do\n  [h . t] -> t\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     IdmBuffer vec_buf;
     idm_buf_init(&vec_buf);
     CHECK(idm_value_write(&vec_buf, out));
-    CHECK_STR(vec_buf.data, "%[2 3]");
+    CHECK_STR(vec_buf.data, "[2 3]");
     idm_buf_destroy(&vec_buf);
     CHECK(!err.present);
     idm_bc_destroy(&module);

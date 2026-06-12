@@ -1,0 +1,3 @@
+operator <+> precedence: 50 assoc: left fixity: infix -> sub
+implement tests/pkg/exporter
+3 <+> 4

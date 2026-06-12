@@ -1,0 +1,13 @@
+defmacro twin-a stx do syntax-case stx do (_ e) -> %`(add %,e 1) end end
+defmacro mk-twin stx do syntax-case stx do
+  (_ n) -> do
+    expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ e) -> %`(add %,e 1) end end)
+    %`(do end)
+  end
+end end
+mk-twin twin-b
+shadowed = do
+  defn add a b -> :shadow
+  tuple (twin-a 1) (twin-b 1)
+end
+tuple (twin-a 20) (twin-b 20) shadowed

@@ -1,0 +1,1 @@
+echo x > build/no-such-dir-h12/out.txt

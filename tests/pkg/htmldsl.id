@@ -1,6 +1,6 @@
 resolver form do
   defn parts-of do
-    i n when (eq? i n) -> :nil
+    i n when (eq? i n) -> '()
     i n -> cons (syntax-nth form i) (parts-of (add i 1) n)
   end
 
@@ -11,22 +11,22 @@ resolver form do
   end
 
   defn body-children do
-    b i n when (eq? i n) -> :nil
+    b i n when (eq? i n) -> '()
     b i n -> cons (syntax-nth b i) (body-children b (add i 1) n)
   end
 
   defn attrs-of do
-    [a v . t] when (syntax-atom? a) ->
+    (list a v . t) when (syntax-atom? a) ->
       cons %`(str " " %,(make-syntax-string form (syntax-atom-text a)) "=\"" %,v "\"") (attrs-of t)
-    [_ . t] -> attrs-of t
-    :nil -> :nil
+    (list _ . t) -> attrs-of t
+    '() -> '()
   end
 
   defn kids-of do
-    [a _ . t] when (syntax-atom? a) -> kids-of t
-    [b . t] when (body? b) -> append (body-children b 1 (syntax-length b)) (kids-of t)
-    [c . t] -> cons c (kids-of t)
-    :nil -> :nil
+    (list a _ . t) when (syntax-atom? a) -> kids-of t
+    (list b . t) when (body? b) -> append (body-children b 1 (syntax-length b)) (kids-of t)
+    (list c . t) -> cons c (kids-of t)
+    '() -> '()
   end
 
   tag = make-syntax-string form (syntax-word-text (syntax-nth form 1))

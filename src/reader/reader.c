@@ -27,7 +27,6 @@ typedef enum {
     TOK_RBRACKET,
     TOK_LBRACE,
     TOK_RBRACE,
-    TOK_PERCENT_LBRACKET,
     TOK_PERCENT_LBRACE,
     TOK_QUOTE,
     TOK_QUASIQUOTE,
@@ -129,6 +128,25 @@ static bool is_operator_char(char ch) {
 
 static bool is_delim(char ch) {
     return ch == '\0' || isspace((unsigned char)ch) || ch == '(' || ch == ')' || ch == '[' || ch == ']' || ch == '{' || ch == '}' || ch == ';' || ch == '"' || ch == '\'' || ch == '`' || ch == ',';
+}
+
+static bool is_wordish(TokenKind kind) {
+    switch (kind) {
+        case TOK_IDENT:
+        case TOK_SHELL_WORD:
+        case TOK_SHELL_VAR:
+        case TOK_INT:
+        case TOK_FLOAT:
+        case TOK_STRING:
+        case TOK_STRING_INTERP:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool continues_word(const Lexer *lx, const TokenVec *out) {
+    return out->count > 0 && lx->pos == lx->previous_end && is_wordish(out->items[out->count - 1u].kind);
 }
 
 static bool add_token(TokenVec *vec, Lexer *lx, TokenKind kind, size_t start, unsigned line, unsigned column, bool leading_space) {
@@ -330,12 +348,17 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
         if (ch == '`') { advance(&lx); if (!add_token(out, &lx, TOK_QUASIQUOTE, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == ',' && peek_n(&lx, 1) == '@') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_COMMA_AT, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == ',') { advance(&lx); if (!add_token(out, &lx, TOK_COMMA, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
-        if (ch == '%' && peek_n(&lx, 1) == '[') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_LBRACKET, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '%' && peek_n(&lx, 1) == '{') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_LBRACE, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '%' && peek_n(&lx, 1) == '\'') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_QUOTE, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '%' && peek_n(&lx, 1) == '`') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_QUASIQUOTE, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '%' && peek_n(&lx, 1) == ',' && peek_n(&lx, 2) == '@') { advance(&lx); advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_COMMA_AT, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '%' && peek_n(&lx, 1) == ',') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_COMMA, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
+        if (ch == ':' && continues_word(&lx, out) && !is_delim(peek_n(&lx, 1))) {
+            advance(&lx);
+            if (!read_shell_word(out, &lx, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column});
+            leading_space = false;
+            continue;
+        }
         if (ch == ':' && is_ident_start(peek_n(&lx, 1))) {
             advance(&lx);
             while (is_ident_part(peek(&lx))) advance(&lx);
@@ -343,9 +366,15 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
             leading_space = false;
             continue;
         }
+        if (ch == '=' && continues_word(&lx, out) && is_delim(peek_n(&lx, 1))) {
+            advance(&lx);
+            if (!add_token(out, &lx, TOK_SHELL_WORD, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column});
+            leading_space = false;
+            continue;
+        }
         if (ch == '$' && is_ident_start(peek_n(&lx, 1))) {
             advance(&lx);
-            while (is_ident_part(peek(&lx))) advance(&lx);
+            while (isalnum((unsigned char)peek(&lx)) || peek(&lx) == '_') advance(&lx);
             if (!add_token(out, &lx, TOK_SHELL_VAR, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column});
             leading_space = false;
             continue;
@@ -392,7 +421,7 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
                 advance(&lx);
                 advance(&lx);
             }
-            if (peek(&lx) == ':' && peek_n(&lx, 1) != ':') {
+            if (peek(&lx) == ':' && peek_n(&lx, 1) != ':' && is_delim(peek_n(&lx, 1))) {
                 advance(&lx);
                 if (!add_token(out, &lx, TOK_KEYWORD, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column});
                 leading_space = false;
@@ -459,7 +488,7 @@ static bool indented_newline_continues(Parser *p, unsigned expr_column, TokenKin
 }
 
 static IdmSyntax *protocol1(const char *head, IdmSyntax *a, IdmSpan span) {
-    IdmSyntax *list = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *list = idm_syn_list(span);
     if (!list || !idm_syn_append(list, idm_syn_word(head, span)) || !idm_syn_append(list, a)) {
         idm_syn_free(list);
         idm_syn_free(a);
@@ -489,7 +518,7 @@ static IdmSyntax *read_interp_inner(const char *file, const char *inner, bool co
 }
 
 static IdmSyntax *parse_string_interp(Parser *p, const char *body, IdmSpan span) {
-    IdmSyntax *result = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *result = idm_syn_list(span);
     if (!result || !idm_syn_append(result, idm_syn_word("%-string", span))) {
         idm_syn_free(result);
         idm_error_oom(p->err, span);
@@ -557,8 +586,7 @@ static bool ident_is(Parser *p, const char *text) {
 
 static IdmSyntax *parse_container(Parser *p, IdmSyntaxKind kind, TokenKind close, IdmSpan span) {
     IdmSyntax *seq = NULL;
-    if (kind == IDM_SYN_LIST) seq = idm_syn_list(IDM_SEQ_BRACKET, span);
-    else if (kind == IDM_SYN_VECTOR) seq = idm_syn_vector(span);
+    if (kind == IDM_SYN_VECTOR) seq = idm_syn_vector(span);
     else if (kind == IDM_SYN_TUPLE) seq = idm_syn_tuple(span);
     else if (kind == IDM_SYN_DICT) seq = idm_syn_dict(span);
     if (!seq) return NULL;
@@ -582,7 +610,7 @@ static IdmSyntax *parse_container(Parser *p, IdmSyntaxKind kind, TokenKind close
 }
 
 static IdmSyntax *parse_body(Parser *p, IdmSpan span) {
-    IdmSyntax *body = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *body = idm_syn_list(span);
     if (!body || !idm_syn_append(body, idm_syn_word("%-body", span))) {
         idm_syn_free(body);
         return NULL;
@@ -733,13 +761,26 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
                 return NULL;
             }
             take(p);
+            if (inner->kind == IDM_SYN_LIST && inner->as.seq.count >= 2 &&
+                !idm_syn_property_set(inner->as.seq.items[1], "shell-group", "true")) {
+                idm_syn_free(inner);
+                idm_error_oom(p->err, tok->span);
+                return NULL;
+            }
             return protocol1("%-group", inner, tok->span);
         }
-        case TOK_LBRACKET: take(p); return parse_container(p, IDM_SYN_LIST, TOK_RBRACKET, tok->span);
-        case TOK_PERCENT_LBRACKET: take(p); return parse_container(p, IDM_SYN_VECTOR, TOK_RBRACKET, tok->span);
+        case TOK_LBRACKET: take(p); return parse_container(p, IDM_SYN_VECTOR, TOK_RBRACKET, tok->span);
         case TOK_LBRACE: take(p); return parse_container(p, IDM_SYN_TUPLE, TOK_RBRACE, tok->span);
         case TOK_PERCENT_LBRACE: take(p); return parse_container(p, IDM_SYN_DICT, TOK_RBRACE, tok->span);
-        case TOK_QUOTE: take(p); return protocol1("%-quote", parse_primary(p), tok->span);
+        case TOK_QUOTE: {
+            take(p);
+            if (at(p, TOK_LPAREN) && p->pos + 1u < p->count && p->tokens[p->pos + 1u].kind == TOK_RPAREN) {
+                take(p);
+                take(p);
+                return protocol1("%-quote", idm_syn_list(tok->span), tok->span);
+            }
+            return protocol1("%-quote", parse_primary(p), tok->span);
+        }
         case TOK_QUASIQUOTE: take(p); return protocol1("%-quasiquote", parse_primary(p), tok->span);
         case TOK_COMMA: take(p); return protocol1("%-unquote", parse_primary(p), tok->span);
         case TOK_COMMA_AT: take(p); return protocol1("%-unquote-splicing", parse_primary(p), tok->span);
@@ -755,7 +796,7 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
 
 static IdmSyntax *parse_expr_impl(Parser *p, TokenKind end1, TokenKind end2, TokenKind end3, bool separators_stop, bool end_stops, bool else_stops) {
     IdmSpan span = cur(p)->span;
-    IdmSyntax *expr = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *expr = idm_syn_list(span);
     if (!expr || !idm_syn_append(expr, idm_syn_word("%-expr", span))) {
         idm_syn_free(expr);
         return NULL;
@@ -805,7 +846,7 @@ static IdmSyntax *parse_expr_body(Parser *p, TokenKind end1, TokenKind end2, Tok
 }
 
 static IdmSyntax *parse_program(Parser *p) {
-    IdmSyntax *program = idm_syn_list(IDM_SEQ_PAREN, idm_span_unknown(p->file));
+    IdmSyntax *program = idm_syn_list(idm_span_unknown(p->file));
     if (!program || !idm_syn_append(program, idm_syn_word("%-package-begin", idm_span_unknown(p->file)))) {
         idm_syn_free(program);
         return NULL;

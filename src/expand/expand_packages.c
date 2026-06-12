@@ -9,7 +9,7 @@ static IdmModuleRef *relocated_module_ref(ExpandContext *ctx, IdmModuleRef *src,
 static bool install_macro_twin(ExpandContext *ctx, const char *name, IdmScopeId base, size_t macros_before, IdmError *err);
 static bool install_relocated_operator(ExpandContext *ctx, const IdmOperatorDef *op, IdmScopeId min_id, int64_t delta, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err);
 static const char *idm_std_root(void);
-static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *protocol_name_hint, bool kernel_mode, IdmArtifact *out, IdmError *err);
+static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *protocol_name_hint, bool kernel_mode, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err);
 
 IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier, IdmSyntax *const *items, size_t cont_index, size_t cont_count, IdmSpan span, IdmError *err) {
     const IdmArtifact *art = artifact_get(ctx, path, span, err);
@@ -27,6 +27,9 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
     int64_t delta = (int64_t)base - (int64_t)art->scope_base;
     IdmScopeSet act_scopes;
     if (!binder_scopes_pruned(ctx, items[cont_index - 1u], &act_scopes)) return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    const char *provider = art->name ? art->name : path;
+    char provider_key[17];
+    artifact_provider_key(art->src_hash, provider_key);
 
     size_t import_count = art->export_count + art->global_count;
     uint32_t *export_src = NULL;
@@ -89,16 +92,12 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
             break;
         }
         size_t before = ctx->macro_count;
-        ok = install_imported_macro(ctx, qualified, &act_scopes, module, art->macros[i].function_index, art->macros[i].phase_ns, art->macros[i].phase_env, NULL, NULL, err) &&
+        ok = install_imported_macro(ctx, qualified, &act_scopes, module, art->macros[i].function_index, art->macros[i].phase_ns, art->macros[i].phase_env, provider, provider_key, err) &&
              install_macro_twin(ctx, art->macros[i].name, base, before, err);
         idm_module_ref_release(module);
         free(qualified);
     }
-    if (ok) {
-        char provider_key[17];
-        artifact_provider_key(art->src_hash, provider_key);
-        ok = install_artifact_protocols(ctx, art->protocols, art->protocol_count, &act_scopes, qualifier, art->name ? art->name : path, provider_key, err);
-    }
+    if (ok) ok = install_artifact_protocols(ctx, art->protocols, art->protocol_count, &act_scopes, qualifier, provider, provider_key, err);
     idm_scope_set_destroy(&act_scopes);
     if (!ok) {
         free(export_src);
@@ -218,7 +217,7 @@ static ExpandCache *kernel_artifact_get(IdmRuntime *rt, IdmError *err) {
     IdmScopeStore store;
     idm_scope_store_init(&store);
     IdmScopeId base = store.next_scope;
-    bool compiled = compile_package_artifact(rt, &store, pkg, "std/kernel", true, &cache->kernel, err);
+    bool compiled = compile_package_artifact(rt, &store, pkg, "std/kernel", true, src_hash, &cache->kernel, err);
     idm_syn_free(pkg);
     if (!compiled) return NULL;
     cache->kernel.scope_base = base;
@@ -521,7 +520,7 @@ const IdmArtifact *artifact_get(ExpandContext *ctx, const char *path, IdmSpan sp
         cache->compiling[cache->compiling_count++] = entry->path;
         IdmScopeStore store;
         store.next_scope = cache->kernel_scope_end;
-        bool compiled = compile_package_artifact(ctx->rt, &store, pkg, path, false, &entry->art, err);
+        bool compiled = compile_package_artifact(ctx->rt, &store, pkg, path, false, src_hash, &entry->art, err);
         cache->compiling_count--;
         idm_syn_free(pkg);
         if (!compiled) {
@@ -697,7 +696,7 @@ static char *protocol_spelling_dup(const char *identity) {
     return suffix ? idm_strndup(start, (size_t)(suffix - start)) : idm_strdup(start);
 }
 
-static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *protocol_name_hint, bool kernel_mode, IdmArtifact *out, IdmError *err) {
+static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *protocol_name_hint, bool kernel_mode, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err) {
     ExpandContext ctx;
     ctx_init(&ctx, rt);
     ctx.scope_store = *store;
@@ -712,6 +711,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             return false;
         }
         ctx.protocol_name = protocol_name;
+        ctx_set_unit(&ctx, protocol_name, src_hash);
     }
     ctx.phase_ns = idm_fresh_phase_namespace(rt, err);
     if (!ctx.phase_ns) {
@@ -726,26 +726,8 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
         ctx_destroy(&ctx);
         return false;
     }
-    void *old_user = rt->local_expand_user;
-    IdmLocalExpandFn old_fn = rt->local_expand;
-    void *old_free_identifier_eq_user = rt->free_identifier_eq_user;
-    IdmFreeIdentifierEqFn old_free_identifier_eq = rt->free_identifier_eq;
-    rt->local_expand_user = &ctx;
-    rt->local_expand = local_expand_callback;
-    rt->free_identifier_eq_user = &ctx;
-    rt->free_identifier_eq = free_identifier_eq_callback;
-    void *old_register_operator_user = rt->register_operator_user;
-    IdmRegisterOperatorFn old_register_operator = rt->register_operator;
-    rt->register_operator_user = &ctx;
-    rt->register_operator = register_operator_callback;
-    void *old_register_macro_user = rt->register_macro_user;
-    IdmRegisterMacroFn old_register_macro = rt->register_macro;
-    rt->register_macro_user = &ctx;
-    rt->register_macro = register_macro_callback;
-    void *old_expander_surface_user = rt->expander_surface_user;
-    IdmExpanderSurfaceFn old_expander_surface = rt->expander_surface;
-    rt->expander_surface_user = &ctx;
-    rt->expander_surface = expander_surface_callback;
+    SavedHooks saved;
+    hooks_install(rt, &ctx, &saved);
     bool ok = ctx_seed(&ctx, err) && (kernel_mode || ctx_activate_kernel(&ctx, err));
     size_t macro_base = ctx.macro_count;
     size_t op_base = ctx.operator_count;
@@ -769,22 +751,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
     IdmCore *body = ok ? expand_body_items(&ctx, scoped_pkg->as.seq.items, 1, scoped_pkg->as.seq.count, false, err) : NULL;
     idm_syn_free(scoped_pkg);
     if (!body) {
-        rt->local_expand_user = old_user;
-        rt->local_expand = old_fn;
-        rt->free_identifier_eq_user = old_free_identifier_eq_user;
-        rt->free_identifier_eq = old_free_identifier_eq;
-    rt->register_operator_user = old_register_operator_user;
-    rt->register_operator = old_register_operator;
-    rt->register_macro_user = old_register_macro_user;
-    rt->register_macro = old_register_macro;
-    rt->expander_surface_user = old_expander_surface_user;
-    rt->expander_surface = old_expander_surface;
-        rt->register_operator_user = old_register_operator_user;
-        rt->register_operator = old_register_operator;
-        rt->register_macro_user = old_register_macro_user;
-        rt->register_macro = old_register_macro;
-        rt->expander_surface_user = old_expander_surface_user;
-        rt->expander_surface = old_expander_surface;
+        hooks_restore(rt, &saved);
         *store = ctx.scope_store;
         ctx_destroy(&ctx);
         return false;
@@ -955,16 +922,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
         }
     }
     idm_core_free(body);
-    rt->local_expand_user = old_user;
-    rt->local_expand = old_fn;
-    rt->free_identifier_eq_user = old_free_identifier_eq_user;
-    rt->free_identifier_eq = old_free_identifier_eq;
-    rt->register_operator_user = old_register_operator_user;
-    rt->register_operator = old_register_operator;
-    rt->register_macro_user = old_register_macro_user;
-    rt->register_macro = old_register_macro;
-    rt->expander_surface_user = old_expander_surface_user;
-    rt->expander_surface = old_expander_surface;
+    hooks_restore(rt, &saved);
     *store = ctx.scope_store;
     ctx_destroy(&ctx);
     if (!copy_ok || !module) {
@@ -1010,6 +968,6 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
     return true;
 }
 
-bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const char *protocol_name_hint, IdmArtifact *out, IdmError *err) {
-    return compile_package_artifact(parent->rt, &parent->scope_store, pkg, protocol_name_hint, false, out, err);
+bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const char *protocol_name_hint, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err) {
+    return compile_package_artifact(parent->rt, &parent->scope_store, pkg, protocol_name_hint, false, src_hash, out, err);
 }

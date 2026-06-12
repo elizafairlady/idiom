@@ -1,0 +1,155 @@
+use std/test
+implement std/test
+
+defmacro pair-sum stx do syntax-case stx do
+  (_ e) -> %`(do
+    {pa pb} = %,e
+    add pa pb
+  end)
+end end
+
+suite do
+  test "tuple-pattern-binds" do
+    {a b} = tuple 1 2
+    assert-eq a 1
+    assert-eq b 2
+  end
+  test "nested-pattern-binds" do
+    {a {b c}} = tuple 1 (tuple 2 3)
+    assert-eq (list a b c) (list 1 2 3)
+  end
+  test "list-and-cons-patterns" do
+    (list x y) = list 10 20
+    assert-eq (add x y) 30
+    (list h . t) = list 1 2 3
+    assert-eq h 1
+    assert-eq t (list 2 3)
+    '() = list
+    f = fn do
+      '() -> :empty
+      (list _ . _) -> :cons
+    end
+    assert-eq (f (list)) :empty
+    assert-eq (f (list 1)) :cons
+  end
+  test "vector-and-dict-patterns" do
+    [v1 v2] = [7 8]
+    assert-eq (add v1 v2) 15
+    [vh . vt] = [1 2 3]
+    assert-eq vh 1
+    assert-eq vt [2 3]
+    [] = []
+    %{:k kv} = %{:k 9 :other 0}
+    assert-eq kv 9
+  end
+  test "bracket-patterns-match-vectors-only" do
+    g = fn do
+      [a b] -> tuple :vec a b
+      (list a b) -> tuple :list a b
+    end
+    assert-eq (g [1 2]) (tuple :vec 1 2)
+    assert-eq (g (list 1 2)) (tuple :list 1 2)
+    h = fn do
+      :nil -> :was-nil
+      '() -> :was-empty-list
+      [] -> :was-empty-vector
+    end
+    assert-eq (h :nil) :was-nil
+    assert-eq (h '()) :was-empty-list
+    assert-eq (h []) :was-empty-vector
+    q = fn do
+      '(1 2) -> :quoted-list
+      _ -> :other
+    end
+    assert-eq (q (list 1 2)) :quoted-list
+    assert-eq (q [1 2]) :other
+  end
+  test "literal-assert-and-bind" do
+    {:ok v} = tuple :ok 42
+    assert-eq v 42
+    {:ok :done} = tuple :ok :done
+    :yes = :yes
+    assert-eq v 42
+  end
+  test "wildcard-positions" do
+    {_ b _} = tuple 1 2 3
+    assert-eq b 2
+  end
+  test "rebind-through-pattern" do
+    a = 1
+    {a b} = tuple (add a 10) 2
+    assert-eq a 11
+    {a c} = tuple 100 3
+    assert-eq (list a b c) (list 100 2 3)
+    a = 0
+    assert-eq a 0
+  end
+  test "pattern-bind-inside-do-and-fn" do
+    got = do
+      {a b} = tuple 4 5
+      add a b
+    end
+    assert-eq got 9
+    f = fn p do
+      {x y} = p
+      mul x y
+    end
+    assert-eq (f (tuple 6 7)) 42
+    defn g p do
+      {:ok n} = p
+      add n 1
+    end
+    assert-eq (g {:ok 41}) 42
+  end
+  test "forward-reference-from-later-defn" do
+    got = do
+      {q r} = tuple 3 4
+      defn use-q x -> add x q
+      use-q r
+    end
+    assert-eq got 7
+  end
+  test "non-match-raises-structured-reason" do
+    got = assert-raises (fn _ig do
+      {a b} = tuple 1 2 3
+      a
+    end)
+    match got do
+      {:error {:no-clause _name args}} -> assert-eq args {{1 2 3}}
+    end
+    got2 = assert-raises (fn _ig do
+      {:ok v} = tuple :error :enoent
+      v
+    end)
+    match got2 do
+      {:error {:no-clause _name args}} -> assert-eq args {{:error :enoent}}
+    end
+  end
+  test "plain-bind-unchanged" do
+    x = 1
+    x = add x 1
+    defn use-x n -> add n x
+    assert-eq (use-x 40) 42
+    _ = tuple 1 2
+  end
+  test "macro-introduced-pattern-bind-is-hygienic" do
+    pa = 100
+    got = pair-sum (tuple 1 2)
+    assert-eq got 3
+    assert-eq pa 100
+  end
+  test "repeated-name-requires-equal-values" do
+    {a a} = tuple 1 1
+    assert-eq a 1
+    got = assert-raises (fn _ig do
+      {b b} = tuple 1 2
+      b
+    end)
+    match got do
+      {:error {:no-clause _name args}} -> assert-eq args {{1 2}}
+    end
+  end
+  test "paren-group-rejected-in-pattern" do
+    assert-expand-error "{a (b c)} = tuple 1 2\na" "unsupported pattern"
+  end
+end

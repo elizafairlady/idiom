@@ -30,13 +30,13 @@ suite do
   end
   test "apply-basic" do
     got = do
-      apply (fn x y -> add x y) [40 2]
+      apply (fn x y -> add x y) (list 40 2)
     end
     assert-inspect got "42"
   end
   test "apply-to-list" do
     got = do
-      apply (fn a b c -> add a (add b c)) (to-list %[1 2 3])
+      apply (fn a b c -> add a (add b c)) (to-list [1 2 3])
     end
     assert-inspect got "6"
   end
@@ -96,9 +96,9 @@ suite do
       end
       defn dropn do
         parts 0 -> parts
-        [_ . t] k -> dropn t (sub k 1)
+        (list _ . t) k -> dropn t (sub k 1)
       end
-      tuple (fact 5) (classify (sub 0 3)) (classify 0) (classify 7) (dropn [1 2 3 4] 2)
+      tuple (fact 5) (classify (sub 0 3)) (classify 0) (classify 7) (dropn '(1 2 3 4) 2)
     end
     assert-inspect got "{120 :negative :zero :positive (3 4)}"
   end
@@ -327,7 +327,7 @@ suite do
       empty = list
       tuple (list) (tuple) (vector) (dict) empty (f 1 2) (apply &list (list 3 4)) (g 40 2)
     end
-    assert-inspect got "{:nil {} %[] %{} :nil (1 2) (3 4) 42}"
+    assert-inspect got "{() {} [] %{} () (1 2) (3 4) 42}"
   end
   test "operator-precedence" do
     got = do
@@ -384,11 +384,11 @@ suite do
     got = do
       x = 9; `[1 ,x 3]
     end
-    assert-inspect got "(1 9 3)"
+    assert-inspect got "[1 9 3]"
   end
   test "qq-splice" do
     got = do
-      xs = [1 2 3]; `(a ,@xs z)
+      xs = '(1 2 3); `(a ,@xs z)
     end
     assert-inspect got "(a 1 2 3 z)"
   end
@@ -587,8 +587,8 @@ suite do
   end
   test "vector-rest-match" do
     got = do
-      match %[1 2 3] do %[h . t] -> t end
+      match [1 2 3] do [h . t] -> t end
     end
-    assert-inspect got "%[2 3]"
+    assert-inspect got "[2 3]"
   end
 end

@@ -61,3 +61,8 @@ dkms.conf
 # debug information files
 *.dwo
 *.ic
+.claude/
+build.log
+/docs/
+/README.md
+/VISION.md

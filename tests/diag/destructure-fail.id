@@ -1,0 +1,3 @@
+defn mk n -> tuple 1 2 n
+{a b} = mk 3
+a

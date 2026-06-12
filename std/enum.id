@@ -1,100 +1,122 @@
 package enum
 
 defn reduce-list do
-  :nil acc _ -> acc
-  [h . t] acc f -> reduce-list t (f h acc) f
+  '() acc _ -> acc
+  (list h . t) acc f -> reduce-list t (f h acc) f
 end
 
 export defn reduce xs acc f -> reduce-list (to-list xs) acc f
-export defn reverse xs -> reduce xs :nil &cons
-export defn map xs f -> reverse (reduce xs :nil (fn x acc -> cons (f x) acc))
-export defn filter xs f -> reverse (reduce xs :nil (fn x acc -> if (f x) do cons x acc else do acc end))
-export defn flat-map xs f -> reduce (map xs f) :nil (fn part acc -> concat acc part)
+export defn reverse xs -> reduce xs '() &cons
+export defn map xs f -> reverse (reduce xs '() (fn x acc -> cons (f x) acc))
+export defn filter xs f -> reverse (reduce xs '() (fn x acc -> if (f x) do cons x acc else do acc end))
+export defn flat-map xs f -> reduce (map xs f) '() (fn part acc -> concat acc part)
 export defn length xs -> reduce xs 0 (fn _x acc -> add acc 1)
 export defn sum xs -> reduce xs 0 &add
 
-export defn member? do
-  :nil _ -> :false
-  [h . _] x when (eq? x h) -> :true
-  [_ . t] x -> member? t x
+defn member-list? do
+  '() _ -> :false
+  (list h . _) x when (eq? x h) -> :true
+  (list _ . t) x -> member-list? t x
 end
 
-export defn concat xs ys -> reduce (reverse xs) ys &cons
+export defn member? xs x -> member-list? (to-list xs) x
+
+export defn concat xs ys -> reduce (reverse (to-list xs)) (to-list ys) &cons
+
+defn nth-list do
+  '() _ -> :nil
+  (list h . _) 0 -> h
+  (list _ . t) i -> nth-list t (sub i 1)
+end
 
 export defn nth do
   _ i when (lt? i 0) -> :nil
-  :nil _ -> :nil
-  [h . _] 0 -> h
-  [_ . t] i -> nth t (sub i 1)
+  xs i -> nth-list (to-list xs) i
 end
 
 defn nth-from do
-  :nil _ i -> error (tuple :index-out-of-range i)
-  [h . _] 0 _ -> h
-  [_ . t] k i -> nth-from t (sub k 1) i
+  '() _ i -> error (tuple :index-out-of-range i)
+  (list h . _) 0 _ -> h
+  (list _ . t) k i -> nth-from t (sub k 1) i
 end
 
 export defn nth! do
   _ i when (lt? i 0) -> error (tuple :index-out-of-range i)
-  xs i -> nth-from xs i i
+  xs i -> nth-from (to-list xs) i i
 end
 
-export defn take do
-  _ 0 -> :nil
-  :nil _ -> :nil
-  [h . t] n -> cons h (take t (sub n 1))
+defn take-list do
+  _ 0 -> '()
+  '() _ -> '()
+  (list h . t) n -> cons h (take-list t (sub n 1))
 end
 
-export defn drop do
+export defn take xs n -> take-list (to-list xs) n
+
+defn drop-list do
   xs 0 -> xs
-  :nil _ -> :nil
-  [_ . t] n -> drop t (sub n 1)
+  '() _ -> '()
+  (list _ . t) n -> drop-list t (sub n 1)
 end
 
-export defn any? do
-  :nil _ -> :false
-  [h . t] f -> if (f h) do :true else do any? t f end
+export defn drop xs n -> drop-list (to-list xs) n
+
+defn any-list? do
+  '() _ -> :false
+  (list h . t) f -> if (f h) do :true else do any-list? t f end
 end
 
-export defn all? do
-  :nil _ -> :true
-  [h . t] f -> if (f h) do all? t f else do :false end
+export defn any? xs f -> any-list? (to-list xs) f
+
+defn all-list? do
+  '() _ -> :true
+  (list h . t) f -> if (f h) do all-list? t f else do :false end
 end
 
-export defn find do
-  :nil _ -> :nil
-  [h . t] f -> if (f h) do h else do find t f end
+export defn all? xs f -> all-list? (to-list xs) f
+
+defn find-list do
+  '() _ -> :nil
+  (list h . t) f -> if (f h) do h else do find-list t f end
 end
 
-export defn zip do
-  :nil _ -> :nil
-  _ :nil -> :nil
-  [a . as] [b . bs] -> cons (tuple a b) (zip as bs)
+export defn find xs f -> find-list (to-list xs) f
+
+defn zip-list do
+  '() _ -> '()
+  _ '() -> '()
+  (list a . as) (list b . bs) -> cons (tuple a b) (zip-list as bs)
 end
+
+export defn zip xs ys -> zip-list (to-list xs) (to-list ys)
 
 export defn range do
-  a b when (gte? a b) -> :nil
+  a b when (gte? a b) -> '()
   a b -> cons a (range (add a 1) b)
 end
 
 defn insert-sorted do
-  x :nil _cmp -> cons x :nil
-  x [h . t] cmp -> if (cmp x h) do cons x (cons h t) else do cons h (insert-sorted x t cmp) end
+  x '() _cmp -> cons x '()
+  x (list h . t) cmp -> if (cmp x h) do cons x (cons h t) else do cons h (insert-sorted x t cmp) end
 end
 
-export defn sort-by xs cmp -> reduce xs :nil (fn x acc -> insert-sorted x acc cmp)
+export defn sort-by xs cmp -> reduce xs '() (fn x acc -> insert-sorted x acc cmp)
 export defn sort xs -> sort-by xs &lt?
 
-export defn min-of do
-  [h . t] -> reduce t h (fn x best -> if (lt? x best) do x else do best end)
+defn min-of-list do
+  (list h . t) -> reduce t h (fn x best -> if (lt? x best) do x else do best end)
 end
 
-export defn max-of do
-  [h . t] -> reduce t h (fn x best -> if (gt? x best) do x else do best end)
+export defn min-of xs -> min-of-list (to-list xs)
+
+defn max-of-list do
+  (list h . t) -> reduce t h (fn x best -> if (gt? x best) do x else do best end)
 end
+
+export defn max-of xs -> max-of-list (to-list xs)
 
 export defn group-by xs f ->
-  reduce xs (dict) (fn x acc -> dict-put acc (f x) (cons x (dict-get acc (f x) :nil)))
+  reduce xs (dict) (fn x acc -> dict-put acc (f x) (cons x (dict-get acc (f x) '())))
 
 export defn not? do
   :false -> :true

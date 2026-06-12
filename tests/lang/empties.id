@@ -1,0 +1,141 @@
+use std/test
+implement std/test
+use std/map
+use std/enum
+
+suite do
+  test "empty-values-are-distinct" do
+    assert-eq (eq? '() :nil) :false
+    assert-eq (eq? [] :nil) :false
+    assert-eq (eq? '() []) :false
+    assert-eq (eq? {} :nil) :false
+    assert-eq (eq? %{} :nil) :false
+    assert-eq (eq? '() (list)) :true
+    assert-eq (eq? [] (vector)) :true
+    assert-eq (eq? {} (tuple)) :true
+    assert-eq (eq? %{} (dict)) :true
+  end
+  test "exactly-nil-and-false-are-falsy" do
+    assert-eq (cond :nil :t :f) :f
+    assert-eq (cond :false :t :f) :f
+    assert-eq (cond '() :t :f) :t
+    assert-eq (cond [] :t :f) :t
+    assert-eq (cond {} :t :f) :t
+    assert-eq (cond %{} :t :f) :t
+  end
+  test "absence-is-nil-empty-is-a-value" do
+    m = dict :a 1
+    missing = get m :missing
+    empty = filter '(1 2 3) (fn _x -> :false)
+    assert-eq missing :nil
+    assert-eq empty '()
+    assert-eq (eq? missing empty) :false
+    assert-eq (nth '(1 2) 9) :nil
+    assert-eq (find '(1 2) (fn _x -> :false)) :nil
+  end
+  test "to-list-bridges-vector-and-list" do
+    assert-eq (eq? [] '()) :false
+    assert-eq (to-list []) '()
+    assert-eq (to-list [1 2]) '(1 2)
+    assert-eq (to-list '(1 2)) '(1 2)
+    assert-eq (assert-raises (fn _ig -> to-list :nil)) {:error {:type-error :to-list :nil}}
+  end
+  test "renderings-round-trip" do
+    assert-inspect [1 2] "[1 2]"
+    assert-inspect [] "[]"
+    assert-inspect '(1 2) "(1 2)"
+    assert-inspect '() "()"
+    assert-inspect {} "{}"
+    assert-inspect %{} "%{}"
+    assert-inspect (list 1 (list 2 3)) "(1 (2 3))"
+    assert-inspect [1 [2 3]] "[1 [2 3]]"
+  end
+  test "quote-is-syntax-faithful" do
+    assert-eq '[1 2] [1 2]
+    assert-eq '[1 2] (vector 1 2)
+    assert-eq '(1 2) (list 1 2)
+    assert-eq '() (list)
+    assert-eq (eq? '[1 2] '(1 2)) :false
+  end
+  test "list-recursion-terminates-on-empty-list" do
+    assert-eq (rest (list 1)) '()
+    assert-eq (cons 1 '()) '(1)
+    assert-eq (append '(1) '(2)) '(1 2)
+    assert-eq (append '() '(9)) '(9)
+    assert-inspect (assert-raises (fn _ig -> first '())) "{:error {:type-error :first ()}}"
+    assert-inspect (assert-raises (fn _ig -> rest '())) "{:error {:type-error :rest ()}}"
+  end
+  test "pattern-matrix-distinguishes-empties" do
+    f = fn do
+      :nil -> :nil-case
+      '() -> :empty-list-case
+      [] -> :empty-vector-case
+      {} -> :empty-tuple-case
+      %{} -> :dict-case
+    end
+    assert-eq (f :nil) :nil-case
+    assert-eq (f '()) :empty-list-case
+    assert-eq (f []) :empty-vector-case
+    assert-eq (f {}) :empty-tuple-case
+    assert-eq (f %{}) :dict-case
+    assert-eq (f (list)) :empty-list-case
+    assert-eq (f (vector)) :empty-vector-case
+  end
+  test "list-pattern-family" do
+    g = fn do
+      '() -> :empty
+      (list a) -> tuple :one a
+      (list a . rest) -> tuple :cons a rest
+    end
+    assert-eq (g '()) :empty
+    assert-eq (g '(1)) (tuple :one 1)
+    assert-eq (g '(1 2 3)) (tuple :cons 1 '(2 3))
+    (list) = list
+    (list x y) = list 4 5
+    assert-eq (add x y) 9
+  end
+  test "bracket-pattern-family-matches-vectors" do
+    h = fn do
+      [] -> :empty
+      [a] -> tuple :one a
+      [a . rest] -> tuple :more a rest
+    end
+    assert-eq (h []) :empty
+    assert-eq (h [1]) (tuple :one 1)
+    assert-eq (h [1 2 3]) (tuple :more 1 [2 3])
+    no-list = fn do
+      [a b] -> tuple a b
+      _ -> :not-a-vector
+    end
+    assert-eq (no-list '(1 2)) :not-a-vector
+  end
+  test "enum-is-polymorphic-and-returns-lists" do
+    double = fn x -> mul x 2
+    assert-eq (map '(1 2) double) '(2 4)
+    assert-eq (map [1 2] double) '(2 4)
+    assert-eq (map {1 2} double) '(2 4)
+    assert-eq (map %{:a 1} (fn kv -> kv)) '({:a 1})
+    assert-eq (filter [1 2 3 4] (fn x -> gt? x 2)) '(3 4)
+    assert-eq (filter [] (fn _x -> :true)) '()
+    assert-eq (reduce [1 2 3] 0 &add) 6
+    assert-eq (length [1 2 3]) 3
+    assert-eq (sum {1 2 3}) 6
+    assert-eq (reverse [1 2 3]) '(3 2 1)
+    assert-eq (member? [1 2] 2) :true
+    assert-eq (nth [7 8] 1) 8
+    assert-eq (take [1 2 3] 2) '(1 2)
+    assert-eq (drop [1 2 3] 2) '(3)
+    assert-eq (concat [1] '(2)) '(1 2)
+    assert-eq (zip [1 2] '(:a :b)) '({1 :a} {2 :b})
+    assert-eq (sort [3 1 2]) '(1 2 3)
+    assert-eq (map (to-list %{:b 2}) (fn kv -> kv)) '({:b 2})
+  end
+  test "empties-survive-quote-constants" do
+    constants = list '() (list 1 '()) 2
+    assert-inspect constants "(() (1 ()) 2)"
+    assert-eq constants (cons '() (cons (cons 1 (cons '() '())) (cons 2 '())))
+    vec-constant = '[1 2]
+    assert-inspect vec-constant "[1 2]"
+    assert-eq (first constants) '()
+  end
+end

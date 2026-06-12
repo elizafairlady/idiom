@@ -1,0 +1,215 @@
+use std/test
+implement std/test
+use std/enum
+use std/supervisor
+
+suite do
+  test "normal-exit-does-not-kill-linked" do
+    got = do
+      c = spawn (fn -> :done)
+      link c
+      receive do {:never x} -> x; after 50 -> :alive end
+    end
+    assert-inspect got ":alive"
+  end
+  test "non-normal-kills-non-trapping-linked" do
+    got = do
+      victim = spawn (fn do
+        receive do :go -> :ok end
+        c = spawn (fn -> raise :boom)
+        link c
+        receive do {:never x} -> x end
+      end)
+      monitor victim
+      send victim :go
+      receive do {:down _ p reason} when (eq? p victim) -> reason end
+    end
+    assert-inspect got ":boom"
+  end
+  test "trap-exit-receives-exit-message" do
+    got = do
+      trap-exit :true
+      c = spawn (fn -> raise :crashed)
+      link c
+      receive do {:exit p reason} -> tuple (eq? p c) reason end
+    end
+    assert-inspect got "{:true :crashed}"
+  end
+  test "exit-signal-trapped-as-message" do
+    got = do
+      trap-exit :true
+      me = self
+      exit me :wave
+      receive do {:exit p reason} -> tuple (eq? p me) reason end
+    end
+    assert-inspect got "{:true :wave}"
+  end
+  test "normal-signal-ignored-by-non-trapper" do
+    got = do
+      parent = self
+      v = spawn (fn -> receive do :ping -> send parent :alive end)
+      exit v :normal
+      send v :ping
+      receive do :alive -> :alive; after 2000 -> :dead end
+    end
+    assert-inspect got ":alive"
+  end
+  test "kill-terminates-trapping-actor" do
+    got = do
+      parent = self
+      v = spawn (fn do
+        trap-exit :true
+        send parent :ready
+        receive do {:never x} -> x end
+      end)
+      monitor v
+      receive do :ready -> :ok end
+      exit v :kill
+      receive do {:down _ p reason} when (eq? p v) -> reason end
+    end
+    assert-inspect got ":killed"
+  end
+  test "monitor-down-on-crash-normal-kill" do
+    got = do
+      c1 = spawn (fn -> receive do :go -> raise :bad end)
+      monitor c1
+      send c1 :go
+      r1 = receive do {:down _ p reason} when (eq? p c1) -> reason end
+      c2 = spawn (fn -> receive do :go -> :done end)
+      monitor c2
+      send c2 :go
+      r2 = receive do {:down _ p reason} when (eq? p c2) -> reason end
+      c3 = spawn (fn -> receive do {:never x} -> x end)
+      monitor c3
+      exit c3 :kill
+      r3 = receive do {:down _ p reason} when (eq? p c3) -> reason end
+      tuple r1 r2 r3
+    end
+    assert-inspect got "{:bad :normal :killed}"
+  end
+  test "monitor-dead-pid-noproc" do
+    got = do
+      d = spawn (fn -> :done)
+      monitor d
+      receive do {:down _ _ r} -> r end
+      ref = monitor d
+      receive do {:down r p reason} -> tuple (eq? r ref) (eq? p d) reason end
+    end
+    assert-inspect got "{:true :true :noproc}"
+  end
+  test "monitor-refs-are-unique" do
+    got = do
+      v = spawn (fn -> receive do {:never x} -> x end)
+      r1 = monitor v
+      r2 = monitor v
+      both = neq? r1 r2
+      exit v :kill
+      a = receive do {:down r _ :killed} -> r end
+      b = receive do {:down r _ :killed} -> r end
+      tuple both (neq? a b)
+    end
+    assert-inspect got "{:true :true}"
+  end
+  test "demonitor-stops-delivery" do
+    got = do
+      v = spawn (fn -> receive do :go -> :done end)
+      ref = monitor v
+      demonitor ref
+      send v :go
+      receive do {:down _ _ r} -> r; after 200 -> :silent end
+    end
+    assert-inspect got ":silent"
+  end
+  test "down-ordered-after-prior-sends" do
+    got = do
+      parent = self
+      v = spawn (fn do
+        receive do :go -> :ok end
+        map (range 0 10) (fn k -> send parent (tuple :seq k))
+        :done
+      end)
+      monitor v
+      send v :go
+      defn drain acc -> receive do
+        {:seq k} -> drain (cons k acc)
+        {:down _ _ :normal} -> reverse acc
+      end
+      eq? (inspect (drain '())) (inspect (range 0 10))
+    end
+    assert-inspect got ":true"
+  end
+  test "supervisor-restarts-crashing-child" do
+    got = do
+      parent = self
+      sup = start (list (tuple :w (fn do
+        send parent (tuple :started (self))
+        receive do :crash -> raise :boom; {:never x} -> x end
+      end) :permanent))
+      p1 = receive do {:started pid} -> pid end
+      send p1 :crash
+      p2 = receive do {:started pid} -> pid end
+      n = count sup
+      stop sup
+      tuple (neq? p1 p2) n
+    end
+    assert-inspect got "{:true 1}"
+  end
+  test "supervisor-transient-not-restarted-on-normal-exit" do
+    got = do
+      parent = self
+      sup = start (list (tuple :w (fn do
+        send parent (tuple :started (self))
+        receive do :finish -> :ok end
+      end) :transient))
+      p1 = receive do {:started pid} -> pid end
+      send p1 :finish
+      outcome = receive do {:started _} -> :restarted; after 200 -> :not-restarted end
+      n = count sup
+      stop sup
+      tuple outcome n
+    end
+    assert-inspect got "{:not-restarted 0}"
+  end
+  test "supervisor-one-for-one-isolation" do
+    got = do
+      parent = self
+      mk = fn tag -> fn do
+        send parent (tuple :up tag (self))
+        receive do :crash -> raise :boom; {:never x} -> x end
+      end
+      sup = start (list (tuple :a (mk :a) :permanent) (tuple :b (mk :b) :permanent))
+      defn grab tag -> receive do {:up t p} when (eq? t tag) -> p end
+      a1 = grab :a
+      b1 = grab :b
+      send a1 :crash
+      a2 = grab :a
+      b-state = receive do {:up t _} when (eq? t :b) -> :b-restarted; after 100 -> :b-stable end
+      n = count sup
+      stop sup
+      tuple (neq? a1 a2) (neq? b1 a2) b-state n
+    end
+    assert-inspect got "{:true :true :b-stable 2}"
+  end
+  test "supervisor-intensity-limit-trips" do
+    got = do
+      sup = start (list (tuple :w (fn -> raise :always) :permanent)) 3 60000
+      monitor sup
+      receive do {:down _ p reason} when (eq? p sup) -> reason end
+    end
+    assert-inspect got "{:shutdown :max-restart-intensity}"
+  end
+  test "supervisor-stop-kills-children" do
+    got = do
+      parent = self
+      sup = start (list (tuple :w (fn do
+        send parent (tuple :started (self))
+        receive do {:never x} -> x end
+      end) :permanent))
+      p1 = receive do {:started pid} -> pid end
+      monitor p1
+      stop sup
+      receive do {:down _ p reason} when (eq? p p1) -> reason; after 2000 -> :child-survived end
+    end
+    assert-inspect got ":killed"
+  end
+end

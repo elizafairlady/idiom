@@ -19,11 +19,6 @@ typedef enum {
     IDM_SYN_DICT
 } IdmSyntaxKind;
 
-typedef enum {
-    IDM_SEQ_PAREN,
-    IDM_SEQ_BRACKET
-} IdmSequenceShape;
-
 typedef struct {
     int phase;
     IdmScopeSet scopes;
@@ -65,7 +60,6 @@ struct IdmSyntax {
             IdmSyntax **items;
             size_t count;
             size_t cap;
-            IdmSequenceShape shape;
         } seq;
     } as;
 };
@@ -77,7 +71,7 @@ IdmSyntax *idm_syn_int(int64_t value, IdmSpan span);
 IdmSyntax *idm_syn_float(double value, IdmSpan span);
 IdmSyntax *idm_syn_string(const char *text, IdmSpan span);
 IdmSyntax *idm_syn_string_n(const char *text, size_t len, IdmSpan span);
-IdmSyntax *idm_syn_list(IdmSequenceShape shape, IdmSpan span);
+IdmSyntax *idm_syn_list(IdmSpan span);
 IdmSyntax *idm_syn_vector(IdmSpan span);
 IdmSyntax *idm_syn_tuple(IdmSpan span);
 IdmSyntax *idm_syn_dict(IdmSpan span);

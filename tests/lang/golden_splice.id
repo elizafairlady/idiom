@@ -4,7 +4,7 @@ implement std/test
 suite do
   test "qq-splice" do
     got = do
-      xs = [1 2 3]; `(a ,@xs z)
+      xs = '(1 2 3); `(a ,@xs z)
     end
     assert-inspect got "(a 1 2 3 z)"
   end

@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <signal.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
@@ -120,58 +121,84 @@ static bool argv_push(char ***argv, size_t *count, size_t *cap, char *item) {
     return true;
 }
 
-static bool resolve_argv_part(IdmValue part, const IdmExec *exec_ctx, Stage *stage, char ***argv, size_t *count, size_t *cap) {
+static bool part_append_text(IdmValue part, const IdmExec *exec_ctx, Stage *stage, IdmBuffer *out, bool *is_glob) {
     if (!idm_is_tuple(part) || idm_sequence_count(part) < 2) return false;
     IdmError ignore;
     idm_error_init(&ignore);
     IdmValue tag = idm_sequence_item(part, 0, &ignore);
     IdmValue payload = idm_sequence_item(part, 1, &ignore);
     idm_error_clear(&ignore);
-    if (value_is_atom(tag, "lit")) {
-        return argv_push(argv, count, cap, dup_string_value(payload));
-    }
-    if (value_is_atom(tag, "temp")) {
-        char *path = dup_string_value(payload);
-        if (!path) return false;
-        if (!stage_own_temp(stage, path)) { free(path); return false; }
-        return argv_push(argv, count, cap, path);
+    if (value_is_atom(tag, "lit") || value_is_atom(tag, "glob") || value_is_atom(tag, "temp")) {
+        if (value_is_atom(tag, "glob")) *is_glob = true;
+        const char *text = payload.tag == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
+        size_t len = payload.tag == IDM_VAL_STRING ? idm_string_length(payload) : 0;
+        if (value_is_atom(tag, "temp") && !stage_own_temp(stage, text)) return false;
+        return idm_buf_append_n(out, text, len);
     }
     if (value_is_atom(tag, "env")) {
         const char *name = payload.tag == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
         const char *value = idm_exec_env_get(exec_ctx, name);
         if (!value) value = getenv(name);
-        return argv_push(argv, count, cap, idm_strdup(value ? value : ""));
+        return idm_buf_append(out, value ? value : "");
     }
-    if (value_is_atom(tag, "glob")) {
-        char *pattern = dup_string_value(payload);
-        if (!pattern) return false;
-        const char *base = idm_exec_cwd(exec_ctx);
-        size_t skip = 0;
-        char *lookup = pattern;
-        if (base && pattern[0] != '/') {
-            skip = strlen(base) + 1u;
-            lookup = malloc(skip + strlen(pattern) + 1u);
-            if (!lookup) { free(pattern); return false; }
-            memcpy(lookup, base, skip - 1u);
-            lookup[skip - 1u] = '/';
-            strcpy(lookup + skip, pattern);
+    if (value_is_atom(tag, "cat")) {
+        IdmValue cur = payload;
+        while (idm_is_pair(cur)) {
+            idm_error_init(&ignore);
+            IdmValue sub = idm_car(cur, &ignore);
+            cur = idm_cdr(cur, &ignore);
+            idm_error_clear(&ignore);
+            if (!part_append_text(sub, exec_ctx, stage, out, is_glob)) return false;
         }
-        glob_t g;
-        memset(&g, 0, sizeof(g));
-        int rc = glob(lookup, 0, NULL, &g);
-        if (lookup != pattern) free(lookup);
-        if (rc == 0 && g.gl_pathc > 0) {
-            bool ok = true;
-            for (size_t i = 0; i < g.gl_pathc && ok; i++) ok = argv_push(argv, count, cap, idm_strdup(g.gl_pathv[i] + skip));
-            globfree(&g);
-            free(pattern);
-            return ok;
-        }
-        if (rc == GLOB_NOSPACE || rc == GLOB_ABORTED) { globfree(&g); free(pattern); return false; }
-        globfree(&g);
-        return argv_push(argv, count, cap, pattern);
+        return true;
     }
     return false;
+}
+
+static bool push_glob_expansion(char *pattern, const IdmExec *exec_ctx, char ***argv, size_t *count, size_t *cap) {
+    const char *base = idm_exec_cwd(exec_ctx);
+    size_t skip = 0;
+    char *lookup = pattern;
+    if (base && pattern[0] != '/') {
+        skip = strlen(base) + 1u;
+        lookup = malloc(skip + strlen(pattern) + 1u);
+        if (!lookup) { free(pattern); return false; }
+        memcpy(lookup, base, skip - 1u);
+        lookup[skip - 1u] = '/';
+        strcpy(lookup + skip, pattern);
+    }
+    glob_t g;
+    memset(&g, 0, sizeof(g));
+    int rc = glob(lookup, 0, NULL, &g);
+    if (lookup != pattern) free(lookup);
+    if (rc == 0 && g.gl_pathc > 0) {
+        bool ok = true;
+        for (size_t i = 0; i < g.gl_pathc && ok; i++) ok = argv_push(argv, count, cap, idm_strdup(g.gl_pathv[i] + skip));
+        globfree(&g);
+        free(pattern);
+        return ok;
+    }
+    if (rc == GLOB_NOSPACE || rc == GLOB_ABORTED) { globfree(&g); free(pattern); return false; }
+    globfree(&g);
+    return argv_push(argv, count, cap, pattern);
+}
+
+static bool resolve_argv_part(IdmValue part, const IdmExec *exec_ctx, Stage *stage, char ***argv, size_t *count, size_t *cap) {
+    IdmBuffer text;
+    idm_buf_init(&text);
+    bool is_glob = false;
+    if (!part_append_text(part, exec_ctx, stage, &text, &is_glob)) {
+        idm_buf_destroy(&text);
+        return false;
+    }
+    if (!idm_buf_append_char(&text, '\0')) {
+        idm_buf_destroy(&text);
+        return false;
+    }
+    char *word = idm_buf_take(&text);
+    if (!word) return false;
+    if (is_glob) return push_glob_expansion(word, exec_ctx, argv, count, cap);
+    return argv_push(argv, count, cap, word);
 }
 
 static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *stage) {
@@ -305,42 +332,47 @@ static void set_nonblocking(int fd) {
     if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
 }
 
+static void child_fail(const char *subject, const char *what) {
+    dprintf(2, "idiom: %s: %s: %s\n", subject, what, strerror(errno));
+    _exit(126);
+}
+
 static void child_apply_redirs(const Stage *stage) {
     for (size_t i = 0; i < stage->redir_count; i++) {
         const Redir *r = &stage->redirs[i];
         if (r->kind == REDIR_DUP) {
-            if (dup2(r->dup_to, r->fd) < 0) _exit(126);
+            if (dup2(r->dup_to, r->fd) < 0) child_fail("fd", "redirect failed");
             continue;
         }
         if (r->op == 'b' || r->op == 'B') {
             int both_flags = r->op == 'B' ? (O_WRONLY | O_CREAT | O_APPEND) : (O_WRONLY | O_CREAT | O_TRUNC);
             int both = open(r->target, both_flags, 0644);
-            if (both < 0) _exit(126);
-            if (dup2(both, 1) < 0 || dup2(both, 2) < 0) _exit(126);
+            if (both < 0) child_fail(r->target, "redirect failed");
+            if (dup2(both, 1) < 0 || dup2(both, 2) < 0) child_fail(r->target, "redirect failed");
             close(both);
             continue;
         }
         if (r->op == 'h') {
             char tmpl[] = "/tmp/idm_heredoc_XXXXXX";
             int hf = mkstemp(tmpl);
-            if (hf < 0) _exit(126);
+            if (hf < 0) child_fail("heredoc", "redirect failed");
             unlink(tmpl);
             size_t blen = strlen(r->target);
             size_t off = 0;
             while (off < blen) {
                 ssize_t w = write(hf, r->target + off, blen - off);
-                if (w < 0) _exit(126);
+                if (w < 0) child_fail("heredoc", "redirect failed");
                 off += (size_t)w;
             }
-            if (lseek(hf, 0, SEEK_SET) < 0) _exit(126);
-            if (dup2(hf, r->fd) < 0) _exit(126);
+            if (lseek(hf, 0, SEEK_SET) < 0) child_fail("heredoc", "redirect failed");
+            if (dup2(hf, r->fd) < 0) child_fail("heredoc", "redirect failed");
             close(hf);
             continue;
         }
         int flags = r->op == '<' ? O_RDONLY : (r->op == 'a' ? (O_WRONLY | O_CREAT | O_APPEND) : (O_WRONLY | O_CREAT | O_TRUNC));
         int opened = open(r->target, flags, 0644);
-        if (opened < 0) _exit(126);
-        if (dup2(opened, r->fd) < 0) _exit(126);
+        if (opened < 0) child_fail(r->target, "redirect failed");
+        if (dup2(opened, r->fd) < 0) child_fail(r->target, "redirect failed");
         close(opened);
     }
 }
@@ -408,7 +440,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         pid_t pid = fork();
         if (pid < 0) { idm_error_set(err, idm_span_unknown(NULL), "fork failed: %s", strerror(errno)); if (stage_pipe[0] >= 0) { close(stage_pipe[0]); close(stage_pipe[1]); } failed = true; break; }
         if (pid == 0) {
-            if (launch_cwd && chdir(launch_cwd) != 0) _exit(126);
+            if (launch_cwd && chdir(launch_cwd) != 0) child_fail(launch_cwd, "chdir failed");
             if (prev_read >= 0) { dup2(prev_read, 0); }
             if (!last) { dup2(stage_pipe[1], 1); }
             else if (port->capture) { dup2(cap_out[1], 1); dup2(cap_err[1], 2); }
@@ -427,7 +459,12 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
             }
             for (size_t e = 0; e < port->stages[i].env_count; e++) setenv(port->stages[i].env_names[e], port->stages[i].env_values[e], 1);
             execvp(port->stages[i].argv[0], port->stages[i].argv);
-            _exit(127);
+            if (errno == ENOENT) {
+                dprintf(2, "idiom: %s: command not found\n", port->stages[i].argv[0]);
+                _exit(127);
+            }
+            dprintf(2, "idiom: %s: %s\n", port->stages[i].argv[0], strerror(errno));
+            _exit(126);
         }
         port->stages[i].pid = pid;
         if (prev_read >= 0) close(prev_read);
@@ -463,12 +500,25 @@ size_t idm_port_live_fds(const IdmPort *port, int *out_fds, size_t max) {
     return n;
 }
 
-static void drain_fd(IdmPort *port, int *fd, IdmBuffer *buf) {
+static void forward_bytes(int fd, const char *data, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, data + off, len - off);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return;
+        }
+        off += (size_t)w;
+    }
+}
+
+static void drain_fd(IdmPort *port, int *fd, IdmBuffer *buf, int forward_to) {
     if (*fd < 0) return;
     char tmp[4096];
     for (;;) {
         ssize_t r = read(*fd, tmp, sizeof(tmp));
         if (r > 0) {
+            if (forward_to >= 0) forward_bytes(forward_to, tmp, (size_t)r);
             size_t room = buf->len < port->capture_limit ? port->capture_limit - buf->len : 0;
             size_t take = (size_t)r < room ? (size_t)r : room;
             if (take > 0) idm_buf_append_n(buf, tmp, take);
@@ -482,8 +532,8 @@ static void drain_fd(IdmPort *port, int *fd, IdmBuffer *buf) {
 }
 
 void idm_port_drain(IdmPort *port) {
-    drain_fd(port, &port->out_fd, &port->out_buf);
-    drain_fd(port, &port->err_fd, &port->err_buf);
+    drain_fd(port, &port->out_fd, &port->out_buf, -1);
+    drain_fd(port, &port->err_fd, &port->err_buf, 2);
 }
 
 bool idm_port_try_complete(IdmPort *port) {
@@ -511,12 +561,17 @@ static int stage_exit_code(int status) {
 IdmValue idm_port_result(IdmPort *port, IdmRuntime *rt, IdmError *err) {
     int final_code = 0;
     bool any_failure = false;
+    int rightmost_failure = 0;
     for (size_t i = 0; i < port->stage_count; i++) {
         int code = stage_exit_code(port->stages[i].status);
-        if (code != 0) any_failure = true;
+        if (code != 0) {
+            any_failure = true;
+            rightmost_failure = code;
+        }
         if (i + 1u == port->stage_count) final_code = code;
     }
     bool ok = port->pipefail ? !any_failure : final_code == 0;
+    if (!ok && port->pipefail && final_code == 0) final_code = rightmost_failure;
     IdmValue out_str = idm_string_n(rt, port->out_buf.data ? port->out_buf.data : "", port->out_buf.len, err);
     if (err->present) return idm_nil();
     IdmValue err_str = idm_string_n(rt, port->err_buf.data ? port->err_buf.data : "", port->err_buf.len, err);

@@ -1,2 +1,5 @@
 <repl>:1:20: error: unbound identifier 'kaboom'
 <repl>:1:1: error: unbound identifier 'ff'
+<repl>:1:15: error: main actor exited with reason {:error {:no-clause :{r s} {{7}}}}
+  in main (<repl>:1)
+<repl>:1:5: error: unbound identifier 'r'

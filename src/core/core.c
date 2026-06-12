@@ -599,12 +599,16 @@ static IdmOpcode primitive_opcode(IdmPrimitive primitive) {
     }
 }
 
-static bool actor_primitive_opcode(IdmPrimitive primitive, IdmOpcode *out_op, uint32_t *out_arity) {
+static bool actor_primitive_opcode(IdmPrimitive primitive, size_t argc, IdmOpcode *out_op, uint32_t *out_arity) {
     switch (primitive) {
         case IDM_PRIM_SELF: *out_op = IDM_OP_SELF; *out_arity = 0; return true;
         case IDM_PRIM_SPAWN: *out_op = IDM_OP_SPAWN; *out_arity = 1; return true;
         case IDM_PRIM_SEND: *out_op = IDM_OP_SEND; *out_arity = 2; return true;
-        case IDM_PRIM_EXIT: *out_op = IDM_OP_EXIT; *out_arity = 1; return true;
+        case IDM_PRIM_EXIT:
+            if (argc >= 2) { *out_op = IDM_OP_EXIT_SIGNAL; *out_arity = 2; return true; }
+            *out_op = IDM_OP_EXIT;
+            *out_arity = 1;
+            return true;
         case IDM_PRIM_LINK: *out_op = IDM_OP_LINK; *out_arity = 1; return true;
         case IDM_PRIM_UNLINK: *out_op = IDM_OP_UNLINK; *out_arity = 1; return true;
         case IDM_PRIM_MONITOR: *out_op = IDM_OP_MONITOR; *out_arity = 1; return true;
@@ -764,7 +768,7 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_MAKE_SYNTAX_ATOM] = {"make-syntax-atom", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_INT] = {"make-syntax-int", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_STRING] = {"make-syntax-string", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_LIST] = {"make-syntax-list", 3, 3},
+    [IDM_PRIM_MAKE_SYNTAX_LIST] = {"make-syntax-list", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_VECTOR] = {"make-syntax-vector", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_TUPLE] = {"make-syntax-tuple", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_EXPR] = {"make-syntax-expr", 2, 2},
@@ -778,7 +782,7 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_SELF] = {"self", 0, 0},
     [IDM_PRIM_SPAWN] = {"spawn", 1, 1},
     [IDM_PRIM_SEND] = {"send", 2, 2},
-    [IDM_PRIM_EXIT] = {"exit", 1, 1},
+    [IDM_PRIM_EXIT] = {"exit", 1, 2},
     [IDM_PRIM_LINK] = {"link", 1, 1},
     [IDM_PRIM_UNLINK] = {"unlink", 1, 1},
     [IDM_PRIM_MONITOR] = {"monitor", 1, 1},
@@ -911,7 +915,7 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
                 }
                 IdmOpcode actor_op = IDM_OP_HALT;
                 uint32_t actor_arity = 0;
-                if (actor_primitive_opcode(core->as.app.callee->as.primitive, &actor_op, &actor_arity)) {
+                if (actor_primitive_opcode(core->as.app.callee->as.primitive, core->as.app.arg_count, &actor_op, &actor_arity)) {
                     if (core->as.app.arg_count != actor_arity) return idm_error_set(err, core->span, "primitive '%s' expects %u argument(s)", idm_primitive_name(core->as.app.callee->as.primitive), actor_arity);
                     if (!idm_bc_emit_op(module, actor_op, NULL)) return idm_error_oom(err, core->span);
                     return true;

@@ -63,7 +63,7 @@ bool value_from_literal_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmValu
             *out = idm_string(ctx->rt, syn->as.text, err);
             return !(err && err->present);
         case IDM_SYN_LIST: {
-            IdmValue list = idm_nil();
+            IdmValue list = idm_empty_list();
             for (size_t i = syn->as.seq.count; i > 0; i--) {
                 IdmValue item = idm_nil();
                 if (!value_from_literal_syntax(ctx, syn->as.seq.items[i - 1u], &item, err)) return false;
@@ -120,13 +120,94 @@ bool value_from_literal_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmValu
     }
 }
 
+static bool pattern_binder_note(ExpandContext *ctx, const IdmSyntax *syn) {
+    if (!ctx->pat_binder_collect) return true;
+    if (ctx->pat_binder_count == ctx->pat_binder_cap) {
+        size_t cap = ctx->pat_binder_cap ? ctx->pat_binder_cap * 2u : 4u;
+        const IdmSyntax **grown = realloc(ctx->pat_binders, cap * sizeof(*grown));
+        if (!grown) return false;
+        ctx->pat_binders = grown;
+        ctx->pat_binder_cap = cap;
+    }
+    ctx->pat_binders[ctx->pat_binder_count++] = syn;
+    return true;
+}
+
+static bool list_pattern_group_items(const IdmSyntax *syn, IdmSyntax *const **out_items, size_t *out_count) {
+    if (!syn_is_protocol(syn, "%-group") || syn->as.seq.count != 2) return false;
+    const IdmSyntax *expr = syn->as.seq.items[1];
+    if (!syn_is_protocol(expr, "%-expr") || expr->as.seq.count < 2) return false;
+    if (!syn_is_word(expr->as.seq.items[1], "list")) return false;
+    *out_items = expr->as.seq.items + 2;
+    *out_count = expr->as.seq.count - 2u;
+    return true;
+}
+
+static IdmPattern *pattern_from_list_items(ExpandContext *ctx, IdmSyntax *const *items, size_t count, IdmSpan span, IdmError *err) {
+    size_t dot_index = SIZE_MAX;
+    for (size_t i = 0; i < count; i++) {
+        if (items[i]->kind == IDM_SYN_WORD && strcmp(items[i]->as.text, ".") == 0) {
+            if (dot_index != SIZE_MAX) {
+                idm_error_set(err, items[i]->span, "list rest pattern may contain only one dot");
+                return NULL;
+            }
+            dot_index = i;
+        }
+    }
+    if (dot_index != SIZE_MAX) {
+        if (dot_index == 0 || dot_index + 2u != count) {
+            idm_error_set(err, span, "list rest pattern must have form (list head ... . rest)");
+            return NULL;
+        }
+        IdmPattern *tail = pattern_from_param_depth(ctx, items[dot_index + 1u], (uint32_t)(dot_index + 1u), false, err);
+        if (!tail) return NULL;
+        for (size_t i = dot_index; i > 0; i--) {
+            IdmPattern *head = pattern_from_param_depth(ctx, items[i - 1u], (uint32_t)(i - 1u), false, err);
+            if (!head) {
+                idm_pat_free(tail);
+                return NULL;
+            }
+            tail = idm_pat_pair(head, tail, span);
+            if (!tail) {
+                idm_pat_free(head);
+                return (IdmPattern *)(uintptr_t)idm_error_oom(err, span);
+            }
+        }
+        return tail;
+    }
+    IdmPattern **pats = NULL;
+    if (count != 0) {
+        pats = calloc(count, sizeof(*pats));
+        if (!pats) {
+            idm_error_oom(err, span);
+            return NULL;
+        }
+    }
+    for (size_t i = 0; i < count; i++) {
+        pats[i] = pattern_from_param_depth(ctx, items[i], (uint32_t)i, false, err);
+        if (!pats[i]) {
+            for (size_t j = 0; j < i; j++) idm_pat_free(pats[j]);
+            free(pats);
+            return NULL;
+        }
+    }
+    IdmPattern *pat = idm_pat_sequence(IDM_PAT_LIST, pats, count, span);
+    if (!pat) {
+        for (size_t i = 0; i < count; i++) idm_pat_free(pats[i]);
+        free(pats);
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    return pat;
+}
+
 static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax *syn, uint32_t arg_index, bool allow_bind, IdmError *err) {
     if (syn->kind == IDM_SYN_WORD) {
         if (strcmp(syn->as.text, "_") == 0) return idm_pat_wildcard(syn->span);
         if (!allow_bind) {
             const IdmBinding *existing = resolve_default(ctx, syn, NULL);
             bool have = existing && existing->kind == IDM_BIND_LOCAL && existing->frame_id == ctx->frame;
-            if (!have && !local_push_scoped(ctx, syn->as.text, syn, NULL)) {
+            if (!have && (!local_push_scoped(ctx, syn->as.text, syn, NULL) || !pattern_binder_note(ctx, syn))) {
                 idm_error_oom(err, syn->span);
                 return NULL;
             }
@@ -134,48 +215,28 @@ static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax 
         }
         const IdmBinding *existing = resolve_default(ctx, syn, NULL);
         bool have = existing && existing->kind == IDM_BIND_ARG && existing->frame_id == ctx->frame;
-        if (!have && !arg_push_slot(ctx, syn, arg_index)) {
+        if (!have && (!arg_push_slot(ctx, syn, arg_index) || !pattern_binder_note(ctx, syn))) {
             idm_error_oom(err, syn->span);
             return NULL;
         }
         return idm_pat_bind(syn->as.text, syn->span);
     }
+    if (syn_is_protocol(syn, "%-quote") && syn->as.seq.count == 2) {
+        IdmValue datum = idm_nil();
+        if (!expand_quote_datum(ctx, syn->as.seq.items[1], &datum, err)) return NULL;
+        return idm_pat_literal(datum, syn->span);
+    }
+    IdmSyntax *const *list_items = NULL;
+    size_t list_count = 0;
+    if (list_pattern_group_items(syn, &list_items, &list_count)) return pattern_from_list_items(ctx, list_items, list_count, syn->span, err);
+    if (syn->kind == IDM_SYN_LIST) {
+        idm_error_set(err, syn->span, "unsupported pattern");
+        return NULL;
+    }
     IdmValue literal = idm_nil();
     if (syn->kind != IDM_SYN_DICT && value_from_literal_syntax(ctx, syn, &literal, err)) return idm_pat_literal(literal, syn->span);
-    if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE) {
-        if (syn->kind == IDM_SYN_LIST) {
-            size_t dot_index = SIZE_MAX;
-            for (size_t i = 0; i < syn->as.seq.count; i++) {
-                if (syn->as.seq.items[i]->kind == IDM_SYN_WORD && strcmp(syn->as.seq.items[i]->as.text, ".") == 0) {
-                    if (dot_index != SIZE_MAX) {
-                        idm_error_set(err, syn->as.seq.items[i]->span, "list rest pattern may contain only one dot");
-                        return NULL;
-                    }
-                    dot_index = i;
-                }
-            }
-            if (dot_index != SIZE_MAX) {
-                if (dot_index == 0 || dot_index + 2u != syn->as.seq.count) {
-                    idm_error_set(err, syn->span, "list rest pattern must have form [head ... . rest]");
-                    return NULL;
-                }
-                IdmPattern *tail = pattern_from_param_depth(ctx, syn->as.seq.items[dot_index + 1u], (uint32_t)(dot_index + 1u), false, err);
-                if (!tail) return NULL;
-                for (size_t i = dot_index; i > 0; i--) {
-                    IdmPattern *head = pattern_from_param_depth(ctx, syn->as.seq.items[i - 1u], (uint32_t)(i - 1u), false, err);
-                    if (!head) {
-                        idm_pat_free(tail);
-                        return NULL;
-                    }
-                    tail = idm_pat_pair(head, tail, syn->span);
-                    if (!tail) {
-                        idm_pat_free(head);
-                        return (IdmPattern *)(uintptr_t)idm_error_oom(err, syn->span);
-                    }
-                }
-                return tail;
-            }
-        } else {
+    if (syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE) {
+        {
             size_t dot_index = SIZE_MAX;
             for (size_t i = 0; i < syn->as.seq.count; i++) {
                 if (syn->as.seq.items[i]->kind == IDM_SYN_WORD && strcmp(syn->as.seq.items[i]->as.text, ".") == 0) {
@@ -188,7 +249,7 @@ static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax 
             }
             if (dot_index != SIZE_MAX) {
                 if (dot_index == 0 || dot_index + 2u != syn->as.seq.count) {
-                    idm_error_set(err, syn->span, "sequence rest pattern must have form %[head ... . rest] or {head ... . rest}");
+                    idm_error_set(err, syn->span, "sequence rest pattern must have form [head ... . rest] or {head ... . rest}");
                     return NULL;
                 }
                 IdmPattern **items = calloc(dot_index, sizeof(*items));
@@ -238,7 +299,7 @@ static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax 
                 return NULL;
             }
         }
-        IdmPatternKind kind = syn->kind == IDM_SYN_LIST ? IDM_PAT_LIST : (syn->kind == IDM_SYN_VECTOR ? IDM_PAT_VECTOR : IDM_PAT_TUPLE);
+        IdmPatternKind kind = syn->kind == IDM_SYN_VECTOR ? IDM_PAT_VECTOR : IDM_PAT_TUPLE;
         IdmPattern *pat = idm_pat_sequence(kind, items, syn->as.seq.count, syn->span);
         if (!pat) {
             for (size_t i = 0; i < syn->as.seq.count; i++) idm_pat_free(items[i]);
@@ -282,7 +343,7 @@ static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax 
         }
         return pat;
     }
-    idm_error_set(err, syn->span, "unsupported defn parameter pattern");
+    idm_error_set(err, syn->span, "unsupported pattern");
     return NULL;
 }
 
@@ -328,6 +389,61 @@ static bool bind_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, s
     if (form->as.seq.count > 4 && form->as.seq.items[2]->token_adjacent_previous && form->as.seq.items[3]->token_adjacent_previous) return false;
     *out_name = form->as.seq.items[1];
     *out_rhs_start = 3;
+    return true;
+}
+
+static bool pattern_bind_form_parts(const IdmSyntax *form, const IdmSyntax **out_pattern, size_t *out_rhs_start) {
+    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (form->as.seq.count < 4) return false;
+    const IdmSyntax *lhs = form->as.seq.items[1];
+    if (lhs->kind == IDM_SYN_WORD) return false;
+    if (lhs->kind == IDM_SYN_LIST && !syn_is_protocol(lhs, "%-quote")) {
+        IdmSyntax *const *items = NULL;
+        size_t count = 0;
+        if (!list_pattern_group_items(lhs, &items, &count)) return false;
+    }
+    if (!syn_is_word(form->as.seq.items[2], "=")) return false;
+    if (form->as.seq.count > 4 && form->as.seq.items[2]->token_adjacent_previous && form->as.seq.items[3]->token_adjacent_previous) return false;
+    *out_pattern = lhs;
+    *out_rhs_start = 3;
+    return true;
+}
+
+static bool scan_pattern_bind(ExpandContext *ctx, BodyRec *rec, const IdmSyntax *pattern_syntax, size_t rhs_start, IdmError *err) {
+    SavedFunctionContext probe;
+    begin_function_context(ctx, &probe);
+    ctx->pat_binder_collect = true;
+    ctx->pat_binder_count = 0;
+    IdmPattern *pattern = pattern_from_param_depth(ctx, pattern_syntax, 0, false, err);
+    ctx->pat_binder_collect = false;
+    size_t count = ctx->pat_binder_count;
+    const IdmSyntax **names = NULL;
+    uint32_t *slots = NULL;
+    bool ok = pattern != NULL;
+    if (ok && count != 0) {
+        names = malloc(count * sizeof(*names));
+        slots = malloc(count * sizeof(*slots));
+        ok = names != NULL && slots != NULL;
+        if (ok) memcpy(names, ctx->pat_binders, count * sizeof(*names));
+    }
+    end_function_context(ctx, &probe);
+    if (!ok) {
+        free(names);
+        free(slots);
+        idm_pat_free(pattern);
+        if (err && !err->present) idm_error_oom(err, pattern_syntax->span);
+        return false;
+    }
+    bool repl_global = ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP;
+    for (size_t i = 0; i < count; i++) slots[i] = repl_global ? ctx->global_seq++ : ctx->next_slot++;
+    rec->kind = BODY_REC_BIND_PATTERN;
+    rec->rhs_start = rhs_start;
+    rec->pattern_syntax = pattern_syntax;
+    rec->pattern = pattern;
+    rec->pattern_names = names;
+    rec->pattern_name_count = count;
+    rec->pattern_slots = slots;
+    rec->pattern_tmp_slot = ctx->next_slot++;
     return true;
 }
 
@@ -455,6 +571,11 @@ bool record_package_global(ExpandContext *ctx, const char *name, uint32_t global
 static void body_recs_destroy(BodyRec *recs, size_t count) {
     for (size_t i = 0; i < count; i++) {
         if (recs[i].kind == BODY_REC_GROUPS) defn_groups_destroy(recs[i].groups, recs[i].group_count);
+        if (recs[i].kind == BODY_REC_BIND_PATTERN) {
+            idm_pat_free(recs[i].pattern);
+            free(recs[i].pattern_names);
+            free(recs[i].pattern_slots);
+        }
         idm_core_free(recs[i].core);
     }
     free(recs);
@@ -467,6 +588,113 @@ static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, u
     bool ok = idm_binding_table_add(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, repl_global ? IDM_BIND_GLOBAL : IDM_BIND_LOCAL, &scopes, slot, repl_global ? IDM_FRAME_GLOBAL : ctx->frame, NULL);
     idm_scope_set_destroy(&scopes);
     return ok;
+}
+
+static IdmCore *pattern_extract_value(BodyRec *rec, size_t index, IdmError *err) {
+    IdmSpan span = rec->pattern_names[index]->span;
+    IdmCore *prim = idm_core_primitive(IDM_PRIM_TUPLE_GET, span);
+    IdmCore *app = prim ? idm_core_app(prim, span) : NULL;
+    if (!app) {
+        idm_core_free(prim);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    IdmCore *ref = idm_core_local_ref(rec->pattern_tmp_slot, span);
+    if (!ref || !idm_core_app_add_arg(app, ref)) {
+        idm_core_free(ref);
+        idm_core_free(app);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    IdmCore *idx = idm_core_literal(idm_int((int64_t)index), span);
+    if (!idx || !idm_core_app_add_arg(app, idx)) {
+        idm_core_free(idx);
+        idm_core_free(app);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    return app;
+}
+
+static IdmCore *pattern_bind_app(BodyRec *rec, IdmCore *rhs, IdmError *err) {
+    IdmSpan span = rec->pattern_syntax->span;
+    IdmCore *prim = idm_core_primitive(IDM_PRIM_TUPLE, span);
+    IdmCore *body = prim ? idm_core_app(prim, span) : NULL;
+    if (!body) {
+        idm_core_free(prim);
+        idm_core_free(rhs);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    for (size_t i = 0; i < rec->pattern_name_count; i++) {
+        IdmCore *ref = idm_core_local_ref((uint32_t)i, rec->pattern_names[i]->span);
+        if (!ref || !idm_core_app_add_arg(body, ref)) {
+            idm_core_free(ref);
+            idm_core_free(body);
+            idm_core_free(rhs);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
+    }
+    IdmBuffer name_buf;
+    idm_buf_init(&name_buf);
+    char *name = idm_syn_dump(&name_buf, rec->pattern_syntax) ? idm_buf_take(&name_buf) : NULL;
+    idm_buf_destroy(&name_buf);
+    IdmCore *fn = idm_core_fn(name ? name : "=", 1, body, span);
+    free(name);
+    if (!fn) {
+        idm_core_free(body);
+        idm_core_free(rhs);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    IdmPattern **patterns = malloc(sizeof(*patterns));
+    if (!patterns) {
+        idm_core_free(fn);
+        idm_core_free(rhs);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    patterns[0] = rec->pattern;
+    if (!idm_core_fn_set_param_patterns_take(fn, patterns, 1)) {
+        free(patterns);
+        idm_core_free(fn);
+        idm_core_free(rhs);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    rec->pattern = NULL;
+    IdmPatternLocal *locals = NULL;
+    if (rec->pattern_name_count != 0) {
+        locals = calloc(rec->pattern_name_count, sizeof(*locals));
+        if (!locals) {
+            idm_core_free(fn);
+            idm_core_free(rhs);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
+        for (size_t i = 0; i < rec->pattern_name_count; i++) {
+            locals[i].name = idm_strdup(rec->pattern_names[i]->as.text);
+            if (!locals[i].name) {
+                for (size_t j = 0; j < i; j++) free(locals[j].name);
+                free(locals);
+                idm_core_free(fn);
+                idm_core_free(rhs);
+                return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+            }
+            locals[i].slot = (uint32_t)i;
+        }
+    }
+    if (!idm_core_fn_set_pattern_locals_take(fn, locals, (uint32_t)rec->pattern_name_count)) {
+        for (size_t i = 0; i < rec->pattern_name_count; i++) free(locals[i].name);
+        free(locals);
+        idm_core_free(fn);
+        idm_core_free(rhs);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    IdmCore *app = idm_core_app(fn, rec->form->span);
+    if (!app) {
+        idm_core_free(fn);
+        idm_core_free(rhs);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, rec->form->span);
+    }
+    if (!idm_core_app_add_arg(app, rhs)) {
+        idm_core_free(app);
+        idm_core_free(rhs);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, rec->form->span);
+    }
+    return app;
 }
 
 static IdmCore *build_macro_registration(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *fn, IdmSpan span, IdmError *err) {
@@ -614,11 +842,17 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 }
                 const char *macro_name = form->as.seq.items[mbase + 1u]->as.text;
                 size_t temp_base = ctx->bindings.count;
-                for (size_t r = 0; r < rec_count; r++) {
+                for (size_t r = 0; r < rec_count && !failed; r++) {
                     if (recs[r].kind == BODY_REC_BIND && !push_bind_binder(ctx, recs[r].bind_name, recs[r].bind_slot)) {
                         idm_error_oom(err, form->span);
                         failed = true;
-                        break;
+                    } else if (recs[r].kind == BODY_REC_BIND_PATTERN) {
+                        for (size_t n = 0; n < recs[r].pattern_name_count && !failed; n++) {
+                            if (!push_bind_binder(ctx, recs[r].pattern_names[n], recs[r].pattern_slots[n])) {
+                                idm_error_oom(err, form->span);
+                                failed = true;
+                            }
+                        }
                     }
                 }
                 if (failed) break;
@@ -784,12 +1018,18 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         }
         memset(&recs[rec_count], 0, sizeof(recs[rec_count]));
         const IdmSyntax *bind_name = NULL;
+        const IdmSyntax *bind_pattern = NULL;
         size_t rhs_start = 0;
         if (bind_form_parts(form, &bind_name, &rhs_start)) {
             recs[rec_count].kind = BODY_REC_BIND;
             recs[rec_count].bind_name = bind_name;
             recs[rec_count].rhs_start = rhs_start;
             recs[rec_count].bind_slot = (ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP) ? ctx->global_seq++ : ctx->next_slot++;
+        } else if (pattern_bind_form_parts(form, &bind_pattern, &rhs_start)) {
+            if (!scan_pattern_bind(ctx, &recs[rec_count], bind_pattern, rhs_start, err)) {
+                failed = true;
+                break;
+            }
         } else {
             recs[rec_count].kind = BODY_REC_EXPR;
         }
@@ -811,6 +1051,22 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 failed = true;
                 break;
             }
+        } else if (rec->kind == BODY_REC_BIND_PATTERN) {
+            bool saved_vc = ctx->value_context;
+            ctx->value_context = true;
+            IdmCore *rhs = expand_parts(ctx, rec->form->as.seq.items, rec->rhs_start, rec->form->as.seq.count, err);
+            ctx->value_context = saved_vc;
+            if (!rhs) { failed = true; break; }
+            rec->core = pattern_bind_app(rec, rhs, err);
+            if (!rec->core) { failed = true; break; }
+            for (size_t n = 0; n < rec->pattern_name_count; n++) {
+                if (!push_bind_binder(ctx, rec->pattern_names[n], rec->pattern_slots[n])) {
+                    idm_error_oom(err, rec->form->span);
+                    failed = true;
+                    break;
+                }
+            }
+            if (failed) break;
         } else if (rec->kind == BODY_REC_GROUPS) {
             bool top_level = ctx->frame == IDM_FRAME_TOP;
             IdmCore *letrec = idm_core_letrec(rec->form->span);
@@ -928,6 +1184,47 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 } else {
                     core = idm_core_bind_local(rec->bind_slot, inner, core, rec->form->span);
                     if (!core) { idm_core_free(inner); idm_error_oom(err, rec->form->span); failed = true; }
+                }
+            } else if (rec->kind == BODY_REC_BIND_PATTERN) {
+                bool repl_global = ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP;
+                for (size_t n = rec->pattern_name_count; n > 0 && !failed; n--) {
+                    IdmCore *value = pattern_extract_value(rec, n - 1u, err);
+                    if (!value) {
+                        idm_core_free(core);
+                        core = NULL;
+                        failed = true;
+                        break;
+                    }
+                    IdmSpan nspan = rec->pattern_names[n - 1u]->span;
+                    if (repl_global) {
+                        IdmCore *letrec = idm_core_letrec(nspan);
+                        bool ok = letrec != NULL && idm_core_letrec_add(letrec, rec->pattern_names[n - 1u]->as.text, rec->pattern_slots[n - 1u], value);
+                        if (ok) ok = idm_core_letrec_set_body(letrec, core);
+                        else idm_core_free(value);
+                        if (!ok) {
+                            idm_core_free(letrec);
+                            idm_core_free(core);
+                            core = NULL;
+                            idm_error_oom(err, rec->form->span);
+                            failed = true;
+                        } else {
+                            idm_core_letrec_set_global(letrec);
+                            core = letrec;
+                        }
+                    } else {
+                        core = idm_core_bind_local(rec->pattern_slots[n - 1u], value, core, nspan);
+                        if (!core) {
+                            idm_core_free(value);
+                            idm_error_oom(err, rec->form->span);
+                            failed = true;
+                        }
+                    }
+                }
+                if (!failed) {
+                    core = idm_core_bind_local(rec->pattern_tmp_slot, inner, core, rec->form->span);
+                    if (!core) { idm_core_free(inner); idm_error_oom(err, rec->form->span); failed = true; }
+                } else {
+                    idm_core_free(inner);
                 }
             } else if (rec->kind == BODY_REC_GROUPS) {
                 if (!idm_core_letrec_set_body(inner, core)) {

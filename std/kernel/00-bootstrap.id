@@ -14,7 +14,7 @@ end
 
 defmacro and stx do
   defn tail-of do
-    i n when (eq? i n) -> :nil
+    i n when (eq? i n) -> '()
     i n -> cons (syntax-nth stx i) (tail-of (add i 1) n)
   end
   defn arm do
@@ -27,7 +27,7 @@ end
 
 defmacro or stx do
   defn tail-of do
-    i n when (eq? i n) -> :nil
+    i n when (eq? i n) -> '()
     i n -> cons (syntax-nth stx i) (tail-of (add i 1) n)
   end
   defn arm do

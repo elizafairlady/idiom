@@ -60,7 +60,7 @@ static bool prim_rest(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *e
 }
 
 static bool prim_list(IdmRuntime *rt, IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
-    IdmValue result = idm_nil();
+    IdmValue result = idm_empty_list();
     for (size_t i = argc; i > 0; i--) {
         result = idm_cons(rt, args[i - 1u], result, err);
         if (err && err->present) return false;
@@ -72,7 +72,7 @@ static bool prim_list(IdmRuntime *rt, IdmValue *args, uint32_t argc, IdmValue *o
 static bool prim_append(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue head = args[0];
     IdmValue tail = args[1];
-    if (idm_is_nil(head)) { *out = tail; return true; }
+    if (idm_is_empty_list(head)) { *out = tail; return true; }
     if (!idm_is_pair(head)) return type_error(rt, err, "append", head, "a list as first argument");
     size_t count = 0;
     IdmValue cur = head;
@@ -81,7 +81,7 @@ static bool prim_append(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError 
         cur = idm_cdr(cur, err);
         if (err && err->present) return false;
     }
-    if (!idm_is_nil(cur)) return idm_error_set(err, idm_span_unknown(NULL), "append expects a proper list as first argument");
+    if (!idm_is_empty_list(cur)) return idm_error_set(err, idm_span_unknown(NULL), "append expects a proper list as first argument");
     IdmValue *items = count == 0 ? NULL : calloc(count, sizeof(*items));
     if (count != 0 && !items) return idm_error_oom(err, idm_span_unknown(NULL));
     cur = head;
@@ -188,10 +188,10 @@ static bool prim_tuple_get(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 
 static bool prim_to_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
-    if (idm_is_nil(v) || idm_is_pair(v)) { *out = v; return true; }
+    if (idm_is_empty_list(v) || idm_is_pair(v)) { *out = v; return true; }
     if (idm_is_vector(v) || idm_is_tuple(v)) {
         size_t count = idm_sequence_count(v);
-        IdmValue result = idm_nil();
+        IdmValue result = idm_empty_list();
         for (size_t i = count; i > 0; i--) {
             IdmValue item = idm_sequence_item(v, i - 1u, err);
             if (err && err->present) return false;
@@ -203,7 +203,7 @@ static bool prim_to_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError
     }
     if (idm_is_dict(v)) {
         size_t count = idm_dict_count(v);
-        IdmValue result = idm_nil();
+        IdmValue result = idm_empty_list();
         for (size_t i = count; i > 0; i--) {
             IdmValue key;
             IdmValue val;
@@ -612,7 +612,7 @@ static bool prim_syntax_to_datum_impl(IdmRuntime *rt, IdmSyntax *syn, IdmValue *
         case IDM_SYN_FLOAT: *out = idm_float(syn->as.real); return true;
         case IDM_SYN_STRING: *out = idm_string(rt, syn->as.text, err); return !(err && err->present);
         case IDM_SYN_LIST: {
-            IdmValue list = idm_nil();
+            IdmValue list = idm_empty_list();
             for (size_t i = syn->as.seq.count; i > 0; i--) {
                 IdmValue item = idm_nil();
                 if (!prim_syntax_to_datum_impl(rt, syn->as.seq.items[i - 1u], &item, err)) return false;
@@ -688,12 +688,13 @@ static IdmSyntax *syntax_from_datum_impl(IdmSyntax *ctx, IdmValue datum, IdmErro
     IdmSyntax *out = NULL;
     switch (datum.tag) {
         case IDM_VAL_NIL: out = idm_syn_nil(span); break;
+        case IDM_VAL_EMPTY_LIST: out = idm_syn_list(span); break;
         case IDM_VAL_INT: out = idm_syn_int(datum.as.i, span); break;
         case IDM_VAL_WORD: out = idm_syn_word(idm_symbol_text(datum.as.symbol), span); break;
         case IDM_VAL_ATOM: out = idm_syn_atom(idm_symbol_text(datum.as.symbol), span); break;
         case IDM_VAL_STRING: out = idm_syn_string(idm_string_bytes(datum), span); break;
         case IDM_VAL_PAIR: {
-            out = idm_syn_list(IDM_SEQ_PAREN, span);
+            out = idm_syn_list(span);
             if (!out) break;
             IdmValue cur = datum;
             while (idm_is_pair(cur)) {
@@ -704,7 +705,7 @@ static IdmSyntax *syntax_from_datum_impl(IdmSyntax *ctx, IdmValue datum, IdmErro
                 cur = idm_cdr(cur, err);
                 if (err && err->present) { idm_syn_free(out); return NULL; }
             }
-            if (!idm_is_nil(cur)) { idm_syn_free(out); idm_error_set(err, span, "datum->syntax requires a proper list"); return NULL; }
+            if (!idm_is_empty_list(cur)) { idm_syn_free(out); idm_error_set(err, span, "datum->syntax requires a proper list"); return NULL; }
             break;
         }
         case IDM_VAL_TUPLE: {
@@ -781,7 +782,7 @@ static bool prim_syntax_set_property(IdmRuntime *rt, IdmValue *args, IdmValue *o
 static bool prim_syntax_origin(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    IdmValue result = idm_nil();
+    IdmValue result = idm_empty_list();
     for (size_t i = syn->origins.count; i > 0; i--) {
         IdmValue item = idm_string(rt, syn->origins.items[i - 1u], err);
         if (err && err->present) return false;
@@ -852,7 +853,7 @@ static bool prim_syntax_slice(IdmRuntime *rt, IdmValue *args, IdmValue *out, Idm
     size_t start = (size_t)start_i;
     size_t end = (size_t)end_i;
     if (end > syn->as.seq.count) return idm_error_set(err, syn->span, "syntax-slice range out of bounds");
-    IdmValue result = idm_nil();
+    IdmValue result = idm_empty_list();
     for (size_t i = end; i > start; i--) {
         IdmValue item = idm_syntax_value(rt, syn->as.seq.items[i - 1u], err);
         if (err && err->present) return false;
@@ -1158,7 +1159,7 @@ static bool prim_file_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     DIR *dir = opendir(path);
     if (!dir) return result_error(rt, out, err);
-    IdmValue acc = idm_nil();
+    IdmValue acc = idm_empty_list();
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
@@ -1183,7 +1184,7 @@ static bool prim_file_remove(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmE
 
 static bool prim_args(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     (void)args;
-    IdmValue acc = idm_nil();
+    IdmValue acc = idm_empty_list();
     for (size_t i = rt->cli_arg_count; i > 0; i--) {
         IdmValue s = idm_string(rt, rt->cli_args[i - 1u], err);
         if (err && err->present) return false;
@@ -1261,7 +1262,7 @@ static bool prim_dict_del(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErro
 
 static bool prim_dict_keys(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_dict(rt, "dict-keys", args[0], err)) return false;
-    IdmValue acc = idm_nil();
+    IdmValue acc = idm_empty_list();
     for (size_t i = idm_dict_count(args[0]); i > 0; i--) {
         IdmValue k, v;
         if (!idm_dict_entry(args[0], i - 1u, &k, &v)) continue;
@@ -1274,7 +1275,7 @@ static bool prim_dict_keys(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 
 static bool prim_dict_vals(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_dict(rt, "dict-vals", args[0], err)) return false;
-    IdmValue acc = idm_nil();
+    IdmValue acc = idm_empty_list();
     for (size_t i = idm_dict_count(args[0]); i > 0; i--) {
         IdmValue k, v;
         if (!idm_dict_entry(args[0], i - 1u, &k, &v)) continue;
@@ -1400,7 +1401,7 @@ static bool collect_list_of_syntax(IdmValue list, IdmSyntax ***out_items, size_t
         cur = idm_cdr(cur, err);
         if (err && err->present) return false;
     }
-    if (!idm_is_nil(cur)) return idm_error_set(err, idm_span_unknown(NULL), "expected proper list of syntax");
+    if (!idm_is_empty_list(cur)) return idm_error_set(err, idm_span_unknown(NULL), "expected proper list of syntax");
     IdmSyntax **items = count == 0 ? NULL : calloc(count, sizeof(*items));
     if (count != 0 && !items) return idm_error_oom(err, idm_span_unknown(NULL));
     cur = list;
@@ -1433,16 +1434,10 @@ static bool collect_list_of_syntax(IdmValue list, IdmSyntax ***out_items, size_t
 static bool prim_make_syntax_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *ctx = require_syntax(args[0], err);
     if (!ctx) return false;
-    if (args[1].tag != IDM_VAL_ATOM) return idm_error_set(err, ctx->span, "make-syntax-list shape must be atom");
-    const char *shape_text = idm_symbol_text(args[1].as.symbol);
-    IdmSequenceShape shape;
-    if (strcmp(shape_text, "paren") == 0) shape = IDM_SEQ_PAREN;
-    else if (strcmp(shape_text, "bracket") == 0) shape = IDM_SEQ_BRACKET;
-    else return idm_error_set(err, ctx->span, "make-syntax-list shape must be :paren or :bracket");
     IdmSyntax **items = NULL;
     size_t count = 0;
-    if (!collect_list_of_syntax(args[2], &items, &count, err)) return false;
-    IdmSyntax *syn = idm_syn_list(shape, ctx->span);
+    if (!collect_list_of_syntax(args[1], &items, &count, err)) return false;
+    IdmSyntax *syn = idm_syn_list(ctx->span);
     if (!syn) {
         for (size_t i = 0; i < count; i++) idm_syn_free(items[i]);
         free(items);
@@ -1536,7 +1531,7 @@ static bool prim_make_syntax_tuple(IdmRuntime *rt, IdmValue *args, IdmValue *out
 
 static IdmSyntax *protocol_sequence(IdmRuntime *rt, IdmSyntax *ctx, const char *head, IdmSyntax **items, size_t count, IdmError *err) {
     (void)rt;
-    IdmSyntax *syn = idm_syn_list(IDM_SEQ_PAREN, ctx->span);
+    IdmSyntax *syn = idm_syn_list(ctx->span);
     if (!syn) return NULL;
     if (!copy_scopes_from(syn, ctx)) { idm_syn_free(syn); return NULL; }
     IdmSyntax *head_syn = idm_syn_word(head, ctx->span);

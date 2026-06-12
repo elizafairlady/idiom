@@ -1,0 +1,3 @@
+r = sh -c "echo forwarded >&2; exit 9"
+println r
+exit 9

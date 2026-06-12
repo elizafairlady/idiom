@@ -29,6 +29,7 @@ void idm_actor_recv_set_cursor(IdmActor *actor, size_t cursor);
 bool idm_sched_spawn(IdmScheduler *sched, IdmValue thunk, const IdmExec *parent, IdmValue *out_pid, IdmError *err);
 void idm_sched_send(IdmScheduler *sched, uint64_t target_pid, IdmValue msg);
 bool idm_sched_link(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
+bool idm_sched_exit_signal(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, IdmValue reason, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
 bool idm_sched_unlink(IdmScheduler *sched, IdmActor *self, uint64_t target_pid);
 bool idm_sched_monitor(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, IdmValue *out_ref, IdmError *err);
 bool idm_sched_demonitor(IdmScheduler *sched, IdmActor *self, IdmValue ref);

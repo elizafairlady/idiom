@@ -533,6 +533,13 @@ IdmValue idm_nil(void) {
     return v;
 }
 
+IdmValue idm_empty_list(void) {
+    IdmValue v;
+    v.tag = IDM_VAL_EMPTY_LIST;
+    v.as.id = 0;
+    return v;
+}
+
 IdmValue idm_int(int64_t value) {
     IdmValue v;
     v.tag = IDM_VAL_INT;
@@ -804,6 +811,7 @@ const char *idm_value_type_name(IdmValueTag tag) {
         case IDM_VAL_FLOAT: return "float";
         case IDM_VAL_STRING: return "string";
         case IDM_VAL_PAIR: return "pair";
+        case IDM_VAL_EMPTY_LIST: return "empty-list";
         case IDM_VAL_TUPLE: return "tuple";
         case IDM_VAL_VECTOR: return "vector";
         case IDM_VAL_DICT: return "dict";
@@ -1059,6 +1067,10 @@ bool idm_is_nil(IdmValue value) {
     return value.tag == IDM_VAL_NIL;
 }
 
+bool idm_is_empty_list(IdmValue value) {
+    return value.tag == IDM_VAL_EMPTY_LIST;
+}
+
 bool idm_is_pair(IdmValue value) {
     return value.tag == IDM_VAL_PAIR;
 }
@@ -1277,7 +1289,8 @@ size_t idm_string_length(IdmValue value) {
 bool idm_value_equal(IdmValue a, IdmValue b) {
     if (a.tag != b.tag) return false;
     switch (a.tag) {
-        case IDM_VAL_NIL: return true;
+        case IDM_VAL_NIL:
+        case IDM_VAL_EMPTY_LIST: return true;
         case IDM_VAL_ATOM:
         case IDM_VAL_WORD: return a.as.symbol == b.as.symbol;
         case IDM_VAL_INT: return a.as.i == b.as.i;
@@ -1343,6 +1356,7 @@ static bool write_escaped(IdmBuffer *buf, const char *text, size_t len) {
 bool idm_value_write(IdmBuffer *buf, IdmValue value) {
     switch (value.tag) {
         case IDM_VAL_NIL: return idm_buf_append(buf, ":nil");
+        case IDM_VAL_EMPTY_LIST: return idm_buf_append(buf, "()");
         case IDM_VAL_ATOM: return idm_buf_append_char(buf, ':') && idm_buf_append(buf, idm_symbol_text(value.as.symbol));
         case IDM_VAL_WORD: return idm_buf_append(buf, idm_symbol_text(value.as.symbol));
         case IDM_VAL_INT: return idm_buf_appendf(buf, "%lld", (long long)value.as.i);
@@ -1359,7 +1373,7 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
         case IDM_VAL_RECORD: return idm_buf_appendf(buf, "#<record:%s>", value.as.obj->as.record.type);
         case IDM_VAL_TUPLE:
         case IDM_VAL_VECTOR: {
-            const char *open = value.tag == IDM_VAL_TUPLE ? "{" : "%[";
+            const char *open = value.tag == IDM_VAL_TUPLE ? "{" : "[";
             const char *close = value.tag == IDM_VAL_TUPLE ? "}" : "]";
             if (!idm_buf_append(buf, open)) return false;
             for (size_t i = 0; i < value.as.obj->as.sequence.count; i++) {
@@ -1391,7 +1405,7 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
                 cur = cur.as.obj->as.pair.cdr;
                 first = false;
             }
-            if (cur.tag != IDM_VAL_NIL) {
+            if (cur.tag != IDM_VAL_EMPTY_LIST) {
                 if (!idm_buf_append(buf, " . ")) return false;
                 if (!idm_value_write(buf, cur)) return false;
             }

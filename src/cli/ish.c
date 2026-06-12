@@ -7,6 +7,8 @@
 #include "idiom/syntax.h"
 #include "idiom/value.h"
 
+#include <errno.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +20,57 @@
 
 static char **g_cli_args = NULL;
 static size_t g_cli_arg_count = 0;
+
+static int masked_status(long n) {
+    int code = (int)(((n % 256) + 256) % 256);
+    return code;
+}
+
+static bool parse_whole_long(const char *text, const char *end, long *out) {
+    char *stop = NULL;
+    errno = 0;
+    long n = strtol(text, &stop, 10);
+    if (errno != 0 || stop != end || stop == text) return false;
+    *out = n;
+    return true;
+}
+
+static int shell_report(const IdmError *err) {
+    static const char prefix[] = "main actor exited with reason ";
+    static const char command_prefix[] = "{:error {:command \"";
+    const char *msg = err->message ? err->message : "";
+    if (strncmp(msg, prefix, sizeof(prefix) - 1u) == 0) {
+        const char *reason = msg + sizeof(prefix) - 1u;
+        const char *end = reason + strlen(reason);
+        long n = 0;
+        if (parse_whole_long(reason, end, &n)) return masked_status(n);
+        if (strncmp(reason, command_prefix, sizeof(command_prefix) - 1u) == 0) {
+            const char *name = reason + sizeof(command_prefix) - 1u;
+            const char *cursor = name;
+            while (*cursor != '\0' && *cursor != '"') {
+                if (*cursor == '\\' && cursor[1] != '\0') cursor++;
+                cursor++;
+            }
+            size_t tail = strlen(cursor);
+            if (*cursor == '"' && cursor[1] == ' ' && tail >= 4u && strcmp(cursor + tail - 2u, "}}") == 0) {
+                const char *status_text = cursor + 2u;
+                const char *status_end = cursor + tail - 2u;
+                if (parse_whole_long(status_text, status_end, &n)) {
+                    fprintf(stderr, "ish: %.*s: exit status %ld\n", (int)(cursor - name), name, n);
+                    int code = masked_status(n);
+                    return code == 0 ? 1 : code;
+                }
+                if (strncmp(status_text, ":capture-overflow", (size_t)(status_end - status_text)) == 0 &&
+                    status_end - status_text == (ptrdiff_t)strlen(":capture-overflow")) {
+                    fprintf(stderr, "ish: %.*s: capture overflow\n", (int)(cursor - name), name);
+                    return 1;
+                }
+            }
+        }
+    }
+    idm_error_fprint(stderr, err);
+    return 1;
+}
 
 static int run_shell_source(const char *file, const char *source, bool print_result) {
     IdmRuntime rt;
@@ -54,7 +107,7 @@ static int run_shell_source(const char *file, const char *source, bool print_res
     }
     status = 0;
 done:
-    if (err.present) idm_error_fprint(stderr, &err);
+    if (err.present) status = shell_report(&err);
     idm_error_clear(&err);
     idm_sched_destroy(sched);
     idm_core_free(core);

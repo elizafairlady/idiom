@@ -1,0 +1,72 @@
+use std/test
+implement std/test
+
+defmacro twin-a stx do syntax-case stx do (_ e) -> %`(add %,e 1) end end
+defmacro mk-twin stx do syntax-case stx do
+  (_ n) -> do
+    expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ e) -> %`(add %,e 1) end end)
+    %`(do end)
+  end
+end end
+mk-twin twin-b
+
+suite do
+  test "bare operator over provider operator shadows like any rebind" do
+    got = do
+      implement tests/pkg/exporter
+      operator <+> precedence: 50 assoc: left fixity: infix -> sub
+      3 <+> 4
+    end
+    assert-inspect got "-1"
+  end
+  test "bare defmacro over provider macro shadows like any rebind" do
+    got = do
+      implement tests/pkg/exporter
+      defmacro answer stx -> make-syntax-int stx 5
+      answer x
+    end
+    assert-eq got 5
+  end
+  test "provider over bare operator collides naming the unit" do
+    assert-expand-error "operator <+> precedence: 50 assoc: left fixity: infix -> sub\nimplement tests/pkg/exporter\n3 <+> 4" "surface '<+>' from '<expand-check>' is already active in this context"
+  end
+  test "provider over bare defmacro collides naming the unit" do
+    assert-expand-error "defmacro answer stx -> make-syntax-int stx 5\nimplement tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
+  end
+  test "provider over registered macro collides naming the unit" do
+    assert-expand-error "defmacro mk stx do syntax-case stx do\n  (_ n) -> do\n    expander-register-macro (syntax-nth stx 2) (fn s -> make-syntax-int s 5)\n    %`(do end)\n  end\nend end\nmk answer\nimplement tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
+  end
+  test "provider over provider still collides naming the provider" do
+    assert-expand-error "implement tests/pkg/exporter\nimplement tests/pkg/exporter2\nanswer x" "from 'tests/pkg/exporter' is already active in this context"
+  end
+  test "registered macro expands identically to defmacro" do
+    assert-inspect (tuple (twin-a 20) (twin-b 20)) "{21 21}"
+  end
+  test "registered macro keeps definition-site add under caller shadow like defmacro" do
+    got = do
+      defn add a b -> :shadow
+      tuple (twin-a 1) (twin-b 1)
+    end
+    assert-inspect got "{2 2}"
+  end
+  test "registered macro extent at block exit matches defmacro" do
+    assert-expand-error "defmacro mk stx do syntax-case stx do\n  (_ n) -> do\n    expander-register-macro (syntax-nth stx 2) (fn s -> make-syntax-int s 7)\n    %`(do end)\n  end\nend end\ndo\n  mk reg-in-block\n  reg-in-block q\nend\nreg-in-block q" "unbound identifier 'reg-in-block'"
+    assert-expand-error "do\n  defmacro def-in-block stx -> make-syntax-int stx 7\n  def-in-block q\nend\ndef-in-block q" "unbound identifier 'def-in-block'"
+  end
+  test "bare rebind in same unit stays legal after threading" do
+    got = do
+      defmacro rb stx -> make-syntax-int stx 1
+      defmacro rb stx -> make-syntax-int stx 2
+      rb q
+    end
+    assert-eq got 2
+  end
+  test "bare operator rebind in same unit stays legal" do
+    got = do
+      operator <+!> precedence: 50 assoc: left fixity: infix -> add
+      operator <+!> precedence: 50 assoc: left fixity: infix -> sub
+      3 <+!> 4
+    end
+    assert-inspect got "-1"
+  end
+end

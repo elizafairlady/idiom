@@ -1,0 +1,4 @@
+{a b} = tuple 1 2
+defn later x -> add x b
+{:ok v} = tuple :ok 39
+later (add v a)

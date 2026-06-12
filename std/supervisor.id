@@ -1,0 +1,88 @@
+package supervisor
+
+use std/map
+use std/enum
+
+export defn start do
+  specs -> start specs 3 5000
+  specs intensity period -> spawn (fn do
+    trap-exit :true
+    loop (tuple (start-children (to-list specs) (dict)) '() intensity period)
+  end)
+end
+
+export defn stop sup -> do
+  send sup (tuple :stop (self))
+  receive do
+    {:stopped p} when (eq? p sup) -> :ok
+  end
+end
+
+export defn count sup -> do
+  send sup (tuple :count (self))
+  receive do
+    {:child-count p n} when (eq? p sup) -> n
+  end
+end
+
+defn spawn-child f -> do
+  pid = spawn f
+  link pid
+  pid
+end
+
+defn start-children do
+  '() children -> children
+  (list {id f restart} . rest) children -> start-children rest (put children (spawn-child f) (tuple id f restart))
+end
+
+defn loop state -> match state do
+  {children _restarts _intensity _period} -> receive do
+    {:exit pid reason} -> handle-exit state pid reason
+    {:stop from} -> do
+      shutdown children
+      send from (tuple :stopped (self))
+      :ok
+    end
+    {:count from} -> do
+      send from (tuple :child-count (self) (size children))
+      loop state
+    end
+  end
+end
+
+defn handle-exit state pid reason -> match state do
+  {children restarts intensity period} -> match (get children pid) do
+    :nil -> loop state
+    {id f restart} ->
+      if (restart? restart reason) do
+        restart-child (tuple (del children pid) restarts intensity period) id f restart
+      else do
+        loop (tuple (del children pid) restarts intensity period)
+      end
+  end
+end
+
+defn restart? do
+  :permanent _ -> :true
+  :transient :normal -> :false
+  :transient _ -> :true
+end
+
+defn restart-child state id f restart -> match state do
+  {children restarts intensity period} -> do
+    now = time-ms
+    recent = filter restarts (fn t -> lt? (sub now t) period)
+    if (gte? (length recent) intensity) do
+      shutdown children
+      exit (tuple :shutdown :max-restart-intensity)
+    else do
+      loop (tuple (put children (spawn-child f) (tuple id f restart)) (cons now recent) intensity period)
+    end
+  end
+end
+
+defn shutdown children -> map (keys children) (fn pid -> do
+  unlink pid
+  exit pid :kill
+end)

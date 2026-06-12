@@ -13,7 +13,7 @@ static void test_values(void) {
     IdmValue s1 = idm_string(&rt, "hello", &err);
     IdmValue s2 = idm_string(&rt, "hello", &err);
     CHECK(idm_value_equal(s1, s2));
-    IdmValue list = idm_cons(&rt, idm_int(1), idm_cons(&rt, idm_int(2), idm_nil(), &err), &err);
+    IdmValue list = idm_cons(&rt, idm_int(1), idm_cons(&rt, idm_int(2), idm_empty_list(), &err), &err);
     IdmBuffer buf;
     idm_buf_init(&buf);
     CHECK(idm_value_write(&buf, list));
@@ -40,9 +40,9 @@ static void test_reader_basic(void) {
     CHECK_STR(s, "(%-package-begin (%-expr foo (%-group (%-expr bar baz))))");
     free(s);
 
-    s = dump_reader("[1 2 :ok] %[a b] {:ok 1}\n");
+    s = dump_reader("[1 2 :ok] (list a b) {:ok 1}\n");
     CHECK(s != NULL);
-    CHECK_STR(s, "(%-package-begin (%-expr [1 2 :ok] %[a b] {:ok 1}))");
+    CHECK_STR(s, "(%-package-begin (%-expr [1 2 :ok] (%-group (%-expr list a b)) {:ok 1}))");
     free(s);
 
     s = dump_reader("i > count\n");
@@ -354,7 +354,7 @@ static void test_syntax_scope_tree(void) {
     idm_scope_store_init(&store);
     IdmScopeId scope = idm_scope_fresh(&store);
     IdmSpan span = idm_span_unknown("<syntax-scope-test>");
-    IdmSyntax *root = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *root = idm_syn_list(span);
     IdmSyntax *word = idm_syn_word("root", span);
     IdmSyntax *nested = idm_syn_vector(span);
     IdmSyntax *inner = idm_syn_word("inner", span);
@@ -673,7 +673,7 @@ static void test_syntax_serialize_roundtrip(void) {
     span.end = 9;
     span.line = 2;
     span.column = 5;
-    IdmSyntax *root = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *root = idm_syn_list(span);
     CHECK(root != NULL);
     IdmSyntax *word = idm_syn_word("hello", span);
     CHECK(word != NULL);
@@ -755,7 +755,7 @@ static void test_module_syntax_constant_roundtrip(void) {
     IdmBytecodeModule m1;
     idm_bc_init(&m1);
     IdmSpan span = idm_span_unknown("tmpl.id");
-    IdmSyntax *template_syn = idm_syn_list(IDM_SEQ_PAREN, span);
+    IdmSyntax *template_syn = idm_syn_list(span);
     CHECK(template_syn != NULL);
     IdmSyntax *head = idm_syn_word("cond", span);
     CHECK(head != NULL);
@@ -874,7 +874,7 @@ static void test_serialize_depth_guard(void) {
     IdmSyntax *deep = idm_syn_int(1, span);
     CHECK(deep != NULL);
     for (size_t i = 0; i < 2000; i++) {
-        IdmSyntax *wrap = idm_syn_list(IDM_SEQ_PAREN, span);
+        IdmSyntax *wrap = idm_syn_list(span);
         CHECK(wrap != NULL && idm_syn_append(wrap, deep));
         deep = wrap;
     }

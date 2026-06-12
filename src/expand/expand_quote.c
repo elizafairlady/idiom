@@ -50,7 +50,7 @@ static IdmCore *syntax_constructor_call(ExpandContext *ctx, IdmPrimitive primiti
 }
 
 static IdmCore *quasisyntax_items_list(ExpandContext *ctx, IdmSyntax *const *items, size_t count, const IdmSyntax *template_ctx, IdmError *err) {
-    IdmCore *tail = idm_core_literal(idm_nil(), template_ctx->span);
+    IdmCore *tail = idm_core_literal(idm_empty_list(), template_ctx->span);
     if (!tail) { idm_error_oom(err, template_ctx->span); return NULL; }
     for (size_t i = count; i > 0; i--) {
         const IdmSyntax *item = items[i - 1u];
@@ -143,10 +143,6 @@ static IdmCore *quasisyntax_template(ExpandContext *ctx, const IdmSyntax *templa
         IdmPrimitive prim = template->kind == IDM_SYN_LIST ? IDM_PRIM_MAKE_SYNTAX_LIST : (template->kind == IDM_SYN_VECTOR ? IDM_PRIM_MAKE_SYNTAX_VECTOR : IDM_PRIM_MAKE_SYNTAX_TUPLE);
         IdmCore *app = syntax_constructor_call(ctx, prim, template_ctx, err);
         if (!app) { idm_core_free(items); return NULL; }
-        if (template->kind == IDM_SYN_LIST) {
-            const char *shape = template->as.seq.shape == IDM_SEQ_BRACKET ? "bracket" : "paren";
-            if (!primitive_app_add(app, idm_core_literal(idm_atom(ctx->rt, shape), template->span), err, template->span)) { idm_core_free(items); return NULL; }
-        }
         if (!primitive_app_add(app, items, err, template->span)) return NULL;
         return app;
     }
@@ -159,7 +155,7 @@ IdmCore *expand_protocol_quasisyntax(ExpandContext *ctx, const IdmSyntax *syn, I
 }
 
 static bool quote_datum_list(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmValue *out, IdmError *err) {
-    IdmValue list = idm_nil();
+    IdmValue list = idm_empty_list();
     for (size_t i = count; i > start; i--) {
         IdmValue item = idm_nil();
         if (!quote_datum(ctx, items[i - 1u], &item, err)) return false;
@@ -212,8 +208,8 @@ static bool quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, I
             return !(err && err->present);
         }
         case IDM_SYN_LIST: {
-            if (t->as.seq.shape == IDM_SEQ_BRACKET) return quote_datum_list(ctx, t->as.seq.items, 0, t->as.seq.count, out, err);
-            const char *head = (t->as.seq.count > 0 && t->as.seq.items[0]->kind == IDM_SYN_WORD) ? t->as.seq.items[0]->as.text : "";
+            if (t->as.seq.count == 0) { *out = idm_empty_list(); return true; }
+            const char *head = t->as.seq.items[0]->kind == IDM_SYN_WORD ? t->as.seq.items[0]->as.text : "";
             if (strcmp(head, "%-expr") == 0) return quote_datum_list(ctx, t->as.seq.items, 1, t->as.seq.count, out, err);
             if (strcmp(head, "%-group") == 0) {
                 if (t->as.seq.count != 2) return idm_error_set(err, t->span, "%-group expects one child");
@@ -226,7 +222,7 @@ static bool quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, I
                 if (t->as.seq.count != 2) return idm_error_set(err, t->span, "%s expects one child", head);
                 IdmValue inner = idm_nil();
                 if (!quote_datum(ctx, t->as.seq.items[1], &inner, err)) return false;
-                IdmValue tail = idm_cons(ctx->rt, inner, idm_nil(), err);
+                IdmValue tail = idm_cons(ctx->rt, inner, idm_empty_list(), err);
                 if (err && err->present) return false;
                 *out = idm_cons(ctx->rt, idm_word(ctx->rt, sym), tail, err);
                 return !(err && err->present);
@@ -235,6 +231,10 @@ static bool quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, I
         }
     }
     return idm_error_set(err, t->span, "unsupported quote template");
+}
+
+bool expand_quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, IdmError *err) {
+    return quote_datum(ctx, t, out, err);
 }
 
 IdmCore *expand_protocol_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
@@ -251,7 +251,7 @@ static IdmCore *datum_constant(ExpandContext *ctx, const IdmSyntax *t, IdmError 
 }
 
 static IdmCore *quasiquote_list(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmSpan span, IdmError *err) {
-    IdmCore *tail = idm_core_literal(idm_nil(), span);
+    IdmCore *tail = idm_core_literal(idm_empty_list(), span);
     if (!tail) { idm_error_oom(err, span); return NULL; }
     for (size_t i = count; i > start; i--) {
         const IdmSyntax *item = items[i - 1u];
@@ -308,8 +308,8 @@ static IdmCore *quasiquote_template(ExpandContext *ctx, const IdmSyntax *t, IdmE
             if (t->as.seq.count % 2u != 0) return expand_error(err, t->span, "dict literal requires key/value pairs");
             return quasiquote_container(ctx, t, IDM_PRIM_DICT, err);
         case IDM_SYN_LIST: {
-            if (t->as.seq.shape == IDM_SEQ_BRACKET) return quasiquote_list(ctx, t->as.seq.items, 0, t->as.seq.count, t->span, err);
-            const char *head = (t->as.seq.count > 0 && t->as.seq.items[0]->kind == IDM_SYN_WORD) ? t->as.seq.items[0]->as.text : "";
+            if (t->as.seq.count == 0) return datum_constant(ctx, t, err);
+            const char *head = t->as.seq.items[0]->kind == IDM_SYN_WORD ? t->as.seq.items[0]->as.text : "";
             if (strcmp(head, "%-expr") == 0) return quasiquote_list(ctx, t->as.seq.items, 1, t->as.seq.count, t->span, err);
             if (strcmp(head, "%-group") == 0) {
                 if (t->as.seq.count != 2) return expand_error(err, t->span, "%-group expects one child");

@@ -23,7 +23,7 @@ suite do
         0 acc -> reverse acc
         n acc -> receive do {:seq k} -> drain (n - 1) (cons k acc) end
       end
-      eq? (inspect (drain 20 :nil)) (inspect (range 0 20))
+      eq? (inspect (drain 20 '())) (inspect (range 0 20))
     end
     assert-inspect got ":true"
   end
@@ -57,7 +57,7 @@ suite do
         0 acc -> acc
         n acc -> build (n - 1) (cons n acc)
       end
-      map (range 0 8) (fn _i -> spawn (fn -> send parent (tuple :sum (sum (build 5000 :nil)))))
+      map (range 0 8) (fn _i -> spawn (fn -> send parent (tuple :sum (sum (build 5000 '())))))
       defn gather do
         0 acc -> acc
         n acc -> receive do {:sum s} -> gather (n - 1) (acc + s) end
@@ -75,7 +75,7 @@ suite do
       defn churn do
         0 -> :ok
         n -> do
-          build 2000 :nil
+          build 2000 '()
           churn (n - 1)
         end
       end
@@ -83,8 +83,8 @@ suite do
       defn hammer do
         0 -> :done
         n -> do
-          r = try do raise (tuple :v n (build 200 :nil)); rescue e -> e end
-          match r do {:v k [h . _]} -> if (and (eq? k n) (eq? h 1)) do hammer (n - 1) else do :corrupt end end
+          r = try do raise (tuple :v n (build 200 '())); rescue e -> e end
+          match r do {:v k (list h . _)} -> if (and (eq? k n) (eq? h 1)) do hammer (n - 1) else do :corrupt end end
         end
       end
       hammer 5000
@@ -121,6 +121,76 @@ suite do
       end
     end
     assert-inspect got ":boom"
+  end
+  test "kill-spinning-actors" do
+    got = do
+      victims = map (range 0 8) (fn _i -> spawn (fn do
+        defn spin n -> spin (n + 1)
+        spin 0
+      end))
+      map victims (fn v -> monitor v)
+      map victims (fn v -> exit v :kill)
+      defn gather do
+        0 -> :done
+        n -> receive do {:down _ _ :killed} -> gather (n - 1) end
+      end
+      gather 8
+    end
+    assert-inspect got ":done"
+  end
+  test "kill-chain-through-links" do
+    got = do
+      parent = self
+      defn chain do
+        0 -> do
+          send parent (tuple :node (self))
+          receive do {:never x} -> x end
+        end
+        k -> do
+          c = spawn (fn -> chain (k - 1))
+          link c
+          send parent (tuple :node (self))
+          receive do {:never x} -> x end
+        end
+      end
+      root = spawn (fn -> chain 5)
+      defn collect do
+        0 acc -> acc
+        n acc -> receive do {:node p} -> collect (n - 1) (cons p acc) end
+      end
+      pids = collect 6 '()
+      map pids (fn p -> monitor p)
+      exit root :kill
+      defn gather do
+        0 -> :done
+        n -> receive do {:down _ _ :killed} -> gather (n - 1) end
+      end
+      gather 6
+    end
+    assert-inspect got ":done"
+  end
+  test "kill-storm-on-allocating-actors" do
+    got = do
+      defn build do
+        0 acc -> acc
+        n acc -> build (n - 1) (cons n acc)
+      end
+      victims = map (range 0 8) (fn _i -> spawn (fn do
+        defn churn k -> do
+          build 500 :nil
+          churn (k + 1)
+        end
+        churn 0
+      end))
+      map victims (fn v -> monitor v)
+      map victims (fn v -> exit v :kill)
+      defn gather do
+        0 -> :done
+        n -> receive do {:down _ _ :killed} -> gather (n - 1) end
+      end
+      gather 8
+    end
+    assert-inspect got ":done"
   end
   test "trap-exit-toggle-under-exit" do
     got = do

@@ -11,6 +11,27 @@ defmacro my-or stx do syntax-case stx do
   end)
 end end
 
+defmacro destr-pair stx do syntax-case stx do
+  (_ e) -> %`(do
+    {hxa hxb} = %,e
+    add hxa hxb
+  end)
+end end
+
+defmacro destr-list stx do syntax-case stx do
+  (_ e) -> %`(do
+    (list lha . lht) = %,e
+    tuple lha lht
+  end)
+end end
+
+defmacro destr-vec stx do syntax-case stx do
+  (_ e) -> %`(do
+    (list lva lvb) = to-list %,e
+    add lva lvb
+  end)
+end end
+
 defmacro defmm2 stx do syntax-case stx do
   (_ n) -> do
     expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ a) -> %`(add %,a 1) end end)
@@ -379,6 +400,12 @@ suite do
     end
     assert-eq got 99
   end
+  test "block defmacro invisible outside even via re-emitting macro" do
+    assert-expand-error "defmacro emit stx -> %`(blockm q)\ndo\n  defmacro blockm stx -> make-syntax-int stx 5\n  blockm q\nend\nemit x" "unbound identifier 'blockm'"
+  end
+  test "block operator invisible outside its block" do
+    assert-expand-error "do\n  operator <**> precedence: 50 assoc: left fixity: infix -> add\n  1 <**> 2\nend\n1 <**> 2" "unbound identifier '<**>'"
+  end
   test "macro-introduced names not visible after splice" do
     assert-expand-error "defmacro m stx -> %`(do\n    defn hidden-fn v -> v\n  end)\nm x\nhidden-fn 1\n" "unbound identifier 'hidden-fn'"
   end
@@ -417,5 +444,28 @@ suite do
     match got do
       {:error {:runtime msg}} -> assert (str-contains? msg "Qx#")
     end
+  end
+  test "macro-introduced pattern bind does not capture" do
+    hxa = 50
+    got = destr-pair (tuple hxa 2)
+    assert-eq got 52
+    assert-eq hxa 50
+    hxb = my-or :nil (destr-pair (tuple hxa hxa))
+    assert-eq hxb 100
+  end
+  test "macro-introduced list and vector patterns are hygienic" do
+    lha = 70
+    lht = 71
+    got = destr-list '(1 2 3)
+    assert-eq got (tuple 1 '(2 3))
+    assert-eq (tuple lha lht) (tuple 70 71)
+    got2 = destr-vec [40 2]
+    assert-eq got2 42
+  end
+  test "list pattern head is recognized by name even when shadowed" do
+    list = fn a b -> vector a b
+    (list pa pb) = '(8 9)
+    assert-eq (add pa pb) 17
+    assert-eq (list 1 2) [1 2]
   end
 end

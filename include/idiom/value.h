@@ -28,6 +28,7 @@ typedef enum {
     IDM_VAL_FLOAT,
     IDM_VAL_STRING,
     IDM_VAL_PAIR,
+    IDM_VAL_EMPTY_LIST,
     IDM_VAL_TUPLE,
     IDM_VAL_VECTOR,
     IDM_VAL_DICT,
@@ -190,6 +191,7 @@ size_t idm_heap_object_count(const IdmHeap *heap);
 size_t idm_heap_bytes(const IdmHeap *heap);
 
 IdmValue idm_nil(void);
+IdmValue idm_empty_list(void);
 IdmValue idm_int(int64_t value);
 IdmValue idm_float(double value);
 IdmValue idm_word(IdmRuntime *rt, const char *text);
@@ -221,6 +223,7 @@ bool idm_protocol_lookup(IdmRuntime *rt, const char *protocol, const char *metho
 void idm_runtime_mark_protocol_roots(IdmRuntime *rt);
 
 bool idm_is_nil(IdmValue value);
+bool idm_is_empty_list(IdmValue value);
 bool idm_is_pair(IdmValue value);
 bool idm_is_tuple(IdmValue value);
 bool idm_is_vector(IdmValue value);

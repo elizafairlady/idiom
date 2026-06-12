@@ -1,0 +1,2 @@
+implement std/shell
+echo a & echo b

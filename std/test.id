@@ -6,7 +6,7 @@ end
 
 export defmacro suite stx do
   defn parts-of do
-    i n _body when (eq? i n) -> :nil
+    i n _body when (eq? i n) -> '()
     i n body -> cons (syntax-nth body i) (parts-of (add i 1) n body)
   end
   body = syntax-nth stx 2
@@ -95,8 +95,8 @@ defn run-one do
 end
 
 defn run-all do
-  :nil failures total -> tuple failures total
-  [t . rest] failures total -> run-all rest (run-one t failures) (add total 1)
+  '() failures total -> tuple failures total
+  (list t . rest) failures total -> run-all rest (run-one t failures) (add total 1)
 end
 
 export defn run-suite tests do

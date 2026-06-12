@@ -1,0 +1,10 @@
+implement std/shell
+mkdir -p build/shell-redir-golden
+cd "build/shell-redir-golden"
+env-set "RT" "tgt"
+echo alpha > $RT.txt
+r = cat tgt.txt
+println r
+echo beta 2> e2.log
+rm -f tgt.txt e2.log
+:done

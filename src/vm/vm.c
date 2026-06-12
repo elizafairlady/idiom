@@ -791,6 +791,22 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 if (out_reason) *out_reason = reason;
                 return true;
             }
+            case IDM_OP_EXIT_SIGNAL: {
+                if (!require_actor(vm, err)) return false;
+                IdmValue reason, target;
+                if (!pop(vm, &reason, err) || !pop(vm, &target, err)) return false;
+                if (target.tag != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "exit signal expects a pid target");
+                bool self_exits = false;
+                IdmValue exit_reason = idm_nil();
+                if (!idm_sched_exit_signal(vm->sched, vm->self, target.as.id, reason, &self_exits, &exit_reason, err)) return false;
+                if (self_exits) {
+                    *status = IDM_EXEC_EXIT;
+                    if (out_reason) *out_reason = exit_reason;
+                    return true;
+                }
+                if (!push(vm, idm_atom(rt, "ok"), err)) return false;
+                break;
+            }
             case IDM_OP_LINK: {
                 if (!require_actor(vm, err)) return false;
                 IdmValue target;
@@ -865,7 +881,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                     cursor = idm_cdr(cursor, err);
                     if (err && err->present) return false;
                 }
-                if (!idm_is_nil(cursor)) return idm_error_set(err, idm_span_unknown(NULL), "apply expects a proper list of arguments");
+                if (!idm_is_empty_list(cursor)) return idm_error_set(err, idm_span_unknown(NULL), "apply expects a proper list of arguments");
                 if (argc > UINT32_MAX) return idm_error_set(err, idm_span_unknown(NULL), "apply argument list too long");
                 if (!push(vm, callee, err)) return false;
                 cursor = arglist;

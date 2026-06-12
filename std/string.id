@@ -46,23 +46,25 @@ defn split-from do
 end
 
 defn rev do
-  :nil acc -> acc
-  [h . t] acc -> rev t (cons h acc)
+  '() acc -> acc
+  (list h . t) acc -> rev t (cons h acc)
 end
 
 export defn split do
   s sep when (eq? (str-len sep) 0) -> error (tuple :split :empty-separator)
-  s sep -> rev (split-from s sep 0 :nil) :nil
+  s sep -> rev (split-from s sep 0 '()) '()
 end
 
-export defn join do
-  :nil _sep -> ""
-  [h . t] sep -> join-from t sep h
+export defn join xs sep -> join-list (to-list xs) sep
+
+defn join-list do
+  '() _sep -> ""
+  (list h . t) sep -> join-from t sep h
 end
 
 defn join-from do
-  :nil _sep acc -> acc
-  [h . t] sep acc -> join-from t sep (str acc sep h)
+  '() _sep acc -> acc
+  (list h . t) sep acc -> join-from t sep (str acc sep h)
 end
 
 export defn replace s old new ->

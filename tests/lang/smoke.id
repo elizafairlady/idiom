@@ -9,7 +9,7 @@ suite do
   test "clauses and patterns" do
     f = fn do
       0 -> :zero
-      [h . _] -> tuple :head h
+      (list h . _) -> tuple :head h
       _ -> :other
     end
     assert-eq (f 0) :zero

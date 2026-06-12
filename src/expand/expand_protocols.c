@@ -84,7 +84,7 @@ static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, ui
         return idm_error_oom(err, name_syntax->span);
     }
     ctx->decl_method_count++;
-    return install_method_surface(ctx, ctx->protocol_name ? ctx->protocol_name : "<anonymous>", method->name, arity, &method->scopes, NULL, NULL, err);
+    return install_method_surface(ctx, ctx->protocol_name ? ctx->protocol_name : "<anonymous>", method->name, arity, &method->scopes, ctx->unit, ctx->unit_key, err);
 }
 
 bool predeclare_protocol_methods(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmError *err) {
@@ -170,7 +170,7 @@ static IdmCore *build_extend_core(ExpandContext *ctx, const char *protocol, cons
     SurfaceCheckpoint checkpoint;
     surface_checkpoint(ctx, &checkpoint);
     bool surface_ok = true;
-    for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, protocol, methods[i].name, methods[i].arity, &ctx->empty_scopes, NULL, NULL, err);
+    for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, protocol, methods[i].name, methods[i].arity, &ctx->empty_scopes, ctx->unit, ctx->unit_key, err);
     if (!surface_ok) {
         surface_rollback(ctx, &checkpoint);
         return NULL;
@@ -243,7 +243,7 @@ static IdmCore *protocol_decl_core(ExpandContext *ctx, const IdmSyntax *form, co
     if (!identity) return NULL;
     IdmArtifact art;
     memset(&art, 0, sizeof(art));
-    if (!compile_package_module(ctx, body, identity, &art, err)) { free(identity); return NULL; }
+    if (!compile_package_module(ctx, body, identity, hash, &art, err)) { free(identity); return NULL; }
     memcpy(art.src_hash, hash, 32u);
     if (ctx->protocol_count == ctx->protocol_cap) {
         size_t cap = ctx->protocol_cap ? ctx->protocol_cap * 2u : 4u;
@@ -529,7 +529,7 @@ IdmCore *expand_extend_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         dotted = form->as.seq.items[i]->kind == IDM_SYN_WORD && syn_is_word(form->as.seq.items[i + 1u], ".") && form->as.seq.items[i + 2u]->kind == IDM_SYN_WORD;
     }
     if (!dotted) return extend_decl_core(ctx, form, items, index, count, err);
-    IdmSyntax *folded = idm_syn_list(IDM_SEQ_PAREN, form->span);
+    IdmSyntax *folded = idm_syn_list(form->span);
     bool ok = folded != NULL;
     for (size_t i = 0; ok && i < form->as.seq.count;) {
         IdmSyntax *part = NULL;
@@ -744,7 +744,7 @@ static bool register_record_protocol_surface(ExpandContext *ctx, const IdmSyntax
             protocol_def_destroy(p);
             return false;
         }
-        if (!install_method_surface(ctx, identity, fields[i], 1u, &method->scopes, NULL, NULL, err)) {
+        if (!install_method_surface(ctx, identity, fields[i], 1u, &method->scopes, ctx->unit, ctx->unit_key, err)) {
             idm_core_free(define);
             idm_core_free(extend);
             protocol_def_destroy(p);

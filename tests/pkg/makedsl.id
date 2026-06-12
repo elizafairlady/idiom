@@ -14,19 +14,19 @@ export defn rule-name do
 end
 
 defn find-rule do
-  [{:rule n d a} . _] name when (eq? n name) -> tuple :rule n d a
-  [_ . t] name -> find-rule t name
-  :nil name -> error (tuple :unknown-target name)
+  (list {:rule n d a} . _) name when (eq? n name) -> tuple :rule n d a
+  (list _ . t) name -> find-rule t name
+  '() name -> error (tuple :unknown-target name)
 end
 
 defn done? do
-  :nil _ -> :false
-  [{n _} . t] name -> cond (eq? n name) :true (done? t name)
+  '() _ -> :false
+  (list {n _} . t) name -> cond (eq? n name) :true (done? t name)
 end
 
 defn build-list do
-  rules :nil done -> done
-  rules [d . ds] done -> build-list rules ds (build-into rules d done)
+  rules '() done -> done
+  rules (list d . ds) done -> build-list rules ds (build-into rules d done)
 end
 
 defn build-into do
@@ -35,9 +35,9 @@ defn build-into do
     match (find-rule rules name) do
       {:rule n deps action} -> do
         finished = build-list rules deps done
-        append finished (cons (tuple n (action :go)) :nil)
+        append finished (cons (tuple n (action :go)) '())
       end
     end
 end
 
-export defn build rules name -> build-into rules name :nil
+export defn build rules name -> build-into rules name '()

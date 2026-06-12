@@ -53,7 +53,8 @@ typedef enum {
     IDM_OP_DEFINE_PROTOCOL,
     IDM_OP_EXTEND_PROTOCOL,
     IDM_OP_CALL_METHOD,
-    IDM_OP_TAIL_CALL_METHOD
+    IDM_OP_TAIL_CALL_METHOD,
+    IDM_OP_EXIT_SIGNAL
 } IdmOpcode;
 
 typedef struct {

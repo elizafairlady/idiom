@@ -19,6 +19,6 @@ export defn update m k default f -> dict-put m k (f (dict-get m k default))
 export defn merge a b -> merge-pairs a (dict-keys b) b
 
 defn merge-pairs do
-  m :nil _other -> m
-  m [k . t] other -> merge-pairs (dict-put m k (dict-get other k :nil)) t other
+  m '() _other -> m
+  m (list k . t) other -> merge-pairs (dict-put m k (dict-get other k :nil)) t other
 end

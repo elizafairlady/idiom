@@ -84,6 +84,25 @@ for f in tests/shell/*.ish; do
     fi
 done
 
+for f in tests/shell/fail/*.ish; do
+    name=$(basename "$f" .ish)
+    if [ "$MODE" = "output" ]; then
+        "$ISH" "$f" >"build/shellfail-$name.out" 2>"build/shellfail-$name.err"
+        rc=$?
+        want=$(cat "tests/shell/fail/$name.status")
+        if [ "$rc" -ne "$want" ]; then
+            echo "SHELL-FAIL STATUS: $name (got $rc want $want)"; fail=1
+        elif ! cmp -s "tests/shell/fail/$name.err" "build/shellfail-$name.err"; then
+            echo "SHELL-FAIL STDERR: $name"; diff "tests/shell/fail/$name.err" "build/shellfail-$name.err" || true; fail=1
+        elif ! cmp -s "tests/shell/fail/$name.out" "build/shellfail-$name.out"; then
+            echo "SHELL-FAIL OUT: $name"; diff "tests/shell/fail/$name.out" "build/shellfail-$name.out" || true; fail=1
+        fi
+    else
+        "$ISH" "$f" >/dev/null 2>"build/san-shellfail-$name.err" || true
+        san_check "build/san-shellfail-$name.err" "shell-fail $name"
+    fi
+done
+
 if [ "$MODE" = "output" ]; then
     "$IDIOMC" build tests/seal/tool.id -o build/sealed-tool >/dev/null 2>build/seal.err
     if [ -s build/seal.err ]; then
@@ -114,8 +133,11 @@ if [ "$MODE" = "output" ]; then
     printf 'implement std/shell\nls -la | wc -l\n' | "$IDIOMC" --dump-core - | grep -q ':pipeline' || { echo "PIN FAIL: pipeline"; fail=1; }
     printf 'echo hello\n' | "$IDIOMC" --dump-core - 2>&1 | grep -q "unbound identifier 'echo'" || { echo "PIN FAIL: no-shell"; fail=1; }
     printf 'implement std/shell\nls *.zz\n' | "$IDIOMC" --dump-core - | grep -q ':glob' || { echo "PIN FAIL: glob"; fail=1; }
+    printf 'implement std/shell\nls nl*\n' | "$IDIOMC" --dump-core - | grep -q ':glob "nl\*"' || { echo "PIN FAIL: glob-joined"; fail=1; }
     printf 'implement std/shell\nsh -c x 2>&1\n' | "$IDIOMC" --dump-core - | grep -q ':dup' || { echo "PIN FAIL: dup"; fail=1; }
     printf 'implement std/shell\nFOO=bar printenv FOO\n' | "$IDIOMC" --dump-core - | grep -q '"FOO"' || { echo "PIN FAIL: env"; fail=1; }
+    printf 'implement std/shell\necho a$X.txt\n' | "$IDIOMC" --dump-core - | grep -q ':cat' || { echo "PIN FAIL: cat"; fail=1; }
+    printf 'implement std/shell\necho hi > out.txt\n' | "$IDIOMC" --dump-core - | grep -q ':lit "out.txt"' || { echo "PIN FAIL: redirect-join"; fail=1; }
 fi
 
 if [ "$fail" -ne 0 ]; then
