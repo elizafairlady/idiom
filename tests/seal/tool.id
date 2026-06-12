@@ -1,6 +1,6 @@
 use std/string
 use std/enum
-implements std/shell
+implement std/shell
 
 greeting = args |> join " "
 counted = sh -c "printf abc | wc -c"

@@ -1,0 +1,2 @@
+<repl>:1:20: error: unbound identifier 'kaboom'
+<repl>:1:1: error: unbound identifier 'ff'

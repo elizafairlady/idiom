@@ -1,0 +1,421 @@
+use std/test
+implement std/test
+
+defn kadd2 a b -> add a b
+defmacro twice2 stx do syntax-case stx do (_ e) -> %`(kadd2 %,e %,e) end end
+
+defmacro my-or stx do syntax-case stx do
+  (_ a b) -> %`(do
+    tmp = %,a
+    if tmp do tmp else do %,b end
+  end)
+end end
+
+defmacro defmm2 stx do syntax-case stx do
+  (_ n) -> do
+    expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ a) -> %`(add %,a 1) end end)
+    %`(do end)
+  end
+end end
+defmm2 inc2
+
+defmacro gen3 stx do syntax-case stx do
+  (_ a) -> %`do
+    defmacro %,a s2 do
+      expander-register-macro (syntax-nth s2 2) (fn s3 -> make-syntax-int s3 7)
+      make-syntax-int s2 0
+    end
+  end
+end end
+gen3 mk3
+mk3 leaf3
+
+defmacro nest3 stx do syntax-case stx do
+  (_ n) -> do
+    v = syntax-int-value n
+    if (eq? v 0) do
+      %`0
+    else do
+      %`(do
+        x = %,(make-syntax-int n v)
+        add x (nest3 %,(make-syntax-int n (sub v 1)))
+      end)
+    end
+  end
+end end
+
+defmacro ping2 stx do syntax-case stx do
+  (_ n) -> do
+    v = syntax-int-value n
+    if (eq? v 0) do %`:done else do
+      %`(do
+        p = :ping
+        tuple p (pong2 %,(make-syntax-int n (sub v 1)))
+      end)
+    end
+  end
+end end
+defmacro pong2 stx do syntax-case stx do
+  (_ n) -> do
+    v = syntax-int-value n
+    if (eq? v 0) do %`:done else do
+      %`(do
+        p = :pong
+        tuple p (ping2 %,(make-syntax-int n (sub v 1)))
+      end)
+    end
+  end
+end end
+
+defmacro with-it2 stx do syntax-case stx do
+  (_ v b) -> do
+    it = bind! stx "it"
+    %`(do
+      %,it = %,v
+      %,b
+    end)
+  end
+end end
+
+defrules swapif do
+  (_ c a b) when (syntax-int? c) -> %`(if (gt? %,c 0) do %,a else do %,b end)
+  (_ c a b) -> %`(if %,c do %,a else do %,b end)
+end
+
+defmacro defproto2 stx do syntax-case stx do (_ n b) -> %`do
+  protocol %,n %,b
+end end end
+defproto2 Greets2 do
+  export defmacro answer2 s -> (make-syntax-int s 99)
+end
+defproto2 Sized2 do
+  method size-of2 x -> mul x 10
+end
+
+defmacro defrec2 stx do syntax-case stx do (_ n b) -> %`do
+  record %,n %,b
+end end end
+defrec2 Pt2 do
+  field x
+end
+
+defmacro bring stx do syntax-case stx do
+  (_ v) -> %`(do
+    implement tests/pkg/exporter
+    tuple (answer q) (%,v <+> 1)
+  end)
+end end
+
+defmacro letpair stx do syntax-case stx do
+  (_ a b body) -> %`do
+    %,a = 10
+    %,b = 20
+    %,body
+  end
+end end
+
+defmacro defsz stx do syntax-case stx do
+  (_ p m) -> %`do
+    protocol %,p do
+      method %,m x -> mul x 10
+    end
+  end
+end end
+defsz Sz3 szof3
+
+defmacro defext stx do syntax-case stx do
+  (_ t p m) -> %`do
+    extend %,t with %,p do
+      method %,m x -> :spliced-impl
+    end
+  end
+end end
+protocol Zp do
+  method zz x
+end
+implement Zp
+defext int Zp zz
+
+for-syntax do
+  defn mk-lit v -> fn s -> make-syntax-int s v
+  expander-register-macro %'forty (mk-lit 40)
+  expander-register-macro %'two (mk-lit 2)
+end
+
+for-syntax do
+  defn pick-fs x -> 1
+end
+for-syntax do
+  defn pick-fs x -> 2
+end
+defmacro which-fs stx -> make-syntax-int stx (pick-fs 0)
+
+suite do
+  test "or/tmp swap does not capture caller tmp" do
+    got = do
+      tmp = :user
+      tuple (my-or :nil tmp) (my-or tmp 99)
+    end
+    assert-inspect got "{:user :user}"
+  end
+  test "three-level macro-defining-macro chain" do
+    assert-eq (leaf3 q) 7
+  end
+  test "recursive macro introducing a binder each round" do
+    got = do
+      x = 1000
+      tuple (nest3 4) x
+    end
+    assert-inspect got "{10 1000}"
+  end
+  test "mutually recursive macros leave caller p untouched" do
+    got = do
+      p = :user
+      tuple (ping2 3) p
+    end
+    assert-inspect got "{{:ping {:pong {:ping :done}}} :user}"
+  end
+  test "library macro template add resolves at definition site" do
+    got = do
+      defn kadd2 a b -> :inner-shadow
+      twice2 21
+    end
+    assert-eq got 42
+  end
+  test "registered-from-transformer macro ignores caller add shadow" do
+    got = do
+      defn add a b -> :user-add
+      inc2 41
+    end
+    assert-eq got 42
+  end
+  test "match survives caller shadowing if/cond/tuple/raise" do
+    got = do
+      defn if a b c -> :user-if
+      defn cond a b c -> :user-cond
+      defn tuple a b -> :user-tuple
+      defn raise x -> :user-raise
+      match 5 do
+        5 -> :matched
+        _ -> :other
+      end
+    end
+    assert-eq got :matched
+  end
+  test "bind! deliberately captures caller it" do
+    got = do
+      it = :outer
+      with-it2 10 (add it 5)
+    end
+    assert-eq got 15
+  end
+  test "bind! introduced name visible only through template" do
+    assert-eq (with-it2 10 (add it 5)) 15
+  end
+  test "bind! capture consistent in bind-RHS position" do
+    got = do
+      it = :outer
+      r = with-it2 10 (add it 5)
+      tuple r it
+    end
+    assert-inspect got "{15 :outer}"
+  end
+  test "package macro template uses sibling exported macro" do
+    got = do
+      implement tests/pkg/sibmac
+      doubled q
+    end
+    assert-eq got 42
+  end
+  test "import alias resolves record identity in extend" do
+    got = do
+      protocol AliasView2 do
+        method ashow2 x
+      end
+      implement AliasView2
+      import tests/pkg/boxa as Q
+      b = Q.box 7
+      extend Q.box with AliasView2 do
+        method ashow2 v -> Q.unbox v
+      end
+      ashow2 b
+    end
+    assert-eq got 7
+  end
+  test "import alias bindings stay in the importing block" do
+    assert-expand-error "do\n  import tests/pkg/exporter as E\n  E.answer x\nend\nE.answer x\n" "unbound identifier 'E'"
+  end
+  test "defrules guard sees library predicate not caller shadow" do
+    got = do
+      defn gt? a b -> :false
+      swapif 5 :pos :nonpos
+    end
+    assert-eq got :pos
+  end
+  test "defrules runtime branch on non-literal" do
+    got = do
+      c = :nil
+      swapif c :t :f
+    end
+    assert-eq got :f
+  end
+  test "macro-spliced protocol exports a macro" do
+    got = do
+      implement Greets2
+      answer2 foo
+    end
+    assert-eq got 99
+  end
+  test "macro-spliced protocol method with default body" do
+    got = do
+      implement Sized2
+      extend int with Sized2 do
+        method size-of2 x -> 100
+      end
+      size-of2 5
+    end
+    assert-eq got 100
+  end
+  test "macro-spliced record" do
+    got = do
+      p = Pt2 7
+      tuple (p.x) (Pt2? p)
+    end
+    assert-inspect got "{7 :true}"
+  end
+  test "macro template activates implement and operator" do
+    assert-inspect (bring 6) "{99 7}"
+  end
+  test "sibling diamond activations stay independent" do
+    got = do
+      implement tests/pkg/exporter
+      a = do
+        implement tests/pkg/exporter2
+        tuple (answer x) (3 <+> 4)
+      end
+      b = do
+        implement tests/pkg/exporter2
+        tuple (answer x) (3 <+> 4)
+      end
+      tuple a b (answer x) (3 <+> 4)
+    end
+    assert-inspect got "{{7 -1} {7 -1} 99 7}"
+  end
+  test "user binders threaded through a macro body" do
+    assert-eq (letpair p q (add p q)) 30
+  end
+  test "macro-defined protocol with literal method default" do
+    got = do
+      implement Sz3
+      extend int with Sz3 do end
+      szof3 4
+    end
+    assert-eq got 40
+  end
+  test "spliced extend installs a method" do
+    assert-eq (zz 5) :spliced-impl
+  end
+  test "expander-register-macro pair from one for-syntax block" do
+    assert-eq (add (forty x) (two x)) 42
+  end
+  test "later for-syntax definition wins (same phase rebind)" do
+    assert-eq (which-fs q) 2
+  end
+  test "use imports runtime names into its block" do
+    got = do
+      use tests/pkg/exporter
+      dbl 21
+    end
+    assert-eq got 42
+  end
+  test "provider operator target unaffected by caller shadow" do
+    got = do
+      implement tests/pkg/exporter
+      defn add a b -> :nope
+      3 <+> 4
+    end
+    assert-eq got 7
+  end
+  test "package defrules expands ignoring caller mul shadow" do
+    got = do
+      implement tests/pkg/rulespkg
+      defn mul a b -> :shadow
+      twice-of 21
+    end
+    assert-eq got 42
+  end
+  test "package resolver macro ignores caller str/append shadows" do
+    got = do
+      implement tests/pkg/htmldsl
+      defn str a -> :shadow
+      defn append a b -> :shadow
+      span :class "x" "hi"
+    end
+    assert-eq got "<span class=\"x\">hi</span>"
+  end
+  test "import alias qualifies macros without activation" do
+    got = do
+      import tests/pkg/exporter as E
+      E.answer x
+    end
+    assert-eq got 99
+  end
+  test "implement inside fn body active for its runtime extent" do
+    got = do
+      mk = fn _ig do
+        implement tests/pkg/exporter
+        fn x -> x <+> (answer q)
+      end
+      f = mk 0
+      f 1
+    end
+    assert-eq got 100
+  end
+  test "re-implement is idempotent" do
+    got = do
+      implement tests/pkg/exporter
+      implement tests/pkg/exporter
+      answer x
+    end
+    assert-eq got 99
+  end
+  test "macro-introduced names not visible after splice" do
+    assert-expand-error "defmacro m stx -> %`(do\n    defn hidden-fn v -> v\n  end)\nm x\nhidden-fn 1\n" "unbound identifier 'hidden-fn'"
+  end
+  test "two providers of one surface in one context collide" do
+    assert-expand-error "implement tests/pkg/exporter\nimplement tests/pkg/exporter2\nanswer x" "already active in this context"
+  end
+  test "two same-named protocols extending same type collide on activation" do
+    assert-expand-error "implement tests/pkg/sizea\nimplement tests/pkg/sizeb\nsize 5" "already active in this context"
+  end
+  test "use does not activate macros" do
+    assert-expand-error "use tests/pkg/exporter\nanswer 1" "unbound identifier 'answer'"
+  end
+  test "for-syntax helper absent at runtime" do
+    assert-expand-error "for-syntax do\n  defn helper x -> x\nend\nhelper 1\n" "unbound identifier 'helper'"
+  end
+  test "runtime helper absent for-syntax" do
+    assert-expand-error "defn helper x -> x\ndefmacro m stx -> helper stx\nm 1\n" "unbound identifier 'helper'"
+  end
+  test "transformer lexical fn-capture still rejected cleanly" do
+    assert-expand-error "outerv = 10\ndefmacro m stx -> make-syntax-int stx outerv\nm 5" "unbound identifier 'outerv'"
+  end
+  test "dispatch error names qualified protocol identity" do
+    got = do
+      protocol Qx do
+        method probe-q x
+      end
+      implement Qx
+      extend string with Qx do
+        method probe-q s -> :str
+      end
+      try do
+        probe-q 5
+        rescue r -> r
+      end
+    end
+    match got do
+      {:error {:runtime msg}} -> assert (str-contains? msg "Qx#")
+    end
+  end
+end

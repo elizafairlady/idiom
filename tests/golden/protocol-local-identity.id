@@ -1,0 +1,36 @@
+mk-a = fn _ig do
+  protocol P do
+    method size x
+  end
+  implement P
+  extend int with P do
+    method size n -> 111
+  end
+  size 5
+end
+mk-b = fn _ig do
+  protocol P do
+    method size x
+  end
+  implement P
+  extend string with P do
+    method size s -> 222
+  end
+  size "hello"
+end
+mk-c = fn _ig do
+  protocol P do
+    method size x
+  end
+  implement P
+  extend string with P do
+    method size s -> 222
+  end
+  size 5
+end
+println (mk-a 0)
+println (mk-b 0)
+println (try do
+  mk-c 0
+  rescue _r -> :no-cross-dispatch
+end)

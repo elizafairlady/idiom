@@ -6,7 +6,7 @@ record Square do
   field side
 end
 
-implements Area
+implement Area
 extend int with Area do
   method area n -> mul n n
 end

@@ -1,0 +1,75 @@
+use std/test
+implement std/test
+
+suite do
+  test "use imports runtime names with later-wins rebind" do
+    got = do
+      use tests/pkg/exporter
+      use tests/pkg/exporter2
+      tuple (who 0) (dbl 4)
+    end
+    assert-inspect got "{:second 8}"
+  end
+  test "use does not activate macros" do
+    assert-expand-error "use tests/pkg/exporter\nanswer 1" "unbound identifier 'answer'"
+  end
+  test "use does not activate operators" do
+    assert-expand-error "use tests/pkg/exporter\n3 <+> 4" "unbound identifier"
+  end
+  test "use does not activate method surface" do
+    assert-expand-error "use tests/pkg/protomethod\ndescribe 1" "unbound identifier 'describe'"
+  end
+  test "implement activates macros and operators" do
+    got = do
+      implement tests/pkg/exporter
+      tuple (answer x) (3 <+> 4)
+    end
+    assert-inspect got "{99 7}"
+  end
+  test "implement surface is scoped to its context" do
+    assert-expand-error "do\n  implement tests/pkg/exporter\n  answer x\nend\nanswer x" "unbound identifier 'answer'"
+    assert-expand-error "do\n  implement tests/pkg/exporter\nend\n3 <+> 4" "unbound identifier"
+    got = do
+      implement tests/pkg/exporter
+      do
+        answer q
+      end
+    end
+    assert-inspect got "99"
+  end
+  test "inner activation shadows outer by scope" do
+    implement tests/pkg/exporter
+    inner = do
+      implement tests/pkg/exporter2
+      tuple (answer x) (3 <+> 4)
+    end
+    assert-inspect (tuple inner (answer x) (3 <+> 4)) "{{7 -1} 99 7}"
+  end
+  test "re-activating the same package is idempotent" do
+    got = do
+      implement tests/pkg/exporter
+      implement tests/pkg/exporter
+      answer x
+    end
+    assert-inspect got "99"
+  end
+  test "two providers of one surface name in one context error" do
+    assert-expand-error "implement tests/pkg/exporter\nimplement tests/pkg/exporter2\nanswer x" "already active in this context"
+  end
+  test "provider-private helper beats consumer same-name binder" do
+    got = do
+      implement tests/pkg/macropriv
+      defn hidden x -> 1000
+      inc-private 41
+    end
+    assert-inspect got "42"
+  end
+  test "import qualifies macros without activation" do
+    got = do
+      import tests/pkg/exporter as E
+      E.answer x
+    end
+    assert-inspect got "99"
+    assert-expand-error "import tests/pkg/exporter as E\nanswer x" "unbound identifier 'answer'"
+  end
+end

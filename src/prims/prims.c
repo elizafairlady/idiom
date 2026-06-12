@@ -16,11 +16,17 @@
 #include <string.h>
 #include <unistd.h>
 
-static bool require_arity(IdmPrimitive prim, uint32_t argc, IdmError *err) {
+static bool type_error(IdmRuntime *rt, IdmError *err, const char *name, IdmValue got, const char *what) {
+    idm_error_set(err, idm_span_unknown(NULL), "%s expects %s", name, what);
+    return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, name), got);
+}
+
+static bool require_arity(IdmRuntime *rt, IdmPrimitive prim, uint32_t argc, IdmError *err) {
     const IdmPrimitiveInfo *info = idm_primitive_info(prim);
     if (!info) return idm_error_set(err, idm_span_unknown(NULL), "unknown primitive %u", (unsigned)prim);
     if (argc < info->min_arity || argc > info->max_arity) {
-        return idm_error_set(err, idm_span_unknown(NULL), "primitive '%s' arity mismatch: got %u, want %u..%u", info->name, argc, info->min_arity, info->max_arity);
+        idm_error_set(err, idm_span_unknown(NULL), "primitive '%s' arity mismatch: got %u, want %u..%u", info->name, argc, info->min_arity, info->max_arity);
+        return idm_error_reason(rt, err, "arity", 4, idm_atom(rt, info->name), idm_int((int64_t)argc), idm_int((int64_t)info->min_arity), idm_int((int64_t)info->max_arity));
     }
     return true;
 }
@@ -42,15 +48,13 @@ static bool prim_cons(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *e
 }
 
 static bool prim_first(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    if (!idm_is_pair(args[0])) return idm_error_set(err, idm_span_unknown(NULL), "first expects a pair");
+    if (!idm_is_pair(args[0])) return type_error(rt, err, "first", args[0], "a pair");
     *out = idm_car(args[0], err);
     return !(err && err->present);
 }
 
 static bool prim_rest(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    if (!idm_is_pair(args[0])) return idm_error_set(err, idm_span_unknown(NULL), "rest expects a pair");
+    if (!idm_is_pair(args[0])) return type_error(rt, err, "rest", args[0], "a pair");
     *out = idm_cdr(args[0], err);
     return !(err && err->present);
 }
@@ -69,7 +73,7 @@ static bool prim_append(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError 
     IdmValue head = args[0];
     IdmValue tail = args[1];
     if (idm_is_nil(head)) { *out = tail; return true; }
-    if (!idm_is_pair(head)) return idm_error_set(err, idm_span_unknown(NULL), "append expects a list as first argument");
+    if (!idm_is_pair(head)) return type_error(rt, err, "append", head, "a list as first argument");
     size_t count = 0;
     IdmValue cur = head;
     while (idm_is_pair(cur)) {
@@ -171,11 +175,13 @@ static bool prim_capture_stdout(IdmRuntime *rt, IdmValue *args, IdmValue *out, I
 }
 
 static bool prim_tuple_get(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    if (!idm_is_tuple(args[0])) return idm_error_set(err, idm_span_unknown(NULL), "tuple-get expects a tuple");
-    if (args[1].tag != IDM_VAL_INT || args[1].as.i < 0) return idm_error_set(err, idm_span_unknown(NULL), "tuple-get index must be a non-negative integer");
+    if (!idm_is_tuple(args[0])) return type_error(rt, err, "tuple-get", args[0], "a tuple");
+    if (args[1].tag != IDM_VAL_INT || args[1].as.i < 0) return type_error(rt, err, "tuple-get", args[1], "a non-negative integer index");
     size_t index = (size_t)args[1].as.i;
-    if (index >= idm_sequence_count(args[0])) return idm_error_set(err, idm_span_unknown(NULL), "tuple-get index out of range");
+    if (index >= idm_sequence_count(args[0])) {
+        idm_error_set(err, idm_span_unknown(NULL), "tuple-get index out of range");
+        return idm_error_reason(rt, err, "index-out-of-range", 1, args[1]);
+    }
     *out = idm_sequence_item(args[0], index, err);
     return !(err && err->present);
 }
@@ -211,7 +217,7 @@ static bool prim_to_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError
         *out = result;
         return true;
     }
-    return idm_error_set(err, idm_span_unknown(NULL), "to-list expects a list, vector, tuple, or dict");
+    return type_error(rt, err, "to-list", v, "a list, vector, tuple, or dict");
 }
 
 static bool prim_cd(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
@@ -327,9 +333,10 @@ static const char *name_value_text(IdmValue value, IdmError *err, const char *wh
     return NULL;
 }
 
-static bool prim_make_record(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+static bool prim_make_record(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err, bool raw) {
     const char *type = name_value_text(args[0], err, "record type");
     if (!type) return false;
+    if (raw && strchr(type, '#')) return idm_error_set(err, idm_span_unknown(NULL), "make-record type must not contain '#' (reserved for declared records)");
     if (!idm_is_dict(args[1])) return idm_error_set(err, idm_span_unknown(NULL), "make-record fields must be a dict");
     *out = idm_record(rt, type, args[1], err);
     return !(err && err->present);
@@ -349,8 +356,9 @@ static bool prim_record_type(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmE
 }
 
 static bool prim_record_field(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    return idm_record_field(args[0], args[1], out, err);
+    if (idm_record_field(args[0], args[1], out, err)) return true;
+    if (!idm_is_record(args[0])) return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "record-field"), args[0]);
+    return idm_error_reason(rt, err, "key-not-found", 1, args[1]);
 }
 
 static bool prim_write_procsub_temp(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
@@ -452,102 +460,111 @@ static bool checked_pow(int64_t base, int64_t exponent, int64_t *out) {
     return true;
 }
 
-static bool require_int_pair(const char *name, IdmValue *args, int64_t *a, int64_t *b, IdmError *err) {
-    if (args[0].tag != IDM_VAL_INT || args[1].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "%s expects integer operands", name);
-    *a = args[0].as.i;
-    *b = args[1].as.i;
-    return true;
-}
-
-static bool prim_add(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    int64_t a = 0, b = 0, r = 0;
-    if (!require_int_pair("add", args, &a, &b, err)) return false;
-    if (!checked_add(a, b, &r)) return idm_error_set(err, idm_span_unknown(NULL), "integer overflow in add");
-    *out = idm_int(r);
-    return true;
-}
-
-static bool prim_sub(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    int64_t a = 0, b = 0, r = 0;
-    if (!require_int_pair("sub", args, &a, &b, err)) return false;
-    if (!checked_sub(a, b, &r)) return idm_error_set(err, idm_span_unknown(NULL), "integer overflow in sub");
-    *out = idm_int(r);
-    return true;
-}
-
-static bool prim_mul(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    int64_t a = 0, b = 0, r = 0;
-    if (!require_int_pair("mul", args, &a, &b, err)) return false;
-    if (!checked_mul(a, b, &r)) return idm_error_set(err, idm_span_unknown(NULL), "integer overflow in mul");
-    *out = idm_int(r);
-    return true;
-}
-
 static bool num_as_double(IdmValue v, double *out) {
     if (v.tag == IDM_VAL_INT) { *out = (double)v.as.i; return true; }
     if (v.tag == IDM_VAL_FLOAT) { *out = v.as.f; return true; }
     return false;
 }
 
-static bool prim_div(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    if (args[0].tag == IDM_VAL_FLOAT || args[1].tag == IDM_VAL_FLOAT) {
-        double x, y;
-        if (!num_as_double(args[0], &x) || !num_as_double(args[1], &y)) return idm_error_set(err, idm_span_unknown(NULL), "div expects numeric operands");
-        if (y == 0.0) return idm_error_set(err, idm_span_unknown(NULL), "division by zero in div");
-        *out = idm_float(x / y);
+static bool num_pair(IdmRuntime *rt, const char *name, IdmValue *args, bool *ints, int64_t *ia, int64_t *ib, double *fa, double *fb, IdmError *err) {
+    if (args[0].tag == IDM_VAL_INT && args[1].tag == IDM_VAL_INT) {
+        *ints = true;
+        *ia = args[0].as.i;
+        *ib = args[1].as.i;
         return true;
     }
-    int64_t a = 0, b = 0;
-    if (!require_int_pair("div", args, &a, &b, err)) return false;
-    if (b == 0) return idm_error_set(err, idm_span_unknown(NULL), "division by zero in div");
-    if (a == INT64_MIN && b == -1) return idm_error_set(err, idm_span_unknown(NULL), "integer overflow in div");
-    *out = idm_int(a / b);
+    if (!num_as_double(args[0], fa) || !num_as_double(args[1], fb)) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s expects numeric operands", name);
+        return idm_error_reason(rt, err, "type-error", 3, idm_atom(rt, name), args[0], args[1]);
+    }
+    *ints = false;
     return true;
 }
 
-static bool prim_mod(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    if (args[0].tag == IDM_VAL_FLOAT || args[1].tag == IDM_VAL_FLOAT) {
-        double x, y;
-        if (!num_as_double(args[0], &x) || !num_as_double(args[1], &y)) return idm_error_set(err, idm_span_unknown(NULL), "mod expects numeric operands");
-        if (y == 0.0) return idm_error_set(err, idm_span_unknown(NULL), "division by zero in mod");
-        *out = idm_float(fmod(x, y));
-        return true;
-    }
-    int64_t a = 0, b = 0;
-    if (!require_int_pair("mod", args, &a, &b, err)) return false;
-    if (b == 0) return idm_error_set(err, idm_span_unknown(NULL), "division by zero in mod");
-    if (a == INT64_MIN && b == -1) return idm_error_set(err, idm_span_unknown(NULL), "integer overflow in mod");
-    *out = idm_int(a % b);
-    return true;
+static bool overflow_error(IdmRuntime *rt, const char *name, IdmError *err) {
+    idm_error_set(err, idm_span_unknown(NULL), "integer overflow in %s", name);
+    return idm_error_reason(rt, err, "overflow", 1, idm_atom(rt, name));
 }
 
-static bool prim_pow(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    if (args[0].tag == IDM_VAL_FLOAT || args[1].tag == IDM_VAL_FLOAT) {
-        double x, y;
-        if (!num_as_double(args[0], &x) || !num_as_double(args[1], &y)) return idm_error_set(err, idm_span_unknown(NULL), "pow expects numeric operands");
-        *out = idm_float(pow(x, y));
-        return true;
-    }
+static bool div_zero_error(IdmRuntime *rt, const char *name, IdmError *err) {
+    idm_error_set(err, idm_span_unknown(NULL), "division by zero in %s", name);
+    return idm_error_reason(rt, err, "div-by-zero", 1, idm_atom(rt, name));
+}
+
+static bool prim_arith(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *name = idm_primitive_name(prim);
+    bool ints = false;
     int64_t a = 0, b = 0, r = 0;
-    if (!require_int_pair("pow", args, &a, &b, err)) return false;
-    if (b < 0) return idm_error_set(err, idm_span_unknown(NULL), "pow exponent must be non-negative");
-    if (!checked_pow(a, b, &r)) return idm_error_set(err, idm_span_unknown(NULL), "integer overflow in pow");
+    double x = 0.0, y = 0.0;
+    if (!num_pair(rt, name, args, &ints, &a, &b, &x, &y, err)) return false;
+    if (!ints) {
+        double f = 0.0;
+        switch (prim) {
+            case IDM_PRIM_ADD: f = x + y; break;
+            case IDM_PRIM_SUB: f = x - y; break;
+            case IDM_PRIM_MUL: f = x * y; break;
+            case IDM_PRIM_DIV:
+                if (y == 0.0) return div_zero_error(rt, name, err);
+                f = x / y;
+                break;
+            case IDM_PRIM_MOD:
+                if (y == 0.0) return div_zero_error(rt, name, err);
+                f = fmod(x, y);
+                break;
+            case IDM_PRIM_POW: f = pow(x, y); break;
+            default: return idm_error_set(err, idm_span_unknown(NULL), "invalid numeric primitive");
+        }
+        *out = idm_float(f);
+        return true;
+    }
+    bool ok = true;
+    switch (prim) {
+        case IDM_PRIM_ADD: ok = checked_add(a, b, &r); break;
+        case IDM_PRIM_SUB: ok = checked_sub(a, b, &r); break;
+        case IDM_PRIM_MUL: ok = checked_mul(a, b, &r); break;
+        case IDM_PRIM_DIV:
+        case IDM_PRIM_MOD:
+            if (b == 0) return div_zero_error(rt, name, err);
+            if (a == INT64_MIN && b == -1) return overflow_error(rt, name, err);
+            r = prim == IDM_PRIM_DIV ? a / b : a % b;
+            break;
+        case IDM_PRIM_POW:
+            if (b < 0) {
+                idm_error_set(err, idm_span_unknown(NULL), "pow exponent must be non-negative");
+                return idm_error_reason(rt, err, "bad-arg", 2, idm_atom(rt, name), args[1]);
+            }
+            ok = checked_pow(a, b, &r);
+            break;
+        default: return idm_error_set(err, idm_span_unknown(NULL), "invalid integer primitive");
+    }
+    if (!ok) return overflow_error(rt, name, err);
     *out = idm_int(r);
     return true;
 }
 
 static bool prim_neg(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
     if (args[0].tag == IDM_VAL_FLOAT) { *out = idm_float(-args[0].as.f); return true; }
-    if (args[0].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "neg expects a number");
-    if (args[0].as.i == INT64_MIN) return idm_error_set(err, idm_span_unknown(NULL), "integer overflow in neg");
+    if (args[0].tag != IDM_VAL_INT) return type_error(rt, err, "neg", args[0], "a number");
+    if (args[0].as.i == INT64_MIN) return overflow_error(rt, "neg", err);
     *out = idm_int(-args[0].as.i);
+    return true;
+}
+
+static bool prim_compare(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *name = idm_primitive_name(prim);
+    bool ints = false;
+    int64_t a = 0, b = 0;
+    double x = 0.0, y = 0.0;
+    if (!num_pair(rt, name, args, &ints, &a, &b, &x, &y, err)) return false;
+    bool r = false;
+    switch (prim) {
+        case IDM_PRIM_LT: r = ints ? a < b : x < y; break;
+        case IDM_PRIM_GT: r = ints ? a > b : x > y; break;
+        case IDM_PRIM_LTE: r = ints ? a <= b : x <= y; break;
+        case IDM_PRIM_GTE: r = ints ? a >= b : x >= y; break;
+        default: return idm_error_set(err, idm_span_unknown(NULL), "invalid comparison primitive");
+    }
+    *out = idm_atom(rt, r ? "true" : "false");
     return true;
 }
 
@@ -560,34 +577,6 @@ static bool prim_eq(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err
 static bool prim_neq(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     (void)err;
     *out = idm_atom(rt, idm_value_equal(args[0], args[1]) ? "false" : "true");
-    return true;
-}
-
-static bool prim_lt(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t a = 0, b = 0;
-    if (!require_int_pair("lt?", args, &a, &b, err)) return false;
-    *out = idm_atom(rt, a < b ? "true" : "false");
-    return true;
-}
-
-static bool prim_gt(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t a = 0, b = 0;
-    if (!require_int_pair("gt?", args, &a, &b, err)) return false;
-    *out = idm_atom(rt, a > b ? "true" : "false");
-    return true;
-}
-
-static bool prim_lte(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t a = 0, b = 0;
-    if (!require_int_pair("lte?", args, &a, &b, err)) return false;
-    *out = idm_atom(rt, a <= b ? "true" : "false");
-    return true;
-}
-
-static bool prim_gte(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t a = 0, b = 0;
-    if (!require_int_pair("gte?", args, &a, &b, err)) return false;
-    *out = idm_atom(rt, a >= b ? "true" : "false");
     return true;
 }
 
@@ -984,17 +973,21 @@ static bool prim_expand_check(IdmRuntime *rt, IdmValue *args, IdmValue *out, Idm
         idm_error_clear(&inner);
         return true;
     }
+    IdmValue detail[2];
+    detail[0] = idm_atom(rt, "expand");
+    detail[1] = idm_string(rt, inner.message ? inner.message : "compile failed", err);
+    idm_error_clear(&inner);
+    if (err && err->present) return false;
     IdmValue items[2];
     items[0] = idm_atom(rt, "error");
-    items[1] = idm_string(rt, inner.message ? inner.message : "compile failed", err);
-    idm_error_clear(&inner);
+    items[1] = idm_tuple(rt, detail, 2u, err);
     if (err && err->present) return false;
     *out = idm_tuple(rt, items, 2u, err);
     return !(err && err->present);
 }
 
-static bool require_string_arg(IdmValue v, const char **out_s, size_t *out_len, const char *what, IdmError *err) {
-    if (v.tag != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "%s expects a string", what);
+static bool require_string_arg(IdmRuntime *rt, IdmValue v, const char **out_s, size_t *out_len, const char *what, IdmError *err) {
+    if (v.tag != IDM_VAL_STRING) return type_error(rt, err, what, v, "a string");
     *out_s = idm_string_bytes(v);
     *out_len = idm_string_length(v);
     return true;
@@ -1009,18 +1002,22 @@ static int64_t clamp_index(int64_t i, size_t len) {
 static bool prim_str_len(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     (void)rt;
     const char *s; size_t len;
-    if (!require_string_arg(args[0], &s, &len, "str-len", err)) return false;
+    if (!require_string_arg(rt, args[0], &s, &len, "str-len", err)) return false;
     *out = idm_int((int64_t)len);
     return true;
 }
 
 static bool prim_str_slice(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *s; size_t len;
-    if (!require_string_arg(args[0], &s, &len, "str-slice", err)) return false;
-    if (args[1].tag != IDM_VAL_INT || args[2].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "str-slice expects integer bounds");
-    int64_t a = clamp_index(args[1].as.i, len);
-    int64_t b = clamp_index(args[2].as.i, len);
-    if (b < a) b = a;
+    if (!require_string_arg(rt, args[0], &s, &len, "str-slice", err)) return false;
+    if (args[1].tag != IDM_VAL_INT) return type_error(rt, err, "str-slice", args[1], "integer bounds");
+    if (args[2].tag != IDM_VAL_INT) return type_error(rt, err, "str-slice", args[2], "integer bounds");
+    int64_t a = args[1].as.i;
+    int64_t b = args[2].as.i;
+    if (a < 0 || b < a || (uint64_t)b > len) {
+        idm_error_set(err, idm_span_unknown(NULL), "str-slice range %lld..%lld out of bounds for length %zu", (long long)a, (long long)b, len);
+        return idm_error_reason(rt, err, "slice-out-of-range", 3, args[1], args[2], idm_int((int64_t)len));
+    }
     *out = idm_string_n(rt, s + a, (size_t)(b - a), err);
     return !(err && err->present);
 }
@@ -1029,9 +1026,9 @@ static bool prim_str_find(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErro
     (void)rt;
     const char *s; size_t len;
     const char *needle; size_t nlen;
-    if (!require_string_arg(args[0], &s, &len, "str-find", err)) return false;
-    if (!require_string_arg(args[1], &needle, &nlen, "str-find", err)) return false;
-    if (args[2].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "str-find expects an integer start");
+    if (!require_string_arg(rt, args[0], &s, &len, "str-find", err)) return false;
+    if (!require_string_arg(rt, args[1], &needle, &nlen, "str-find", err)) return false;
+    if (args[2].tag != IDM_VAL_INT) return type_error(rt, err, "str-find", args[2], "an integer start");
     size_t from = (size_t)clamp_index(args[2].as.i, len);
     if (nlen == 0) { *out = idm_int((int64_t)from); return true; }
     for (size_t i = from; i + nlen <= len; i++) {
@@ -1047,8 +1044,8 @@ static bool prim_str_find(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErro
 static bool prim_str_byte(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     (void)rt;
     const char *s; size_t len;
-    if (!require_string_arg(args[0], &s, &len, "str-byte", err)) return false;
-    if (args[1].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "str-byte expects an integer index");
+    if (!require_string_arg(rt, args[0], &s, &len, "str-byte", err)) return false;
+    if (args[1].tag != IDM_VAL_INT) return type_error(rt, err, "str-byte", args[1], "an integer index");
     int64_t i = args[1].as.i;
     if (i < 0 || (size_t)i >= len) { *out = idm_nil(); return true; }
     *out = idm_int((int64_t)(unsigned char)s[i]);
@@ -1056,7 +1053,7 @@ static bool prim_str_byte(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErro
 }
 
 static bool prim_byte_str(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    if (args[0].tag != IDM_VAL_INT || args[0].as.i < 0 || args[0].as.i > 255) return idm_error_set(err, idm_span_unknown(NULL), "byte-str expects an integer 0..255");
+    if (args[0].tag != IDM_VAL_INT || args[0].as.i < 0 || args[0].as.i > 255) return type_error(rt, err, "byte-str", args[0], "an integer 0..255");
     char c = (char)args[0].as.i;
     *out = idm_string_n(rt, &c, 1u, err);
     return !(err && err->present);
@@ -1095,7 +1092,7 @@ static const char *resolve_cwd(const char *path, char *buf, size_t cap) {
 
 static bool prim_file_read(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(args[0], &path, &plen, "file-read", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-read", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     char *data = NULL;
@@ -1115,8 +1112,8 @@ static bool prim_file_read(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 static bool prim_file_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     const char *data; size_t dlen;
-    if (!require_string_arg(args[0], &path, &plen, "file-write", err)) return false;
-    if (!require_string_arg(args[1], &data, &dlen, "file-write", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-write", err)) return false;
+    if (!require_string_arg(rt, args[1], &data, &dlen, "file-write", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     FILE *f = fopen(path, "wb");
@@ -1130,7 +1127,7 @@ static bool prim_file_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmEr
 
 static bool prim_file_exists(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(args[0], &path, &plen, "file-exists?", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-exists?", err)) return false;
     char pb[PATH_MAX];
     path = resolve_cwd(path, pb, sizeof(pb));
     *out = path && access(path, F_OK) == 0 ? idm_atom(rt, "true") : idm_atom(rt, "false");
@@ -1139,7 +1136,7 @@ static bool prim_file_exists(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmE
 
 static bool prim_file_stat(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(args[0], &path, &plen, "file-stat", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-stat", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     struct stat st;
@@ -1156,7 +1153,7 @@ static bool prim_file_stat(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 
 static bool prim_file_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(args[0], &path, &plen, "file-list", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-list", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     DIR *dir = opendir(path);
@@ -1176,7 +1173,7 @@ static bool prim_file_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 
 static bool prim_file_remove(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(args[0], &path, &plen, "file-remove", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-remove", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     if (remove(path) != 0) return result_error(rt, out, err);
@@ -1206,37 +1203,45 @@ static bool prim_time_ms(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError
 }
 
 static bool prim_random(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
-    if (args[0].tag != IDM_VAL_INT || args[0].as.i <= 0) return idm_error_set(err, idm_span_unknown(NULL), "random expects a positive integer bound");
+    if (args[0].tag != IDM_VAL_INT || args[0].as.i <= 0) return type_error(rt, err, "random", args[0], "a positive integer bound");
     *out = idm_int((int64_t)(random() % args[0].as.i));
     return true;
 }
 
+static bool require_dict(IdmRuntime *rt, const char *name, IdmValue v, IdmError *err) {
+    if (v.tag == IDM_VAL_DICT) return true;
+    return type_error(rt, err, name, v, "a dict");
+}
+
 static bool prim_dict_get(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt; (void)err;
-    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-get expects a dict");
+    if (!require_dict(rt, "dict-get", args[0], err)) return false;
     IdmValue found;
     *out = idm_dict_get(args[0], args[1], &found) ? found : args[2];
     return true;
 }
 
-static bool dict_rebuild(IdmRuntime *rt, IdmValue d, IdmValue skip_key, bool have_extra, IdmValue extra_key, IdmValue extra_val, IdmValue *out, IdmError *err) {
+static bool dict_rebuild(IdmRuntime *rt, IdmValue d, IdmValue key, bool put, IdmValue val, IdmValue *out, IdmError *err) {
     size_t n = idm_dict_count(d);
-    size_t cap = n + (have_extra ? 1u : 0u);
+    size_t cap = n + (put ? 1u : 0u);
     IdmDictEntry *entries = cap ? calloc(cap, sizeof(*entries)) : NULL;
     if (cap && !entries) return idm_error_oom(err, idm_span_unknown(NULL));
     size_t count = 0;
+    bool replaced = false;
     for (size_t i = 0; i < n; i++) {
         IdmValue k, v;
         if (!idm_dict_entry(d, i, &k, &v)) continue;
-        if (idm_value_equal(k, skip_key)) continue;
+        if (idm_value_equal(k, key)) {
+            if (!put) continue;
+            v = val;
+            replaced = true;
+        }
         entries[count].key = k;
         entries[count].value = v;
         count++;
     }
-    if (have_extra) {
-        entries[count].key = extra_key;
-        entries[count].value = extra_val;
+    if (put && !replaced) {
+        entries[count].key = key;
+        entries[count].value = val;
         count++;
     }
     *out = idm_dict(rt, entries, count, err);
@@ -1245,17 +1250,17 @@ static bool dict_rebuild(IdmRuntime *rt, IdmValue d, IdmValue skip_key, bool hav
 }
 
 static bool prim_dict_put(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-put expects a dict");
-    return dict_rebuild(rt, args[0], args[1], true, args[1], args[2], out, err);
+    if (!require_dict(rt, "dict-put", args[0], err)) return false;
+    return dict_rebuild(rt, args[0], args[1], true, args[2], out, err);
 }
 
 static bool prim_dict_del(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-del expects a dict");
-    return dict_rebuild(rt, args[0], args[1], false, idm_nil(), idm_nil(), out, err);
+    if (!require_dict(rt, "dict-del", args[0], err)) return false;
+    return dict_rebuild(rt, args[0], args[1], false, idm_nil(), out, err);
 }
 
 static bool prim_dict_keys(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-keys expects a dict");
+    if (!require_dict(rt, "dict-keys", args[0], err)) return false;
     IdmValue acc = idm_nil();
     for (size_t i = idm_dict_count(args[0]); i > 0; i--) {
         IdmValue k, v;
@@ -1268,7 +1273,7 @@ static bool prim_dict_keys(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 }
 
 static bool prim_dict_vals(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-vals expects a dict");
+    if (!require_dict(rt, "dict-vals", args[0], err)) return false;
     IdmValue acc = idm_nil();
     for (size_t i = idm_dict_count(args[0]); i > 0; i--) {
         IdmValue k, v;
@@ -1281,16 +1286,14 @@ static bool prim_dict_vals(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 }
 
 static bool prim_dict_has(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)err;
-    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-has? expects a dict");
+    if (!require_dict(rt, "dict-has?", args[0], err)) return false;
     IdmValue found;
     *out = idm_dict_get(args[0], args[1], &found) ? idm_atom(rt, "true") : idm_atom(rt, "false");
     return true;
 }
 
 static bool prim_dict_size(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt; (void)err;
-    if (args[0].tag != IDM_VAL_DICT) return idm_error_set(err, idm_span_unknown(NULL), "dict-size expects a dict");
+    if (!require_dict(rt, "dict-size", args[0], err)) return false;
     *out = idm_int((int64_t)idm_dict_count(args[0]));
     return true;
 }
@@ -1674,7 +1677,7 @@ static bool prim_bind_bang(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 }
 
 bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
-    if (!require_arity(prim, argc, err)) return false;
+    if (!require_arity(rt, prim, argc, err)) return false;
     switch (prim) {
         case IDM_PRIM_CONS: return prim_cons(rt, args, out, err);
         case IDM_PRIM_FIRST: return prim_first(rt, args, out, err);
@@ -1746,19 +1749,19 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_FREE_IDENTIFIER_EQ: return prim_free_identifier_eq(rt, args, out, err);
         case IDM_PRIM_BOUND_IDENTIFIER_EQ: return prim_bound_identifier_eq(rt, args, out, err);
         case IDM_PRIM_BIND_BANG: return prim_bind_bang(rt, args, out, err);
-        case IDM_PRIM_ADD: return prim_add(rt, args, out, err);
-        case IDM_PRIM_SUB: return prim_sub(rt, args, out, err);
-        case IDM_PRIM_MUL: return prim_mul(rt, args, out, err);
-        case IDM_PRIM_DIV: return prim_div(rt, args, out, err);
-        case IDM_PRIM_MOD: return prim_mod(rt, args, out, err);
-        case IDM_PRIM_POW: return prim_pow(rt, args, out, err);
+        case IDM_PRIM_ADD:
+        case IDM_PRIM_SUB:
+        case IDM_PRIM_MUL:
+        case IDM_PRIM_DIV:
+        case IDM_PRIM_MOD:
+        case IDM_PRIM_POW: return prim_arith(rt, prim, args, out, err);
         case IDM_PRIM_NEG: return prim_neg(rt, args, out, err);
         case IDM_PRIM_EQ: return prim_eq(rt, args, out, err);
         case IDM_PRIM_NEQ: return prim_neq(rt, args, out, err);
-        case IDM_PRIM_LT: return prim_lt(rt, args, out, err);
-        case IDM_PRIM_GT: return prim_gt(rt, args, out, err);
-        case IDM_PRIM_LTE: return prim_lte(rt, args, out, err);
-        case IDM_PRIM_GTE: return prim_gte(rt, args, out, err);
+        case IDM_PRIM_LT:
+        case IDM_PRIM_GT:
+        case IDM_PRIM_LTE:
+        case IDM_PRIM_GTE: return prim_compare(rt, prim, args, out, err);
         case IDM_PRIM_SELF:
         case IDM_PRIM_SPAWN:
         case IDM_PRIM_SEND:
@@ -1784,7 +1787,8 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_ENV_SET: return prim_env_set(rt, args, out, err);
         case IDM_PRIM_WRITE_PROCSUB_TEMP: return prim_write_procsub_temp(rt, args, out, err);
         case IDM_PRIM_MAKE_PROCSUB_TEMP: return prim_make_procsub_temp(rt, args, out, err);
-        case IDM_PRIM_MAKE_RECORD: return prim_make_record(rt, args, out, err);
+        case IDM_PRIM_MAKE_RECORD: return prim_make_record(rt, args, out, err, true);
+        case IDM_PRIM_RECORD_NEW: return prim_make_record(rt, args, out, err, false);
         case IDM_PRIM_RECORD_PRED: return prim_record_pred(rt, args, out, err);
         case IDM_PRIM_RECORD_TYPE: return prim_record_type(rt, args, out, err);
         case IDM_PRIM_RECORD_FIELD: return prim_record_field(rt, args, out, err);

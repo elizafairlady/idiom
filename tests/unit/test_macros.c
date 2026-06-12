@@ -430,13 +430,13 @@ static void test_compile_time_surface_scoping(void) {
         false);
     expect_expand_result("<surface-scope-ok-shell>",
         "do\n"
-        "  implements std/shell\n"
+        "  implement std/shell\n"
         "  echo inner\n"
         "end\n",
         true);
     expect_expand_result("<surface-scope-leak-shell>",
         "do\n"
-        "  implements std/shell\n"
+        "  implement std/shell\n"
         "  echo inner\n"
         "end\n"
         "echo outer\n",
@@ -446,8 +446,8 @@ static void test_compile_time_surface_scoping(void) {
 static void test_import_compile_time_surface_boundaries(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    check_value_written(&rt, "use tests/pkg/exporter\nanswer anything\n", "99");
-    check_value_written(&rt, "use tests/pkg/exporter\n3 <+> 4\n", "7");
+    check_value_written(&rt, "implement tests/pkg/exporter\nanswer anything\n", "99");
+    check_value_written(&rt, "implement tests/pkg/exporter\n3 <+> 4\n", "7");
     check_value_written(&rt, "import tests/pkg/exporter as E\nE.answer anything\n", "99");
     idm_runtime_destroy(&rt);
 
@@ -458,6 +458,18 @@ static void test_import_compile_time_surface_boundaries(void) {
     expect_expand_result("<import-operator-leak>",
         "import tests/pkg/exporter as E\n"
         "3 <+> 4\n",
+        false);
+    expect_expand_result("<use-no-macro-surface>",
+        "use tests/pkg/exporter\n"
+        "answer anything\n",
+        false);
+    expect_expand_result("<use-no-operator-surface>",
+        "use tests/pkg/exporter\n"
+        "3 <+> 4\n",
+        false);
+    expect_expand_result("<use-no-method-surface>",
+        "use tests/pkg/protomethod\n"
+        "describe 1\n",
         false);
 }
 
@@ -489,9 +501,9 @@ static void test_scoped_surface_shadowing(void) {
         "protocol Inner do\n"
         "  export defmacro go y do %`6 end\n"
         "end\n"
-        "implements Outer\n"
+        "implement Outer\n"
         "a = do\n"
-        "  implements Inner\n"
+        "  implement Inner\n"
         "  go x\n"
         "end\n"
         "{a (go x)}\n",
@@ -507,7 +519,7 @@ static void test_scoped_surface_protocol_nesting(void) {
         "  export defmacro answer y do %`42 end\n"
         "end\n"
         "do\n"
-        "  implements Nest\n"
+        "  implement Nest\n"
         "  answer foo\n"
         "end\n",
         true);
@@ -516,7 +528,7 @@ static void test_scoped_surface_protocol_nesting(void) {
         "  export defmacro answer y do %`42 end\n"
         "end\n"
         "do\n"
-        "  implements Nest\n"
+        "  implement Nest\n"
         "  answer foo\n"
         "end\n"
         "answer foo\n",
@@ -528,15 +540,15 @@ static void test_scoped_surface_protocol_nesting(void) {
         "  end\n"
         "  0\n"
         "end\n"
-        "implements BodyLocal\n"
+        "implement BodyLocal\n"
         "answer foo\n",
         "not found");
-    expect_expand_error_rt(&rt, "<fn-body-implements-scoped>",
+    expect_expand_error_rt(&rt, "<fn-body-implement-scoped>",
         "protocol Nest do\n"
         "  export defmacro answer y do %`7 end\n"
         "end\n"
         "f = fn z do\n"
-        "  implements Nest\n"
+        "  implement Nest\n"
         "  add z (answer foo)\n"
         "end\n"
         "answer foo\n",
@@ -554,7 +566,7 @@ static void test_scoped_surface_rollback_on_failure(void) {
         "  protocol RollP do\n"
         "    export defmacro roll y do %`9 end\n"
         "  end\n"
-        "  implements RollP\n"
+        "  implement RollP\n"
         "  roll check\n"
         "  this-name-is-unbound 1\n"
         "end\n",
@@ -562,7 +574,7 @@ static void test_scoped_surface_rollback_on_failure(void) {
     expect_expand_error_rt(&rt, "<rollback-macro-gone>", "answer now\n", "unbound identifier 'answer'");
     expect_expand_error_rt(&rt, "<rollback-operator-gone>", "3 <+> 4\n", "unbound identifier '<+>'");
     expect_expand_error_rt(&rt, "<rollback-protocol-gone>",
-        "implements RollP\n"
+        "implement RollP\n"
         "roll now\n",
         "not found");
     expect_expand_result_rt(&rt, "<body-surface-ok>",
@@ -592,11 +604,11 @@ static void test_macro_phase_environment(void) {
         "    export defmacro answer stx -> lit stx\n"
         "  end\n"
         "end\n"
-        "implements p\n"
+        "implement p\n"
         "answer anything\n",
         "42");
     check_value_written(&rt,
-        "use tests/pkg/macropriv\n"
+        "implement tests/pkg/macropriv\n"
         "phase-answer anything\n",
         "77");
     check_value_written(&rt,
@@ -604,7 +616,7 @@ static void test_macro_phase_environment(void) {
         "M.phase-answer anything\n",
         "77");
     check_value_written(&rt,
-        "use tests/pkg/macropriv\n"
+        "implement tests/pkg/macropriv\n"
         "inc-private 41\n",
         "42");
     expect_expand_result("<private-runtime-helper-hidden>",

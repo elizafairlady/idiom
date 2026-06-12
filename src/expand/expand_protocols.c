@@ -9,7 +9,6 @@ static const IdmProtocolMethodDef *find_protocol_method_def(const IdmProtocolMet
 static bool extend_has_impl(const ExtendMethodImpl *impls, size_t count, const char *name);
 static bool extend_impls_push(ExtendMethodImpl **impls, size_t *count, size_t *cap, const char *name, uint32_t arity, IdmCore *fn, IdmError *err, IdmSpan span);
 static IdmCore *build_extend_core(ExpandContext *ctx, const char *protocol, const char *type, const IdmProtocolMethodDef *methods, size_t method_count, const IdmSyntax *body, IdmError *err);
-static bool activate_surface(ExpandContext *ctx, const char *protocol_name, const IdmOperatorDef *operators, size_t op_count, const IdmPkgMacro *macros, size_t macro_count, const IdmProtocolMethodDef *methods, size_t method_count, IdmModuleRef *resolver_module, uint32_t resolver_fn, IdmNamespace *resolver_phase_ns, IdmPhaseEnv *resolver_phase_env, IdmSpan span, IdmError *err);
 static IdmCore *sequence_two(IdmCore *first, IdmCore *second, IdmSpan span, IdmError *err);
 static bool record_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, const IdmSyntax **out_body, bool *out_exported);
 static void record_field_names_destroy(char **fields, size_t count);
@@ -18,10 +17,10 @@ static bool parse_record_fields(const IdmSyntax *body, char ***out_fields, size_
 static IdmCore *make_prim_app(IdmPrimitive primitive, IdmSpan span, IdmError *err);
 static bool core_app_add_or_oom(IdmCore *app, IdmCore *arg, IdmError *err, IdmSpan span);
 static IdmCore *record_field_default_fn(ExpandContext *ctx, const char *field, IdmSpan span, IdmError *err);
-static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, char **fields, size_t field_count, IdmSpan span, IdmError *err);
-static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *record_name, const char *predicate_name, IdmSpan span, IdmError *err);
+static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, const char *identity, char **fields, size_t field_count, IdmSpan span, IdmError *err);
+static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *identity, const char *predicate_name, IdmSpan span, IdmError *err);
 static char *record_predicate_name(const char *record_name);
-static bool register_record_protocol_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *record_name, char **fields, size_t field_count, IdmSpan span, IdmCore **out_define, IdmCore **out_extend, IdmError *err);
+static bool register_record_protocol_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *record_name, char *identity, const unsigned char hash[32], bool exported, char **fields, size_t field_count, IdmSpan span, IdmCore **out_define, IdmCore **out_extend, IdmError *err);
 
 static bool method_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_param_start, bool *out_has_body, IdmError *err) {
     if (!syn_is_protocol(form, "%-expr")) return false;
@@ -80,12 +79,12 @@ static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, ui
     method->name = idm_strdup(name_syntax->as.text);
     method->arity = arity;
     method->exported = true;
-    if (!method->name || !syntax_scopes_copy(&method->scopes, name_syntax)) {
+    if (!method->name || !binder_scopes_pruned(ctx, name_syntax, &method->scopes)) {
         idm_protocol_method_def_destroy(method);
         return idm_error_oom(err, name_syntax->span);
     }
     ctx->decl_method_count++;
-    return install_method_surface(ctx, ctx->protocol_name ? ctx->protocol_name : "<anonymous>", method->name, arity, &method->scopes, err);
+    return install_method_surface(ctx, ctx->protocol_name ? ctx->protocol_name : "<anonymous>", method->name, arity, &method->scopes, NULL, NULL, err);
 }
 
 bool predeclare_protocol_methods(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmError *err) {
@@ -127,7 +126,7 @@ IdmCore *expand_method_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         method->default_fn = fn;
         method->has_default = true;
     }
-    return expand_body_items(ctx, items, index + 1u, count, err);
+    return expand_body_items(ctx, items, index + 1u, count, false, err);
 }
 
 static void extend_impls_destroy(ExtendMethodImpl *impls, size_t count) {
@@ -171,7 +170,7 @@ static IdmCore *build_extend_core(ExpandContext *ctx, const char *protocol, cons
     SurfaceCheckpoint checkpoint;
     surface_checkpoint(ctx, &checkpoint);
     bool surface_ok = true;
-    for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, protocol, methods[i].name, methods[i].arity, &ctx->empty_scopes, err);
+    for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, protocol, methods[i].name, methods[i].arity, &ctx->empty_scopes, NULL, NULL, err);
     if (!surface_ok) {
         surface_rollback(ctx, &checkpoint);
         return NULL;
@@ -197,7 +196,7 @@ static IdmCore *build_extend_core(ExpandContext *ctx, const char *protocol, cons
         const IdmProtocolMethodDef *contract = find_protocol_method_def(methods, method_count, name->as.text);
         if (!contract) { expand_error(err, name->span, "protocol '%s' has no method '%s'", protocol, name->as.text); ok = false; break; }
         if (contract->arity != arity) { expand_error(err, name->span, "method '%s.%s' expects %u argument(s), got %u", protocol, name->as.text, contract->arity, arity); ok = false; break; }
-        if (extend_has_impl(impls, impl_count, name->as.text)) { expand_error(err, name->span, "extend for '%s' implements method '%s' more than once", protocol, name->as.text); ok = false; break; }
+        if (extend_has_impl(impls, impl_count, name->as.text)) { expand_error(err, name->span, "extend for '%s' provides method '%s' more than once", protocol, name->as.text); ok = false; break; }
         IdmCore *fn = expand_function_literal(ctx, name->as.text, stmt->as.seq.items[1], stmt->as.seq.items, param_start, stmt->as.seq.count, err);
         if (!fn) { ok = false; break; }
         if (!extend_impls_push(&impls, &impl_count, &impl_cap, name->as.text, arity, fn, err, name->span)) {
@@ -237,130 +236,209 @@ static IdmCore *build_extend_core(ExpandContext *ctx, const char *protocol, cons
     return core;
 }
 
-IdmCore *expand_protocol_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
-    IdmSyntax *const *fitems = form->as.seq.items;
-    if (form->as.seq.count != 4 || fitems[2]->kind != IDM_SYN_WORD || !syn_is_protocol(fitems[3], "%-body"))
-        return expand_error(err, form->span, "protocol expects 'protocol NAME do ... end'");
-    const char *name = fitems[2]->as.text;
+static IdmCore *protocol_decl_core(ExpandContext *ctx, const IdmSyntax *form, const IdmSyntax *name_syntax, const IdmSyntax *body, bool activate, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
+    const char *name = name_syntax->as.text;
+    unsigned char hash[32];
+    char *identity = protocol_identity(ctx, name, form, hash, err);
+    if (!identity) return NULL;
     IdmArtifact art;
     memset(&art, 0, sizeof(art));
-    if (!compile_package_module(ctx, fitems[3], name, &art, err)) return NULL;
+    if (!compile_package_module(ctx, body, identity, &art, err)) { free(identity); return NULL; }
+    memcpy(art.src_hash, hash, 32u);
     if (ctx->protocol_count == ctx->protocol_cap) {
         size_t cap = ctx->protocol_cap ? ctx->protocol_cap * 2u : 4u;
         ProtocolDef *next = realloc(ctx->protocols, cap * sizeof(*next));
-        if (!next) { idm_artifact_destroy(&art); return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span); }
+        if (!next) { free(identity); idm_artifact_destroy(&art); return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span); }
         ctx->protocols = next;
         ctx->protocol_cap = cap;
     }
     ProtocolDef *p = &ctx->protocols[ctx->protocol_count];
     memset(p, 0, sizeof(*p));
-    p->name = idm_strdup(name);
-    if (!p->name) { idm_artifact_destroy(&art); return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span); }
-    p->operators = art.operators;
-    p->operator_count = art.operator_count;
-    p->macros = art.macros;
-    p->macro_count = art.macro_count;
-    p->methods = art.methods;
-    p->method_count = art.method_count;
-    if (art.resolver_module) {
-        p->resolver_module = art.resolver_module;
-        p->resolver_fn = art.resolver_fn;
-        p->resolver_phase_ns = art.resolver_phase_ns;
-        p->resolver_phase_env = idm_phase_env_retain(art.resolver_phase_env);
-        art.resolver_module = NULL;
-        art.resolver_phase_ns = NULL;
-        idm_phase_env_release(art.resolver_phase_env);
-        art.resolver_phase_env = NULL;
-    }
-    art.operators = NULL;
-    art.operator_count = 0;
-    art.macros = NULL;
-    art.macro_count = 0;
-    art.methods = NULL;
-    art.method_count = 0;
+    p->name = identity;
+    p->art = art;
     IdmScopeSet protocol_scopes;
-    if (!syntax_scopes_copy(&protocol_scopes, fitems[2])) {
+    if (!binder_scopes_pruned(ctx, name_syntax, &protocol_scopes)) {
         protocol_def_destroy(p);
-        idm_artifact_destroy(&art);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, fitems[2]->span);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
     uint32_t payload = (uint32_t)ctx->protocol_count;
-    if (!idm_binding_table_add(&ctx->bindings, name, 0, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, &protocol_scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, &protocol_scopes, payload, ctx->frame, NULL)) {
         idm_scope_set_destroy(&protocol_scopes);
         protocol_def_destroy(p);
-        idm_artifact_destroy(&art);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, fitems[2]->span);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
     idm_scope_set_destroy(&protocol_scopes);
     ctx->protocol_count++;
-    IdmBytecodeModule *module = art.module;
-    uint32_t init_fn = art.init_fn;
-    art.module = NULL;
-    IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, err);
+    const char *runtime_name = p->name;
+    IdmBytecodeModule *module = p->art.module;
+    uint32_t init_fn = p->art.init_fn;
+    p->art.module = NULL;
+    size_t global_count = p->art.global_count;
+    const IdmPkgGlobal *globals = p->art.globals;
+    uint32_t *global_src = NULL;
+    uint32_t *global_dst = NULL;
+    if (global_count != 0) {
+        global_src = malloc(global_count * sizeof(*global_src));
+        global_dst = malloc(global_count * sizeof(*global_dst));
+        if (!global_src || !global_dst) {
+            free(global_src);
+            free(global_dst);
+            if (module) { idm_bc_destroy(module); free(module); }
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
+        }
+    }
+    for (size_t i = 0; i < global_count; i++) {
+        uint32_t consumer_slot = ctx->global_seq++;
+        global_src[i] = globals[i].slot;
+        global_dst[i] = consumer_slot;
+        if (!idm_binding_table_add(&ctx->bindings, globals[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &globals[i].scopes, consumer_slot, IDM_FRAME_GLOBAL, NULL)) {
+            free(global_src);
+            free(global_dst);
+            if (module) { idm_bc_destroy(module); free(module); }
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
+        }
+    }
+    if (activate) {
+        IdmScopeSet act_scopes;
+        bool activated = binder_scopes_pruned(ctx, name_syntax, &act_scopes);
+        if (!activated) {
+            idm_error_oom(err, form->span);
+        } else {
+            IdmArtifact art_view = ctx->protocols[payload].art;
+            activated = activate_artifact(ctx, runtime_name, &art_view, art_view.scope_base, &act_scopes, form->span, err) && record_activation(ctx, name, form->span, err);
+            idm_scope_set_destroy(&act_scopes);
+        }
+        if (!activated) {
+            free(global_src);
+            free(global_dst);
+            if (module) { idm_bc_destroy(module); free(module); }
+            if (err && err->present && err->span.line == 0) err->span = form->span;
+            if (err && err->present && form->span.line != 0) idm_error_note(err, "while activating '%s' (%s:%u:%u)", name, form->span.file ? form->span.file : "<unknown>", form->span.line, form->span.column);
+            return NULL;
+        }
+    }
+    IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, false, err);
     if (!cont) {
+        free(global_src);
+        free(global_dst);
         if (module) { idm_bc_destroy(module); free(module); }
-        idm_artifact_destroy(&art);
         return NULL;
     }
-    IdmCore *runtime = idm_core_use_package(idm_atom(ctx->rt, name), module, init_fn, NULL, NULL, 0u, cont, form->span);
+    IdmCore *runtime = idm_core_use_package(idm_atom(ctx->rt, runtime_name), module, init_fn, global_src, global_dst, global_count, cont, form->span);
     if (!runtime) {
+        free(global_src);
+        free(global_dst);
         if (module) { idm_bc_destroy(module); free(module); }
         idm_core_free(cont);
-        idm_artifact_destroy(&art);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
     }
-    idm_artifact_destroy(&art);
     return runtime;
 }
 
-static bool activate_surface(ExpandContext *ctx, const char *protocol_name, const IdmOperatorDef *operators, size_t op_count, const IdmPkgMacro *macros, size_t macro_count, const IdmProtocolMethodDef *methods, size_t method_count, IdmModuleRef *resolver_module, uint32_t resolver_fn, IdmNamespace *resolver_phase_ns, IdmPhaseEnv *resolver_phase_env, IdmSpan span, IdmError *err) {
-    (void)span;
-    for (size_t i = 0; i < op_count; i++) {
-        if (!install_imported_operator(ctx, &operators[i], err)) return false;
-    }
-    for (size_t i = 0; i < macro_count; i++) {
-        if (!install_imported_macro(ctx, macros[i].name, &ctx->empty_scopes, macros[i].module, macros[i].function_index, macros[i].phase_ns, macros[i].phase_env, err)) return false;
-    }
-    for (size_t i = 0; i < method_count; i++) {
-        if (!install_method_surface(ctx, protocol_name, methods[i].name, methods[i].arity, &ctx->empty_scopes, err)) return false;
-    }
-    if (resolver_module) {
-        if (!install_imported_macro(ctx, "%resolver", &ctx->empty_scopes, resolver_module, resolver_fn, resolver_phase_ns ? resolver_phase_ns : ctx->phase_ns, resolver_phase_env ? resolver_phase_env : ctx->phase_env, err)) return false;
-    }
-    return true;
+IdmCore *expand_protocol_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
+    IdmSyntax *const *fitems = form->as.seq.items;
+    if (form->as.seq.count != 4 || fitems[2]->kind != IDM_SYN_WORD || !syn_is_protocol(fitems[3], "%-body"))
+        return expand_error(err, form->span, "protocol expects 'protocol NAME do ... end'");
+    return protocol_decl_core(ctx, form, fitems[2], fitems[3], false, items, index, count, err);
 }
 
-IdmCore *expand_implements(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmSyntax *const *items, size_t index, size_t count, IdmSpan span, IdmError *err) {
+IdmCore *expand_implement_protocol(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
+    IdmSyntax *const *fitems = form->as.seq.items;
+    if (form->as.seq.count != 5 || fitems[3]->kind != IDM_SYN_WORD || !syn_is_protocol(fitems[4], "%-body"))
+        return expand_error(err, form->span, "implement protocol expects 'implement protocol NAME do ... end'");
+    return protocol_decl_core(ctx, form, fitems[3], fitems[4], true, items, index, count, err);
+}
+
+IdmCore *expand_implement(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmSyntax *const *items, size_t index, size_t count, IdmSpan span, IdmError *err) {
     const char *name = name_syntax->as.text;
     IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
     ProtocolDef *p = resolve_protocol_def(ctx, name_syntax, &status);
     if (status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, name_syntax->span, "ambiguous protocol '%s'", name);
+    IdmScopeSet act_scopes;
+    if (!binder_scopes_pruned(ctx, name_syntax, &act_scopes)) return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     if (p) {
-        if (!activate_surface(ctx, p->name, p->operators, p->operator_count, p->macros, p->macro_count, p->methods, p->method_count, p->resolver_module, p->resolver_fn, p->resolver_phase_ns, p->resolver_phase_env, span, err)) return NULL;
-        if (!record_activation(ctx, name, span, err)) return NULL;
-        return expand_body_items(ctx, items, index + 1u, count, err);
+        const char *identity = p->name;
+        IdmArtifact art_view = p->art;
+        bool activated = activate_artifact(ctx, identity, &art_view, art_view.scope_base, &act_scopes, span, err) && record_activation(ctx, name, span, err);
+        idm_scope_set_destroy(&act_scopes);
+        if (!activated) {
+            if (err && err->present && err->span.line == 0) err->span = span;
+            if (err && err->present && span.line != 0) idm_error_note(err, "while activating '%s' (%s:%u:%u)", name, span.file ? span.file : "<unknown>", span.line, span.column);
+            return NULL;
+        }
+        return expand_body_items(ctx, items, index + 1u, count, false, err);
     }
     const IdmArtifact *art = artifact_get(ctx, name, span, err);
     if (!art) {
+        idm_scope_set_destroy(&act_scopes);
         if (err && err->present && err->message && strcmp(err->message, "package source must be a program") == 0) {
-            idm_error_set(err, span, "implements: '%s' is not a protocol", name);
+            idm_error_set(err, span, "implement: '%s' is not a protocol", name);
         }
         return NULL;
     }
     IdmScopeId base = 0;
-    if (!artifact_base(ctx, art, &base, err)) return NULL;
-    if (!activate_artifact(ctx, name, art, base, span, err)) return NULL;
-    if (!record_activation(ctx, name, span, err)) return NULL;
-    IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, err);
-    if (!cont) return NULL;
-    uint32_t fn_off = 0;
-    IdmBytecodeModule *module = relocated_module_copy(ctx, art->module, art->scope_base, (int64_t)base - (int64_t)art->scope_base, &fn_off, err);
-    if (!module) {
-        idm_core_free(cont);
+    bool activated = artifact_base(ctx, art, &base, err) &&
+                     activate_artifact(ctx, name, art, base, &act_scopes, span, err) &&
+                     record_activation(ctx, name, span, err);
+    idm_scope_set_destroy(&act_scopes);
+    if (!activated) {
+        if (err && err->present && err->span.line == 0) err->span = span;
+        if (err && err->present && span.line != 0) idm_error_note(err, "while activating '%s' (%s:%u:%u)", name, span.file ? span.file : "<unknown>", span.line, span.column);
         return NULL;
     }
-    IdmCore *runtime = idm_core_use_package(idm_atom(ctx->rt, art->name ? art->name : name), module, art->init_fn + fn_off, NULL, NULL, 0u, cont, span);
+    IdmScopeId min_id = art->scope_base;
+    int64_t delta = (int64_t)base - (int64_t)art->scope_base;
+    uint32_t *global_src = NULL;
+    uint32_t *global_dst = NULL;
+    if (art->global_count != 0) {
+        global_src = malloc(art->global_count * sizeof(*global_src));
+        global_dst = malloc(art->global_count * sizeof(*global_dst));
+        if (!global_src || !global_dst) {
+            free(global_src);
+            free(global_dst);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
+    }
+    for (size_t i = 0; i < art->global_count; i++) {
+        uint32_t consumer_slot = ctx->global_seq++;
+        global_src[i] = art->globals[i].slot;
+        global_dst[i] = consumer_slot;
+        IdmScopeSet gscopes;
+        idm_scope_set_init(&gscopes);
+        bool ok = idm_scope_set_copy(&gscopes, &art->globals[i].scopes);
+        if (ok) {
+            idm_scope_set_relocate(&gscopes, min_id, delta);
+            ok = idm_binding_table_add(&ctx->bindings, art->globals[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &gscopes, consumer_slot, IDM_FRAME_GLOBAL, NULL);
+        }
+        idm_scope_set_destroy(&gscopes);
+        if (!ok) {
+            free(global_src);
+            free(global_dst);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
+    }
+    bool init_pending = artifact_init_pending(ctx, art);
+    IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, false, err);
+    if (!cont) {
+        free(global_src);
+        free(global_dst);
+        return NULL;
+    }
+    uint32_t fn_off = 0;
+    IdmBytecodeModule *module = NULL;
+    if (init_pending) {
+        module = relocated_module_copy(ctx, art->module, min_id, delta, &fn_off, err);
+        if (!module) {
+            free(global_src);
+            free(global_dst);
+            idm_core_free(cont);
+            return NULL;
+        }
+    }
+    IdmCore *runtime = idm_core_use_package(idm_atom(ctx->rt, art->name ? art->name : name), module, art->init_fn + fn_off, global_src, global_dst, art->global_count, cont, span);
     if (!runtime) {
+        free(global_src);
+        free(global_dst);
         idm_bc_destroy(module);
         free(module);
         idm_core_free(cont);
@@ -381,11 +459,15 @@ static IdmCore *sequence_two(IdmCore *first, IdmCore *second, IdmSpan span, IdmE
     return seq;
 }
 
-IdmCore *expand_extend_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
+static IdmCore *extend_decl_core(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
     if (form->as.seq.count != 6 || form->as.seq.items[2]->kind != IDM_SYN_WORD || !syn_is_word(form->as.seq.items[3], "with") || form->as.seq.items[4]->kind != IDM_SYN_WORD || !syn_is_protocol(form->as.seq.items[5], "%-body")) {
         return expand_error(err, form->span, "extend expects 'extend TYPE with PROTOCOL do ... end'");
     }
     const char *type_name = form->as.seq.items[2]->as.text;
+    IdmResolveStatus type_status = IDM_RESOLVE_UNBOUND;
+    ProtocolDef *type_def = resolve_protocol_def(ctx, form->as.seq.items[2], &type_status);
+    if (type_status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, form->as.seq.items[2]->span, "ambiguous type '%s'", type_name);
+    if (type_def) type_name = type_def->name;
     const char *protocol_name = form->as.seq.items[4]->as.text;
     const IdmProtocolMethodDef *methods = NULL;
     size_t method_count = 0;
@@ -397,8 +479,8 @@ IdmCore *expand_extend_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     if (status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, form->as.seq.items[4]->span, "ambiguous protocol '%s'", protocol_name);
     if (local) {
         protocol_name = local->name;
-        methods = local->methods;
-        method_count = local->method_count;
+        methods = local->art.methods;
+        method_count = local->art.method_count;
     } else {
         ext = artifact_get(ctx, protocol_name, form->as.seq.items[4]->span, err);
         if (!ext) {
@@ -415,13 +497,14 @@ IdmCore *expand_extend_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         return expand_error(err, form->as.seq.items[4]->span, "protocol '%s' has no methods to extend", protocol_name);
     }
 
+    bool ext_init_pending = ext ? artifact_init_pending(ctx, ext) : false;
     IdmCore *extend_core = build_extend_core(ctx, protocol_name, type_name, methods, method_count, form->as.seq.items[5], err);
     if (!extend_core) return NULL;
-    IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, err);
+    IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, false, err);
     if (!cont) { idm_core_free(extend_core); return NULL; }
     IdmCore *seq = sequence_two(extend_core, cont, form->span, err);
     if (!seq) return NULL;
-    if (ext) {
+    if (ext && ext_init_pending) {
         uint32_t fn_off = 0;
         IdmBytecodeModule *module = relocated_module_copy(ctx, ext->module, ext->scope_base, (int64_t)ext_base - (int64_t)ext->scope_base, &fn_off, err);
         if (!module) {
@@ -438,6 +521,38 @@ IdmCore *expand_extend_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         return runtime;
     }
     return seq;
+}
+
+IdmCore *expand_extend_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
+    bool dotted = false;
+    for (size_t i = 2; i + 2u < form->as.seq.count && !dotted; i++) {
+        dotted = form->as.seq.items[i]->kind == IDM_SYN_WORD && syn_is_word(form->as.seq.items[i + 1u], ".") && form->as.seq.items[i + 2u]->kind == IDM_SYN_WORD;
+    }
+    if (!dotted) return extend_decl_core(ctx, form, items, index, count, err);
+    IdmSyntax *folded = idm_syn_list(IDM_SEQ_PAREN, form->span);
+    bool ok = folded != NULL;
+    for (size_t i = 0; ok && i < form->as.seq.count;) {
+        IdmSyntax *part = NULL;
+        if (i >= 2u && form->as.seq.items[i]->kind == IDM_SYN_WORD && i + 2u < form->as.seq.count &&
+            syn_is_word(form->as.seq.items[i + 1u], ".") && form->as.seq.items[i + 2u]->kind == IDM_SYN_WORD) {
+            size_t chain_end = form->as.seq.count;
+            part = make_qualified_word(form->as.seq.items, i, &chain_end, err);
+            i = chain_end;
+        } else {
+            part = idm_syn_clone(form->as.seq.items[i]);
+            i++;
+        }
+        ok = part != NULL && idm_syn_append(folded, part);
+        if (!ok) idm_syn_free(part);
+    }
+    if (!ok) {
+        idm_syn_free(folded);
+        if (err && !err->present) idm_error_oom(err, form->span);
+        return NULL;
+    }
+    IdmCore *core = extend_decl_core(ctx, folded, items, index, count, err);
+    idm_syn_free(folded);
+    return core;
 }
 
 static bool record_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, const IdmSyntax **out_body, bool *out_exported) {
@@ -533,7 +648,7 @@ static IdmCore *record_field_default_fn(ExpandContext *ctx, const char *field, I
     return idm_core_fn(field, 1u, app, span);
 }
 
-static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, char **fields, size_t field_count, IdmSpan span, IdmError *err) {
+static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, const char *identity, char **fields, size_t field_count, IdmSpan span, IdmError *err) {
     IdmCore *dict = make_prim_app(IDM_PRIM_DICT, span, err);
     if (!dict) return NULL;
     for (size_t i = 0; i < field_count; i++) {
@@ -543,9 +658,9 @@ static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_nam
             return NULL;
         }
     }
-    IdmCore *make = make_prim_app(IDM_PRIM_MAKE_RECORD, span, err);
+    IdmCore *make = make_prim_app(IDM_PRIM_RECORD_NEW, span, err);
     if (!make) { idm_core_free(dict); return NULL; }
-    if (!core_app_add_or_oom(make, idm_core_literal(idm_atom(ctx->rt, record_name), span), err, span) ||
+    if (!core_app_add_or_oom(make, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span) ||
         !core_app_add_or_oom(make, dict, err, span)) {
         idm_core_free(make);
         return NULL;
@@ -558,7 +673,7 @@ static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_nam
     return idm_core_fn(record_name, (uint32_t)field_count, make, span);
 }
 
-static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *record_name, const char *predicate_name, IdmSpan span, IdmError *err) {
+static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *identity, const char *predicate_name, IdmSpan span, IdmError *err) {
     IdmCore *pred = make_prim_app(IDM_PRIM_RECORD_PRED, span, err);
     if (!pred) return NULL;
     if (!core_app_add_or_oom(pred, idm_core_arg_ref(0u, span), err, span)) { idm_core_free(pred); return NULL; }
@@ -567,7 +682,7 @@ static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *record_name,
     if (!core_app_add_or_oom(type, idm_core_arg_ref(0u, span), err, span)) { idm_core_free(pred); idm_core_free(type); return NULL; }
     IdmCore *eq = make_prim_app(IDM_PRIM_EQ, span, err);
     if (!eq) { idm_core_free(pred); idm_core_free(type); return NULL; }
-    if (!core_app_add_or_oom(eq, type, err, span) || !core_app_add_or_oom(eq, idm_core_literal(idm_atom(ctx->rt, record_name), span), err, span)) {
+    if (!core_app_add_or_oom(eq, type, err, span) || !core_app_add_or_oom(eq, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span)) {
         idm_core_free(pred);
         idm_core_free(eq);
         return NULL;
@@ -588,32 +703,34 @@ static char *record_predicate_name(const char *record_name) {
     return idm_buf_take(&buf);
 }
 
-static bool register_record_protocol_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *record_name, char **fields, size_t field_count, IdmSpan span, IdmCore **out_define, IdmCore **out_extend, IdmError *err) {
+static bool register_record_protocol_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *record_name, char *identity, const unsigned char hash[32], bool exported, char **fields, size_t field_count, IdmSpan span, IdmCore **out_define, IdmCore **out_extend, IdmError *err) {
     if (ctx->protocol_count == ctx->protocol_cap) {
         size_t cap = ctx->protocol_cap ? ctx->protocol_cap * 2u : 4u;
         ProtocolDef *next = realloc(ctx->protocols, cap * sizeof(*next));
-        if (!next) return idm_error_oom(err, span);
+        if (!next) { free(identity); return idm_error_oom(err, span); }
         ctx->protocols = next;
         ctx->protocol_cap = cap;
     }
     ProtocolDef *p = &ctx->protocols[ctx->protocol_count];
     memset(p, 0, sizeof(*p));
-    p->name = idm_strdup(record_name);
-    p->method_count = field_count;
-    p->methods = field_count == 0 ? NULL : calloc(field_count, sizeof(*p->methods));
-    if (!p->name || (field_count != 0 && !p->methods)) { protocol_def_destroy(p); return idm_error_oom(err, span); }
+    p->name = identity;
+    p->exported = exported;
+    memcpy(p->art.src_hash, hash, 32u);
+    p->art.method_count = field_count;
+    p->art.methods = field_count == 0 ? NULL : calloc(field_count, sizeof(*p->art.methods));
+    if (field_count != 0 && !p->art.methods) { protocol_def_destroy(p); return idm_error_oom(err, span); }
 
-    IdmCore *define = idm_core_define_protocol(idm_atom(ctx->rt, record_name), span);
-    IdmCore *extend = idm_core_extend_protocol(idm_atom(ctx->rt, record_name), idm_atom(ctx->rt, record_name), span);
+    IdmCore *define = idm_core_define_protocol(idm_atom(ctx->rt, identity), span);
+    IdmCore *extend = idm_core_extend_protocol(idm_atom(ctx->rt, identity), idm_atom(ctx->rt, identity), span);
     if (!define || !extend) { idm_core_free(define); idm_core_free(extend); protocol_def_destroy(p); return idm_error_oom(err, span); }
     for (size_t i = 0; i < field_count; i++) {
-        IdmProtocolMethodDef *method = &p->methods[i];
+        IdmProtocolMethodDef *method = &p->art.methods[i];
         method->name = idm_strdup(fields[i]);
         method->arity = 1u;
         method->has_default = true;
         method->seen_decl = true;
         method->exported = true;
-        if (!method->name || !syntax_scopes_copy(&method->scopes, name_syntax)) {
+        if (!method->name || !binder_scopes_pruned(ctx, name_syntax, &method->scopes)) {
             idm_core_free(define);
             idm_core_free(extend);
             protocol_def_destroy(p);
@@ -627,7 +744,7 @@ static bool register_record_protocol_surface(ExpandContext *ctx, const IdmSyntax
             protocol_def_destroy(p);
             return false;
         }
-        if (!install_method_surface(ctx, record_name, fields[i], 1u, &method->scopes, err)) {
+        if (!install_method_surface(ctx, identity, fields[i], 1u, &method->scopes, NULL, NULL, err)) {
             idm_core_free(define);
             idm_core_free(extend);
             protocol_def_destroy(p);
@@ -635,14 +752,14 @@ static bool register_record_protocol_surface(ExpandContext *ctx, const IdmSyntax
         }
     }
     IdmScopeSet protocol_scopes;
-    if (!syntax_scopes_copy(&protocol_scopes, name_syntax)) {
+    if (!binder_scopes_pruned(ctx, name_syntax, &protocol_scopes)) {
         idm_core_free(define);
         idm_core_free(extend);
         protocol_def_destroy(p);
         return idm_error_oom(err, span);
     }
     uint32_t payload = (uint32_t)ctx->protocol_count;
-    if (!idm_binding_table_add(&ctx->bindings, record_name, 0, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, &protocol_scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, record_name, IDM_PHASE_ANY, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, &protocol_scopes, payload, ctx->frame, NULL)) {
         idm_scope_set_destroy(&protocol_scopes);
         idm_core_free(define);
         idm_core_free(extend);
@@ -665,12 +782,20 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     char **fields = NULL;
     size_t field_count = 0;
     if (!parse_record_fields(body, &fields, &field_count, err)) return NULL;
+    unsigned char hash[32];
     char *predicate_name = record_predicate_name(record_name);
-    if (!predicate_name) { record_field_names_destroy(fields, field_count); return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span); }
+    char *owned_identity = predicate_name ? protocol_identity(ctx, record_name, form, hash, err) : NULL;
+    if (!predicate_name || !owned_identity) {
+        free(predicate_name);
+        record_field_names_destroy(fields, field_count);
+        if (err && !err->present) idm_error_oom(err, name_syntax->span);
+        return NULL;
+    }
+    const char *identity = owned_identity;
 
     IdmCore *define_protocol = NULL;
     IdmCore *extend_protocol = NULL;
-    if (!register_record_protocol_surface(ctx, name_syntax, record_name, fields, field_count, form->span, &define_protocol, &extend_protocol, err)) {
+    if (!register_record_protocol_surface(ctx, name_syntax, record_name, owned_identity, hash, exported && ctx->in_package, fields, field_count, form->span, &define_protocol, &extend_protocol, err)) {
         free(predicate_name);
         record_field_names_destroy(fields, field_count);
         return NULL;
@@ -681,7 +806,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     uint32_t saved_next = ctx->next_slot;
     uint32_t constructor_slot = 0;
     uint32_t predicate_slot = 0;
-    bool ok = top_level ? global_push(ctx, record_name, name_syntax, &constructor_slot) : local_push_scoped(ctx, record_name, name_syntax, &constructor_slot);
+    bool ok = top_level ? global_push_def_binder(ctx, record_name, name_syntax, &constructor_slot) : local_push_def_binder(ctx, record_name, name_syntax, &constructor_slot);
     IdmSyntax *predicate_syntax = NULL;
     if (ok) {
         predicate_syntax = idm_syn_word(predicate_name, name_syntax->span);
@@ -691,7 +816,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         const IdmScopeSet *scopes = idm_syn_scope_set(name_syntax, 0);
         if (scopes) for (size_t i = 0; i < scopes->count && ok; i++) ok = idm_syn_scope_add(predicate_syntax, 0, scopes->items[i]);
     }
-    if (ok) ok = top_level ? global_push(ctx, predicate_name, predicate_syntax, &predicate_slot) : local_push_scoped(ctx, predicate_name, predicate_syntax, &predicate_slot);
+    if (ok) ok = top_level ? global_push_def_binder(ctx, predicate_name, predicate_syntax, &predicate_slot) : local_push_def_binder(ctx, predicate_name, predicate_syntax, &predicate_slot);
     if (!ok) {
         if (!top_level) local_pop_to(ctx, saved_count, saved_next);
         idm_syn_free(predicate_syntax);
@@ -742,8 +867,8 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
 
-    IdmCore *constructor = record_constructor_fn(ctx, record_name, fields, field_count, form->span, err);
-    IdmCore *predicate = constructor ? record_predicate_fn(ctx, record_name, predicate_name, form->span, err) : NULL;
+    IdmCore *constructor = record_constructor_fn(ctx, record_name, identity, fields, field_count, form->span, err);
+    IdmCore *predicate = constructor ? record_predicate_fn(ctx, identity, predicate_name, form->span, err) : NULL;
     if (!constructor || !predicate) {
         idm_syn_free(predicate_syntax);
         idm_core_free(constructor);
@@ -754,7 +879,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         record_field_names_destroy(fields, field_count);
         return NULL;
     }
-    IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, err);
+    IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, false, err);
     if (!cont) {
         idm_syn_free(predicate_syntax);
         idm_core_free(constructor);
@@ -802,7 +927,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     }
     IdmCore *export_extend = NULL;
     if (ctx->in_package && exported && ctx->protocol_name) {
-        export_extend = idm_core_extend_protocol(idm_atom(ctx->rt, ctx->protocol_name), idm_atom(ctx->rt, record_name), form->span);
+        export_extend = idm_core_extend_protocol(idm_atom(ctx->rt, ctx->protocol_name), idm_atom(ctx->rt, identity), form->span);
         if (!export_extend) {
             idm_syn_free(predicate_syntax);
             idm_core_free(define_protocol);

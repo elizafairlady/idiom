@@ -172,75 +172,12 @@ static void pop_frame(Vm *vm, Frame *out) {
     *out = vm->frames[--vm->frame_count];
 }
 
-static bool checked_add(int64_t a, int64_t b, int64_t *out) {
-    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b)) return false;
-    *out = a + b;
-    return true;
-}
-
-static bool checked_sub(int64_t a, int64_t b, int64_t *out) {
-    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b)) return false;
-    *out = a - b;
-    return true;
-}
-
-static bool checked_mul(int64_t a, int64_t b, int64_t *out) {
-    if (a == 0 || b == 0) { *out = 0; return true; }
-    if (a == -1) {
-        if (b == INT64_MIN) return false;
-        *out = -b;
-        return true;
-    }
-    if (b == -1) {
-        if (a == INT64_MIN) return false;
-        *out = -a;
-        return true;
-    }
-    if (a > 0) {
-        if (b > 0) {
-            if (a > INT64_MAX / b) return false;
-        } else {
-            if (b < INT64_MIN / a) return false;
-        }
-    } else {
-        if (b > 0) {
-            if (a < INT64_MIN / b) return false;
-        } else {
-            if (b < INT64_MAX / a) return false;
-        }
-    }
-    *out = a * b;
-    return true;
-}
-
-static bool binary_int(Vm *vm, IdmOpcode op, IdmError *err) {
-    IdmValue b, a;
-    if (!pop(vm, &b, err) || !pop(vm, &a, err)) return false;
-    bool a_num = a.tag == IDM_VAL_INT || a.tag == IDM_VAL_FLOAT;
-    bool b_num = b.tag == IDM_VAL_INT || b.tag == IDM_VAL_FLOAT;
-    if (!a_num || !b_num) return idm_error_set(err, idm_span_unknown(NULL), "%s expects numeric operands", idm_opcode_name(op));
-    if (a.tag == IDM_VAL_FLOAT || b.tag == IDM_VAL_FLOAT) {
-        double x = a.tag == IDM_VAL_FLOAT ? a.as.f : (double)a.as.i;
-        double y = b.tag == IDM_VAL_FLOAT ? b.as.f : (double)b.as.i;
-        double r = 0.0;
-        switch (op) {
-            case IDM_OP_ADD: r = x + y; break;
-            case IDM_OP_SUB: r = x - y; break;
-            case IDM_OP_MUL: r = x * y; break;
-            default: return idm_error_set(err, idm_span_unknown(NULL), "invalid numeric primitive");
-        }
-        return push(vm, idm_float(r), err);
-    }
-    int64_t out = 0;
-    bool ok = false;
-    switch (op) {
-        case IDM_OP_ADD: ok = checked_add(a.as.i, b.as.i, &out); break;
-        case IDM_OP_SUB: ok = checked_sub(a.as.i, b.as.i, &out); break;
-        case IDM_OP_MUL: ok = checked_mul(a.as.i, b.as.i, &out); break;
-        default: return idm_error_set(err, idm_span_unknown(NULL), "invalid integer primitive");
-    }
-    if (!ok) return idm_error_set(err, idm_span_unknown(NULL), "integer overflow in %s", idm_opcode_name(op));
-    return push(vm, idm_int(out), err);
+static bool binary_prim(Vm *vm, IdmPrimitive prim, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "%s stack underflow", idm_primitive_name(prim));
+    IdmValue out = idm_nil();
+    if (!idm_prim_invoke(vm->rt, prim, &vm->stack[vm->sp - 2u], 2u, &out, err)) return false;
+    vm->sp -= 2u;
+    return push(vm, out, err);
 }
 
 static bool generic_prim_call(Vm *vm, uint32_t primitive, uint32_t argc, IdmError *err) {
@@ -259,17 +196,6 @@ static bool generic_prim_call(Vm *vm, uint32_t primitive, uint32_t argc, IdmErro
 
 static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
 static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
-
-static IdmValue make_error_reason(Vm *vm, IdmError *err) {
-    IdmError ignore;
-    idm_error_init(&ignore);
-    IdmValue items[2];
-    items[0] = idm_atom(vm->rt, "error");
-    items[1] = idm_string(vm->rt, (err->present && err->message) ? err->message : "error", &ignore);
-    IdmValue reason = idm_tuple(vm->rt, items, 2u, &ignore);
-    idm_error_clear(&ignore);
-    return reason;
-}
 
 static bool init_pattern_locals(Vm *vm, Frame *frame, const IdmBcFunction *fn, const IdmPatternBindings *bindings, IdmError *err) {
     for (uint32_t i = 0; i < fn->pattern_local_count; i++) {
@@ -399,7 +325,10 @@ static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err) {
         vm->sp = closure_index;
         return push(vm, out, err);
     }
-    if (!idm_is_closure(callee)) return idm_error_set(err, idm_span_unknown(NULL), "attempted to call a non-closure");
+    if (!idm_is_closure(callee)) {
+        idm_error_set(err, idm_span_unknown(NULL), "attempted to call a non-closure");
+        return idm_error_reason(vm->rt, err, "not-callable", 1, callee);
+    }
     uint32_t function_index = UINT32_MAX;
     IdmPatternBindings selected_bindings;
     idm_pattern_bindings_init(&selected_bindings);
@@ -423,7 +352,8 @@ static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err) {
                       (int)(args_buf.len < 160u ? args_buf.len : 160u), args_buf.data ? args_buf.data : "",
                       args_buf.len > 160u ? " ..." : "");
         idm_buf_destroy(&args_buf);
-        return false;
+        IdmValue args_tuple = idm_tuple(vm->rt, argc == 0 ? NULL : &vm->stack[closure_index + 1u], argc, NULL);
+        return idm_error_reason(vm->rt, err, "no-clause", 2, idm_atom(vm->rt, cname && cname[0] ? cname : "fn"), args_tuple);
     }
     const IdmBytecodeModule *callee_module = closure_module_or_current(vm, callee);
     const IdmBcFunction *fn = &callee_module->functions[function_index];
@@ -811,28 +741,20 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 break;
             }
             case IDM_OP_ADD:
+                if (!binary_prim(vm, IDM_PRIM_ADD, err)) return false;
+                break;
             case IDM_OP_SUB:
+                if (!binary_prim(vm, IDM_PRIM_SUB, err)) return false;
+                break;
             case IDM_OP_MUL:
-                if (!binary_int(vm, op, err)) return false;
+                if (!binary_prim(vm, IDM_PRIM_MUL, err)) return false;
                 break;
-            case IDM_OP_EQ: {
-                IdmValue b, a;
-                if (!pop(vm, &b, err) || !pop(vm, &a, err)) return false;
-                if (!push(vm, idm_atom(rt, idm_value_equal(a, b) ? "true" : "false"), err)) return false;
+            case IDM_OP_EQ:
+                if (!binary_prim(vm, IDM_PRIM_EQ, err)) return false;
                 break;
-            }
-            case IDM_OP_LT: {
-                IdmValue b, a;
-                if (!pop(vm, &b, err) || !pop(vm, &a, err)) return false;
-                bool an = a.tag == IDM_VAL_INT || a.tag == IDM_VAL_FLOAT;
-                bool bn = b.tag == IDM_VAL_INT || b.tag == IDM_VAL_FLOAT;
-                if (!an || !bn) return idm_error_set(err, idm_span_unknown(NULL), "LT expects numeric operands");
-                bool lt = (a.tag == IDM_VAL_FLOAT || b.tag == IDM_VAL_FLOAT)
-                    ? ((a.tag == IDM_VAL_FLOAT ? a.as.f : (double)a.as.i) < (b.tag == IDM_VAL_FLOAT ? b.as.f : (double)b.as.i))
-                    : (a.as.i < b.as.i);
-                if (!push(vm, idm_atom(rt, lt ? "true" : "false"), err)) return false;
+            case IDM_OP_LT:
+                if (!binary_prim(vm, IDM_PRIM_LT, err)) return false;
                 break;
-            }
             case IDM_OP_PRIM_CALL: {
                 uint32_t prim = module->code[frame->ip++];
                 uint32_t argc = module->code[frame->ip++];
@@ -1103,7 +1025,7 @@ static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue 
         if (vm->has_raised) {
             vm->has_raised = false;
         } else {
-            vm->raised = make_error_reason(vm, err);
+            vm->raised = idm_error_reason_value(vm->rt, err);
         }
         idm_error_clear(err);
         frame->ip = handler.catch_ip;

@@ -1,0 +1,7 @@
+package boxa
+
+export record box do
+  field v
+end
+
+export defn unbox b -> b.v

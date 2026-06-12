@@ -1,4 +1,4 @@
-implements std/shell
+implement std/shell
 p = printf hi &
 r1 = await p
 r2 = await p

@@ -44,18 +44,18 @@ static void test_surface_forms_are_kernel_sourced(void) {
 static void test_artifact_cache_relocation(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    check_value_written(&rt, "use tests/pkg/macropriv\nphase-answer x\n", "77");
-    check_value_written(&rt, "use tests/pkg/macropriv\ninc-private 41\n", "42");
+    check_value_written(&rt, "implement tests/pkg/macropriv\nphase-answer x\n", "77");
+    check_value_written(&rt, "implement tests/pkg/macropriv\ninc-private 41\n", "42");
     expect_expand_error_rt(&rt, "<cached-private-still-hidden>",
         "use tests/pkg/macropriv\n"
         "hidden 1\n",
         "unbound identifier 'hidden'");
-    check_value_written(&rt, "use tests/pkg/exporter\n3 <+> 4\nanswer x\n", "99");
-    check_value_written(&rt, "use tests/pkg/exporter\n3 <+> 4\n", "7");
+    check_value_written(&rt, "implement tests/pkg/exporter\n3 <+> 4\nanswer x\n", "99");
+    check_value_written(&rt, "implement tests/pkg/exporter\n3 <+> 4\n", "7");
     check_value_written(&rt,
-        "implements std/shell\n"
+        "implement std/shell\n"
         "x = do\n"
-        "  implements std/shell\n"
+        "  implement std/shell\n"
         "  1\n"
         "end\n"
         "add x 1\n",

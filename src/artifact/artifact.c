@@ -132,6 +132,36 @@ void idm_pkg_global_destroy(IdmPkgGlobal *global) {
     global->slot = 0;
 }
 
+void idm_pkg_protocol_destroy(IdmPkgProtocol *protocol) {
+    if (!protocol) return;
+    free(protocol->name);
+    free(protocol->identity);
+    for (size_t i = 0; i < protocol->method_count; i++) idm_protocol_method_def_destroy(&protocol->methods[i]);
+    free(protocol->methods);
+    memset(protocol, 0, sizeof(*protocol));
+}
+
+bool idm_protocol_method_defs_copy(const IdmProtocolMethodDef *src, size_t count, IdmProtocolMethodDef **out) {
+    *out = NULL;
+    if (count == 0) return true;
+    IdmProtocolMethodDef *methods = calloc(count, sizeof(*methods));
+    if (!methods) return false;
+    for (size_t i = 0; i < count; i++) {
+        methods[i].name = idm_strdup(src[i].name);
+        methods[i].arity = src[i].arity;
+        methods[i].has_default = src[i].has_default;
+        methods[i].seen_decl = src[i].seen_decl;
+        methods[i].exported = true;
+        if (!methods[i].name || !idm_scope_set_copy(&methods[i].scopes, &src[i].scopes)) {
+            for (size_t j = 0; j <= i; j++) idm_protocol_method_def_destroy(&methods[j]);
+            free(methods);
+            return false;
+        }
+    }
+    *out = methods;
+    return true;
+}
+
 void idm_artifact_destroy(IdmArtifact *art) {
     if (art->module) { idm_bc_destroy(art->module); free(art->module); }
     free(art->name);
@@ -154,6 +184,10 @@ void idm_artifact_destroy(IdmArtifact *art) {
     if (art->methods) {
         for (size_t i = 0; i < art->method_count; i++) idm_protocol_method_def_destroy(&art->methods[i]);
         free(art->methods);
+    }
+    if (art->protocols) {
+        for (size_t i = 0; i < art->protocol_count; i++) idm_pkg_protocol_destroy(&art->protocols[i]);
+        free(art->protocols);
     }
     idm_module_ref_release(art->resolver_module);
     idm_phase_env_release(art->resolver_phase_env);
@@ -287,7 +321,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 6u
+#define IDM_ARTIFACT_VERSION 8u
 
 static bool artifact_noop_register_operator(void *user, IdmRuntime *rt, const IdmSyntax *name, int64_t precedence, const char *assoc, const char *fixity, const IdmSyntax *target, IdmError *err) {
     (void)user; (void)rt; (void)name; (void)precedence; (void)assoc; (void)fixity; (void)target; (void)err;
@@ -313,6 +347,41 @@ static bool read_scope_set(IdmByteReader *r, IdmScopeSet *set) {
     for (uint32_t i = 0; i < n; i++) {
         IdmScopeId id = idm_rd_u32(r);
         if (!r->ok || !idm_scope_set_add(set, id)) return false;
+    }
+    return true;
+}
+
+static bool artifact_read_str(IdmByteReader *r, char **out, IdmError *err);
+
+static bool put_method_defs(IdmBuffer *out, const IdmProtocolMethodDef *methods, size_t count) {
+    if (!idm_buf_put_u32(out, (uint32_t)count)) return false;
+    for (size_t i = 0; i < count; i++) {
+        const IdmProtocolMethodDef *m = &methods[i];
+        if (!idm_buf_put_str(out, m->name, strlen(m->name)) || !idm_buf_put_u32(out, m->arity)) return false;
+        if (!idm_buf_put_u8(out, m->has_default ? 1u : 0u) || !idm_buf_put_u8(out, m->seen_decl ? 1u : 0u)) return false;
+        if (!put_scope_set(out, &m->scopes)) return false;
+    }
+    return true;
+}
+
+static bool read_method_defs(IdmByteReader *r, IdmProtocolMethodDef **out_methods, size_t *out_count, IdmError *err) {
+    uint32_t count = idm_rd_u32(r);
+    if (!r->ok) return false;
+    if (count == 0) return true;
+    IdmProtocolMethodDef *methods = calloc(count, sizeof(*methods));
+    if (!methods) return false;
+    *out_methods = methods;
+    for (uint32_t i = 0; i < count; i++) {
+        IdmProtocolMethodDef *m = &methods[i];
+        *out_count = i + 1u;
+        if (!artifact_read_str(r, &m->name, err)) return false;
+        m->arity = idm_rd_u32(r);
+        m->has_default = r->ok && idm_rd_u8(r) != 0;
+        m->seen_decl = r->ok && idm_rd_u8(r) != 0;
+        if (!r->ok) return false;
+        m->exported = true;
+        idm_scope_set_init(&m->scopes);
+        if (!read_scope_set(r, &m->scopes)) return false;
     }
     return true;
 }
@@ -375,12 +444,12 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
         if (!idm_buf_put_str(out, art->macros[i].name, strlen(art->macros[i].name)) || !idm_buf_put_u32(out, art->macros[i].function_index)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!put_module_blob(out, &art->macros[i].module->module, err)) return false;
     }
-    ok = idm_buf_put_u32(out, (uint32_t)art->method_count);
-    for (size_t i = 0; ok && i < art->method_count; i++) {
-        const IdmProtocolMethodDef *m = &art->methods[i];
-        ok = idm_buf_put_str(out, m->name, strlen(m->name)) && idm_buf_put_u32(out, m->arity);
-        ok = ok && idm_buf_put_u8(out, m->has_default ? 1u : 0u) && idm_buf_put_u8(out, m->seen_decl ? 1u : 0u);
-        ok = ok && put_scope_set(out, &m->scopes);
+    ok = put_method_defs(out, art->methods, art->method_count);
+    ok = ok && idm_buf_put_u32(out, (uint32_t)art->protocol_count);
+    for (size_t i = 0; ok && i < art->protocol_count; i++) {
+        const IdmPkgProtocol *p = &art->protocols[i];
+        ok = idm_buf_put_str(out, p->name, strlen(p->name)) && idm_buf_put_str(out, p->identity, strlen(p->identity));
+        ok = ok && put_method_defs(out, p->methods, p->method_count);
     }
     if (!ok) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u8(out, art->resolver_module ? 1u : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -515,22 +584,17 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             }
         }
     }
-    uint32_t method_count = ok ? idm_rd_u32(&r) : 0;
+    if (ok) ok = read_method_defs(&r, &out->methods, &out->method_count, err);
+    uint32_t protocol_count = ok ? idm_rd_u32(&r) : 0;
     if (ok && !r.ok) ok = false;
-    if (ok && method_count != 0) {
-        out->methods = calloc(method_count, sizeof(*out->methods));
-        if (!out->methods) ok = false;
-        for (uint32_t i = 0; ok && i < method_count; i++) {
-            IdmProtocolMethodDef *m = &out->methods[i];
-            out->method_count = i + 1u;
-            ok = artifact_read_str(&r, &m->name, err);
-            m->arity = ok ? idm_rd_u32(&r) : 0;
-            m->has_default = ok && idm_rd_u8(&r) != 0;
-            m->seen_decl = ok && idm_rd_u8(&r) != 0;
-            if (ok && !r.ok) ok = false;
-            m->exported = true;
-            idm_scope_set_init(&m->scopes);
-            if (ok) ok = read_scope_set(&r, &m->scopes);
+    if (ok && protocol_count != 0) {
+        out->protocols = calloc(protocol_count, sizeof(*out->protocols));
+        if (!out->protocols) ok = false;
+        for (uint32_t i = 0; ok && i < protocol_count; i++) {
+            IdmPkgProtocol *p = &out->protocols[i];
+            out->protocol_count = i + 1u;
+            ok = artifact_read_str(&r, &p->name, err) && artifact_read_str(&r, &p->identity, err);
+            if (ok) ok = read_method_defs(&r, &p->methods, &p->method_count, err);
         }
     }
     uint8_t has_resolver = ok ? idm_rd_u8(&r) : 0;
@@ -592,11 +656,13 @@ static bool artifact_run_phase_inits(IdmRuntime *rt, const IdmArtifact *art, Idm
     const IdmPhaseEnv *env = art->phase_env;
     if (!env || env->module_count == 0) return true;
     IdmNamespace *old_main_ns = rt->main_ns;
+    int old_protocol_phase = rt->protocol_phase;
     void *old_op_user = rt->register_operator_user;
     IdmRegisterOperatorFn old_op = rt->register_operator;
     void *old_mac_user = rt->register_macro_user;
     IdmRegisterMacroFn old_mac = rt->register_macro;
     rt->main_ns = env->ns;
+    rt->protocol_phase = 1;
     rt->register_operator_user = NULL;
     rt->register_operator = artifact_noop_register_operator;
     rt->register_macro_user = NULL;
@@ -607,6 +673,7 @@ static bool artifact_run_phase_inits(IdmRuntime *rt, const IdmArtifact *art, Idm
         ok = idm_vm_run(rt, env->modules[i], env->module_main_fns[i], &ignored, err);
     }
     rt->main_ns = old_main_ns;
+    rt->protocol_phase = old_protocol_phase;
     rt->register_operator_user = old_op_user;
     rt->register_operator = old_op;
     rt->register_macro_user = old_mac_user;

@@ -1,0 +1,18 @@
+protocol OpCarrier do
+  defn opmul a b -> mul a b
+  operator <%%> precedence: 50 assoc: left fixity: infix -> opmul
+end
+protocol UsesOp do
+  export defmacro squarish stx do syntax-case stx do
+    (_ x) -> %`(%,x <%%> %,x)
+  end end
+end
+r = do
+  implement OpCarrier
+  implement UsesOp
+  squarish 6
+end
+implement OpCarrier
+implement UsesOp
+println (squarish 7)
+inspect r

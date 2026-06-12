@@ -1,4 +1,5 @@
 use std/test
+implement std/test
 
 suite do
   test "qq-splice" do
@@ -40,7 +41,7 @@ suite do
   end
   test "splice-import" do
     got = do
-      use tests/pkg/splicemak
+      implement tests/pkg/splicemak
       defdouble dbl
       dbl 21
     end

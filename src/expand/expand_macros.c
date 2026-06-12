@@ -14,10 +14,13 @@ bool run_phase_core(ExpandContext *ctx, IdmCore *core, IdmError *err) {
         return false;
     }
     IdmNamespace *old_main_ns = ctx->rt->main_ns;
+    int old_protocol_phase = ctx->rt->protocol_phase;
     if (ctx->phase_ns) ctx->rt->main_ns = ctx->phase_ns;
+    ctx->rt->protocol_phase = 1;
     IdmValue ignored = idm_nil();
     bool ok = idm_vm_run(ctx->rt, module, main_fn, &ignored, err);
     ctx->rt->main_ns = old_main_ns;
+    ctx->rt->protocol_phase = old_protocol_phase;
     if (ok) {
         if (!idm_phase_env_add_module(ctx->phase_env, module, main_fn)) {
             idm_bc_destroy(module);
@@ -38,7 +41,7 @@ bool resolve_transformer(ExpandContext *ctx, const IdmSyntax *head, uint32_t *ou
     idm_scope_set_init(&empty);
     const IdmScopeSet *lookup_scopes = scopes ? scopes : &empty;
     const IdmBinding *binding = NULL;
-    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, head->as.text, 0, IDM_BIND_SPACE_DEFAULT, lookup_scopes, &binding);
+    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, head->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, lookup_scopes, &binding);
     idm_scope_set_destroy(&empty);
     if (status == IDM_RESOLVE_AMBIGUOUS) {
         expand_error(err, head->span, "ambiguous transformer '%s'", head->as.text);
@@ -78,12 +81,15 @@ bool local_macro_invoke(void *user, IdmRuntime *rt, uint32_t payload, const IdmS
     if (err && err->present) return false;
     IdmValue result = idm_nil();
     IdmNamespace *old_main_ns = rt->main_ns;
+    int old_protocol_phase = rt->protocol_phase;
     IdmNamespace *macro_ns = ctx->macros[payload].phase_env ? ctx->macros[payload].phase_env->ns : ctx->macros[payload].phase_ns;
     if (macro_ns) rt->main_ns = macro_ns;
+    rt->protocol_phase = 1;
     bool ok = ctx->macros[payload].closure_backed
         ? idm_vm_call_closure(rt, ctx->macros[payload].transformer, &arg, 1, &result, err)
         : idm_vm_call_function(rt, &ctx->macros[payload].module->module, ctx->macros[payload].function_index, &arg, 1, &result, err);
     rt->main_ns = old_main_ns;
+    rt->protocol_phase = old_protocol_phase;
     if (!ok) return false;
     const IdmSyntax *result_syntax = idm_syntax_get(result, err);
     if (!result_syntax) return false;
@@ -218,6 +224,15 @@ IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items
         idm_syn_free(use);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
     }
+    for (int phase = 0; phase < 2; phase++) {
+        const IdmScopeSet *scopes = idm_syn_scope_set(items[start], phase);
+        for (size_t i = 0; scopes && i < scopes->count; i++) {
+            if (!idm_syn_scope_add(use, phase, scopes->items[i])) {
+                idm_syn_free(use);
+                return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+            }
+        }
+    }
     for (size_t i = start; i < end; i++) {
         IdmSyntax *item = idm_syn_clone(items[i]);
         if (!item || !idm_syn_append(use, item)) {
@@ -241,7 +256,6 @@ bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *f
     if (!name) return idm_error_set(err, span, "defmacro name must be an identifier");
     if (!fn || fn->kind != IDM_CORE_FN) return idm_error_set(err, span, "defmacro must compile to a transformer function");
     if (fn->as.fn.arity != 1) return idm_error_set(err, span, "defmacro transformer must accept exactly one syntax argument");
-    if (fn->as.fn.capture_count != 0) return idm_error_set(err, span, "defmacro transformer captures require phase environment support");
     if (ctx->macro_count == ctx->macro_cap) {
         size_t cap = ctx->macro_cap ? ctx->macro_cap * 2u : 4u;
         MacroDef *macros = realloc(ctx->macros, cap * sizeof(*macros));
@@ -271,7 +285,7 @@ bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *f
         macro_def_destroy(macro);
         return idm_error_oom(err, span);
     }
-    if (!idm_binding_table_add(&ctx->bindings, name, 0, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, ctx->frame, NULL)) {
         idm_scope_set_destroy(&scopes);
         macro_def_destroy(macro);
         return idm_error_oom(err, span);
@@ -337,7 +351,7 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
         macro_def_destroy(macro);
         return idm_error_oom(err, name_syntax->span);
     }
-    if (!idm_binding_table_add(&ctx->bindings, name, 0, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, ctx->frame, NULL)) {
         idm_scope_set_destroy(&scopes);
         macro_def_destroy(macro);
         return idm_error_oom(err, name_syntax->span);
@@ -347,7 +361,9 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
     return true;
 }
 
-bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, IdmError *err) {
+bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
+    int guard = surface_install_guard(ctx, provider, provider_key, name, name, IDM_BIND_SPACE_DEFAULT, scopes ? scopes : &ctx->empty_scopes, err);
+    if (guard <= 0) return guard == 0;
     if (ctx->macro_count == ctx->macro_cap) {
         size_t cap = ctx->macro_cap ? ctx->macro_cap * 2u : 4u;
         MacroDef *macros = realloc(ctx->macros, cap * sizeof(*macros));
@@ -365,7 +381,7 @@ bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScope
     macro->phase_env = idm_phase_env_retain(phase_env ? phase_env : ctx->phase_env);
     macro->exported = false;
     uint32_t payload = (uint32_t)ctx->macro_count;
-    if (!idm_binding_table_add(&ctx->bindings, name, 0, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, scopes ? scopes : &ctx->empty_scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, scopes ? scopes : &ctx->empty_scopes, payload, ctx->frame, NULL)) {
         macro_def_destroy(macro);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
@@ -373,8 +389,14 @@ bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScope
     return true;
 }
 
-bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, IdmError *err) {
-    if (!register_operator(ctx, op->name, op->precedence, op->assoc, op->fixity, op->target_kind, op->primitive, op->target_name, &op->scopes, err)) return false;
+bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err) {
+    if (!binding_scopes) binding_scopes = &ctx->empty_scopes;
+    char *key = operator_binding_key(op->name, op->fixity);
+    if (!key) return idm_error_oom(err, idm_span_unknown(NULL));
+    int guard = surface_install_guard(ctx, provider, provider_key, key, op->name, IDM_BIND_SPACE_OPERATOR, binding_scopes, err);
+    free(key);
+    if (guard <= 0) return guard == 0;
+    if (!register_operator(ctx, op->name, op->precedence, op->assoc, op->fixity, op->target_kind, op->primitive, op->target_name, &op->scopes, binding_scopes, err)) return false;
     ctx->operators[ctx->operator_count - 1u].exported = false;
     return true;
 }
@@ -419,5 +441,20 @@ bool register_operator_callback(void *user, IdmRuntime *rt, const IdmSyntax *nam
         tk = IDM_OP_TGT_NAMED;
         target_name = target;
     }
-    return register_operator(ctx, name, (uint8_t)precedence, assoc, fixity, tk, prim, target_name, NULL, err);
+    IdmScopeSet decl_scopes;
+    if (!binder_scopes_pruned(ctx, name_syntax, &decl_scopes)) return idm_error_oom(err, name_syntax->span);
+    IdmScopeSet target_scopes;
+    if (!syntax_scopes_copy(&target_scopes, target_syntax)) {
+        idm_scope_set_destroy(&decl_scopes);
+        return idm_error_oom(err, target_syntax->span);
+    }
+    if (ctx->rt->macro_intro_active && !idm_scope_set_flip(&target_scopes, ctx->rt->macro_intro_scope)) {
+        idm_scope_set_destroy(&decl_scopes);
+        idm_scope_set_destroy(&target_scopes);
+        return idm_error_oom(err, target_syntax->span);
+    }
+    bool ok = register_operator(ctx, name, (uint8_t)precedence, assoc, fixity, tk, prim, target_name, tk == IDM_OP_TGT_NAMED ? &target_scopes : &decl_scopes, &decl_scopes, err);
+    idm_scope_set_destroy(&decl_scopes);
+    idm_scope_set_destroy(&target_scopes);
+    return ok;
 }

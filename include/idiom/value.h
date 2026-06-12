@@ -94,6 +94,18 @@ typedef struct {
 } IdmRuntimeProtocolConformance;
 
 typedef struct {
+    IdmRuntimeProtocolMethod *methods;
+    size_t method_count;
+    size_t method_cap;
+    IdmRuntimeProtocolImpl *impls;
+    size_t impl_count;
+    size_t impl_cap;
+    IdmRuntimeProtocolConformance *conformances;
+    size_t conformance_count;
+    size_t conformance_cap;
+} IdmProtocolWorld;
+
+typedef struct {
     IdmSymbol **symbols;
     size_t count;
     size_t cap;
@@ -134,15 +146,8 @@ struct IdmRuntime {
     size_t ns_count;
     size_t ns_cap;
     IdmNamespace *main_ns;
-    IdmRuntimeProtocolMethod *protocol_methods;
-    size_t protocol_method_count;
-    size_t protocol_method_cap;
-    IdmRuntimeProtocolImpl *protocol_impls;
-    size_t protocol_impl_count;
-    size_t protocol_impl_cap;
-    IdmRuntimeProtocolConformance *protocol_conformances;
-    size_t protocol_conformance_count;
-    size_t protocol_conformance_cap;
+    IdmProtocolWorld protocol_worlds[2];
+    int protocol_phase;
     const IdmBytecodeModule **gc_modules;
     size_t gc_module_count;
     size_t gc_module_cap;
@@ -250,5 +255,8 @@ const char *idm_string_bytes(IdmValue value);
 size_t idm_string_length(IdmValue value);
 bool idm_value_equal(IdmValue a, IdmValue b);
 bool idm_value_write(IdmBuffer *buf, IdmValue value);
+bool idm_error_reason(IdmRuntime *rt, IdmError *err, const char *kind, size_t count, ...);
+bool idm_error_take_reason(IdmError *err, IdmValue *out);
+IdmValue idm_error_reason_value(IdmRuntime *rt, IdmError *err);
 
 #endif

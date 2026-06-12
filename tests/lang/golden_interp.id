@@ -1,9 +1,10 @@
 use std/test
+implement std/test
 
 suite do
   test "interp-cmd" do
     got = do
-      implements std/shell
+      implement std/shell
       "out:$(echo hi)"
     end
     assert-inspect got "\"out:hi\""

@@ -139,7 +139,8 @@ typedef enum {
     IDM_PRIM_DICT_KEYS,
     IDM_PRIM_DICT_VALS,
     IDM_PRIM_DICT_HAS,
-    IDM_PRIM_DICT_SIZE
+    IDM_PRIM_DICT_SIZE,
+    IDM_PRIM_RECORD_NEW
 } IdmPrimitive;
 
 typedef struct {

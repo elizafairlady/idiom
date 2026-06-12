@@ -1,2 +1,2 @@
-implements std/shell
+implement std/shell
 echo phase9-foreground

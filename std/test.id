@@ -53,7 +53,7 @@ end
 
 export defn assert-expand-error do
   source expected -> match (expand-check source) do
-    {:error msg} ->
+    {:error {:expand msg}} ->
       if (str-contains? msg expected) do
         :ok
       else do
@@ -66,7 +66,7 @@ end
 export defn assert-compiles do
   source -> match (expand-check source) do
     :ok -> :ok
-    {:error msg} -> error (tuple :assert-compiles :failed msg :source source)
+    {:error {:expand msg}} -> error (tuple :assert-compiles :failed msg :source source)
   end
 end
 

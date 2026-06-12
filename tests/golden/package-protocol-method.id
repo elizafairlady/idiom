@@ -1,4 +1,4 @@
-implements tests/pkg/protomethod
+implement tests/pkg/protomethod
 extend int with tests/pkg/protomethod do
   method tag x -> :int
 end

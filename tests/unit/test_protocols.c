@@ -7,7 +7,7 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "protocol ShowDefault do\n"
         "  method show x -> str \"default:\" x\n"
         "end\n"
-        "implements ShowDefault\n"
+        "implement ShowDefault\n"
         "extend int with ShowDefault do\n"
         "end\n"
         "show 42\n",
@@ -16,7 +16,7 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "protocol ShowOverride do\n"
         "  method show x -> str \"default:\" x\n"
         "end\n"
-        "implements ShowOverride\n"
+        "implement ShowOverride\n"
         "extend int with ShowOverride do\n"
         "  method show x -> str \"int:\" x\n"
         "end\n"
@@ -26,7 +26,7 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "protocol ShowDot do\n"
         "  method show x\n"
         "end\n"
-        "implements ShowDot\n"
+        "implement ShowDot\n"
         "extend int with ShowDot do\n"
         "  method show x -> str \"dot:\" x\n"
         "end\n"
@@ -36,13 +36,13 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "protocol Eqish do\n"
         "  method same a b -> eq? a b\n"
         "end\n"
-        "implements Eqish\n"
+        "implement Eqish\n"
         "extend int with Eqish do\n"
         "end\n"
         "same 4 4\n",
         ":true");
     check_value_written(&rt,
-        "implements tests/pkg/protomethod\n"
+        "implement tests/pkg/protomethod\n"
         "extend int with tests/pkg/protomethod do\n"
         "  method tag x -> :int\n"
         "end\n"
@@ -53,9 +53,9 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "protocol NeedsExtend do\n"
         "  method show x -> str x\n"
         "end\n"
-        "implements NeedsExtend\n"
+        "implement NeedsExtend\n"
         "show 42\n",
-        "does not extend protocol 'NeedsExtend'");
+        "does not extend protocol 'NeedsExtend#");
     expect_runtime_error_contains(&rt, "<duplicate-extend-runtime>",
         "protocol DupExtend do\n"
         "  method show x -> str x\n"
@@ -64,7 +64,7 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "end\n"
         "extend int with DupExtend do\n"
         "end\n",
-        "already extends protocol 'DupExtend'");
+        "already extends protocol 'DupExtend#");
     idm_runtime_destroy(&rt);
 }
 
@@ -95,7 +95,7 @@ static void test_protocol_method_expansion_boundaries(void) {
         "  method show x -> str x\n"
         "end\n"
         "do\n"
-        "  implements ScopedShow\n"
+        "  implement ScopedShow\n"
         "  show 1\n"
         "end\n"
         "show 1\n",
@@ -114,7 +114,7 @@ static void test_protocol_bytecode_roundtrip(void) {
         "protocol RoundShow do\n"
         "  method show x -> str \"round:\" x\n"
         "end\n"
-        "implements RoundShow\n"
+        "implement RoundShow\n"
         "extend int with RoundShow do\n"
         "end\n"
         "show 5\n";
@@ -200,11 +200,12 @@ static void test_records_on_protocol_dispatch(void) {
         "extend UserLabel with LabelFor do\n"
         "  method label-of u -> str \"user:\" (u.name)\n"
         "end\n"
-        "implements LabelFor\n"
+        "implement LabelFor\n"
         "{(label-of (PointLabel 7)) (label-of (UserLabel \"ada\"))}\n",
         "{\"point:7\" \"user:ada\"}");
     check_value_written(&rt,
         "use tests/pkg/recordbox\n"
+        "implement tests/pkg/recordbox\n"
         "b = Box 42 \"answer\"\n"
         "{(b.value) (label b) (Box? b)}\n",
         "{42 \"answer\" :true}");
@@ -215,9 +216,9 @@ static void test_records_on_protocol_dispatch(void) {
         "record NeedsRecord do\n"
         "  field x\n"
         "end\n"
-        "implements NeedsRecordExtend\n"
+        "implement NeedsRecordExtend\n"
         "label (NeedsRecord 1)\n",
-        "does not extend protocol 'NeedsRecordExtend'");
+        "does not extend protocol 'NeedsRecordExtend#");
     idm_runtime_destroy(&rt);
 }
 
@@ -299,21 +300,109 @@ static void test_record_ishc_roundtrip(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_protocol_identity_semantics(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    expect_runtime_error_contains(&rt, "<local-protocols-do-not-share-dispatch>",
+        "mk-a = fn _ig do\n"
+        "  protocol P do\n"
+        "    method size x\n"
+        "  end\n"
+        "  implement P\n"
+        "  extend int with P do\n"
+        "    method size n -> 111\n"
+        "  end\n"
+        "  size 5\n"
+        "end\n"
+        "mk-b = fn _ig do\n"
+        "  protocol P do\n"
+        "    method size x\n"
+        "  end\n"
+        "  implement P\n"
+        "  extend string with P do\n"
+        "    method size s -> 222\n"
+        "  end\n"
+        "  add (size \"hello\") (size 5)\n"
+        "end\n"
+        "add (mk-a 0) (mk-b 0)\n",
+        "type 'int' does not extend protocol 'P#");
+    check_value_written(&rt,
+        "protocol Q do\n"
+        "  method qa x\n"
+        "end\n"
+        "implement Q\n"
+        "extend int with Q do\n"
+        "  method qa x -> 7\n"
+        "end\n"
+        "qa 1\n",
+        "7");
+    expect_runtime_error_contains(&rt, "<changed-contract-is-a-distinct-protocol>",
+        "protocol Q do\n"
+        "  method qa x y\n"
+        "end\n"
+        "implement Q\n"
+        "qa 1 2\n",
+        "type 'int' does not extend protocol 'Q#");
+    check_value_written(&rt,
+        "implement tests/pkg/protomethod\n"
+        "implement tests/pkg/protomethod\n"
+        "extend int with tests/pkg/protomethod do\n"
+        "  method tag x -> :int\n"
+        "end\n"
+        "describe 7\n",
+        "\"pkg:7\"");
+    IdmError err;
+    idm_error_init(&err);
+    IdmProtocolMethodSpec contract_v1 = {"m", 1u, false, idm_nil()};
+    IdmProtocolMethodSpec contract_v2 = {"m", 2u, false, idm_nil()};
+    CHECK(idm_protocol_define(&rt, "redef/X#1", &contract_v1, 1u, &err));
+    CHECK(!err.present);
+    CHECK(!idm_protocol_define(&rt, "redef/X#1", &contract_v2, 1u, &err));
+    IdmBuffer reason;
+    idm_buf_init(&reason);
+    CHECK(idm_value_write(&reason, idm_error_reason_value(&rt, &err)));
+    CHECK_STR(reason.data, "{:error {:protocol-redefinition :redef/X#1}}");
+    idm_buf_destroy(&reason);
+    idm_error_clear(&err);
+    expect_expand_error_rt(&rt, "<shadowed-protocol-activation-collides>",
+        "protocol G do\n"
+        "  method gee x -> 1\n"
+        "end\n"
+        "implement G\n"
+        "protocol G do\n"
+        "  method gee x -> 2\n"
+        "end\n"
+        "implement G\n"
+        "gee 1\n",
+        "' is already active in this context; activating 'G#");
+    expect_runtime_error_contains(&rt, "<make-record-rejects-reserved-hash>",
+        "make-record \"x#1\" (dict)\n",
+        "make-record type must not contain '#'");
+    check_value_written(&rt,
+        "record Plain do\n"
+        "  field v\n"
+        "end\n"
+        "raw = make-record \"Plain\" (dict :v 9)\n"
+        "{(Plain? (Plain 9)) (Plain? raw)}\n",
+        "{:true :false}");
+    idm_runtime_destroy(&rt);
+}
+
 static void test_dsl_protocol_scoping(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    expect_expand_error_rt(&rt, "<html-needs-implements>",
+    expect_expand_error_rt(&rt, "<html-needs-implement>",
         "h1 \"Title\"\n",
         "unbound identifier 'h1'");
     expect_expand_error_rt(&rt, "<html-scoped-deactivation>",
         "x = do\n"
-        "  implements tests/pkg/htmldsl\n"
+        "  implement tests/pkg/htmldsl\n"
         "  h1 \"inside\"\n"
         "end\n"
         "h1 \"outside\"\n",
         "unbound identifier 'h1'");
     check_value_written(&rt,
-        "implements tests/pkg/htmldsl\n"
+        "implement tests/pkg/htmldsl\n"
         "div 10 2\n",
         "5");
     idm_runtime_destroy(&rt);
@@ -326,5 +415,6 @@ void run_protocol_suite(void) {
     test_records_on_protocol_dispatch();
     test_record_expansion_boundaries();
     test_record_ishc_roundtrip();
+    test_protocol_identity_semantics();
     test_dsl_protocol_scoping();
 }

@@ -830,6 +830,7 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_DICT_HAS] = {"dict-has?", 2, 2},
     [IDM_PRIM_DICT_SIZE] = {"dict-size", 1, 1},
     [IDM_PRIM_RECORD_FIELD] = {"record-field", 2, 2},
+    [IDM_PRIM_RECORD_NEW] = {"%record-new", 2, 2},
 };
 
 size_t idm_primitive_count(void) {
@@ -1125,20 +1126,24 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             return true;
         }
         case IDM_CORE_USE_PACKAGE: {
-            size_t skip_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &skip_op)) return idm_error_oom(err, core->span);
-            uint32_t const_off = 0;
             uint32_t fn_off = 0;
-            uint32_t code_off = 0;
-            if (!idm_bc_link(module, core->as.use_package.module, &const_off, &fn_off, &code_off, err)) return false;
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, skip_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch package skip jump");
+            if (core->as.use_package.module) {
+                size_t skip_op = 0;
+                if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &skip_op)) return idm_error_oom(err, core->span);
+                uint32_t const_off = 0;
+                uint32_t code_off = 0;
+                if (!idm_bc_link(module, core->as.use_package.module, &const_off, &fn_off, &code_off, err)) return false;
+                if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
+                if (!idm_bc_patch_u32(module, skip_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch package skip jump");
+            }
             uint32_t name_index = 0;
             if (!idm_bc_add_const(module, core->as.use_package.name, &name_index)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit_u32(module, IDM_OP_ENTER_NAMESPACE, name_index, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_u32(module, IDM_OP_MAKE_CLOSURE, fn_off + core->as.use_package.init_fn, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_u32(module, IDM_OP_CALL, 0u, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+            if (core->as.use_package.module) {
+                if (!idm_bc_emit_u32(module, IDM_OP_MAKE_CLOSURE, fn_off + core->as.use_package.init_fn, NULL)) return idm_error_oom(err, core->span);
+                if (!idm_bc_emit_u32(module, IDM_OP_CALL, 0u, NULL)) return idm_error_oom(err, core->span);
+                if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+            }
             for (size_t i = 0; i < core->as.use_package.export_count; i++) {
                 if (!idm_bc_emit_u32(module, IDM_OP_IMPORT_GLOBAL, core->as.use_package.export_src[i], NULL)) return idm_error_oom(err, core->span);
                 if (!idm_bc_emit(module, core->as.use_package.export_dst[i], NULL)) return idm_error_oom(err, core->span);

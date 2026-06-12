@@ -1,4 +1,5 @@
 use std/test
+implement std/test
 
 suite do
   test "if-chain" do

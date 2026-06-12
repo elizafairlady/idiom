@@ -1,0 +1,4 @@
+package exporter2
+operator <+> precedence: 6 assoc: left fixity: infix -> sub
+export defmacro answer s -> (make-syntax-int s 7)
+export defn who x -> :second

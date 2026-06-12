@@ -2,7 +2,7 @@ protocol Show do
   method show x
 end
 
-implements Show
+implement Show
 extend int with Show do
   method show x -> str "int:" x
 end

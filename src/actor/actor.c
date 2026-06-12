@@ -524,12 +524,6 @@ static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason) {
 }
 
 static IdmValue crash_reason_from_err(IdmScheduler *sched, IdmError *err) {
-    IdmValue message;
-    if (err->present && err->message) {
-        message = idm_string(sched->rt, err->message, NULL);
-    } else {
-        message = idm_string(sched->rt, "actor crashed", NULL);
-    }
     if (err->present && err->notes) {
         free(sched->crash_notes);
         sched->crash_notes = idm_strdup(err->notes);
@@ -537,14 +531,8 @@ static IdmValue crash_reason_from_err(IdmScheduler *sched, IdmError *err) {
     if (err->present && err->span.line != 0 && sched->crash_span.line == 0) {
         sched->crash_span = err->span;
     }
+    IdmValue reason = idm_error_reason_value(sched->rt, err);
     idm_error_clear(err);
-    IdmValue items[2];
-    items[0] = idm_atom(sched->rt, "error");
-    items[1] = message;
-    IdmError ignore;
-    idm_error_init(&ignore);
-    IdmValue reason = idm_tuple(sched->rt, items, 2u, &ignore);
-    idm_error_clear(&ignore);
     return reason;
 }
 

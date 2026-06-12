@@ -1,4 +1,5 @@
 use std/test
+implement std/test
 use std/file
 use std/enum
 

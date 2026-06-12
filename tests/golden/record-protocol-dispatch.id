@@ -18,6 +18,6 @@ extend User with Label do
   method label-of u -> str "user:" (u.name)
 end
 
-implements Label
+implement Label
 println (label-of (Point 7))
 println (label-of (User "ada"))

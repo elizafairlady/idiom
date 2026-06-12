@@ -1,0 +1,6 @@
+defmacro defop stx -> %`(do
+  defn hidden-target a b -> mul a b
+  operator %,(syntax-nth stx 2) precedence: 50 assoc: left fixity: infix -> hidden-target
+end)
+defop <*+>
+inspect (6 <*+> 7)

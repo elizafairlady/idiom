@@ -1,0 +1,48 @@
+use std/test
+implement std/test
+
+suite do
+  test "inline implement protocol matches the two-statement form" do
+    a = do
+      implement protocol Q do
+        defn qmul a b -> mul a b
+        method qsize x
+        operator <*!> precedence: 50 assoc: left fixity: infix -> qmul
+      end
+      extend int with Q do
+        method qsize n -> 11
+      end
+      tuple (qsize 3) (3 <*!> 4)
+    end
+    b = do
+      protocol Q do
+        defn qmul a b -> mul a b
+        method qsize x
+        operator <*!> precedence: 50 assoc: left fixity: infix -> qmul
+      end
+      implement Q
+      extend int with Q do
+        method qsize n -> 11
+      end
+      tuple (qsize 3) (3 <*!> 4)
+    end
+    assert-eq a b
+    assert-inspect a "{11 12}"
+  end
+  test "extend works against an inline-declared protocol" do
+    got = do
+      implement protocol R do
+        method tagit x
+      end
+      extend string with R do
+        method tagit s -> :str
+      end
+      tagit "x"
+    end
+    assert-inspect got ":str"
+  end
+  test "inline implement rolls back outside its block" do
+    assert-expand-error "do\n  implement protocol S do\n    method sz x\n  end\n  :ok\nend\nsz 1" "unbound identifier 'sz'"
+    assert-expand-error "do\n  implement protocol S do\n    defn shelp a -> a\n    operator <!!> precedence: 50 assoc: left fixity: infix -> shelp\n  end\n  :ok\nend\n1 <!!> 2" "unbound identifier"
+  end
+end

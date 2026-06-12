@@ -1,0 +1,3 @@
+package sizeb
+
+method size x -> 222

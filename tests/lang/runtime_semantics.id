@@ -1,11 +1,70 @@
 use std/test
+implement std/test
 
 suite do
   test "integer-overflow-traps" do
-    assert-eq (assert-raises (fn _ig do 9223372036854775807 + 1 end)) (tuple :error "integer overflow in ADD")
-    assert-eq (assert-raises (fn _ig do 0 - 9223372036854775807 - 2 end)) (tuple :error "integer overflow in SUB")
-    assert-eq (assert-raises (fn _ig do 4611686018427387904 * 4 end)) (tuple :error "integer overflow in MUL")
-    assert-eq (assert-raises (fn _ig do 2 ** 64 end)) (tuple :error "integer overflow in pow")
+    assert-eq (assert-raises (fn _ig do 9223372036854775807 + 1 end)) {:error {:overflow :add}}
+    assert-eq (assert-raises (fn _ig do 0 - 9223372036854775807 - 2 end)) {:error {:overflow :sub}}
+    assert-eq (assert-raises (fn _ig do 4611686018427387904 * 4 end)) {:error {:overflow :mul}}
+    assert-eq (assert-raises (fn _ig do 2 ** 64 end)) {:error {:overflow :pow}}
+    int-min = 0 - 9223372036854775807 - 1
+    assert-eq (assert-raises (fn _ig do neg int-min end)) {:error {:overflow :neg}}
+    assert-eq (assert-raises (fn _ig do int-min / -1 end)) {:error {:overflow :div}}
+    assert-eq (assert-raises (fn _ig do int-min % -1 end)) {:error {:overflow :mod}}
+  end
+  test "one-arithmetic" do
+    assert-eq (1 + 2.5) 3.5
+    assert-eq (add 1 2.5) 3.5
+    assert-eq (apply &add (list 1 2.5)) 3.5
+    assert-eq (2.0 * 2) 4.0
+    assert-eq (1.5 < 2) :true
+    assert-eq (lte? 2 2.0) :true
+    assert-eq (gt? 2.5 2) :true
+    assert-eq (gte? 2 2.5) :false
+    assert-eq (1 == 1.0) :false
+  end
+  test "error-shapes" do
+    assert-eq (assert-raises (fn _ig do add 1 :nope end)) {:error {:type-error :add 1 :nope}}
+    assert-eq (assert-raises (fn _ig do 1 < :nope end)) {:error {:type-error :lt? 1 :nope}}
+    assert-eq (assert-raises (fn _ig do 1 / 0 end)) {:error {:div-by-zero :div}}
+    assert-eq (assert-raises (fn _ig do 1 % 0 end)) {:error {:div-by-zero :mod}}
+    assert-eq (assert-raises (fn _ig do first :nope end)) {:error {:type-error :first :nope}}
+    assert-eq (assert-raises (fn _ig do apply 5 (list 1) end)) {:error {:not-callable 5}}
+    assert-eq (assert-raises (fn _ig do apply &str-len (list "a" "b") end)) {:error {:arity :str-len 2 1 1}}
+    assert-eq (assert-raises (fn _ig do tuple-get {1 2} 5 end)) {:error {:index-out-of-range 5}}
+    got = assert-raises (fn _ig do
+      defn just-one 1 -> :one
+      just-one 2
+    end)
+    assert-eq got {:error {:no-clause :just-one {2}}}
+  end
+  test "error-macro-arities" do
+    assert-eq (assert-raises (fn _ig do error :bad end)) {:error :bad}
+    assert-eq (assert-raises (fn _ig do error :bad 42 end)) {:error {:bad 42}}
+    got = try do
+      error :code 7 :extra
+      :unreached
+      rescue r -> match r do
+        {:error {:code n more}} -> tuple n more
+      end
+    end
+    assert-eq got {7 :extra}
+  end
+  test "float-prints-distinguishably" do
+    assert-inspect 1.0 "1.0"
+    assert-inspect 2.5 "2.5"
+    assert-inspect (neg 2.0) "-2.0"
+    assert-inspect (2.0 * 2) "4.0"
+    assert-inspect (1.0 / 2) "0.5"
+    assert-inspect 1 "1"
+  end
+  test "dict-equality-structural" do
+    assert-eq (dict :a 1 :b 2) (dict :b 2 :a 1)
+    m = dict :a 1 :b 2
+    assert-eq m (dict-put m :a (dict-get m :a :nil))
+    assert-neq (dict :a 1) (dict :a 1 :b 2)
+    assert-neq (dict :a 1) (dict :a 2)
+    assert-inspect (dict-put (dict :a 1 :b 2) :a 9) "%{:a 9 :b 2}"
   end
   test "strings-are-bytes" do
     assert-eq (str-len "héllo") 6
@@ -42,7 +101,7 @@ suite do
       pick 1
     end)
     match got do
-      {:error msg} -> assert (str-contains? msg "exceeded its budget")
+      {:error {:runtime msg}} -> assert (str-contains? msg "exceeded its budget")
     end
   end
   test "tail-method-dispatch" do
@@ -50,7 +109,7 @@ suite do
       protocol Down do
         method down n -> if (eq? n 0) do :done else do down (n - 1) end
       end
-      implements Down
+      implement Down
       extend int with Down do
       end
       down 200000

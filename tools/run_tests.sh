@@ -98,24 +98,24 @@ if [ "$MODE" = "output" ]; then
     fi
 
     "$IDIOMC" repl < tests/repl/session.in > build/repl-session.out 2>build/repl-session.err
-    if [ -s build/repl-session.err ] || ! cmp -s tests/repl/session.out build/repl-session.out; then
-        echo "REPL FAIL"; cat build/repl-session.err; diff tests/repl/session.out build/repl-session.out || true; fail=1
+    if ! cmp -s tests/repl/session.err build/repl-session.err || ! cmp -s tests/repl/session.out build/repl-session.out; then
+        echo "REPL FAIL"; diff tests/repl/session.err build/repl-session.err || true; diff tests/repl/session.out build/repl-session.out || true; fail=1
     else
         echo "repl session passed (1 case)"
     fi
 
     "$IDIOMC" --dump-surface > build/dump-surface-default.out 2>/dev/null
     cmp -s tests/dump/surface-default.out build/dump-surface-default.out || { echo "DUMP FAIL: surface-default"; diff tests/dump/surface-default.out build/dump-surface-default.out; fail=1; }
-    "$IDIOMC" --dump-surface 'implements std/shell' > build/dump-surface-shell.out 2>/dev/null
+    "$IDIOMC" --dump-surface 'implement std/shell' > build/dump-surface-shell.out 2>/dev/null
     cmp -s tests/dump/surface-shell.out build/dump-surface-shell.out || { echo "DUMP FAIL: surface-shell"; diff tests/dump/surface-shell.out build/dump-surface-shell.out; fail=1; }
 
     printf 'foo bar\n' | "$IDIOMC" --dump-reader - >/dev/null || fail=1
-    printf 'implements std/shell\necho hello\n' | "$IDIOMC" --dump-core - | grep -q 'prim exec' || { echo "PIN FAIL: exec"; fail=1; }
-    printf 'implements std/shell\nls -la | wc -l\n' | "$IDIOMC" --dump-core - | grep -q ':pipeline' || { echo "PIN FAIL: pipeline"; fail=1; }
+    printf 'implement std/shell\necho hello\n' | "$IDIOMC" --dump-core - | grep -q 'prim exec' || { echo "PIN FAIL: exec"; fail=1; }
+    printf 'implement std/shell\nls -la | wc -l\n' | "$IDIOMC" --dump-core - | grep -q ':pipeline' || { echo "PIN FAIL: pipeline"; fail=1; }
     printf 'echo hello\n' | "$IDIOMC" --dump-core - 2>&1 | grep -q "unbound identifier 'echo'" || { echo "PIN FAIL: no-shell"; fail=1; }
-    printf 'implements std/shell\nls *.zz\n' | "$IDIOMC" --dump-core - | grep -q ':glob' || { echo "PIN FAIL: glob"; fail=1; }
-    printf 'implements std/shell\nsh -c x 2>&1\n' | "$IDIOMC" --dump-core - | grep -q ':dup' || { echo "PIN FAIL: dup"; fail=1; }
-    printf 'implements std/shell\nFOO=bar printenv FOO\n' | "$IDIOMC" --dump-core - | grep -q '"FOO"' || { echo "PIN FAIL: env"; fail=1; }
+    printf 'implement std/shell\nls *.zz\n' | "$IDIOMC" --dump-core - | grep -q ':glob' || { echo "PIN FAIL: glob"; fail=1; }
+    printf 'implement std/shell\nsh -c x 2>&1\n' | "$IDIOMC" --dump-core - | grep -q ':dup' || { echo "PIN FAIL: dup"; fail=1; }
+    printf 'implement std/shell\nFOO=bar printenv FOO\n' | "$IDIOMC" --dump-core - | grep -q '"FOO"' || { echo "PIN FAIL: env"; fail=1; }
 fi
 
 if [ "$fail" -ne 0 ]; then

@@ -20,6 +20,7 @@ typedef struct {
     IdmSpan span;
     char *message;
     char *notes;
+    void *reason;
 } IdmError;
 
 typedef struct {

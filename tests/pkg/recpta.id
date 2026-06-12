@@ -1,0 +1,9 @@
+package recpta
+
+export record point do
+  field x
+end
+
+extend point with tests/pkg/labelproto do
+  method point-label p -> str "A:" (p.x)
+end

@@ -11,10 +11,10 @@ export defn contains? s sub -> str-contains? s sub
 export defn find s sub -> str-find s sub 0
 
 export defn starts-with? s prefix ->
-  eq? (str-slice s 0 (str-len prefix)) prefix
+  and (lte? (str-len prefix) (str-len s)) (eq? (str-slice s 0 (str-len prefix)) prefix)
 
 export defn ends-with? s suffix ->
-  eq? (str-slice s (sub (str-len s) (str-len suffix)) (str-len s)) suffix
+  and (lte? (str-len suffix) (str-len s)) (eq? (str-slice s (sub (str-len s) (str-len suffix)) (str-len s)) suffix)
 
 defn space? do
   32 -> :true

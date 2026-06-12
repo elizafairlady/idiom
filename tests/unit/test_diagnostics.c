@@ -89,14 +89,14 @@ static void test_runtime_call_trace(void) {
         "defn level2 x -> level3 x\n"
         "defn level1 x -> level2 x\n"
         "level1 1\n",
-        "ADD expects numeric operands",
+        "add expects numeric operands",
         "in level3");
     expect_runtime_error_note(&rt, "<call-trace-outer>",
         "defn level3 x -> add x :not-a-number\n"
         "defn level2 x -> add (level3 x) 1\n"
         "defn level1 x -> add (level2 x) 1\n"
         "level1 1\n",
-        "ADD expects numeric operands",
+        "add expects numeric operands",
         "in level1");
     idm_runtime_destroy(&rt);
 }
@@ -115,7 +115,7 @@ static void test_expander_surface_introspection(void) {
         "gt? (probe x) 8\n",
         ":true");
     check_value_written(&rt,
-        "implements std/shell\n"
+        "implement std/shell\n"
         "defmacro probe2 stx do\n"
         "  defn count do\n"
         "    :nil n -> n\n"

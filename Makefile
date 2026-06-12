@@ -24,7 +24,7 @@ LIB_OBJS := $(LIB_SRCS:%.c=build/%.o)
 CLI_OBJS := build/src/cli/main.o
 TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(patsubst %.c,build/%.o,$(TEST_SRCS))
-DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
+DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) build/src/cli/ish.d $(TEST_OBJS:.o=.d)
 
 .PHONY: all test sanitize tsan conformance release clean
 

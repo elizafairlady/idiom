@@ -1,2 +1,2 @@
-implements std/shell
+implement std/shell
 cat <(echo procsub-golden)

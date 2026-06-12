@@ -1,0 +1,3 @@
+package labelproto
+
+method point-label x

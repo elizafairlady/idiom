@@ -1,0 +1,105 @@
+use std/test
+implement std/test
+
+defn kadd a b -> add a b
+defmacro twice stx do syntax-case stx do (_ e) -> %`(kadd %,e %,e) end end
+defn myadd a b -> add a b
+operator <+> precedence: 50 assoc: left fixity: infix -> myadd
+
+defmacro defmm stx do
+  syntax-case stx do
+    (_ n) -> do
+      expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ a) -> %`(add %,a 1) end end)
+      %`(do end)
+    end
+  end
+end
+defmm inc
+
+defmacro defproto stx do syntax-case stx do (_ n b) -> %`do
+  protocol %,n %,b
+end end end
+defproto Greets do
+  export defmacro answer s -> (make-syntax-int s 99)
+end
+defproto Sized do
+  method size-of x
+end
+
+defmacro defrec stx do syntax-case stx do (_ n b) -> %`do
+  record %,n %,b
+end end end
+defrec Pt do
+  field x
+end
+
+suite do
+  test "macro registered from inside a transformer" do
+    assert-eq (inc 41) 42
+  end
+  test "protocol registered from a macro splice" do
+    got = do
+      implement Greets
+      answer foo
+    end
+    assert-eq got 99
+  end
+  test "methods of a macro-spliced protocol" do
+    got = do
+      implement Sized
+      extend int with Sized do
+        method size-of x -> 100
+      end
+      size-of 5
+    end
+    assert-eq got 100
+  end
+  test "record registered from a macro splice" do
+    p = Pt 7
+    assert-eq (p.x) 7
+    assert-eq (if (Pt? p) do 1 else do 0 end) 1
+  end
+  test "template references resolve at definition context" do
+    r = do
+      defn kadd a b -> 0
+      twice 21
+    end
+    assert-eq r 42
+  end
+  test "operator targets resolve at declaration site" do
+    r = do
+      defn myadd a b -> 0
+      1 <+> 2
+    end
+    assert-eq r 3
+  end
+  test "do-block shadowing stays local" do
+    x = 1
+    r = do
+      x = 2
+      x
+    end
+    assert-eq r 2
+    assert-eq x 1
+  end
+  test "nested do shadowing" do
+    a = 1
+    r = do
+      a = 2
+      inner = do
+        a = 3
+        a
+      end
+      add (mul 10 a) inner
+    end
+    assert-eq r 23
+    assert-eq a 1
+  end
+  test "closures capture do-locals" do
+    g = do
+      n = 21
+      fn x -> add n x
+    end
+    assert-eq (g 21) 42
+  end
+end

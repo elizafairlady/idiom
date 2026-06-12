@@ -177,15 +177,8 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->ns_count = 0;
     rt->ns_cap = 0;
     rt->main_ns = idm_namespace_get_or_create(rt, "main");
-    rt->protocol_methods = NULL;
-    rt->protocol_method_count = 0;
-    rt->protocol_method_cap = 0;
-    rt->protocol_impls = NULL;
-    rt->protocol_impl_count = 0;
-    rt->protocol_impl_cap = 0;
-    rt->protocol_conformances = NULL;
-    rt->protocol_conformance_count = 0;
-    rt->protocol_conformance_cap = 0;
+    memset(rt->protocol_worlds, 0, sizeof(rt->protocol_worlds));
+    rt->protocol_phase = 0;
     rt->gc_modules = NULL;
     rt->gc_module_count = 0;
     rt->gc_module_cap = 0;
@@ -288,21 +281,16 @@ static void runtime_protocol_conformance_destroy(IdmRuntimeProtocolConformance *
 }
 
 void idm_runtime_destroy(IdmRuntime *rt) {
-    for (size_t i = 0; i < rt->protocol_method_count; i++) runtime_protocol_method_destroy(&rt->protocol_methods[i]);
-    free(rt->protocol_methods);
-    rt->protocol_methods = NULL;
-    rt->protocol_method_count = 0;
-    rt->protocol_method_cap = 0;
-    for (size_t i = 0; i < rt->protocol_impl_count; i++) runtime_protocol_impl_destroy(&rt->protocol_impls[i]);
-    free(rt->protocol_impls);
-    rt->protocol_impls = NULL;
-    rt->protocol_impl_count = 0;
-    rt->protocol_impl_cap = 0;
-    for (size_t i = 0; i < rt->protocol_conformance_count; i++) runtime_protocol_conformance_destroy(&rt->protocol_conformances[i]);
-    free(rt->protocol_conformances);
-    rt->protocol_conformances = NULL;
-    rt->protocol_conformance_count = 0;
-    rt->protocol_conformance_cap = 0;
+    for (size_t w = 0; w < 2u; w++) {
+        IdmProtocolWorld *world = &rt->protocol_worlds[w];
+        for (size_t i = 0; i < world->method_count; i++) runtime_protocol_method_destroy(&world->methods[i]);
+        free(world->methods);
+        for (size_t i = 0; i < world->impl_count; i++) runtime_protocol_impl_destroy(&world->impls[i]);
+        free(world->impls);
+        for (size_t i = 0; i < world->conformance_count; i++) runtime_protocol_conformance_destroy(&world->conformances[i]);
+        free(world->conformances);
+    }
+    memset(rt->protocol_worlds, 0, sizeof(rt->protocol_worlds));
     for (size_t i = 0; i < rt->ns_count; i++) {
         free(rt->namespaces[i]->name);
         free(rt->namespaces[i]->slots);
@@ -852,63 +840,71 @@ static bool protocol_name_eq(const char *a_protocol, const char *a_method, const
     return strcmp(a_protocol, b_protocol) == 0 && strcmp(a_method, b_method) == 0;
 }
 
+static IdmProtocolWorld *protocol_world(IdmRuntime *rt) {
+    return &rt->protocol_worlds[rt->protocol_phase ? 1 : 0];
+}
+
 static IdmRuntimeProtocolMethod *runtime_protocol_find_method(IdmRuntime *rt, const char *protocol, const char *method) {
-    for (size_t i = 0; i < rt->protocol_method_count; i++) {
-        if (protocol_name_eq(rt->protocol_methods[i].protocol, rt->protocol_methods[i].method, protocol, method)) return &rt->protocol_methods[i];
+    IdmProtocolWorld *w = protocol_world(rt);
+    for (size_t i = 0; i < w->method_count; i++) {
+        if (protocol_name_eq(w->methods[i].protocol, w->methods[i].method, protocol, method)) return &w->methods[i];
     }
     return NULL;
 }
 
 static IdmRuntimeProtocolImpl *runtime_protocol_find_impl(IdmRuntime *rt, const char *protocol, const char *method, const char *type) {
-    for (size_t i = 0; i < rt->protocol_impl_count; i++) {
-        if (strcmp(rt->protocol_impls[i].type, type) == 0 && protocol_name_eq(rt->protocol_impls[i].protocol, rt->protocol_impls[i].method, protocol, method)) return &rt->protocol_impls[i];
+    IdmProtocolWorld *w = protocol_world(rt);
+    for (size_t i = 0; i < w->impl_count; i++) {
+        if (strcmp(w->impls[i].type, type) == 0 && protocol_name_eq(w->impls[i].protocol, w->impls[i].method, protocol, method)) return &w->impls[i];
     }
     return NULL;
 }
 
 static IdmRuntimeProtocolConformance *runtime_protocol_find_conformance(IdmRuntime *rt, const char *protocol, const char *type) {
-    for (size_t i = 0; i < rt->protocol_conformance_count; i++) {
-        if (strcmp(rt->protocol_conformances[i].type, type) == 0 && strcmp(rt->protocol_conformances[i].protocol, protocol) == 0) return &rt->protocol_conformances[i];
+    IdmProtocolWorld *w = protocol_world(rt);
+    for (size_t i = 0; i < w->conformance_count; i++) {
+        if (strcmp(w->conformances[i].type, type) == 0 && strcmp(w->conformances[i].protocol, protocol) == 0) return &w->conformances[i];
     }
     return NULL;
 }
 
-static bool protocol_methods_reserve(IdmRuntime *rt, size_t needed, IdmError *err) {
-    if (needed <= rt->protocol_method_cap) return true;
-    size_t cap = rt->protocol_method_cap ? rt->protocol_method_cap * 2u : 8u;
+static bool protocol_methods_reserve(IdmProtocolWorld *w, size_t needed, IdmError *err) {
+    if (needed <= w->method_cap) return true;
+    size_t cap = w->method_cap ? w->method_cap * 2u : 8u;
     while (cap < needed) cap *= 2u;
-    IdmRuntimeProtocolMethod *next = realloc(rt->protocol_methods, cap * sizeof(*next));
+    IdmRuntimeProtocolMethod *next = realloc(w->methods, cap * sizeof(*next));
     if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-    rt->protocol_methods = next;
-    rt->protocol_method_cap = cap;
+    w->methods = next;
+    w->method_cap = cap;
     return true;
 }
 
-static bool protocol_impls_reserve(IdmRuntime *rt, size_t needed, IdmError *err) {
-    if (needed <= rt->protocol_impl_cap) return true;
-    size_t cap = rt->protocol_impl_cap ? rt->protocol_impl_cap * 2u : 8u;
+static bool protocol_impls_reserve(IdmProtocolWorld *w, size_t needed, IdmError *err) {
+    if (needed <= w->impl_cap) return true;
+    size_t cap = w->impl_cap ? w->impl_cap * 2u : 8u;
     while (cap < needed) cap *= 2u;
-    IdmRuntimeProtocolImpl *next = realloc(rt->protocol_impls, cap * sizeof(*next));
+    IdmRuntimeProtocolImpl *next = realloc(w->impls, cap * sizeof(*next));
     if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-    rt->protocol_impls = next;
-    rt->protocol_impl_cap = cap;
+    w->impls = next;
+    w->impl_cap = cap;
     return true;
 }
 
-static bool protocol_conformances_reserve(IdmRuntime *rt, size_t needed, IdmError *err) {
-    if (needed <= rt->protocol_conformance_cap) return true;
-    size_t cap = rt->protocol_conformance_cap ? rt->protocol_conformance_cap * 2u : 8u;
+static bool protocol_conformances_reserve(IdmProtocolWorld *w, size_t needed, IdmError *err) {
+    if (needed <= w->conformance_cap) return true;
+    size_t cap = w->conformance_cap ? w->conformance_cap * 2u : 8u;
     while (cap < needed) cap *= 2u;
-    IdmRuntimeProtocolConformance *next = realloc(rt->protocol_conformances, cap * sizeof(*next));
+    IdmRuntimeProtocolConformance *next = realloc(w->conformances, cap * sizeof(*next));
     if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-    rt->protocol_conformances = next;
-    rt->protocol_conformance_cap = cap;
+    w->conformances = next;
+    w->conformance_cap = cap;
     return true;
 }
 
 static size_t runtime_protocol_method_count_for(IdmRuntime *rt, const char *protocol) {
+    IdmProtocolWorld *w = protocol_world(rt);
     size_t count = 0;
-    for (size_t i = 0; i < rt->protocol_method_count; i++) if (strcmp(rt->protocol_methods[i].protocol, protocol) == 0) count++;
+    for (size_t i = 0; i < w->method_count; i++) if (strcmp(w->methods[i].protocol, protocol) == 0) count++;
     return count;
 }
 
@@ -919,45 +915,6 @@ static bool runtime_protocol_contract_compatible(IdmRuntime *rt, const char *pro
         if (!existing || existing->arity != methods[i].arity) return false;
     }
     return true;
-}
-
-static void runtime_protocol_remove_impls_for(IdmRuntime *rt, const char *protocol) {
-    size_t out = 0;
-    for (size_t i = 0; i < rt->protocol_impl_count; i++) {
-        if (strcmp(rt->protocol_impls[i].protocol, protocol) == 0) {
-            runtime_protocol_impl_destroy(&rt->protocol_impls[i]);
-            continue;
-        }
-        if (out != i) rt->protocol_impls[out] = rt->protocol_impls[i];
-        out++;
-    }
-    rt->protocol_impl_count = out;
-}
-
-static void runtime_protocol_remove_conformances_for(IdmRuntime *rt, const char *protocol) {
-    size_t out = 0;
-    for (size_t i = 0; i < rt->protocol_conformance_count; i++) {
-        if (strcmp(rt->protocol_conformances[i].protocol, protocol) == 0) {
-            runtime_protocol_conformance_destroy(&rt->protocol_conformances[i]);
-            continue;
-        }
-        if (out != i) rt->protocol_conformances[out] = rt->protocol_conformances[i];
-        out++;
-    }
-    rt->protocol_conformance_count = out;
-}
-
-static void runtime_protocol_remove_methods_for(IdmRuntime *rt, const char *protocol) {
-    size_t out = 0;
-    for (size_t i = 0; i < rt->protocol_method_count; i++) {
-        if (strcmp(rt->protocol_methods[i].protocol, protocol) == 0) {
-            runtime_protocol_method_destroy(&rt->protocol_methods[i]);
-            continue;
-        }
-        if (out != i) rt->protocol_methods[out] = rt->protocol_methods[i];
-        out++;
-    }
-    rt->protocol_method_count = out;
 }
 
 static void staged_protocol_methods_destroy(IdmRuntimeProtocolMethod *methods, size_t count) {
@@ -975,7 +932,11 @@ bool idm_protocol_define(IdmRuntime *rt, const char *protocol, const IdmProtocol
         }
     }
 
-    if (runtime_protocol_contract_compatible(rt, protocol, methods, method_count)) {
+    if (runtime_protocol_method_count_for(rt, protocol) != 0) {
+        if (!runtime_protocol_contract_compatible(rt, protocol, methods, method_count)) {
+            idm_error_set(err, idm_span_unknown(NULL), "protocol '%s' is already defined with an incompatible contract", protocol);
+            return idm_error_reason(rt, err, "protocol-redefinition", 1, idm_atom(rt, protocol));
+        }
         for (size_t i = 0; i < method_count; i++) {
             IdmRuntimeProtocolMethod *existing = runtime_protocol_find_method(rt, protocol, methods[i].name);
             existing->has_default = methods[i].has_default;
@@ -998,17 +959,12 @@ bool idm_protocol_define(IdmRuntime *rt, const char *protocol, const IdmProtocol
         staged[i].default_impl = methods[i].has_default ? methods[i].default_impl : idm_nil();
     }
 
-    size_t old_count = runtime_protocol_method_count_for(rt, protocol);
-    size_t needed = rt->protocol_method_count - old_count + method_count;
-    if (!protocol_methods_reserve(rt, needed, err)) {
+    IdmProtocolWorld *w = protocol_world(rt);
+    if (!protocol_methods_reserve(w, w->method_count + method_count, err)) {
         staged_protocol_methods_destroy(staged, method_count);
         return false;
     }
-
-    runtime_protocol_remove_methods_for(rt, protocol);
-    runtime_protocol_remove_impls_for(rt, protocol);
-    runtime_protocol_remove_conformances_for(rt, protocol);
-    for (size_t i = 0; i < method_count; i++) rt->protocol_methods[rt->protocol_method_count++] = staged[i];
+    for (size_t i = 0; i < method_count; i++) w->methods[w->method_count++] = staged[i];
     free(staged);
     return true;
 }
@@ -1031,7 +987,7 @@ bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type,
         if (!idm_is_closure(impls[i].impl)) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' implementation is not a function", protocol, impls[i].name);
         if (runtime_protocol_find_impl(rt, protocol, impls[i].name, type)) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' already has an implementation for type '%s'", protocol, impls[i].name, type);
         for (size_t j = i + 1u; j < impl_count; j++) {
-            if (strcmp(impls[i].name, impls[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "extend for '%s' implements method '%s' more than once", protocol, impls[i].name);
+            if (strcmp(impls[i].name, impls[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "extend for '%s' provides method '%s' more than once", protocol, impls[i].name);
         }
     }
 
@@ -1047,11 +1003,12 @@ bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type,
         }
         staged[i].impl = impls[i].impl;
     }
-    if (!protocol_impls_reserve(rt, rt->protocol_impl_count + impl_count, err)) {
+    IdmProtocolWorld *w = protocol_world(rt);
+    if (!protocol_impls_reserve(w, w->impl_count + impl_count, err)) {
         staged_protocol_impls_destroy(staged, impl_count);
         return false;
     }
-    if (!protocol_conformances_reserve(rt, rt->protocol_conformance_count + 1u, err)) {
+    if (!protocol_conformances_reserve(w, w->conformance_count + 1u, err)) {
         staged_protocol_impls_destroy(staged, impl_count);
         return false;
     }
@@ -1063,8 +1020,8 @@ bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type,
         staged_protocol_impls_destroy(staged, impl_count);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
-    for (size_t i = 0; i < impl_count; i++) rt->protocol_impls[rt->protocol_impl_count++] = staged[i];
-    rt->protocol_conformances[rt->protocol_conformance_count++] = conf;
+    for (size_t i = 0; i < impl_count; i++) w->impls[w->impl_count++] = staged[i];
+    w->conformances[w->conformance_count++] = conf;
     free(staged);
     return true;
 }
@@ -1089,10 +1046,13 @@ bool idm_protocol_lookup(IdmRuntime *rt, const char *protocol, const char *metho
 }
 
 void idm_runtime_mark_protocol_roots(IdmRuntime *rt) {
-    for (size_t i = 0; i < rt->protocol_method_count; i++) {
-        if (rt->protocol_methods[i].has_default) idm_gc_mark_value(rt->protocol_methods[i].default_impl);
+    for (size_t p = 0; p < 2u; p++) {
+        IdmProtocolWorld *w = &rt->protocol_worlds[p];
+        for (size_t i = 0; i < w->method_count; i++) {
+            if (w->methods[i].has_default) idm_gc_mark_value(w->methods[i].default_impl);
+        }
+        for (size_t i = 0; i < w->impl_count; i++) idm_gc_mark_value(w->impls[i].impl);
     }
-    for (size_t i = 0; i < rt->protocol_impl_count; i++) idm_gc_mark_value(rt->protocol_impls[i].impl);
 }
 
 bool idm_is_nil(IdmValue value) {
@@ -1338,8 +1298,9 @@ bool idm_value_equal(IdmValue a, IdmValue b) {
         case IDM_VAL_DICT:
             if (a.as.obj->as.dict.count != b.as.obj->as.dict.count) return false;
             for (size_t i = 0; i < a.as.obj->as.dict.count; i++) {
-                if (!idm_value_equal(a.as.obj->as.dict.entries[i].key, b.as.obj->as.dict.entries[i].key)) return false;
-                if (!idm_value_equal(a.as.obj->as.dict.entries[i].value, b.as.obj->as.dict.entries[i].value)) return false;
+                IdmValue other;
+                if (!idm_dict_get(b, a.as.obj->as.dict.entries[i].key, &other)) return false;
+                if (!idm_value_equal(a.as.obj->as.dict.entries[i].value, other)) return false;
             }
             return true;
         case IDM_VAL_SYNTAX:
@@ -1385,7 +1346,11 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
         case IDM_VAL_ATOM: return idm_buf_append_char(buf, ':') && idm_buf_append(buf, idm_symbol_text(value.as.symbol));
         case IDM_VAL_WORD: return idm_buf_append(buf, idm_symbol_text(value.as.symbol));
         case IDM_VAL_INT: return idm_buf_appendf(buf, "%lld", (long long)value.as.i);
-        case IDM_VAL_FLOAT: return idm_buf_appendf(buf, "%g", value.as.f);
+        case IDM_VAL_FLOAT: {
+            char text[40];
+            snprintf(text, sizeof(text), "%g", value.as.f);
+            return idm_buf_append(buf, text) && (strpbrk(text, ".eEn") != NULL || idm_buf_append(buf, ".0"));
+        }
         case IDM_VAL_STRING: return write_escaped(buf, value.as.obj->as.string.bytes, value.as.obj->as.string.len);
         case IDM_VAL_PID: return idm_buf_appendf(buf, "#<pid:%llu>", (unsigned long long)value.as.id);
         case IDM_VAL_REF: return idm_buf_appendf(buf, "#<ref:%llu>", (unsigned long long)value.as.id);
@@ -1434,4 +1399,44 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
         }
     }
     return false;
+}
+
+bool idm_error_reason(IdmRuntime *rt, IdmError *err, const char *kind, size_t count, ...) {
+    if (!err) return false;
+    IdmValue items[5];
+    if (count > 4u) count = 4u;
+    items[0] = idm_atom(rt, kind);
+    va_list ap;
+    va_start(ap, count);
+    for (size_t i = 0; i < count; i++) items[i + 1u] = va_arg(ap, IdmValue);
+    va_end(ap);
+    IdmValue detail = idm_tuple(rt, items, count + 1u, NULL);
+    if (detail.tag != IDM_VAL_TUPLE) return false;
+    IdmValue *slot = err->reason ? err->reason : malloc(sizeof(*slot));
+    if (!slot) return false;
+    *slot = detail;
+    err->reason = slot;
+    return false;
+}
+
+bool idm_error_take_reason(IdmError *err, IdmValue *out) {
+    if (!err || !err->reason) return false;
+    *out = *(IdmValue *)err->reason;
+    free(err->reason);
+    err->reason = NULL;
+    return true;
+}
+
+IdmValue idm_error_reason_value(IdmRuntime *rt, IdmError *err) {
+    IdmValue detail;
+    if (!idm_error_take_reason(err, &detail)) {
+        IdmValue inner[2];
+        inner[0] = idm_atom(rt, "runtime");
+        inner[1] = idm_string(rt, (err && err->present && err->message) ? err->message : "error", NULL);
+        detail = idm_tuple(rt, inner, 2u, NULL);
+    }
+    IdmValue items[2];
+    items[0] = idm_atom(rt, "error");
+    items[1] = detail;
+    return idm_tuple(rt, items, 2u, NULL);
 }

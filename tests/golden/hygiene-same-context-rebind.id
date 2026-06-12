@@ -1,0 +1,4 @@
+defn k a -> 10
+defmacro m stx do syntax-case stx do (_ a) -> %`(k %,a) end end
+defn k a -> 20
+m 0

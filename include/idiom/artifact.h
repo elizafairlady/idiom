@@ -75,6 +75,13 @@ typedef struct {
 } IdmArtifactDep;
 
 typedef struct {
+    char *name;
+    char *identity;
+    IdmProtocolMethodDef *methods;
+    size_t method_count;
+} IdmPkgProtocol;
+
+typedef struct {
     IdmBytecodeModule *module;
     uint32_t init_fn;
     char *name;
@@ -92,6 +99,8 @@ typedef struct {
     IdmPhaseEnv *resolver_phase_env;
     IdmProtocolMethodDef *methods;
     size_t method_count;
+    IdmPkgProtocol *protocols;
+    size_t protocol_count;
     IdmScopeId scope_base;
     IdmScopeId scope_end;
     IdmPhaseEnv *phase_env;
@@ -114,6 +123,8 @@ void idm_operator_def_destroy(IdmOperatorDef *op);
 void idm_protocol_method_def_destroy(IdmProtocolMethodDef *method);
 void idm_pkg_macro_destroy(IdmPkgMacro *macro);
 void idm_pkg_global_destroy(IdmPkgGlobal *global);
+void idm_pkg_protocol_destroy(IdmPkgProtocol *protocol);
+bool idm_protocol_method_defs_copy(const IdmProtocolMethodDef *src, size_t count, IdmProtocolMethodDef **out);
 void idm_artifact_destroy(IdmArtifact *art);
 
 bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_src, const char **out_label, IdmSpan span, IdmError *err);

@@ -1,4 +1,5 @@
 use std/test
+implement std/test
 
 suite do
   test "shell-cd-relative" do
@@ -21,7 +22,7 @@ suite do
   end
   test "shell-env-prefix" do
     got = do
-      implements std/shell
+      implement std/shell
       x = ISH_GOLD_PREFIX=hello printenv ISH_GOLD_PREFIX
       x
     end
@@ -29,7 +30,7 @@ suite do
   end
   test "shell-fd-dup" do
     got = do
-      implements std/shell
+      implement std/shell
       x = sh -c "echo oops >&2" 2>&1
       x
     end
@@ -37,7 +38,7 @@ suite do
   end
   test "shell-glob-nomatch" do
     got = do
-      implements std/shell
+      implement std/shell
       x = echo *.zzz-no-match
       x
     end
@@ -45,7 +46,7 @@ suite do
   end
   test "shell-glob-quoted" do
     got = do
-      implements std/shell
+      implement std/shell
       x = echo "*.zzz-no-match"
       x
     end
@@ -53,7 +54,7 @@ suite do
   end
   test "shell-word-join" do
     got = do
-      implements std/shell
+      implement std/shell
       x = echo a"b"c
       x
     end

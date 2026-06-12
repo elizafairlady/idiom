@@ -5,6 +5,12 @@ defrules dbl do
   (_ a) -> %`(mul 2 %,a)
 end
 dbl (bump x)
-implements std/shell
+defn ff n -> add n kaboom
+ff 1
+defn ff n -> add n 1
+ff x
+defmacro mm stx do syntax-case stx do (_ a) -> %`(dbl %,a) end end
+mm (ff 100)
+implement std/shell
 y = printf from-repl-shell
 y

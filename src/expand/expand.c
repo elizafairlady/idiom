@@ -10,7 +10,6 @@ static const IdmSyntax *try_section_head(const IdmSyntax *stmt);
 static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, IdmError *err);
 static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static bool syn_is_dot(const IdmSyntax *s);
-static IdmSyntax *make_qualified_word(IdmSyntax *const *items, size_t start, size_t *inout_end, IdmError *err);
 static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word);
 static IdmCore *expand_method_surface_call(ExpandContext *ctx, const MethodSurfaceDef *method, IdmCore *receiver, IdmSyntax *const *items, size_t arg_start, size_t end, IdmError *err);
 static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
@@ -33,14 +32,26 @@ static IdmPrimitive primitive_from_binding(const IdmBinding *binding) {
     return (IdmPrimitive)binding->payload;
 }
 
+static bool binding_phase_visible(const IdmBinding *binding, int phase) {
+    return binding->phase == phase || binding->phase == IDM_PHASE_ANY;
+}
+
 static void note_unbound_context(ExpandContext *ctx, const IdmSyntax *word, IdmError *err) {
     if (!err || !err->present) return;
     for (size_t i = 0; i < word->origins.count; i++) {
         idm_error_note(err, "in expansion of '%s'", word->origins.items[i]);
     }
+    int other = ctx->phase == 0 ? 1 : 0;
+    const IdmScopeSet *scopes = idm_syn_scope_set(word, 0);
+    if (idm_binding_resolve(&ctx->bindings, word->as.text, other, IDM_BIND_SPACE_DEFAULT, scopes ? scopes : &ctx->empty_scopes, NULL) == IDM_RESOLVE_OK) {
+        if (ctx->phase == 0) idm_error_note(err, "'%s' is bound for-syntax (phase 1) but referenced at runtime (phase 0)", word->as.text);
+        else idm_error_note(err, "'%s' is bound at runtime (phase 0) but referenced for-syntax (phase 1)", word->as.text);
+        idm_error_note(err, "idiom has exactly two phases; for-syntax inside for-syntax is still for-syntax");
+        return;
+    }
     size_t hidden = 0;
     for (size_t i = 0; i < ctx->bindings.count; i++) {
-        if (ctx->bindings.items[i].phase == 0 && ctx->bindings.items[i].space == IDM_BIND_SPACE_DEFAULT &&
+        if (binding_phase_visible(&ctx->bindings.items[i], ctx->phase) && ctx->bindings.items[i].space == IDM_BIND_SPACE_DEFAULT &&
             strcmp(ctx->bindings.items[i].name, word->as.text) == 0) {
             hidden++;
         }
@@ -89,7 +100,7 @@ static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, 
         expand_error(err, word->span, "ambiguous identifier '%s'", word->as.text);
         size_t candidates = 0;
         for (size_t i = 0; i < ctx->bindings.count; i++) {
-            if (ctx->bindings.items[i].phase == 0 && ctx->bindings.items[i].space == IDM_BIND_SPACE_DEFAULT &&
+            if (binding_phase_visible(&ctx->bindings.items[i], ctx->phase) && ctx->bindings.items[i].space == IDM_BIND_SPACE_DEFAULT &&
                 strcmp(ctx->bindings.items[i].name, word->as.text) == 0 &&
                 scopes_subset_for_ref(&ctx->bindings.items[i].scopes, word)) {
                 candidates++;
@@ -180,7 +191,7 @@ static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, si
     size_t expected_sections = (has_rescue ? 1u : 0u) + (has_ensure ? 1u : 0u);
     if (scount - boundary != expected_sections) return expand_error(err, stmts[boundary]->span, "try sections (rescue/ensure) must be the final statements of the body");
 
-    IdmCore *body_core = expand_body_items(ctx, stmts, 1, boundary, err);
+    IdmCore *body_core = expand_body_items(ctx, stmts, 1, boundary, true, err);
     if (!body_core) return NULL;
 
     IdmCore *guarded = body_core;
@@ -207,7 +218,7 @@ static bool syn_is_dot(const IdmSyntax *s) {
     return s->kind == IDM_SYN_WORD && strcmp(s->as.text, ".") == 0;
 }
 
-static IdmSyntax *make_qualified_word(IdmSyntax *const *items, size_t start, size_t *inout_end, IdmError *err) {
+IdmSyntax *make_qualified_word(IdmSyntax *const *items, size_t start, size_t *inout_end, IdmError *err) {
     IdmBuffer name;
     idm_buf_init(&name);
     bool ok = idm_buf_append(&name, items[start]->as.text);
@@ -495,13 +506,8 @@ static IdmCore *operator_callee(ExpandContext *ctx, const IdmOperatorDef *op, co
     if (op->target_kind != IDM_OP_TGT_NAMED) return idm_core_primitive(op->primitive, span);
     IdmSyntax *word = idm_syn_word(op->target_name, op_token ? op_token->span : span);
     if (!word) return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    if (op_token) {
-        const IdmScopeSet *scopes = idm_syn_scope_set(op_token, 0);
-        if (scopes) {
-            for (size_t i = 0; i < scopes->count; i++) {
-                if (!idm_syn_scope_add(word, 0, scopes->items[i])) { idm_syn_free(word); return (IdmCore *)(uintptr_t)idm_error_oom(err, span); }
-            }
-        }
+    for (size_t i = 0; i < op->scopes.count; i++) {
+        if (!idm_syn_scope_add(word, 0, op->scopes.items[i])) { idm_syn_free(word); return (IdmCore *)(uintptr_t)idm_error_oom(err, span); }
     }
     IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
     const IdmBinding *binding = resolve_default(ctx, word, &status);
@@ -594,7 +600,7 @@ static IdmCore *expand_protocol_expr(ExpandContext *ctx, const IdmSyntax *syn, I
 static IdmCore *expand_protocol_body(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     SurfaceCheckpoint checkpoint;
     surface_checkpoint(ctx, &checkpoint);
-    IdmCore *core = expand_body_items(ctx, syn->as.seq.items, 1, syn->as.seq.count, err);
+    IdmCore *core = expand_body_items(ctx, syn->as.seq.items, 1, syn->as.seq.count, true, err);
     surface_rollback(ctx, &checkpoint);
     return core;
 }
@@ -631,7 +637,7 @@ static IdmCore *expand_protocol_syntax_quote(ExpandContext *ctx, const IdmSyntax
 
 static IdmCore *expand_program(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (!syn_is_protocol(syn, "%-package-begin")) return expand_error(err, syn->span, "expected %%-package-begin syntax");
-    return expand_body_items(ctx, syn->as.seq.items, 1, syn->as.seq.count, err);
+    return expand_body_items(ctx, syn->as.seq.items, 1, syn->as.seq.count, true, err);
 }
 
 static IdmCore *expand_container(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
@@ -700,6 +706,7 @@ bool idm_expand_syntax(IdmRuntime *rt, const IdmSyntax *syntax, IdmCore **out, I
 struct IdmRepl {
     IdmRuntime *rt;
     ExpandContext ctx;
+    IdmScopeId session_scope;
     IdmBytecodeModule **modules;
     size_t module_count;
     size_t module_cap;
@@ -736,6 +743,7 @@ IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
         return NULL;
     }
     repl->ctx.runner = &repl->ctx.local_runner;
+    repl->session_scope = idm_scope_fresh(&repl->ctx.scope_store);
     repl_install_hooks(repl);
     if (!ctx_seed(&repl->ctx, err) || !ctx_activate_kernel(&repl->ctx, err)) {
         ctx_destroy(&repl->ctx);
@@ -743,6 +751,13 @@ IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
         return NULL;
     }
     return repl;
+}
+
+static bool repl_rollback(IdmRepl *repl, const SurfaceCheckpoint *checkpoint, uint32_t global_seq, uint32_t next_slot) {
+    surface_rollback(&repl->ctx, checkpoint);
+    repl->ctx.global_seq = global_seq;
+    repl->ctx.next_slot = next_slot;
+    return false;
 }
 
 bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool *out_has_value, IdmError *err) {
@@ -754,14 +769,22 @@ bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool 
         return true;
     }
     repl_install_hooks(repl);
-    IdmCore *core = expand_body_items(&repl->ctx, program->as.seq.items, 1, program->as.seq.count, err);
+    if (!idm_syn_scope_add_tree(program, 0, repl->session_scope)) {
+        idm_syn_free(program);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    SurfaceCheckpoint checkpoint;
+    surface_checkpoint(&repl->ctx, &checkpoint);
+    uint32_t global_seq = repl->ctx.global_seq;
+    uint32_t next_slot = repl->ctx.next_slot;
+    IdmCore *core = expand_body_items(&repl->ctx, program->as.seq.items, 1, program->as.seq.count, false, err);
     idm_syn_free(program);
-    if (!core) return false;
+    if (!core) return repl_rollback(repl, &checkpoint, global_seq, next_slot);
     IdmBytecodeModule *module = malloc(sizeof(*module));
     if (!module) {
         idm_core_free(core);
         idm_error_oom(err, idm_span_unknown(NULL));
-        return false;
+        return repl_rollback(repl, &checkpoint, global_seq, next_slot);
     }
     idm_bc_init(module);
     uint32_t main_fn = 0;
@@ -770,7 +793,7 @@ bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool 
     if (!compiled) {
         idm_bc_destroy(module);
         free(module);
-        return false;
+        return repl_rollback(repl, &checkpoint, global_seq, next_slot);
     }
     if (repl->module_count == repl->module_cap) {
         size_t cap = repl->module_cap ? repl->module_cap * 2u : 8u;
@@ -779,7 +802,7 @@ bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool 
             idm_bc_destroy(module);
             free(module);
             idm_error_oom(err, idm_span_unknown(NULL));
-            return false;
+            return repl_rollback(repl, &checkpoint, global_seq, next_slot);
         }
         repl->modules = grown;
         repl->module_cap = cap;
@@ -787,14 +810,14 @@ bool idm_repl_eval(IdmRepl *repl, const char *source, IdmValue *out_value, bool 
     repl->modules[repl->module_count++] = module;
     if (!idm_runtime_register_gc_module(repl->rt, module)) {
         idm_error_oom(err, idm_span_unknown(NULL));
-        return false;
+        return repl_rollback(repl, &checkpoint, global_seq, next_slot);
     }
     IdmScheduler *sched = idm_sched_create(repl->rt, module, err);
-    if (!sched) return false;
+    if (!sched) return repl_rollback(repl, &checkpoint, global_seq, next_slot);
     IdmValue out = idm_nil();
     bool ran = idm_sched_run_main(sched, main_fn, &out, err);
     idm_sched_destroy(sched);
-    if (!ran) return false;
+    if (!ran) return repl_rollback(repl, &checkpoint, global_seq, next_slot);
     *out_value = out;
     *out_has_value = true;
     return true;
@@ -815,6 +838,11 @@ void idm_repl_destroy(IdmRepl *repl) {
 bool idm_expand_syntax_with_runner(IdmRuntime *rt, const IdmSyntax *syntax, IdmMacroRunner *runner, IdmCore **out, IdmError *err) {
     ExpandContext ctx;
     ctx_init(&ctx, rt);
+    ctx.phase_ns = idm_fresh_phase_namespace(rt, err);
+    if (!ctx.phase_ns) {
+        ctx_destroy(&ctx);
+        return false;
+    }
     ctx.phase_env = idm_phase_env_create(rt, ctx.phase_ns);
     if (!ctx.phase_env) {
         idm_error_oom(err, idm_span_unknown(NULL));

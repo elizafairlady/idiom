@@ -366,7 +366,7 @@ static int build_sealed(const char *src_path, const char *out_path) {
     if (!idm_reader_read_string(src_path, source, &program, &err)) goto done;
     size_t src_len = strlen(src_path);
     if (src_len >= 4 && strcmp(src_path + src_len - 4, ".ish") == 0) {
-        wrapped = idm_syn_program_prepend_implements(program, "std/shell", src_path);
+        wrapped = idm_syn_program_prepend_implement(program, "std/shell", src_path);
         if (!wrapped) { idm_error_oom(&err, idm_span_unknown(src_path)); goto done; }
     }
     if (!idm_expand_syntax(&rt, wrapped ? wrapped : program, &core, &err)) goto done;

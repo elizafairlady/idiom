@@ -1,0 +1,24 @@
+r = do
+  implement protocol Ops do
+    defn opbump a b -> add (add a b) 1
+    method size x
+    operator <+!> precedence: 50 assoc: left fixity: infix -> opbump
+  end
+  extend int with Ops do
+    method size n -> 111
+  end
+  tuple (size 5) (3 <+!> 4)
+end
+s = do
+  implement protocol Ops do
+    defn opbump a b -> mul a b
+    method size x
+    operator <+!> precedence: 50 assoc: left fixity: infix -> opbump
+  end
+  extend int with Ops do
+    method size n -> 222
+  end
+  tuple (size 5) (3 <+!> 4)
+end
+println (inspect r)
+inspect s

@@ -319,6 +319,25 @@ static void test_binding_resolution(void) {
     CHECK(idm_binding_resolve(&table, "amb", 0, IDM_BIND_SPACE_DEFAULT, &both, &binding) == IDM_RESOLVE_AMBIGUOUS);
     CHECK(binding == NULL);
 
+    IdmScopeId s3 = idm_scope_fresh(&store);
+    IdmScopeSet one_three;
+    IdmScopeSet all;
+    idm_scope_set_init(&one_three);
+    idm_scope_set_init(&all);
+    CHECK(idm_scope_set_add(&one_three, s1));
+    CHECK(idm_scope_set_add(&one_three, s3));
+    CHECK(idm_scope_set_add(&all, s1));
+    CHECK(idm_scope_set_add(&all, s2));
+    CHECK(idm_scope_set_add(&all, s3));
+    CHECK(idm_binding_table_add(&table, "amb", 0, IDM_BIND_SPACE_DEFAULT, IDM_BIND_VALUE, &one_three, 3, 0u, NULL));
+    CHECK(idm_binding_resolve(&table, "amb", 0, IDM_BIND_SPACE_DEFAULT, &all, &binding) == IDM_RESOLVE_AMBIGUOUS);
+    CHECK(binding == NULL);
+    CHECK(idm_binding_table_add(&table, "amb", 0, IDM_BIND_SPACE_DEFAULT, IDM_BIND_VALUE, &both, 4, 0u, NULL));
+    CHECK(idm_binding_resolve(&table, "amb", 0, IDM_BIND_SPACE_DEFAULT, &both, &binding) == IDM_RESOLVE_OK);
+    CHECK(binding && binding->payload == 4);
+    idm_scope_set_destroy(&one_three);
+    idm_scope_set_destroy(&all);
+
     CHECK(idm_binding_table_add(&table, "op", 0, IDM_BIND_SPACE_OPERATOR, IDM_BIND_OPERATOR, &empty, 99, 0u, NULL));
     CHECK(idm_binding_resolve(&table, "op", 0, IDM_BIND_SPACE_OPERATOR, &empty, &binding) == IDM_RESOLVE_OK);
     CHECK(binding && binding->kind == IDM_BIND_OPERATOR && binding->payload == 99);
@@ -543,7 +562,7 @@ static void test_source_expansion_capabilities(void) {
     idm_error_clear(&err);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<expand-test>", "implements std/shell\necho hello\n", &core, &err));
+    CHECK(idm_expand_string(&rt, "<expand-test>", "implement std/shell\necho hello\n", &core, &err));
     CHECK(!err.present);
     CHECK(core != NULL);
     {

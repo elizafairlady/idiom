@@ -1,0 +1,8 @@
+for-syntax do
+  use tests/pkg/phx
+  defn phase-tag _ig -> tagit 3
+end
+defmacro phx-probe stx -> make-syntax-int stx (if (eq? (phase-tag 0) :int-label) do 1 else do 0 end)
+use tests/pkg/phx
+println (phx-probe q)
+println (tagit 5)

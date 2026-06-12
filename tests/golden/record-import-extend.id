@@ -1,0 +1,24 @@
+protocol BoxView do
+  method box-show x
+end
+implement BoxView
+use tests/pkg/boxa
+extend box with BoxView do
+  method box-show b -> str "boxed:" (unbox b)
+end
+println (box-show (box 7))
+do
+  implement tests/pkg/boxa
+  protocol BoxTag do
+    method box-tag x
+  end
+  implement BoxTag
+  extend box with BoxTag do
+    method box-tag b -> str "tag:" (b.v)
+  end
+  println (box-tag (box 9))
+end
+println (try do
+  box-show (make-record "box" (dict :v 1))
+  rescue _r -> :no-raw-dispatch
+end)

@@ -1,4 +1,5 @@
 use std/test
+implement std/test
 
 suite do
   test "actor-capture" do
@@ -122,7 +123,7 @@ suite do
   end
   test "defrules-export" do
     got = do
-      use tests/pkg/rulespkg
+      implement tests/pkg/rulespkg
       twice-of 21
     end
     assert-inspect got "42"
@@ -170,14 +171,14 @@ suite do
   end
   test "export-macro" do
     got = do
-      use tests/pkg/exporter
+      implement tests/pkg/exporter
       answer foo
     end
     assert-inspect got "99"
   end
   test "export-operator" do
     got = do
-      use tests/pkg/exporter
+      implement tests/pkg/exporter
       3 <+> 4
     end
     assert-inspect got "7"
@@ -204,7 +205,7 @@ suite do
   end
   test "html-dsl" do
     got = do
-      implements tests/pkg/htmldsl
+      implement tests/pkg/htmldsl
       html do
         body class: "main" do
           h1 "Title"
@@ -262,6 +263,7 @@ suite do
   test "make-dsl-diamond" do
     got = do
       use tests/pkg/makedsl
+      implement tests/pkg/makedsl
       rules = list (rule :base do :b end) (rule :l deps: (list :base) do :l end) (rule :r deps: (list :base) do :r end) (rule :top deps: (list :l :r) do :t end)
       tuple (build rules :top) (try do
         build rules :missing
@@ -273,7 +275,8 @@ suite do
   test "make-dsl" do
     got = do
       use tests/pkg/makedsl
-      implements std/shell
+      implement tests/pkg/makedsl
+      implement std/shell
       rules = list (rule :prep do
           x = sh -c "printf prep"
           tuple :prep-out x
@@ -362,7 +365,7 @@ suite do
       protocol m do
         export defmacro answer s -> (make-syntax-int s 99)
       end
-      implements m
+      implement m
       answer foo
     end
     assert-inspect got "99"
@@ -372,7 +375,7 @@ suite do
       protocol arith do
         operator <+> precedence: 6 assoc: left fixity: infix -> add
       end
-      implements arith
+      implement arith
       3 <+> 4
     end
     assert-inspect got "7"
@@ -507,9 +510,9 @@ suite do
       protocol Inner do
         export defmacro go y do %`6 end
       end
-      implements Outer
+      implement Outer
       a = do
-        implements Inner
+        implement Inner
         go x
       end
       {a (go x)}

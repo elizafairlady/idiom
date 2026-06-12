@@ -460,6 +460,43 @@ static void body_recs_destroy(BodyRec *recs, size_t count) {
     free(recs);
 }
 
+static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, uint32_t slot) {
+    bool repl_global = ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP;
+    IdmScopeSet scopes;
+    if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return false;
+    bool ok = idm_binding_table_add(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, repl_global ? IDM_BIND_GLOBAL : IDM_BIND_LOCAL, &scopes, slot, repl_global ? IDM_FRAME_GLOBAL : ctx->frame, NULL);
+    idm_scope_set_destroy(&scopes);
+    return ok;
+}
+
+static IdmCore *build_macro_registration(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *fn, IdmSpan span, IdmError *err) {
+    IdmValue name_value = idm_syntax_value(ctx->rt, name_syntax, err);
+    if (err && err->present) {
+        idm_core_free(fn);
+        return NULL;
+    }
+    IdmCore *callee = idm_core_primitive(IDM_PRIM_EXPANDER_REGISTER_MACRO, span);
+    IdmCore *app = callee ? idm_core_app(callee, span) : NULL;
+    if (!app) {
+        idm_core_free(callee);
+        idm_core_free(fn);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    IdmCore *name_lit = idm_core_literal(name_value, span);
+    if (!name_lit || !idm_core_app_add_arg(app, name_lit)) {
+        idm_core_free(name_lit);
+        idm_core_free(app);
+        idm_core_free(fn);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    if (!idm_core_app_add_arg(app, fn)) {
+        idm_core_free(app);
+        idm_core_free(fn);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    return app;
+}
+
 static bool body_work_splice(IdmSyntax ***work, size_t *work_count, size_t *work_cap, size_t at, const IdmSyntax *body, IdmError *err) {
     size_t add = body->as.seq.count - 1u;
     size_t needed = *work_count - 1u + add;
@@ -477,13 +514,29 @@ static bool body_work_splice(IdmSyntax ***work, size_t *work_count, size_t *work
     return true;
 }
 
-IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
+IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t index, size_t count, bool def_scope, IdmError *err) {
     if (index >= count) return idm_core_literal(idm_nil(), idm_span_unknown(NULL));
     size_t work_count = count - index;
     size_t work_cap = work_count;
     IdmSyntax **work = malloc(work_cap * sizeof(*work));
     if (!work) return (IdmCore *)(uintptr_t)idm_error_oom(err, items[index]->span);
     for (size_t i = 0; i < work_count; i++) work[i] = items[index + i];
+    if (def_scope) {
+        IdmScopeId body_scope = idm_scope_fresh(&ctx->scope_store);
+        for (size_t i = 0; i < work_count; i++) {
+            if (!idm_syn_scope_add_tree(work[i], 0, body_scope)) {
+                free(work);
+                return (IdmCore *)(uintptr_t)idm_error_oom(err, items[index]->span);
+            }
+        }
+    }
+    IdmScopeSet body_ctx_scopes;
+    if (!syntax_scopes_copy(&body_ctx_scopes, work[0])) {
+        free(work);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[index]->span);
+    }
+    const IdmScopeSet *saved_op_fallback = ctx->op_fallback;
+    ctx->op_fallback = &body_ctx_scopes;
     IdmSyntax **owned = NULL;
     size_t owned_count = 0;
     size_t owned_cap = 0;
@@ -518,7 +571,10 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         if (syn_is_protocol(form, "%-expr") && form->as.seq.count == 4 &&
             syn_is_word(form->as.seq.items[1], "resolver") && form->as.seq.items[2]->kind == IDM_SYN_WORD &&
             syn_is_protocol(form->as.seq.items[3], "%-body")) {
+            int saved_phase = ctx->phase;
+            ctx->phase = 1;
             IdmCore *fn = expand_function_literal(ctx, "%resolver", form->as.seq.items[1], form->as.seq.items, 2u, form->as.seq.count, err);
+            ctx->phase = saved_phase;
             if (!fn) { failed = true; break; }
             bool ok = register_resolver(ctx, fn, form->span, err);
             idm_core_free(fn);
@@ -528,9 +584,11 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         }
         const IdmSyntax *for_syntax_body = NULL;
         if (for_syntax_form(form, &for_syntax_body)) {
-            IdmCore *ignored = expand_body_items(ctx, for_syntax_body->as.seq.items, 1, for_syntax_body->as.seq.count, err);
-            if (!ignored) { failed = true; break; }
-            bool ran = run_phase_core(ctx, ignored, err);
+            int saved_phase = ctx->phase;
+            ctx->phase = 1;
+            IdmCore *ignored = expand_body_items(ctx, for_syntax_body->as.seq.items, 1, for_syntax_body->as.seq.count, false, err);
+            bool ran = ignored != NULL && run_phase_core(ctx, ignored, err);
+            ctx->phase = saved_phase;
             idm_core_free(ignored);
             if (!ran) {
                 if (err && err->present) idm_error_note(err, "during for-syntax evaluation (%s:%u:%u)", form->span.file ? form->span.file : "<unknown>", form->span.line, form->span.column);
@@ -555,8 +613,46 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     break;
                 }
                 const char *macro_name = form->as.seq.items[mbase + 1u]->as.text;
+                size_t temp_base = ctx->bindings.count;
+                for (size_t r = 0; r < rec_count; r++) {
+                    if (recs[r].kind == BODY_REC_BIND && !push_bind_binder(ctx, recs[r].bind_name, recs[r].bind_slot)) {
+                        idm_error_oom(err, form->span);
+                        failed = true;
+                        break;
+                    }
+                }
+                if (failed) break;
+                int saved_phase = ctx->phase;
+                ctx->phase = 1;
                 IdmCore *fn = expand_function_literal(ctx, macro_name, form->as.seq.items[mbase], form->as.seq.items, mbase + 2u, form->as.seq.count, err);
+                ctx->phase = saved_phase;
+                idm_binding_table_truncate(&ctx->bindings, temp_base);
                 if (!fn) { failed = true; break; }
+                if (fn->kind == IDM_CORE_FN && fn->as.fn.capture_count != 0) {
+                    if (mbase == 2u) {
+                        idm_core_free(fn);
+                        expand_error(err, form->span, "exported defmacro '%s' cannot capture for-syntax locals", macro_name);
+                        idm_error_note(err, "captured phase-1 values cannot be serialized into a package artifact; use an exported for-syntax defn helper instead");
+                        failed = true;
+                        break;
+                    }
+                    IdmCore *reg = build_macro_registration(ctx, form->as.seq.items[mbase + 1u], fn, form->span, err);
+                    if (!reg) { failed = true; break; }
+                    if (rec_count == rec_cap) {
+                        size_t cap = rec_cap ? rec_cap * 2u : 8u;
+                        BodyRec *grown = realloc(recs, cap * sizeof(*grown));
+                        if (!grown) { idm_core_free(reg); idm_error_oom(err, form->span); failed = true; break; }
+                        recs = grown;
+                        rec_cap = cap;
+                    }
+                    memset(&recs[rec_count], 0, sizeof(recs[rec_count]));
+                    recs[rec_count].kind = BODY_REC_EXPR;
+                    recs[rec_count].form = form;
+                    recs[rec_count].core = reg;
+                    rec_count++;
+                    i++;
+                    continue;
+                }
                 bool ok = register_macro(ctx, form->as.seq.items[mbase + 1u], fn, form->span, mbase == 2u, err);
                 idm_core_free(fn);
                 if (!ok) { failed = true; break; }
@@ -619,7 +715,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         if (syn_is_protocol(form, "%-expr") && form->as.seq.count >= 2 && form->as.seq.items[1]->kind == IDM_SYN_WORD &&
             !bind_form_parts(form, &(const IdmSyntax *){NULL}, &(size_t){0})) {
             bool is_boundary_word =
-                syn_is_word(form->as.seq.items[1], "implements") || syn_is_word(form->as.seq.items[1], "extend") ||
+                syn_is_word(form->as.seq.items[1], "implement") || syn_is_word(form->as.seq.items[1], "extend") ||
                 syn_is_word(form->as.seq.items[1], "record") || syn_is_word(form->as.seq.items[1], "use") ||
                 syn_is_word(form->as.seq.items[1], "import") || syn_is_word(form->as.seq.items[1], "method") ||
                 syn_is_word(form->as.seq.items[1], "protocol") ||
@@ -693,6 +789,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             recs[rec_count].kind = BODY_REC_BIND;
             recs[rec_count].bind_name = bind_name;
             recs[rec_count].rhs_start = rhs_start;
+            recs[rec_count].bind_slot = (ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP) ? ctx->global_seq++ : ctx->next_slot++;
         } else {
             recs[rec_count].kind = BODY_REC_EXPR;
         }
@@ -709,11 +806,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             rec->core = expand_parts(ctx, rec->form->as.seq.items, rec->rhs_start, rec->form->as.seq.count, err);
             ctx->value_context = saved_vc;
             if (!rec->core) { failed = true; break; }
-            bool repl_global = ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP;
-            bool pushed = repl_global
-                ? global_push_def_binder(ctx, rec->bind_name->as.text, rec->bind_name, &rec->bind_slot)
-                : local_push_def_binder(ctx, rec->bind_name->as.text, rec->bind_name, &rec->bind_slot);
-            if (!pushed) {
+            if (!push_bind_binder(ctx, rec->bind_name, rec->bind_slot)) {
                 idm_error_oom(err, rec->form->span);
                 failed = true;
                 break;
@@ -735,7 +828,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 }
             }
             rec->core = letrec;
-        } else {
+        } else if (!rec->core) {
             rec->core = syn_is_protocol(rec->form, "%-expr")
                 ? expand_parts(ctx, rec->form->as.seq.items, 1, rec->form->as.seq.count, err)
                 : expand_syntax(ctx, rec->form, err);
@@ -750,8 +843,11 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             if (syn_is_word(bform->as.seq.items[1], "protocol") && bform->as.seq.count == 4 &&
                 bform->as.seq.items[2]->kind == IDM_SYN_WORD && syn_is_protocol(bform->as.seq.items[3], "%-body")) {
                 core = expand_protocol_decl(ctx, bform, work, boundary_index, work_count, err);
-            } else if (syn_is_word(bform->as.seq.items[1], "implements") && bform->as.seq.count == 3 && bform->as.seq.items[2]->kind == IDM_SYN_WORD) {
-                core = expand_implements(ctx, bform->as.seq.items[2], work, boundary_index, work_count, bform->span, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "implement") && bform->as.seq.count == 3 && bform->as.seq.items[2]->kind == IDM_SYN_WORD) {
+                core = expand_implement(ctx, bform->as.seq.items[2], work, boundary_index, work_count, bform->span, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "implement") && bform->as.seq.count == 5 && syn_is_word(bform->as.seq.items[2], "protocol") &&
+                       bform->as.seq.items[3]->kind == IDM_SYN_WORD && syn_is_protocol(bform->as.seq.items[4], "%-body")) {
+                core = expand_implement_protocol(ctx, bform, work, boundary_index, work_count, err);
             } else if (syn_is_word(bform->as.seq.items[1], "extend")) {
                 core = expand_extend_decl(ctx, bform, work, boundary_index, work_count, err);
             } else if (syn_is_word(bform->as.seq.items[1], "record") ||
@@ -783,7 +879,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     ? expand_parts(ctx, bform->as.seq.items, 1, bform->as.seq.count, err)
                     : expand_syntax(ctx, bform, err);
                 if (core && boundary_index + 1u < work_count) {
-                    IdmCore *rest = expand_body_items(ctx, work, boundary_index + 1u, work_count, err);
+                    IdmCore *rest = expand_body_items(ctx, work, boundary_index + 1u, work_count, false, err);
                     if (!rest) { idm_core_free(core); core = NULL; }
                     else {
                         IdmCore *do_expr = idm_core_do(bform->span);
@@ -860,6 +956,8 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     }
 
     ctx->def_ctx = def_ctx.prev;
+    ctx->op_fallback = saved_op_fallback;
+    idm_scope_set_destroy(&body_ctx_scopes);
     idm_scope_set_destroy(&def_ctx.use_site);
     body_recs_destroy(recs, rec_count);
     for (size_t o = 0; o < owned_count; o++) idm_syn_free(owned[o]);

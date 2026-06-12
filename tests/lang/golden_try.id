@@ -1,4 +1,5 @@
 use std/test
+implement std/test
 
 suite do
   test "try-combined" do
@@ -35,7 +36,7 @@ suite do
     got = do
       try do div 1 0; rescue r -> r end
     end
-    assert-inspect got "{:error \"division by zero in div\"}"
+    assert-inspect got "{:error {:div-by-zero :div}}"
   end
   test "try-rescue-value" do
     got = do

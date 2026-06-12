@@ -1,2 +1,2 @@
-implements std/shell
+implement std/shell
 ls tests/pkg/mathx/*.id

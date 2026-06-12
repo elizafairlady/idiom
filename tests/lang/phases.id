@@ -1,0 +1,59 @@
+use std/test
+implement std/test
+
+for-syntax do
+  defn tmp x -> add x 100
+end
+defn tmp x -> add x 1
+defmacro from-phase stx -> make-syntax-int stx (tmp 1)
+
+for-syntax do
+  for-syntax do
+    for-syntax do
+      defn deep3 x -> add x 5
+    end
+  end
+end
+defmacro from-deep stx -> make-syntax-int stx (deep3 37)
+
+for-syntax do
+  capv = 41
+  defmacro cap-one stx -> make-syntax-int stx (add capv 1)
+end
+for-syntax do
+  capw = 40
+  defmacro cap-two stx do
+    f = fn y -> add capw y
+    make-syntax-int stx (f 2)
+  end
+end
+
+suite do
+  test "same-name-both-phases" do
+    assert-eq (tmp 41) 42
+  end
+  test "for-syntax-helper-from-transformer" do
+    assert-eq (from-phase x) 101
+  end
+  test "phase-one-absent-at-runtime" do
+    assert-expand-error "for-syntax do\n  defn ph x -> x\nend\nph 1\n" "unbound identifier 'ph'"
+  end
+  test "for-syntax-three-deep-is-still-phase-one" do
+    assert-eq (from-deep x) 42
+  end
+  test "for-syntax-three-deep-absent-at-runtime" do
+    assert-expand-error "for-syntax do\n  for-syntax do\n    for-syntax do\n      defn d3 x -> x\n    end\n  end\nend\nd3 1\n" "unbound identifier 'd3'"
+  end
+  test "transformer-captures-for-syntax-local" do
+    assert-eq (cap-one q) 42
+  end
+  test "transformer-captures-nested-closure" do
+    assert-eq (cap-two q) 42
+  end
+  test "exported-defmacro-capture-rejected" do
+    assert-expand-error "protocol CapP do\n  for-syntax do\n    y = 1\n    export defmacro capm stx -> make-syntax-int stx y\n  end\nend\n" "cannot capture for-syntax locals"
+  end
+  test "runtime-absent-at-phase-one" do
+    assert-expand-error "defn rt x -> x\ndefmacro mm stx -> rt stx\nmm 1\n" "unbound identifier 'rt'"
+  end
+end

@@ -1,0 +1,12 @@
+do
+  implement tests/pkg/sizea
+  extend int with tests/pkg/sizea do
+  end
+  println (size 5)
+end
+do
+  implement tests/pkg/sizeb
+  extend int with tests/pkg/sizeb do
+  end
+  println (size 5)
+end

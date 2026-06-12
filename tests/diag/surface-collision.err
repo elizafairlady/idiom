@@ -1,0 +1,2 @@
+tests/diag/surface-collision.id:2:1: error: surface '<+>' from 'tests/pkg/exporter' is already active in this context; activating 'tests/pkg/exporter2' would conflict
+  while activating 'tests/pkg/exporter2' (tests/diag/surface-collision.id:2:1)

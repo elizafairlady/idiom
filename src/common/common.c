@@ -20,16 +20,19 @@ void idm_error_init(IdmError *err) {
     err->span = idm_span_unknown(NULL);
     err->message = NULL;
     err->notes = NULL;
+    err->reason = NULL;
 }
 
 void idm_error_clear(IdmError *err) {
     if (!err) return;
     free(err->message);
     free(err->notes);
+    free(err->reason);
     err->present = false;
     err->span = idm_span_unknown(NULL);
     err->message = NULL;
     err->notes = NULL;
+    err->reason = NULL;
 }
 
 bool idm_error_setv(IdmError *err, IdmSpan span, const char *fmt, va_list ap) {

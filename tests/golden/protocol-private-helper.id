@@ -1,0 +1,10 @@
+defn helper x -> :outer-helper
+protocol Helped do
+  defn helper x -> mul x 2
+  export defmacro twice-h stx do syntax-case stx do
+    (_ e) -> %`(helper %,e)
+  end end
+end
+implement Helped
+println (twice-h 21)
+println (helper 5)

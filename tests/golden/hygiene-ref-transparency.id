@@ -1,0 +1,7 @@
+defn kadd a b -> add a b
+defmacro twice stx do syntax-case stx do (_ e) -> %`(kadd %,e %,e) end end
+r = do
+  defn kadd a b -> 0
+  twice 21
+end
+inspect r

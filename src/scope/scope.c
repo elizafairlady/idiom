@@ -183,37 +183,29 @@ void idm_binding_table_truncate(IdmBindingTable *table, size_t count) {
     }
 }
 
+static bool binding_candidate(const IdmBinding *candidate, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes) {
+    if ((candidate->phase != phase && candidate->phase != IDM_PHASE_ANY) || candidate->space != space || strcmp(candidate->name, name) != 0) return false;
+    return idm_scope_set_subset(&candidate->scopes, reference_scopes);
+}
+
 IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding) {
     const IdmBinding *best = NULL;
-    bool ambiguous = false;
     for (size_t i = 0; i < table->count; i++) {
         const IdmBinding *candidate = &table->items[i];
-        if (candidate->phase != phase || candidate->space != space || strcmp(candidate->name, name) != 0) continue;
-        if (!idm_scope_set_subset(&candidate->scopes, reference_scopes)) continue;
-        if (!best) {
-            best = candidate;
-            ambiguous = false;
-            continue;
-        }
-        bool candidate_more_specific = idm_scope_set_subset(&best->scopes, &candidate->scopes);
-        bool best_more_specific = idm_scope_set_subset(&candidate->scopes, &best->scopes);
-        if (candidate_more_specific && !best_more_specific) {
-            best = candidate;
-            ambiguous = false;
-        } else if (candidate_more_specific && best_more_specific) {
-            best = candidate;
-            ambiguous = false;
-        } else if (!candidate_more_specific && !best_more_specific) {
-            ambiguous = true;
-        }
+        if (!binding_candidate(candidate, name, phase, space, reference_scopes)) continue;
+        if (!best || idm_scope_set_subset(&best->scopes, &candidate->scopes)) best = candidate;
     }
     if (!best) {
         if (out_binding) *out_binding = NULL;
         return IDM_RESOLVE_UNBOUND;
     }
-    if (ambiguous) {
-        if (out_binding) *out_binding = NULL;
-        return IDM_RESOLVE_AMBIGUOUS;
+    for (size_t i = 0; i < table->count; i++) {
+        const IdmBinding *candidate = &table->items[i];
+        if (!binding_candidate(candidate, name, phase, space, reference_scopes)) continue;
+        if (!idm_scope_set_subset(&candidate->scopes, &best->scopes)) {
+            if (out_binding) *out_binding = NULL;
+            return IDM_RESOLVE_AMBIGUOUS;
+        }
     }
     if (out_binding) *out_binding = best;
     return IDM_RESOLVE_OK;

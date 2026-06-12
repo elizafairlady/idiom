@@ -6,6 +6,8 @@
 typedef uint32_t IdmScopeId;
 typedef uint32_t IdmBindingId;
 
+#define IDM_PHASE_ANY (-1)
+
 typedef struct {
     IdmScopeId next_scope;
 } IdmScopeStore;

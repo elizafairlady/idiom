@@ -22,8 +22,21 @@ end
 export defn concat xs ys -> reduce (reverse xs) ys &cons
 
 export defn nth do
-  xs 0 -> first xs
-  xs i -> nth (rest xs) (sub i 1)
+  _ i when (lt? i 0) -> :nil
+  :nil _ -> :nil
+  [h . _] 0 -> h
+  [_ . t] i -> nth t (sub i 1)
+end
+
+defn nth-from do
+  :nil _ i -> error (tuple :index-out-of-range i)
+  [h . _] 0 _ -> h
+  [_ . t] k i -> nth-from t (sub k 1) i
+end
+
+export defn nth! do
+  _ i when (lt? i 0) -> error (tuple :index-out-of-range i)
+  xs i -> nth-from xs i i
 end
 
 export defn take do

@@ -21,7 +21,8 @@ export defrules match do
 end
 
 export defrules error do
-  (_ value ...) -> %`(raise (tuple :error (%,@value)))
+  (_ value) -> %`(raise (tuple :error %,value))
+  (_ first rest ...) -> %`(raise (tuple :error (tuple %,first %,@rest)))
 end
 
 export defrules case do

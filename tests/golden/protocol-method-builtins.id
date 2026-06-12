@@ -2,7 +2,7 @@ protocol Describe do
   method describe x -> str "value:" x
 end
 
-implements Describe
+implement Describe
 extend int with Describe do
   method describe n -> str "int:" n
 end
