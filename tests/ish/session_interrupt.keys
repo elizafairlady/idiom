@@ -1,0 +1,17 @@
+w ~ % 
+s junk
+w ~ % junk
+s \x03
+p 100
+s add 9 9
+s \r
+w 18
+s receive do :never -> :ok end
+s \r
+p 300
+s \x03
+w ^C
+s add 3 4
+s \r
+w 7
+s \x04

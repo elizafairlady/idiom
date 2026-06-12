@@ -785,6 +785,18 @@ IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
     return repl;
 }
 
+static bool repl_track_module(IdmRepl *repl, IdmBytecodeModule *module) {
+    if (repl->module_count == repl->module_cap) {
+        size_t cap = repl->module_cap ? repl->module_cap * 2u : 8u;
+        IdmBytecodeModule **grown = realloc(repl->modules, cap * sizeof(*grown));
+        if (!grown) return false;
+        repl->modules = grown;
+        repl->module_cap = cap;
+    }
+    repl->modules[repl->module_count++] = module;
+    return true;
+}
+
 static IdmReplStatus repl_compile_fail(IdmRepl *repl, IdmError *err) {
     if (err && !err->present) idm_error_oom(err, idm_span_unknown(NULL));
     surface_rollback(&repl->ctx, &repl->checkpoint);
@@ -836,18 +848,11 @@ IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_
         free(module);
         return repl_compile_fail(repl, err);
     }
-    if (repl->module_count == repl->module_cap) {
-        size_t cap = repl->module_cap ? repl->module_cap * 2u : 8u;
-        IdmBytecodeModule **grown = realloc(repl->modules, cap * sizeof(*grown));
-        if (!grown) {
-            idm_bc_destroy(module);
-            free(module);
-            return repl_compile_fail(repl, err);
-        }
-        repl->modules = grown;
-        repl->module_cap = cap;
+    if (!repl_track_module(repl, module)) {
+        idm_bc_destroy(module);
+        free(module);
+        return repl_compile_fail(repl, err);
     }
-    repl->modules[repl->module_count++] = module;
     if (!idm_runtime_register_gc_module(repl->rt, module)) return repl_compile_fail(repl, err);
     IdmValue thunk = idm_closure_in_module(repl->rt, module, main_fn, NULL, 0, repl->rt->main_ns, err);
     if (err->present) return repl_compile_fail(repl, err);
@@ -879,6 +884,34 @@ IdmScheduler *idm_repl_scheduler(IdmRepl *repl) {
 
 uint64_t idm_repl_session_pid(const IdmRepl *repl) {
     return repl->session_pid;
+}
+
+void idm_repl_set_session_pid(IdmRepl *repl, uint64_t pid) {
+    repl->session_pid = pid;
+}
+
+bool idm_repl_loop_thunk(IdmRepl *repl, const char *source, IdmValue *out_thunk, IdmError *err) {
+    IdmCore *core = NULL;
+    if (!idm_expand_string(repl->rt, "<ish>", source, &core, err)) return false;
+    IdmBytecodeModule *module = malloc(sizeof(*module));
+    if (!module) {
+        idm_core_free(core);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    idm_bc_init(module);
+    uint32_t main_fn = 0;
+    bool compiled = idm_core_compile_main(core, module, &main_fn, err);
+    idm_core_free(core);
+    if (!compiled || !repl_track_module(repl, module)) {
+        idm_bc_destroy(module);
+        free(module);
+        return compiled ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
+    }
+    if (!idm_runtime_register_gc_module(repl->rt, module)) return idm_error_oom(err, idm_span_unknown(NULL));
+    IdmNamespace *ns = idm_namespace_get_or_create(repl->rt, "ish-loop");
+    if (!ns) return idm_error_oom(err, idm_span_unknown(NULL));
+    *out_thunk = idm_closure_in_module(repl->rt, module, main_fn, NULL, 0, ns, err);
+    return !(err && err->present);
 }
 
 void idm_repl_destroy(IdmRepl *repl) {

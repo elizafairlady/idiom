@@ -448,7 +448,7 @@ static bool prim_write_procsub_temp(IdmRuntime *rt, IdmValue *args, IdmValue *ou
     return !(err && err->present);
 }
 
-static bool prim_print_impl(IdmRuntime *rt, IdmValue *args, uint32_t argc, bool newline, IdmValue *out, IdmError *err) {
+static bool prim_print_to(IdmRuntime *rt, FILE *stream, IdmValue *args, uint32_t argc, bool newline, IdmValue *out, IdmError *err) {
     (void)rt;
     IdmBuffer buf;
     idm_buf_init(&buf);
@@ -457,11 +457,15 @@ static bool prim_print_impl(IdmRuntime *rt, IdmValue *args, uint32_t argc, bool 
         if (!append_display(&buf, args[i])) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
     }
     if (newline && !idm_buf_append_char(&buf, '\n')) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
-    if (buf.len != 0) fwrite(buf.data, 1u, buf.len, stdout);
-    fflush(stdout);
+    if (buf.len != 0) fwrite(buf.data, 1u, buf.len, stream);
+    fflush(stream);
     idm_buf_destroy(&buf);
     *out = idm_nil();
     return true;
+}
+
+static bool prim_print_impl(IdmRuntime *rt, IdmValue *args, uint32_t argc, bool newline, IdmValue *out, IdmError *err) {
+    return prim_print_to(rt, stdout, args, argc, newline, out, err);
 }
 
 static bool checked_add(int64_t a, int64_t b, int64_t *out) {
@@ -2109,6 +2113,7 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_TTY_RESTORE: return idm_prim_tty_restore(rt, out, err);
         case IDM_PRIM_TTY_WRITE: return idm_prim_tty_write(rt, args, out, err);
         case IDM_PRIM_TTY_SIZE: return idm_prim_tty_size(rt, out, err);
+        case IDM_PRIM_EPRINTLN: return prim_print_to(rt, stderr, args, argc, true, out, err);
     }
     return idm_error_set(err, idm_span_unknown(NULL), "unimplemented primitive '%s'", idm_primitive_name(prim));
 }

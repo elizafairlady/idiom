@@ -1,0 +1,8 @@
+w ~ % 
+s x = 41
+s \r
+p 200
+s add x 1
+s \r
+w 42
+s \x04

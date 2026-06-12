@@ -1,0 +1,11 @@
+w ~ % 
+s do
+s \r
+w ...> 
+s add 20 3
+s \r
+p 200
+s end
+s \r
+w 23
+s \x04

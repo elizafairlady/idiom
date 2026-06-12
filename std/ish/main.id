@@ -1,0 +1,277 @@
+defn home-abbrev cwd -> do
+  h = env-get "HOME"
+  if (present? h) do
+    if (eq? cwd h) do
+      "~"
+    else if (starts-with? cwd (str h "/")) do
+      str "~" (str-slice cwd (str-len h) (str-len cwd))
+    else do
+      cwd
+    end
+  else do
+    cwd
+  end
+end
+
+defn status-mark do
+  :nil -> ""
+  0 -> ""
+  :error -> " [error]"
+  s -> str " [" s "]"
+end
+
+defn default-prompt pst -> str (home-abbrev (dict-get pst :cwd "")) (status-mark (dict-get pst :status :nil)) " % "
+
+defn prompt-state status -> dict :cwd (pwd) :status status :jobs 0 :cols (term-cols :go)
+
+defn fenced-prompt pst -> match (try do tuple :ok (prompt pst); rescue r -> tuple :rescued r end) do
+  {:ok p} -> p
+  {:rescued {:error {:runtime _no-conformance}}} -> default-prompt pst
+  {:rescued r} -> do
+    eprintln (str "ish: prompt raised: " (inspect r))
+    default-prompt pst
+  end
+end
+
+defn fenced-cont pst -> match (try do tuple :ok (continuation-prompt pst); rescue r -> tuple :rescued r end) do
+  {:ok p} -> p
+  {:rescued {:error {:runtime _no-conformance}}} -> "...> "
+  {:rescued r} -> do
+    eprintln (str "ish: prompt raised: " (inspect r))
+    "...> "
+  end
+end
+
+defn arm ed status shell -> do
+  if (eq? (tty?) :false) do
+    ed |> sput :prompt "" |> sput :cont-prompt ""
+  else if shell do
+    pst = prompt-state status
+    ed |> sput :prompt (fenced-prompt pst) |> sput :cont-prompt (fenced-cont pst)
+  else do
+    ed |> sput :prompt "idiom> " |> sput :cont-prompt "  ...> "
+  end
+end
+
+defn accept-mark st -> if (cooked? st) do :ok else do tty-write "\r\n" end
+
+defn eof-mark _st -> if (eq? (tty?) :true) do tty-write "\r\n" else do :ok end
+
+defn read-entry ed -> match (read ed) do
+  {:eof st} -> tuple :eof st
+  {:cancel st} -> tuple :cancel st
+  {:line text st} -> match (repl-compile text) do
+    :incomplete -> read-entry (continue st)
+    res -> tuple :entry text res st
+  end
+end
+
+defn drop-loop-frames do
+  '() -> '()
+  (list h . t) when (contains? h "(std/ish:") -> drop-loop-frames t
+  (list h . t) -> cons h (drop-loop-frames t)
+end
+
+defn print-diag fallback -> match (repl-diagnostic) do
+  :nil -> eprintln (inspect fallback)
+  d -> eprintln (join (drop-loop-frames (split d "\n")) "\n")
+end
+
+defn drain-normal pid -> receive do
+  {:down _ p _r} when (eq? p pid) -> :ok
+end
+
+defn eval-down reason tok -> do
+  repl-abort tok
+  match reason do
+    {:error {:command name :capture-overflow}} -> do
+      eprintln (str "ish: " name ": capture overflow")
+      1
+    end
+    {:error {:command name s}} -> do
+      eprintln (str "ish: " name ": exit status " s)
+      s
+    end
+    {:error {:suspended _port}} -> do
+      print-diag reason
+      :error
+    end
+    :interrupt -> do
+      eprintln "^C"
+      :error
+    end
+    :killed -> do
+      eprintln "^C"
+      :error
+    end
+    other -> match (try do tuple :num (mod other 1) (add other 0); rescue _e -> :not-int end) do
+      {:num 0 n} -> tuple :exit n
+      _ -> do
+        print-diag other
+        :error
+      end
+    end
+  end
+end
+
+defn observe pid tok print? -> receive do
+  {:eval-value p v} when (eq? p pid) -> do
+    drain-normal pid
+    if (and (eq? print? :true) (neq? v :nil)) do
+      println (inspect v)
+    end
+    0
+  end
+  {:down _ p reason} when (eq? p pid) -> eval-down reason tok
+  {:ish-job _port _text} -> observe pid tok print?
+end
+
+defn dispatch res print? -> match res do
+  {:error diag} -> do
+    eprintln diag
+    :error
+  end
+  {:ok f tok} -> do
+    session = (self)
+    pid = repl-spawn (fn -> send session (tuple :eval-value (self) (apply f '())))
+    monitor pid
+    observe pid tok print?
+  end
+end
+
+defn eval-text text print? -> match (repl-compile text) do
+  :incomplete -> do
+    eprintln "ish: unterminated input"
+    :error
+  end
+  res -> dispatch res print?
+end
+
+defn config-home _tag -> do
+  v = env-get "XDG_CONFIG_HOME"
+  if (present? v) do
+    v
+  else do
+    match (env-get "HOME") do
+      h when (present? h) -> str h "/.config"
+      _ -> :nil
+    end
+  end
+end
+
+defn rc-file _tag -> do
+  primary = match (config-home :go) do
+    :nil -> :nil
+    c -> str c "/ish/rc.ish"
+  end
+  if (and (neq? primary :nil) (eq? (file-exists? primary) :true)) do
+    primary
+  else do
+    match (env-get "HOME") do
+      h when (present? h) -> do
+        fallback = str h "/.ishrc"
+        if (eq? (file-exists? fallback) :true) do fallback else do :nil end
+      end
+      _ -> :nil
+    end
+  end
+end
+
+defn run-rc _tag -> match (rc-file :go) do
+  :nil -> 0
+  path -> match (file-read path) do
+    {:ok src} -> eval-text src :false
+    {:error r} -> do
+      eprintln (str "ish: cannot read " path ": " (inspect r))
+      :error
+    end
+  end
+end
+
+defn first-hist ed -> match (sget ed :history) do
+  (list h . _) -> h
+  _ -> :nil
+end
+
+defn serve ed hist status shell -> do
+  ed2 = arm ed status shell
+  match (read-entry ed2) do
+    {:eof st} -> do
+      eof-mark st
+      0
+    end
+    {:cancel st} -> do
+      accept-mark st
+      serve (reset st) hist status shell
+    end
+    {:entry text res st} -> do
+      accept-mark st
+      st2 = reset st
+      {ed3 hist2} = if (eq? (record? text (first-hist st2)) :true) do
+        pushed = push-history st2 text
+        tuple pushed (history-append hist (sget pushed :history) text)
+      else do
+        tuple st2 hist
+      end
+      if (and (eq? shell :false) (eq? text ":quit")) do
+        0
+      else do
+        match (dispatch res :true) do
+          {:exit n} -> n
+          s -> serve ed3 hist2 s shell
+        end
+      end
+    end
+  end
+end
+
+defn run-loop shell -> do
+  base = initial-state "idiom> "
+  ed = if (eq? (tty?) :true) do base else do sput base :dumb :true end
+  {hist entries} = history-load shell
+  serve (sput ed :history entries) hist :nil shell
+end
+
+defn start-loop shell -> do
+  parent = (self)
+  pid = spawn (fn -> send parent (tuple :ish-done (run-loop shell)))
+  link pid
+  pid
+end
+
+defn recent-restarts do
+  '() _now -> '()
+  (list t . rest) now -> if (lt? (sub now t) 30000) do cons t (recent-restarts rest now) else do recent-restarts rest now end
+end
+
+defn supervise shell restarts -> do
+  pid = start-loop shell
+  receive do
+    {:ish-done n} -> n
+    {:exit p reason} when (eq? p pid) -> do
+      eprintln (str "ish: session loop crashed: " (inspect reason))
+      now = time-ms
+      recent = recent-restarts restarts now
+      if (gte? (list-len recent) 3) do
+        70
+      else do
+        supervise shell (cons now recent)
+      end
+    end
+  end
+end
+
+export defn main mode -> do
+  shell = eq? mode :shell
+  if shell do
+    eval-text "implement std/shell" :false
+  end
+  rc = if shell do run-rc :go else do 0 end
+  match rc do
+    {:exit n} -> n
+    _ -> do
+      trap-exit :true
+      supervise shell '()
+    end
+  end
+end

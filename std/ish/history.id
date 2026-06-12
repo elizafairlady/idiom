@@ -1,0 +1,140 @@
+defn present? do
+  :nil -> :false
+  "" -> :false
+  _ -> :true
+end
+
+defn env-or name fallback -> do
+  v = env-get name
+  if (present? v) do v else do fallback end
+end
+
+defn hist-path-under do
+  :nil -> :nil
+  state -> str state "/idiom/ish_history"
+end
+
+defn hist-path _tag -> do
+  v = env-get "ISH_HISTFILE"
+  if (present? v) do
+    v
+  else do
+    state = env-or "XDG_STATE_HOME" (match (env-get "HOME") do
+      h when (present? h) -> str h "/.local/state"
+      _ -> :nil
+    end)
+    hist-path-under state
+  end
+end
+
+defn hist-cap _tag -> match (parse-int (env-or "ISH_HISTSIZE" "")) do
+  {:ok n} when (gt? n 0) -> n
+  _ -> 10000
+end
+
+defn last-slash-at do
+  _p 0 -> :nil
+  p i -> if (eq? (str-byte p (sub i 1)) 47) do sub i 1 else do last-slash-at p (sub i 1) end
+end
+
+defn dir-of p -> match (last-slash-at p (str-len p)) do
+  :nil -> "."
+  0 -> "/"
+  i -> str-slice p 0 i
+end
+
+defn mkdirs do
+  "" -> :ok
+  "/" -> :ok
+  "." -> :ok
+  path -> do
+    mkdirs (dir-of path)
+    file-mkdir path
+    :ok
+  end
+end
+
+defn hist-escape s ->
+  if (or (contains? s "\\") (contains? s "\n")) do
+    s |> replace "\\" "\\\\" |> replace "\n" "\\n"
+  else do
+    s
+  end
+
+defn unescape-scan do
+  s i acc when (eq? i (str-len s)) -> acc
+  s i acc -> do
+    b = str-byte s i
+    if (and (eq? b 92) (lt? (add i 1) (str-len s))) do
+      n = str-byte s (add i 1)
+      unescape-scan s (add i 2) (str acc (if (eq? n 110) do "\n" else do byte-str n end))
+    else do
+      unescape-scan s (add i 1) (str acc (byte-str b))
+    end
+  end
+end
+
+defn hist-unescape s -> if (contains? s "\\") do unescape-scan s 0 "" else do s end
+
+defn parse-rev do
+  '() acc -> acc
+  (list "" . t) acc -> parse-rev t acc
+  (list h . t) acc when (starts-with? h "#") -> parse-rev t acc
+  (list h . t) acc -> parse-rev t (cons (hist-unescape h) acc)
+end
+
+defn take-n do
+  '() _n -> '()
+  _xs 0 -> '()
+  (list h . t) n -> cons h (take-n t (sub n 1))
+end
+
+defn rev-app do
+  '() acc -> acc
+  (list h . t) acc -> rev-app t (cons h acc)
+end
+
+defn render-oldest-first do
+  '() acc -> acc
+  (list h . t) acc -> render-oldest-first t (str acc (hist-escape h) "\n")
+end
+
+defn history-load shell -> do
+  path = if shell do hist-path :go else do :nil end
+  match path do
+    :nil -> tuple :nil '()
+    p -> do
+      mkdirs (dir-of p)
+      cap = hist-cap :go
+      match (file-read p) do
+        {:ok data} -> do
+          newest-first = parse-rev (split data "\n") '()
+          tuple (tuple p (list-len newest-first) cap) (take-n newest-first cap)
+        end
+        _ -> tuple (tuple p 0 cap) '()
+      end
+    end
+  end
+end
+
+defn record? do
+  "" _prev -> :false
+  t _prev when (starts-with? t " ") -> :false
+  t prev when (eq? t prev) -> :false
+  _t _prev -> :true
+end
+
+defn history-append do
+  :nil _entries _text -> :nil
+  {path count cap} entries text -> do
+    file-append path (str (hist-escape text) "\n")
+    n = add count 1
+    if (gt? n (mul 2 cap)) do
+      kept = take-n entries cap
+      file-write path (render-oldest-first (rev-app kept '()) "")
+      tuple path (list-len kept) cap
+    else do
+      tuple path n cap
+    end
+  end
+end

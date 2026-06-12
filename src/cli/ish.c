@@ -118,9 +118,34 @@ static int run_shell_file(const char *path) {
 
 static void usage(FILE *out) {
     fprintf(out, "ish — the idiom shell\n");
+    fprintf(out, "  ish                 start an interactive session\n");
     fprintf(out, "  ish FILE.ish        run a shell script\n");
     fprintf(out, "  ish -c 'COMMANDS'   run shell commands\n");
     fprintf(out, "  ish --version\n");
+}
+
+static int run_session(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    rt.interactive = true;
+    IdmError err;
+    idm_error_init(&err);
+    int status = 1;
+    IdmRepl *repl = idm_repl_create(&rt, &err);
+    IdmValue thunk = idm_nil();
+    if (repl && idm_repl_loop_thunk(repl, "use std/ish\nmain :shell", &thunk, &err)) {
+        IdmValue value = idm_nil();
+        IdmValue reason = idm_nil();
+        IdmScheduler *sched = idm_repl_scheduler(repl);
+        if (idm_sched_run_session(sched, thunk, true, &value, &reason, &err)) {
+            status = idm_sched_session_status(sched, value, reason);
+        }
+    }
+    if (err.present) idm_error_fprint(stderr, &err);
+    idm_error_clear(&err);
+    idm_repl_destroy(repl);
+    idm_runtime_destroy(&rt);
+    return status;
 }
 
 int main(int argc, char **argv) {
@@ -138,7 +163,8 @@ int main(int argc, char **argv) {
         g_cli_arg_count = (size_t)(argc - 2);
         return run_shell_file(argv[1]);
     }
-    if (argc == 1 && !isatty(0)) {
+    if (argc == 1 && isatty(0)) return run_session();
+    if (argc == 1) {
         IdmError err;
         idm_error_init(&err);
         char *source = NULL;

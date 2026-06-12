@@ -9,5 +9,4 @@
 {:add 2}
 7
 :normal
-"<unknown>: error: main actor exited with reason :pinned-diag"
 ":nil"

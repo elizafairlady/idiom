@@ -1,5 +1,6 @@
 #include "idiom/actor.h"
 
+#include "idiom/expand.h"
 #include "idiom/ports.h"
 #include "idiom/tty.h"
 
@@ -1435,6 +1436,9 @@ void idm_sched_watch(IdmScheduler *sched, uint64_t pid) {
         actor->diag_retain = true;
         sched->interrupt_pid = pid;
         sched->interrupt_struck = false;
+        free(sched->crash_notes);
+        sched->crash_notes = NULL;
+        sched->crash_span = idm_span_unknown(NULL);
     }
     sched_unlock(sched);
 }
@@ -1460,7 +1464,7 @@ static void eval_contain_failure(IdmScheduler *sched, IdmError *err) {
     sched_unlock(sched);
 }
 
-bool idm_sched_eval(IdmScheduler *sched, IdmValue thunk, IdmValue *out_value, IdmError *err) {
+static bool sched_run_thunk(IdmScheduler *sched, IdmValue thunk, bool interrupt_target, bool register_session, IdmValue *out_value, IdmValue *out_reason, IdmError *err) {
     sched_lock(sched);
     sig_drain_pending();
     free(sched->crash_notes);
@@ -1476,13 +1480,14 @@ bool idm_sched_eval(IdmScheduler *sched, IdmValue thunk, IdmValue *out_value, Id
         return false;
     }
     sched->eval_pid = pid.as.id;
+    if (register_session && sched->rt->repl) idm_repl_set_session_pid(sched->rt->repl, pid.as.id);
     IdmActor *actor = sched_lookup(sched, pid.as.id);
     actor->diag_retain = true;
     if (actor->exited) {
         sched->eval_done = true;
         sched->eval_reason = actor->exit_reason;
         if (!reason_is_normal(actor->exit_reason)) retain_diag(sched, actor->exit_reason);
-    } else {
+    } else if (interrupt_target) {
         sched->interrupt_pid = pid.as.id;
         sched->interrupt_struck = false;
     }
@@ -1538,11 +1543,40 @@ bool idm_sched_eval(IdmScheduler *sched, IdmValue thunk, IdmValue *out_value, Id
         sched->eval_reason = idm_atom(sched->rt, "killed");
     }
     sched->eval_pid = 0;
-    bool normal = reason_is_normal(sched->eval_reason);
-    IdmValue value = sched->eval_value;
-    IdmValue reason = sched->eval_reason;
+    *out_value = sched->eval_value;
+    *out_reason = sched->eval_reason;
     sched_unlock(sched);
-    if (!normal) return sched_abnormal_error(sched, reason, err);
+    return true;
+}
+
+bool idm_sched_eval(IdmScheduler *sched, IdmValue thunk, IdmValue *out_value, IdmError *err) {
+    IdmValue value = idm_nil();
+    IdmValue reason = idm_nil();
+    if (!sched_run_thunk(sched, thunk, true, false, &value, &reason, err)) return false;
+    if (!reason_is_normal(reason)) return sched_abnormal_error(sched, reason, err);
     *out_value = value;
     return true;
+}
+
+bool idm_sched_run_session(IdmScheduler *sched, IdmValue thunk, bool register_session, IdmValue *out_value, IdmValue *out_reason, IdmError *err) {
+    return sched_run_thunk(sched, thunk, false, register_session, out_value, out_reason, err);
+}
+
+int idm_sched_session_status(IdmScheduler *sched, IdmValue value, IdmValue reason) {
+    if (reason_is_normal(reason)) {
+        return value.tag == IDM_VAL_INT ? (int)(((value.as.i % 256) + 256) % 256) : 0;
+    }
+    if (reason.tag == IDM_VAL_INT) return (int)(((reason.as.i % 256) + 256) % 256);
+    char *diag = idm_sched_take_diagnostic(sched);
+    if (diag) {
+        fprintf(stderr, "%s\n", diag);
+        free(diag);
+    } else {
+        IdmError err;
+        idm_error_init(&err);
+        sched_abnormal_error(sched, reason, &err);
+        idm_error_fprint(stderr, &err);
+        idm_error_clear(&err);
+    }
+    return 70;
 }

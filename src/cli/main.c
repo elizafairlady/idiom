@@ -4,7 +4,6 @@
 #include "idiom/reader.h"
 #include "idiom/vm.h"
 
-#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -415,75 +414,22 @@ static int run_repl(void) {
     rt.interactive = isatty(0) != 0;
     IdmError err;
     idm_error_init(&err);
+    int status = 1;
     IdmRepl *repl = idm_repl_create(&rt, &err);
-    if (!repl) {
-        idm_error_fprint(stderr, &err);
-        idm_error_clear(&err);
-        idm_runtime_destroy(&rt);
-        return 1;
-    }
-    bool tty = rt.interactive;
-    if (tty) printf("idiom %s — :quit or ^D to exit\n", IDM_VERSION);
-    char *line = NULL;
-    size_t cap = 0;
-    IdmBuffer pending;
-    idm_buf_init(&pending);
-    int status = 0;
-    for (;;) {
-        if (tty) {
-            fputs(pending.len == 0 ? "idiom> " : "  ...> ", stdout);
-            fflush(stdout);
-        }
-        errno = 0;
-        ssize_t n = getline(&line, &cap, stdin);
-        if (n < 0) {
-            if (errno == EINTR) {
-                clearerr(stdin);
-                if (tty) putchar('\n');
-                pending.len = 0;
-                if (pending.data) pending.data[0] = '\0';
-                continue;
-            }
-            break;
-        }
-        if (pending.len == 0 && strcmp(line, ":quit\n") == 0) break;
-        if (!idm_buf_append(&pending, line)) break;
-        IdmValue thunk = idm_nil();
-        uint64_t token = 0;
-        IdmReplStatus compiled = idm_repl_compile(repl, pending.data, &thunk, &token, &err);
-        if (compiled == IDM_REPL_INCOMPLETE) continue;
-        pending.len = 0;
-        if (pending.data) pending.data[0] = '\0';
-        if (compiled == IDM_REPL_ERROR) {
-            idm_error_fprint(stderr, &err);
-            idm_error_clear(&err);
-            continue;
-        }
-        IdmValue out = idm_nil();
-        if (!idm_repl_run(repl, thunk, &out, &err)) {
-            IdmValue reason = idm_nil();
-            if (idm_error_take_reason(&err, &reason) && reason.tag == IDM_VAL_INT) {
-                idm_error_clear(&err);
-                status = (int)(((reason.as.i % 256) + 256) % 256);
-                break;
-            }
-            idm_error_fprint(stderr, &err);
-            idm_error_clear(&err);
-            idm_repl_abort(repl, token);
-            continue;
-        }
-        if (!idm_is_nil(out)) {
-            IdmBuffer buf;
-            idm_buf_init(&buf);
-            if (idm_value_write(&buf, out) && idm_buf_append_char(&buf, '\n')) fputs(buf.data, stdout);
-            idm_buf_destroy(&buf);
+    IdmValue thunk = idm_nil();
+    if (repl && idm_repl_loop_thunk(repl, "use std/ish\nmain :plain", &thunk, &err)) {
+        if (rt.interactive) printf("idiom %s — :quit or ^D to exit\n", IDM_VERSION);
+        IdmValue value = idm_nil();
+        IdmValue reason = idm_nil();
+        IdmScheduler *sched = idm_repl_scheduler(repl);
+        if (idm_sched_run_session(sched, thunk, false, &value, &reason, &err)) {
+            status = idm_sched_session_status(sched, value, reason);
         }
     }
-    free(line);
-    idm_buf_destroy(&pending);
+    if (err.present) idm_error_fprint(stderr, &err);
+    idm_error_clear(&err);
     idm_repl_destroy(repl);
     idm_runtime_destroy(&rt);
-    if (tty) putchar('\n');
     return status;
 }
 

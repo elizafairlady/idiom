@@ -69,22 +69,55 @@ for f in tests/diag/*.id; do
     fi
 done
 
+ROOT="$PWD"
 for f in tests/ish/*.keys; do
     name=$(basename "$f" .keys)
-    prog="tests/ish/$name.id"
-    [ -e "$prog" ] || prog="tests/ish/edit_driver.id"
-    if [ "$MODE" = "output" ]; then
-        ./build/pty_driver "$f" "$IDIOMC" "$prog" >"build/ish-$name.out" 2>"build/ish-$name.err"
-        rc=$?
-        if [ "$rc" -ne 0 ]; then
-            echo "ISH PTY FAIL: $name (status $rc)"; cat "build/ish-$name.err"; fail=1
-        elif ! cmp -s "tests/ish/$name.out" "build/ish-$name.out"; then
-            echo "ISH PTY FAIL: $name"; diff "tests/ish/$name.out" "build/ish-$name.out" || true; fail=1
+    case "$name" in
+    session_*)
+        home="$ROOT/build/ish-home-$name"
+        rm -rf "$home"
+        mkdir -p "$home"
+        if [ -e "tests/ish/$name.rc" ]; then
+            mkdir -p "$home/.config/ish"
+            cp "tests/ish/$name.rc" "$home/.config/ish/rc.ish"
         fi
-    else
-        ./build/pty_driver "$f" "$IDIOMC" "$prog" >"build/san-ish-$name.out" 2>/dev/null || true
-        san_check "build/san-ish-$name.out" "ish pty $name"
-    fi
+        [ -e "tests/ish/$name.ishrc" ] && cp "tests/ish/$name.ishrc" "$home/.ishrc"
+        want=0
+        [ -e "tests/ish/$name.status" ] && want=$(cat "tests/ish/$name.status")
+        if [ "$MODE" = "output" ]; then
+            (cd "$home" && env -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u ISH_HISTSIZE \
+                HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist \
+                "$ROOT/build/pty_driver" "$ROOT/$f" "$ROOT/$ISH") >"build/ish-$name.out" 2>"build/ish-$name.err"
+            rc=$?
+            if [ "$rc" -ne "$want" ]; then
+                echo "ISH SESSION FAIL: $name (status $rc want $want)"; cat "build/ish-$name.err"; fail=1
+            elif ! cmp -s "tests/ish/$name.out" "build/ish-$name.out"; then
+                echo "ISH SESSION FAIL: $name"; diff "tests/ish/$name.out" "build/ish-$name.out" || true; fail=1
+            fi
+        else
+            (cd "$home" && env -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u ISH_HISTSIZE \
+                HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist \
+                "$ROOT/build/pty_driver" "$ROOT/$f" "$ROOT/$ISH") >"build/san-ish-$name.out" 2>/dev/null || true
+            san_check "build/san-ish-$name.out" "ish session $name"
+        fi
+        ;;
+    *)
+        prog="tests/ish/$name.id"
+        [ -e "$prog" ] || prog="tests/ish/edit_driver.id"
+        if [ "$MODE" = "output" ]; then
+            ./build/pty_driver "$f" "$IDIOMC" "$prog" >"build/ish-$name.out" 2>"build/ish-$name.err"
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+                echo "ISH PTY FAIL: $name (status $rc)"; cat "build/ish-$name.err"; fail=1
+            elif ! cmp -s "tests/ish/$name.out" "build/ish-$name.out"; then
+                echo "ISH PTY FAIL: $name"; diff "tests/ish/$name.out" "build/ish-$name.out" || true; fail=1
+            fi
+        else
+            ./build/pty_driver "$f" "$IDIOMC" "$prog" >"build/san-ish-$name.out" 2>/dev/null || true
+            san_check "build/san-ish-$name.out" "ish pty $name"
+        fi
+        ;;
+    esac
 done
 [ "$MODE" = "output" ] && echo "ish pty goldens passed ($(ls tests/ish/*.keys | wc -l) cases)"
 

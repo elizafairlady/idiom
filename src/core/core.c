@@ -860,6 +860,7 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_TTY_READ_LINE] = {"tty-read-line", 0, 0},
     [IDM_PRIM_TTY_WRITE] = {"tty-write", 1, 1},
     [IDM_PRIM_TTY_SIZE] = {"tty-size", 0, 0},
+    [IDM_PRIM_EPRINTLN] = {"eprintln", 0, UINT32_MAX},
 };
 
 size_t idm_primitive_count(void) {

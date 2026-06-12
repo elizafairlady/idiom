@@ -13,6 +13,8 @@ IdmScheduler *idm_sched_create(IdmRuntime *rt, const IdmBytecodeModule *module, 
 void idm_sched_destroy(IdmScheduler *sched);
 bool idm_sched_run_main(IdmScheduler *sched, uint32_t main_fn, IdmValue *out_result, IdmError *err);
 bool idm_sched_eval(IdmScheduler *sched, IdmValue thunk, IdmValue *out_value, IdmError *err);
+bool idm_sched_run_session(IdmScheduler *sched, IdmValue thunk, bool register_session, IdmValue *out_value, IdmValue *out_reason, IdmError *err);
+int idm_sched_session_status(IdmScheduler *sched, IdmValue value, IdmValue reason);
 void idm_sched_watch(IdmScheduler *sched, uint64_t pid);
 char *idm_sched_take_diagnostic(IdmScheduler *sched);
 bool idm_signals_install(IdmError *err);

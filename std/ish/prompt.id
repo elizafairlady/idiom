@@ -1,0 +1,2 @@
+method prompt state -> default-prompt state
+method continuation-prompt _state -> "...> "
