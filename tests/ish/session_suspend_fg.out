@@ -5,9 +5,7 @@ running
 ^Z[1]+  Stopped  sh -c "echo run''ning; until test -f go; do sleep 0.1; done; echo wo''ke"
 [J~ [error] % [12C[J~ [error] % s[13C[J~ [error] % sh[14C[J~ [error] % sh [15C[J~ [error] % sh -[16C[J~ [error] % sh -c[17C[J~ [error] % sh -c [18C[J~ [error] % sh -c "[19C[J~ [error] % sh -c "t[20C[J~ [error] % sh -c "to[21C[J~ [error] % sh -c "tou[22C[J~ [error] % sh -c "touc[23C[J~ [error] % sh -c "touch[24C[J~ [error] % sh -c "touch [25C[J~ [error] % sh -c "touch g[26C[J~ [error] % sh -c "touch go[27C[J~ [error] % sh -c "touch go;[28C[J~ [error] % sh -c "touch go; [29C[J~ [error] % sh -c "touch go; e[30C[J~ [error] % sh -c "touch go; ec[31C[J~ [error] % sh -c "touch go; ech[32C[J~ [error] % sh -c "touch go; echo[33C[J~ [error] % sh -c "touch go; echo [34C[J~ [error] % sh -c "touch go; echo m[35C[J~ [error] % sh -c "touch go; echo ma[36C[J~ [error] % sh -c "touch go; echo ma'[37C[J~ [error] % sh -c "touch go; echo ma''[38C[J~ [error] % sh -c "touch go; echo ma''d[39C[J~ [error] % sh -c "touch go; echo ma''de[40C[J~ [error] % sh -c "touch go; echo ma''de"[41C
 made
-{:ok 0 "" ""}
 [J~ % [4C[J~ % f[5C[J~ % fg[6C
 sh -c "echo run''ning; until test -f go; do sleep 0.1; done; echo wo''ke"
 woke
-{:ok 0 "" ""}
 [J~ % [4C[J~ % e[5C[J~ % ex[6C[J~ % exi[7C[J~ % exit[8C[J~ % exit [9C[J~ % exit 0[10C

@@ -1,0 +1,5 @@
+package labelext
+
+extend int with tests/pkg/labelproto do
+  method point-label n -> str "ext:" n
+end

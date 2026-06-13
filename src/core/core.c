@@ -313,11 +313,13 @@ bool idm_core_define_protocol_add_method(IdmCore *core, IdmValue method, uint32_
     return true;
 }
 
-IdmCore *idm_core_extend_protocol(IdmValue protocol, IdmValue type, IdmSpan span) {
+IdmCore *idm_core_extend_protocol(IdmValue protocol, IdmValue type, IdmValue provider, IdmValue provider_key, IdmSpan span) {
     IdmCore *core = core_alloc(IDM_CORE_EXTEND_PROTOCOL, span);
     if (!core) return NULL;
     core->as.extend_protocol.protocol = protocol;
     core->as.extend_protocol.type = type;
+    core->as.extend_protocol.provider = provider;
+    core->as.extend_protocol.provider_key = provider_key;
     return core;
 }
 
@@ -782,7 +784,7 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_SELF] = {"self", 0, 0},
     [IDM_PRIM_SPAWN] = {"spawn", 1, 1},
     [IDM_PRIM_SEND] = {"send", 2, 2},
-    [IDM_PRIM_EXIT] = {"exit", 1, 2},
+    [IDM_PRIM_EXIT] = {"exit", 0, 2},
     [IDM_PRIM_LINK] = {"link", 1, 1},
     [IDM_PRIM_UNLINK] = {"unlink", 1, 1},
     [IDM_PRIM_MONITOR] = {"monitor", 1, 1},
@@ -941,6 +943,13 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             if (core->as.app.callee && core->as.app.callee->kind == IDM_CORE_PRIMITIVE) {
                 for (size_t i = 0; i < core->as.app.arg_count; i++) {
                     if (!compile_expr(core->as.app.args[i], module, false, err)) return false;
+                }
+                if (core->as.app.callee->as.primitive == IDM_PRIM_EXIT && core->as.app.arg_count == 0) {
+                    uint32_t zero_const = 0;
+                    if (!add_const_value(module, idm_int(0), &zero_const, err, core->span)) return false;
+                    if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, zero_const, NULL)) return idm_error_oom(err, core->span);
+                    if (!idm_bc_emit_op(module, IDM_OP_EXIT, NULL)) return idm_error_oom(err, core->span);
+                    return true;
                 }
                 IdmOpcode actor_op = IDM_OP_HALT;
                 uint32_t actor_arity = 0;
@@ -1215,10 +1224,16 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             }
             uint32_t protocol_const = 0;
             uint32_t type_const = 0;
+            uint32_t provider_const = 0;
+            uint32_t provider_key_const = 0;
             if (!add_const_value(module, core->as.extend_protocol.protocol, &protocol_const, err, core->span)) return false;
             if (!add_const_value(module, core->as.extend_protocol.type, &type_const, err, core->span)) return false;
+            if (!add_const_value(module, core->as.extend_protocol.provider, &provider_const, err, core->span)) return false;
+            if (!add_const_value(module, core->as.extend_protocol.provider_key, &provider_key_const, err, core->span)) return false;
             if (!idm_bc_emit_u32(module, IDM_OP_EXTEND_PROTOCOL, protocol_const, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit(module, type_const, NULL)) return idm_error_oom(err, core->span);
+            if (!idm_bc_emit(module, provider_const, NULL)) return idm_error_oom(err, core->span);
+            if (!idm_bc_emit(module, provider_key_const, NULL)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit(module, (uint32_t)core->as.extend_protocol.count, NULL)) return idm_error_oom(err, core->span);
             for (size_t i = 0; i < core->as.extend_protocol.count; i++) {
                 IdmCoreProtocolImpl *impl = &core->as.extend_protocol.impls[i];

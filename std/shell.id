@@ -4,16 +4,34 @@ defn shell-merge a b ->
   tuple (tuple-get b 0) (tuple-get b 1) (str (tuple-get a 2) (tuple-get b 2)) (str (tuple-get a 3) (tuple-get b 3))
 
 defn shell-check do
-  _ r when (shell-ok? r) -> r
+  _ r when (shell-ok? r) -> :nil
   name r -> error :command name (tuple-get r 1)
 end
 
-defn ish-notify-job port text -> do
+defn ish-register-job port text do
   match ish-session do
-    :nil -> :ok
-    spid -> send spid (tuple :ish-job port text)
+    :nil -> :nil
+    spid when (eq? spid (self)) -> :nil
+    spid -> do
+      send spid (tuple :ish-job port text (self))
+      receive do
+        {:ish-job-id n} -> n
+      end
+    end
   end
+end
+
+defn ish-notify-job port text do
+  ish-register-job port text
   port
+end
+
+defn ish-announce-job port text do
+  match (ish-register-job port text) do
+    :nil -> :ok
+    n -> str "[" n "] " text " &" |> eprintln
+  end
+  :nil
 end
 
 resolver form do
@@ -323,21 +341,34 @@ resolver form do
   end
 
   defn chain-step do
-    acc :and next ->
+    acc :and next :false ->
       %`(do
           __c = %,acc
           (cond (shell-ok? __c) (shell-merge __c %,next) __c)
         end)
-    acc :or next ->
+    acc :or next :false ->
       %`(do
           __c = %,acc
           (cond (shell-ok? __c) __c (shell-merge __c %,next))
+        end)
+    acc :and next _ ->
+      %`(do
+          __c = %,acc
+          (cond (shell-ok? __c) %,next :nil)
+        end)
+    acc :or next _ ->
+      %`(do
+          __c = %,acc
+          (cond (shell-ok? __c) :nil %,next)
         end)
   end
 
   defn chain-fold do
     acc '() _ _ -> acc
-    acc (list {op e} . t) cap checked -> chain-fold (chain-step acc op (elem-exec e cap (and checked (eq? t '())))) t cap checked
+    acc (list {op e} . t) cap checked -> do
+      last = and checked (eq? t '())
+      chain-fold (chain-step acc op (elem-exec e cap last) last) t cap checked
+    end
   end
 
   defn emit-chain do
@@ -382,11 +413,18 @@ resolver form do
     _ -> syntax-error form "process substitution cannot be combined with '&&' or '||'"
   end
 
-  defn emit do
-    chain :nil :true cap _ -> do
-      e = bg-elem chain
-      %`(ish-notify-job (exec %,(elem-graph e cap)) %,(make-syntax-string form (render-parts e)))
+  defn emit-bg e cap do
+    launch = %`(exec %,(elem-graph e cap))
+    text = make-syntax-string form (render-parts e)
+    if (eq? (syntax-property form "value-context") "true") do
+      %`(ish-notify-job %,launch %,text)
+    else do
+      %`(ish-announce-job %,launch %,text)
     end
+  end
+
+  defn emit do
+    chain :nil :true cap _ -> emit-bg (bg-elem chain) cap
     chain :nil _ cap checked -> emit-chain chain cap checked
     chain pw _ cap checked -> emit-pw (pw-elem chain) pw cap checked
   end

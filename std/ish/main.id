@@ -1,4 +1,4 @@
-defn home-abbrev cwd -> do
+defn home-abbrev cwd do
   h = env-get "HOME"
   if (present? h) do
     if (eq? cwd h) do
@@ -26,23 +26,21 @@ defn prompt-state status jobs -> dict :cwd (pwd) :status status :jobs jobs :cols
 
 defn fenced-prompt pst -> match (try do tuple :ok (prompt pst); rescue r -> tuple :rescued r end) do
   {:ok p} -> p
-  {:rescued {:error {:runtime _no-conformance}}} -> default-prompt pst
   {:rescued r} -> do
-    eprintln (str "ish: prompt raised: " (inspect r))
+    str "ish: prompt raised: " (inspect r) |> eprintln
     default-prompt pst
   end
 end
 
 defn fenced-cont pst -> match (try do tuple :ok (continuation-prompt pst); rescue r -> tuple :rescued r end) do
   {:ok p} -> p
-  {:rescued {:error {:runtime _no-conformance}}} -> "...> "
   {:rescued r} -> do
-    eprintln (str "ish: prompt raised: " (inspect r))
+    str "ish: prompt raised: " (inspect r) |> eprintln
     "...> "
   end
 end
 
-defn arm ed status shell jobs -> do
+defn arm ed status shell jobs do
   if (eq? (tty?) :false) do
     ed |> sput :prompt "" |> sput :cont-prompt ""
   else if shell do
@@ -73,23 +71,23 @@ defn drop-loop-frames do
 end
 
 defn print-diag fallback -> match (repl-diagnostic) do
-  :nil -> eprintln (inspect fallback)
-  d -> eprintln (join (drop-loop-frames (split d "\n")) "\n")
+  :nil -> fallback |> inspect |> eprintln
+  d -> d |> split "\n" |> drop-loop-frames |> join "\n" |> eprintln
 end
 
 defn drain-normal pid -> receive do
   {:exit p _r} when (eq? p pid) -> :ok
 end
 
-defn eval-down reason tok text -> do
+defn eval-down reason tok text do
   repl-abort tok
   match reason do
     {:error {:command name :capture-overflow}} -> do
-      eprintln (str "ish: " name ": capture overflow")
+      str "ish: " name ": capture overflow" |> eprintln
       1
     end
     {:error {:command name s}} -> do
-      eprintln (str "ish: " name ": exit status " s)
+      str "ish: " name ": exit status " s |> eprintln
       s
     end
     {:error {:suspended port}} -> do
@@ -99,7 +97,7 @@ defn eval-down reason tok text -> do
       else do
         send spid (tuple :ish-job-stopped port text (self))
         receive do
-          {:ish-job-id n} -> eprintln (job-line n "+" :stopped text)
+          {:ish-job-id n} -> job-line n "+" :stopped text |> eprintln
         end
       end
       :error
@@ -126,7 +124,7 @@ defn observe pid tok print? text -> receive do
   {:eval-value p v} when (eq? p pid) -> do
     drain-normal pid
     if (and (eq? print? :true) (neq? v :nil)) do
-      println (inspect v)
+      v |> inspect |> println
     end
     0
   end
@@ -154,7 +152,7 @@ defn eval-text text print? -> match (repl-compile text) do
   res -> dispatch res print? text
 end
 
-defn config-home _tag -> do
+defn config-home _tag do
   v = env-get "XDG_CONFIG_HOME"
   if (present? v) do
     v
@@ -166,7 +164,7 @@ defn config-home _tag -> do
   end
 end
 
-defn rc-file _tag -> do
+defn rc-file _tag do
   primary = match (config-home :go) do
     :nil -> :nil
     c -> str c "/ish/rc.ish"
@@ -189,7 +187,7 @@ defn run-rc _tag -> match (rc-file :go) do
   path -> match (file-read path) do
     {:ok src} -> eval-text src :false
     {:error r} -> do
-      eprintln (str "ish: cannot read " path ": " (inspect r))
+      str "ish: cannot read " path ": " (inspect r) |> eprintln
       :error
     end
   end
@@ -215,7 +213,7 @@ end
 defn print-done do
   '() -> :ok
   (list {n mark status text _port} . t) -> do
-    eprintln (job-line n mark status text)
+    job-line n mark status text |> eprintln
     print-done t
   end
 end
@@ -230,7 +228,7 @@ defn hist-notify text entries -> match ish-session do
   end
 end
 
-defn exit-attempt st n status shell warned -> do
+defn exit-attempt st n status shell warned do
   {lines _live} = jobs-poll :go
   stopped = stopped-lines lines
   if (eq? stopped '()) do
@@ -244,7 +242,7 @@ defn exit-attempt st n status shell warned -> do
   end
 end
 
-defn serve ed status shell warned -> do
+defn serve ed status shell warned do
   {lines live} = jobs-poll :go
   print-done (done-lines lines)
   ed2 = arm ed status shell live
@@ -279,7 +277,7 @@ defn serve ed status shell warned -> do
   end
 end
 
-defn run-loop shell entries rc -> do
+defn run-loop shell entries rc do
   trap-exit :true
   base = initial-state "idiom> "
   ed = if (eq? (tty?) :true) do base else do sput base :dumb :true end
@@ -291,7 +289,7 @@ defn run-loop shell entries rc -> do
   end
 end
 
-defn start-loop shell entries rc -> do
+defn start-loop shell entries rc do
   parent = (self)
   pid = spawn (fn -> send parent (tuple :ish-done (run-loop shell entries rc)))
   link pid
@@ -306,7 +304,7 @@ end
 defn state-loop shell pid restarts jst hist -> receive do
   {:ish-done n} -> n
   {:exit p reason} when (eq? p pid) -> do
-    eprintln (str "ish: session loop crashed: " (inspect reason))
+    str "ish: session loop crashed: " (inspect reason) |> eprintln
     now = time-ms
     recent = recent-restarts restarts now
     if (gte? (list-len recent) 3) do
@@ -316,8 +314,9 @@ defn state-loop shell pid restarts jst hist -> receive do
       state-loop shell (start-loop shell entries :false) (cons now recent) jst hist2
     end
   end
-  {:ish-job port text} -> do
-    {jst2 _n} = jobs-register jst port text
+  {:ish-job port text from} -> do
+    {jst2 n} = jobs-register jst port text
+    send from (tuple :ish-job-id n)
     state-loop shell pid restarts jst2 hist
   end
   {:ish-job-stopped port text from} -> do
@@ -345,7 +344,7 @@ defn state-loop shell pid restarts jst hist -> receive do
   end
 end
 
-export defn main mode -> do
+export defn main mode do
   shell = eq? mode :shell
   trap-exit :true
   if shell do

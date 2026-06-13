@@ -13,7 +13,7 @@ suite do
       x = 40
       defmacro m stx do
         %`(do
-            defn %,(syntax-nth stx 2) v -> do
+            defn %,(syntax-nth stx 2) v do
                 %,(syntax-nth stx 3) = :other
                 x
               end
@@ -28,7 +28,7 @@ suite do
     got = do
       defmacro m2 stx do
         %`(do
-            defn %,(syntax-nth stx 2) v -> do
+            defn %,(syntax-nth stx 2) v do
                 %,(syntax-nth stx 3) = 7
                 add %,(syntax-nth stx 3) 1
               end

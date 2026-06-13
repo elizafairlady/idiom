@@ -312,6 +312,8 @@ struct IdmCore {
         struct {
             IdmValue protocol;
             IdmValue type;
+            IdmValue provider;
+            IdmValue provider_key;
             IdmCoreProtocolImpl *impls;
             size_t count;
             size_t cap;
@@ -358,7 +360,7 @@ IdmCore *idm_core_ensure(IdmCore *body, IdmCore *cleanup, uint32_t tmp_slot, Idm
 IdmCore *idm_core_use_package(IdmValue name, IdmBytecodeModule *module, uint32_t init_fn, uint32_t *export_src, uint32_t *export_dst, size_t export_count, IdmCore *cont, IdmSpan span);
 IdmCore *idm_core_define_protocol(IdmValue name, IdmSpan span);
 bool idm_core_define_protocol_add_method(IdmCore *core, IdmValue method, uint32_t arity, IdmCore *default_fn);
-IdmCore *idm_core_extend_protocol(IdmValue protocol, IdmValue type, IdmSpan span);
+IdmCore *idm_core_extend_protocol(IdmValue protocol, IdmValue type, IdmValue provider, IdmValue provider_key, IdmSpan span);
 bool idm_core_extend_protocol_add_impl(IdmCore *core, IdmValue method, uint32_t arity, IdmCore *impl_fn);
 IdmCore *idm_core_method_call(IdmValue protocol, IdmValue method, IdmSpan span);
 bool idm_core_method_call_add_arg(IdmCore *core, IdmCore *arg);

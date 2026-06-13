@@ -8,8 +8,6 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "  method show x -> str \"default:\" x\n"
         "end\n"
         "implement ShowDefault\n"
-        "extend int with ShowDefault do\n"
-        "end\n"
         "show 42\n",
         "\"default:42\"");
     check_value_written(&rt,
@@ -37,10 +35,19 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "  method same a b -> eq? a b\n"
         "end\n"
         "implement Eqish\n"
-        "extend int with Eqish do\n"
-        "end\n"
         "same 4 4\n",
         ":true");
+    check_value_written(&rt,
+        "protocol Pair do\n"
+        "  method label x -> \"label\"\n"
+        "  method describe x -> str (label x) \":\" x\n"
+        "end\n"
+        "implement Pair\n"
+        "extend int with Pair do\n"
+        "  method label _n -> \"int\"\n"
+        "end\n"
+        "{(describe 3) (describe \"s\")}\n",
+        "{\"int:3\" \"label:s\"}");
     check_value_written(&rt,
         "implement tests/pkg/protomethod\n"
         "extend int with tests/pkg/protomethod do\n"
@@ -49,22 +56,40 @@ static void test_protocol_methods_runtime_dispatch(void) {
         "{(describe 7) (tag 7)}\n",
         "{\"pkg:7\" :int}");
 
-    expect_runtime_error_contains(&rt, "<protocol-default-requires-extend>",
+    expect_runtime_error_contains(&rt, "<signature-only-requires-extend>",
         "protocol NeedsExtend do\n"
-        "  method show x -> str x\n"
+        "  method show x\n"
         "end\n"
         "implement NeedsExtend\n"
         "show 42\n",
         "does not extend protocol 'NeedsExtend#");
-    expect_runtime_error_contains(&rt, "<duplicate-extend-runtime>",
-        "protocol DupExtend do\n"
-        "  method show x -> str x\n"
+    check_value_written(&rt,
+        "protocol Rebind do\n"
+        "  method show x\n"
         "end\n"
-        "extend int with DupExtend do\n"
+        "implement Rebind\n"
+        "extend int with Rebind do\n"
+        "  method show x -> :first\n"
         "end\n"
-        "extend int with DupExtend do\n"
+        "extend int with Rebind do\n"
+        "  method show x -> :second\n"
+        "end\n"
+        "show 1\n",
+        ":second");
+    expect_runtime_error_contains(&rt, "<cross-provider-extend-conflict>",
+        "use tests/pkg/labelext\n"
+        "implement tests/pkg/labelproto\n"
+        "extend int with tests/pkg/labelproto do\n"
+        "  method point-label n -> :mine\n"
         "end\n",
-        "already extends protocol 'DupExtend#");
+        "already extends protocol 'tests/pkg/labelproto'");
+    expect_runtime_error_contains(&rt, "<cross-provider-extend-names-units>",
+        "use tests/pkg/labelext\n"
+        "implement tests/pkg/labelproto\n"
+        "extend int with tests/pkg/labelproto do\n"
+        "  method point-label n -> :mine\n"
+        "end\n",
+        "via 'tests/pkg/labelext'");
     idm_runtime_destroy(&rt);
 }
 
@@ -112,10 +137,11 @@ static void test_protocol_method_expansion_boundaries(void) {
 static void test_protocol_bytecode_roundtrip(void) {
     const char *src =
         "protocol RoundShow do\n"
-        "  method show x -> str \"round:\" x\n"
+        "  method show x -> str \"default:\" x\n"
         "end\n"
         "implement RoundShow\n"
         "extend int with RoundShow do\n"
+        "  method show x -> str \"round:\" x\n"
         "end\n"
         "show 5\n";
     IdmRuntime rt1;

@@ -566,11 +566,17 @@ static bool op_extend_protocol(Vm *vm, Frame *frame, IdmError *err) {
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     uint32_t protocol_const = module->code[frame->ip++];
     uint32_t type_const = module->code[frame->ip++];
+    uint32_t provider_const = module->code[frame->ip++];
+    uint32_t provider_key_const = module->code[frame->ip++];
     uint32_t impl_count = module->code[frame->ip++];
     const char *protocol = module_const_text(module, protocol_const, "EXTEND_PROTOCOL protocol", err);
     if (!protocol) return false;
     const char *type = module_const_text(module, type_const, "EXTEND_PROTOCOL type", err);
     if (!type) return false;
+    const char *provider = module_const_text(module, provider_const, "EXTEND_PROTOCOL provider", err);
+    if (!provider) return false;
+    const char *provider_key = module_const_text(module, provider_key_const, "EXTEND_PROTOCOL provider key", err);
+    if (!provider_key) return false;
     if (vm->sp < impl_count) return idm_error_set(err, idm_span_unknown(NULL), "EXTEND_PROTOCOL stack underflow");
     IdmProtocolImplSpec *specs = impl_count == 0 ? NULL : calloc(impl_count, sizeof(*specs));
     if (impl_count != 0 && !specs) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -589,7 +595,7 @@ static bool op_extend_protocol(Vm *vm, Frame *frame, IdmError *err) {
         if (!pop(vm, &impl, err)) { free(specs); return false; }
         specs[i - 1u].impl = impl;
     }
-    ok = idm_protocol_extend(vm->rt, protocol, type, specs, impl_count, err);
+    ok = idm_protocol_extend(vm->rt, protocol, type, provider, provider_key, specs, impl_count, err);
     free(specs);
     if (!ok) return false;
     return push(vm, idm_atom(vm->rt, "ok"), err);

@@ -11,21 +11,21 @@ export defn start do
   end)
 end
 
-export defn stop sup -> do
+export defn stop sup do
   send sup (tuple :stop (self))
   receive do
     {:stopped p} when (eq? p sup) -> :ok
   end
 end
 
-export defn count sup -> do
+export defn count sup do
   send sup (tuple :count (self))
   receive do
     {:child-count p n} when (eq? p sup) -> n
   end
 end
 
-defn spawn-child f -> do
+defn spawn-child f do
   pid = spawn f
   link pid
   pid
@@ -82,7 +82,7 @@ defn restart-child state id f restart -> match state do
   end
 end
 
-defn shutdown children -> map (keys children) (fn pid -> do
+defn shutdown children -> map (keys children) (fn pid do
   unlink pid
   exit pid :kill
 end)

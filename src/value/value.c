@@ -280,6 +280,8 @@ static void runtime_protocol_conformance_destroy(IdmRuntimeProtocolConformance *
     if (!conf) return;
     free(conf->protocol);
     free(conf->type);
+    free(conf->provider);
+    free(conf->provider_key);
     memset(conf, 0, sizeof(*conf));
 }
 
@@ -985,18 +987,31 @@ static void staged_protocol_impls_destroy(IdmRuntimeProtocolImpl *impls, size_t 
     free(impls);
 }
 
-bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type, const IdmProtocolImplSpec *impls, size_t impl_count, IdmError *err) {
+static void runtime_protocol_remove_impls(IdmProtocolWorld *w, const char *protocol, const char *type) {
+    size_t kept = 0;
+    for (size_t i = 0; i < w->impl_count; i++) {
+        if (strcmp(w->impls[i].type, type) == 0 && strcmp(w->impls[i].protocol, protocol) == 0) runtime_protocol_impl_destroy(&w->impls[i]);
+        else w->impls[kept++] = w->impls[i];
+    }
+    w->impl_count = kept;
+}
+
+bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type, const char *provider, const char *provider_key, const IdmProtocolImplSpec *impls, size_t impl_count, IdmError *err) {
     if (!protocol || !*protocol) return idm_error_set(err, idm_span_unknown(NULL), "extend requires a protocol name");
     if (!type || !*type) return idm_error_set(err, idm_span_unknown(NULL), "extend requires a value type name");
+    if (!provider || !provider_key) return idm_error_set(err, idm_span_unknown(NULL), "extend requires a provider identity");
     if (runtime_protocol_method_count_for(rt, protocol) == 0) return idm_error_set(err, idm_span_unknown(NULL), "protocol '%s' is not defined at runtime", protocol);
-    if (runtime_protocol_find_conformance(rt, protocol, type)) return idm_error_set(err, idm_span_unknown(NULL), "type '%s' already extends protocol '%s'", type, protocol);
+    IdmRuntimeProtocolConformance *existing = runtime_protocol_find_conformance(rt, protocol, type);
+    if (existing && strcmp(existing->provider_key, provider_key) != 0) {
+        idm_error_set(err, idm_span_unknown(NULL), "type '%s' already extends protocol '%s' via '%s'; the extend in '%s' conflicts", type, protocol, existing->provider, provider);
+        return idm_error_reason(rt, err, "protocol-extend-conflict", 4, idm_atom(rt, protocol), idm_atom(rt, type), idm_atom(rt, existing->provider), idm_atom(rt, provider));
+    }
     for (size_t i = 0; i < impl_count; i++) {
         if (!impls[i].name || !*impls[i].name) return idm_error_set(err, idm_span_unknown(NULL), "extend for protocol '%s' has an unnamed method", protocol);
         IdmRuntimeProtocolMethod *method = runtime_protocol_find_method(rt, protocol, impls[i].name);
         if (!method) return idm_error_set(err, idm_span_unknown(NULL), "protocol '%s' has no method '%s'", protocol, impls[i].name);
         if (method->arity != impls[i].arity) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %u got %u", protocol, impls[i].name, method->arity, impls[i].arity);
         if (!idm_is_closure(impls[i].impl)) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' implementation is not a function", protocol, impls[i].name);
-        if (runtime_protocol_find_impl(rt, protocol, impls[i].name, type)) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' already has an implementation for type '%s'", protocol, impls[i].name, type);
         for (size_t j = i + 1u; j < impl_count; j++) {
             if (strcmp(impls[i].name, impls[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "extend for '%s' provides method '%s' more than once", protocol, impls[i].name);
         }
@@ -1019,20 +1034,27 @@ bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type,
         staged_protocol_impls_destroy(staged, impl_count);
         return false;
     }
-    if (!protocol_conformances_reserve(w, w->conformance_count + 1u, err)) {
+    if (!existing && !protocol_conformances_reserve(w, w->conformance_count + 1u, err)) {
         staged_protocol_impls_destroy(staged, impl_count);
         return false;
     }
-    IdmRuntimeProtocolConformance conf;
-    conf.protocol = idm_strdup(protocol);
-    conf.type = idm_strdup(type);
-    if (!conf.protocol || !conf.type) {
-        runtime_protocol_conformance_destroy(&conf);
-        staged_protocol_impls_destroy(staged, impl_count);
-        return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!existing) {
+        IdmRuntimeProtocolConformance conf;
+        memset(&conf, 0, sizeof(conf));
+        conf.protocol = idm_strdup(protocol);
+        conf.type = idm_strdup(type);
+        conf.provider = idm_strdup(provider);
+        conf.provider_key = idm_strdup(provider_key);
+        if (!conf.protocol || !conf.type || !conf.provider || !conf.provider_key) {
+            runtime_protocol_conformance_destroy(&conf);
+            staged_protocol_impls_destroy(staged, impl_count);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        w->conformances[w->conformance_count++] = conf;
+    } else {
+        runtime_protocol_remove_impls(w, protocol, type);
     }
     for (size_t i = 0; i < impl_count; i++) w->impls[w->impl_count++] = staged[i];
-    w->conformances[w->conformance_count++] = conf;
     free(staged);
     return true;
 }
@@ -1046,12 +1068,12 @@ bool idm_protocol_lookup(IdmRuntime *rt, const char *protocol, const char *metho
         *out_impl = impl->impl;
         return true;
     }
-    if (!runtime_protocol_find_conformance(rt, protocol, type)) {
-        return idm_error_set(err, idm_span_unknown(NULL), "type '%s' does not extend protocol '%s'", type, protocol);
-    }
     if (contract->has_default) {
         *out_impl = contract->default_impl;
         return true;
+    }
+    if (!runtime_protocol_find_conformance(rt, protocol, type)) {
+        return idm_error_set(err, idm_span_unknown(NULL), "type '%s' does not extend protocol '%s'", type, protocol);
     }
     return idm_error_set(err, idm_span_unknown(NULL), "no implementation for method '%s.%s' on type '%s'", protocol, method, type);
 }

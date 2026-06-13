@@ -9,9 +9,6 @@ end
 extend string with Describe do
   method describe s -> str "string:" s
 end
-extend pair with Describe do
-end
-
 println (describe 7)
 println (describe "hi")
 println (describe (cons 1 2))

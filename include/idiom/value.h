@@ -93,6 +93,8 @@ typedef struct {
 typedef struct {
     char *protocol;
     char *type;
+    char *provider;
+    char *provider_key;
 } IdmRuntimeProtocolConformance;
 
 typedef struct {
@@ -225,7 +227,7 @@ const char *idm_value_type_name(IdmValueTag tag);
 const char *idm_value_dispatch_type_name(IdmValue value);
 bool idm_value_type_from_name(const char *name, IdmValueTag *out);
 bool idm_protocol_define(IdmRuntime *rt, const char *protocol, const IdmProtocolMethodSpec *methods, size_t method_count, IdmError *err);
-bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type, const IdmProtocolImplSpec *impls, size_t impl_count, IdmError *err);
+bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type, const char *provider, const char *provider_key, const IdmProtocolImplSpec *impls, size_t impl_count, IdmError *err);
 bool idm_protocol_lookup(IdmRuntime *rt, const char *protocol, const char *method, const char *type, uint32_t argc, IdmValue *out_impl, IdmError *err);
 void idm_runtime_mark_protocol_roots(IdmRuntime *rt);
 

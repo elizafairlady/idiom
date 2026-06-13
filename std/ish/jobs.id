@@ -42,7 +42,7 @@ defn keep-undone do
   end
 end
 
-defn jobs-snapshot {entries next} -> do
+defn jobs-snapshot {entries next} do
   {lines live} = snap-lines entries 0 '() 0
   kept = keep-undone entries
   tuple lines live (tuple kept (if (eq? kept '()) do 1 else do next end))
@@ -54,7 +54,7 @@ defn drop-port do
   (list h . t) p -> cons h (drop-port t p)
 end
 
-defn jobs-remove {entries next} port -> do
+defn jobs-remove {entries next} port do
   kept = drop-port entries port
   tuple kept (if (eq? kept '()) do 1 else do next end)
 end
@@ -95,7 +95,7 @@ end
 defn jobs-print do
   '() -> :nil
   (list {n mark status text _port} . t) -> do
-    println (job-line n mark status text)
+    job-line n mark status text |> println
     jobs-print t
   end
 end
@@ -121,7 +121,7 @@ defn job-take n -> match ish-session do
   end
 end
 
-defn fg-cmd n -> do
+defn fg-cmd n do
   {_m port text} = job-take n
   println text
   job-resume port :fg
@@ -135,13 +135,17 @@ defn fg-cmd n -> do
       end
     end
   end
-  r
+  if (eq? (tuple-get r 0) :ok) do
+    :nil
+  else do
+    error :command text (tuple-get r 1)
+  end
 end
 
-defn bg-cmd n -> do
+defn bg-cmd n do
   {m port text} = job-take n
   job-resume port :bg
-  println (str "[" m "]+ " text " &")
+  str "[" m "]+ " text " &" |> println
   :nil
 end
 

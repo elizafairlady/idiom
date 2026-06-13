@@ -4,7 +4,7 @@ defn present? do
   _ -> :true
 end
 
-defn env-or name fallback -> do
+defn env-or name fallback do
   v = env-get name
   if (present? v) do v else do fallback end
 end
@@ -14,7 +14,7 @@ defn hist-path-under do
   state -> str state "/idiom/ish_history"
 end
 
-defn hist-path _tag -> do
+defn hist-path _tag do
   v = env-get "ISH_HISTFILE"
   if (present? v) do
     v
@@ -99,7 +99,7 @@ defn render-oldest-first do
   (list h . t) acc -> render-oldest-first t (str acc (hist-escape h) "\n")
 end
 
-defn history-load shell -> do
+defn history-load shell do
   path = if shell do hist-path :go else do :nil end
   match path do
     :nil -> tuple :nil '()

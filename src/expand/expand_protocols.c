@@ -217,7 +217,7 @@ static IdmCore *build_extend_core(ExpandContext *ctx, const char *protocol, cons
             return NULL;
         }
     }
-    IdmCore *core = idm_core_extend_protocol(idm_atom(ctx->rt, protocol), idm_atom(ctx->rt, type), body->span);
+    IdmCore *core = idm_core_extend_protocol(idm_atom(ctx->rt, protocol), idm_atom(ctx->rt, type), idm_atom(ctx->rt, ctx->unit), idm_atom(ctx->rt, ctx->unit_key), body->span);
     if (!core) {
         extend_impls_destroy(impls, impl_count);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, body->span);
@@ -721,7 +721,7 @@ static bool register_record_protocol_surface(ExpandContext *ctx, const IdmSyntax
     if (field_count != 0 && !p->art.methods) { protocol_def_destroy(p); return idm_error_oom(err, span); }
 
     IdmCore *define = idm_core_define_protocol(idm_atom(ctx->rt, identity), span);
-    IdmCore *extend = idm_core_extend_protocol(idm_atom(ctx->rt, identity), idm_atom(ctx->rt, identity), span);
+    IdmCore *extend = idm_core_extend_protocol(idm_atom(ctx->rt, identity), idm_atom(ctx->rt, identity), idm_atom(ctx->rt, ctx->unit), idm_atom(ctx->rt, ctx->unit_key), span);
     if (!define || !extend) { idm_core_free(define); idm_core_free(extend); protocol_def_destroy(p); return idm_error_oom(err, span); }
     for (size_t i = 0; i < field_count; i++) {
         IdmProtocolMethodDef *method = &p->art.methods[i];
@@ -927,7 +927,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     }
     IdmCore *export_extend = NULL;
     if (ctx->in_package && exported && ctx->protocol_name) {
-        export_extend = idm_core_extend_protocol(idm_atom(ctx->rt, ctx->protocol_name), idm_atom(ctx->rt, identity), form->span);
+        export_extend = idm_core_extend_protocol(idm_atom(ctx->rt, ctx->protocol_name), idm_atom(ctx->rt, identity), idm_atom(ctx->rt, ctx->unit), idm_atom(ctx->rt, ctx->unit_key), form->span);
         if (!export_extend) {
             idm_syn_free(predicate_syntax);
             idm_core_free(define_protocol);

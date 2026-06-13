@@ -341,11 +341,17 @@ bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
             case IDM_OP_EXTEND_PROTOCOL: {
                 uint32_t protocol_const = 0;
                 uint32_t type_const = 0;
+                uint32_t provider_const = 0;
+                uint32_t provider_key_const = 0;
                 uint32_t method_count = 0;
                 if (!verify_operand(module, &ip, op, &protocol_const, err)) return false;
                 if (protocol_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "EXTEND_PROTOCOL protocol constant %u out of bounds", protocol_const);
                 if (!verify_operand(module, &ip, op, &type_const, err)) return false;
                 if (type_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "EXTEND_PROTOCOL type constant %u out of bounds", type_const);
+                if (!verify_operand(module, &ip, op, &provider_const, err)) return false;
+                if (provider_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "EXTEND_PROTOCOL provider constant %u out of bounds", provider_const);
+                if (!verify_operand(module, &ip, op, &provider_key_const, err)) return false;
+                if (provider_key_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "EXTEND_PROTOCOL provider key constant %u out of bounds", provider_key_const);
                 if (!verify_operand(module, &ip, op, &method_count, err)) return false;
                 for (uint32_t i = 0; i < method_count; i++) {
                     uint32_t method_const = 0;
@@ -498,11 +504,13 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 break;
             }
             case IDM_OP_EXTEND_PROTOCOL: {
-                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
                 uint32_t protocol_const = module->code[ip++];
                 uint32_t type_const = module->code[ip++];
+                uint32_t provider_const = module->code[ip++];
+                uint32_t provider_key_const = module->code[ip++];
                 uint32_t method_count = module->code[ip++];
-                if (!idm_buf_appendf(buf, " %u %u %u", protocol_const, type_const, method_count)) return false;
+                if (!idm_buf_appendf(buf, " %u %u %u %u %u", protocol_const, type_const, provider_const, provider_key_const, method_count)) return false;
                 for (uint32_t i = 0; i < method_count; i++) {
                     if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
                     if (!idm_buf_appendf(buf, " %u %u", module->code[ip], module->code[ip + 1u])) return false;
@@ -917,8 +925,12 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
             case IDM_OP_EXTEND_PROTOCOL: {
                 uint32_t protocol_const = src->code[ip++];
                 uint32_t type_const = src->code[ip++];
+                uint32_t provider_const = src->code[ip++];
+                uint32_t provider_key_const = src->code[ip++];
                 uint32_t method_count = src->code[ip++];
-                if (!idm_bc_emit(dst, protocol_const + const_off, NULL) || !idm_bc_emit(dst, type_const + const_off, NULL) || !idm_bc_emit(dst, method_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                if (!idm_bc_emit(dst, protocol_const + const_off, NULL) || !idm_bc_emit(dst, type_const + const_off, NULL) ||
+                    !idm_bc_emit(dst, provider_const + const_off, NULL) || !idm_bc_emit(dst, provider_key_const + const_off, NULL) ||
+                    !idm_bc_emit(dst, method_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 for (uint32_t i = 0; i < method_count; i++) {
                     uint32_t method_const = src->code[ip++];
                     uint32_t arity = src->code[ip++];

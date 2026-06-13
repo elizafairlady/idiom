@@ -176,7 +176,7 @@ suite do
         n acc -> build (n - 1) (cons n acc)
       end
       victims = map (range 0 8) (fn _i -> spawn (fn do
-        defn churn k -> do
+        defn churn k do
           build 500 :nil
           churn (k + 1)
         end
@@ -195,7 +195,7 @@ suite do
   test "trap-exit-toggle-under-exit" do
     got = do
       victim = spawn (fn do
-        defn flip n -> do
+        defn flip n do
           trap-exit :true
           trap-exit :false
           flip (n + 1)

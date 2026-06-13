@@ -46,3 +46,15 @@ raise :pinned-diag
 repl-diagnostic
 repl-diagnostic
 inspect (ish-session)
+protocol Greet do
+  method greet x
+end
+implement Greet
+extend int with Greet do
+  method greet n -> str "hi-" n
+end
+greet 7
+extend int with Greet do
+  method greet n -> str "yo-" n
+end
+greet 7

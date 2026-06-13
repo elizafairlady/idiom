@@ -15,7 +15,7 @@ defn imin a b -> if (lt? a b) do a else do b end
 
 defn edited state -> tuple :render state
 
-defn insert-text state text -> do
+defn insert-text state text do
   b = buffer-of state
   c = cursor-of state
   b2 = str (str-slice b 0 c) text (str-slice b c (str-len b))
@@ -75,31 +75,31 @@ defn key-line-end state -> move-to state (line-stop (buffer-of state) (cursor-of
 defn key-word-back state -> move-to state (word-back (buffer-of state) (cursor-of state))
 defn key-word-fwd state -> move-to state (word-fwd (buffer-of state) (cursor-of state))
 
-defn delete-range state a z -> do
+defn delete-range state a z do
   b = buffer-of state
   edited (state |> sput :buffer (str (str-slice b 0 a) (str-slice b z (str-len b))) |> sput :cursor a)
 end
 
-defn kill-range state a z -> do
+defn kill-range state a z do
   b = buffer-of state
   match (delete-range state a z) do
     {:render st} -> edited (sput st :kill (str-slice b a z))
   end
 end
 
-defn key-backspace state -> do
+defn key-backspace state do
   c = cursor-of state
   if (eq? c 0) do edited state else do delete-range state (sub c 1) c end
 end
 
-defn key-delete state -> do
+defn key-delete state do
   c = cursor-of state
   if (eq? c (str-len (buffer-of state))) do edited state else do delete-range state c (add c 1) end
 end
 
 defn key-eof-or-delete state -> if (eq? (str-len (buffer-of state)) 0) do tuple :eof state else do key-delete state end
 
-defn key-kill-line-end state -> do
+defn key-kill-line-end state do
   b = buffer-of state
   c = cursor-of state
   e = line-stop b c
@@ -108,13 +108,13 @@ end
 
 defn key-kill-line-start state -> kill-range state (line-start (buffer-of state) (cursor-of state)) (cursor-of state)
 
-defn key-kill-word state -> do
+defn key-kill-word state do
   b = buffer-of state
   c = cursor-of state
   kill-range state (skip-back b (skip-back b c &space-byte?) &filled-byte?) c
 end
 
-defn key-yank state -> do
+defn key-yank state do
   k = sget state :kill
   if (eq? k "") do edited state else do insert-text state k end
 end
@@ -133,7 +133,7 @@ end
 defn show-history state pos text ->
   edited (state |> sput :hist-pos pos |> sput :buffer text |> sput :cursor (str-len text))
 
-defn key-history-back state -> do
+defn key-history-back state do
   h = sget state :history
   p = sget state :hist-pos
   n = add p 1
@@ -145,7 +145,7 @@ defn key-history-back state -> do
   end
 end
 
-defn key-history-fwd state -> do
+defn key-history-fwd state do
   p = sget state :hist-pos
   if (eq? p (sub 0 1)) do
     edited state
@@ -170,7 +170,7 @@ defn search-scan do
   (list _ . t) q i -> search-scan t q (add i 1)
 end
 
-defn search-apply state from -> do
+defn search-apply state from do
   q = sget state :search
   if (eq? q "") do
     edited state
@@ -227,7 +227,7 @@ export defn step state key ->
 export defn reset state ->
   state |> sput :buffer "" |> sput :cursor 0 |> sput :mode :edit |> sput :hist-pos (sub 0 1) |> sput :row 0 |> sput :below 0
 
-export defn continue state -> do
+export defn continue state do
   b = str (buffer-of state) "\n"
   state |> sput :buffer b |> sput :cursor (str-len b) |> sput :mode :edit
 end
@@ -271,7 +271,7 @@ defn locate do
   '() c i -> tuple i c
 end
 
-defn prompt-for state i -> do
+defn prompt-for state i do
   p = if (eq? (sget state :mode) :search) do str "(reverse-i-search)'" (sget state :search) "': " else do sget state :prompt end
   if (eq? i 0) do p else do sget state :cont-prompt end
 end
@@ -293,7 +293,7 @@ defn join-crlf do
   (list h . t) -> str h "\r\n" (join-crlf t)
 end
 
-export defn redraw state -> do
+export defn redraw state do
   cols = imax 1 (sget state :cols)
   b = buffer-of state
   lines = split b "\n"
@@ -385,7 +385,7 @@ defn term-cols _tag -> match tty-size do
   {c _r} -> c
 end
 
-defn paint state -> do
+defn paint state do
   {st out} = redraw state
   tty-write out
   st
@@ -394,12 +394,12 @@ end
 defn to-block-end state ->
   if (gt? (sget state :below) 0) do tty-write (csi (str (sget state :below) "B")) else do :ok end
 
-defn finish-line state -> do
+defn finish-line state do
   to-block-end state
   tuple :line (buffer-of state) (state |> sput :row 0 |> sput :below 0)
 end
 
-defn finish-cancel state -> do
+defn finish-cancel state do
   to-block-end state
   tuple :cancel (reset state)
 end
@@ -422,7 +422,7 @@ defn edit-loop state -> match (read-key :go) do
   end
 end
 
-defn raw-read state -> do
+defn raw-read state do
   tty-raw!
   result = edit-loop (paint state)
   tty-restore!
@@ -442,7 +442,7 @@ defn cooked-line state -> match tty-read-line do
   end
 end
 
-defn cooked-read state -> do
+defn cooked-read state do
   tty-write (if (eq? (buffer-of state) "") do sget state :prompt else do sget state :cont-prompt end)
   cooked-line state
 end
@@ -453,12 +453,12 @@ defn guarded-raw state -> match (try do tuple :ok (raw-read state); rescue r -> 
   {:ok result} -> result
   {:fallback reason} -> do
     tty-restore!
-    println (str "ish: editor disabled, falling back to plain input: " (inspect reason))
+    str "ish: editor disabled, falling back to plain input: " (inspect reason) |> println
     cooked-read (sput state :dumb :true)
   end
 end
 
-export defn read state -> do
+export defn read state do
   st = sput state :cols (term-cols :go)
   if (cooked? st) do cooked-read st else do guarded-raw st end
 end

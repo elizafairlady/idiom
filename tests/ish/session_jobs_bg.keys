@@ -10,7 +10,7 @@ s \r
 w okbg
 s sleep 30 &
 s \r
-w port:
+w ] sleep 30 &
 s jobs
 s \r
 w [2]+

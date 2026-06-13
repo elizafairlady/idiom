@@ -3,7 +3,5 @@ protocol Show do
 end
 
 implement Show
-extend int with Show do
-end
 
 println (show 42)

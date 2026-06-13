@@ -87,7 +87,7 @@ defn run-one do
     match outcome do
       :ok -> failures
       {:failed r} -> do
-        println (str "FAIL " name ": " (inspect r))
+        str "FAIL " name ": " (inspect r) |> println
         add failures 1
       end
     end
@@ -103,7 +103,7 @@ export defn run-suite tests do
   result = run-all (to-list tests) 0 0
   match result do
     {0 total} -> do
-      println (str "ok: " total " tests")
+      str "ok: " total " tests" |> println
       :ok
     end
     {failures total} -> error (tuple :suite-failed failures :of total)

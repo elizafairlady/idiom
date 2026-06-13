@@ -124,14 +124,28 @@ suite do
       {:error {:runtime msg}} -> assert (str-contains? msg "exceeded its budget")
     end
   end
+  test "extend-sequential-rebind" do
+    got = do
+      protocol Tag do
+        method tag x
+      end
+      implement Tag
+      extend int with Tag do
+        method tag _n -> :first
+      end
+      extend int with Tag do
+        method tag _n -> :second
+      end
+      tag 1
+    end
+    assert-inspect got ":second"
+  end
   test "tail-method-dispatch" do
     got = do
       protocol Down do
         method down n -> if (eq? n 0) do :done else do down (n - 1) end
       end
       implement Down
-      extend int with Down do
-      end
       down 200000
     end
     assert-inspect got ":done"
