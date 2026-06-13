@@ -8,6 +8,52 @@ defn shell-check do
   name r -> error :command name (tuple-get r 1)
 end
 
+defn shell-cd path do
+  chdir path
+  match ish-session do
+    :nil -> :nil
+    spid when (eq? spid (self)) -> :nil
+    spid -> do
+      send spid (tuple :ish-cd (pwd) (self))
+      receive do
+        {:ish-cd-ok} -> :nil
+      end
+    end
+  end
+end
+
+export defmacro cd stx do
+  defn head-is? do
+    node name when (syntax-list? node) ->
+      and (gt? (syntax-length node) 0) (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name)
+    _ _ -> :false
+  end
+
+  defn string-syntax? p -> eq? (syntax-kind p) :string
+
+  defn render-static-part do
+    p when (syntax-word? p) -> syntax-word-text p
+    p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
+    p when (string-syntax? p) -> syntax-string-text p
+    p when (syntax-int? p) -> str (syntax-int-value p)
+    p when (eq? (syntax-kind p) :float) -> str (syntax->datum p)
+    _ -> :nil
+  end
+
+  defn path-text do
+    stx i n acc when (eq? i n) -> acc
+    stx i n _acc when (and (gt? i 2) (eq? (syntax-adjacent? (syntax-nth stx i)) :false)) -> syntax-error stx "cd takes zero or one path"
+    stx i n acc -> match (render-static-part (syntax-nth stx i)) do
+      :nil -> syntax-error (syntax-nth stx i) "cd path must be a literal shell word or string"
+      text -> path-text stx (add i 1) n (str acc text)
+    end
+  end
+
+  n = syntax-length stx
+  path = if (eq? n 2) do "~" else do path-text stx 2 n "" end
+  %`(shell-cd %,(make-syntax-string stx path))
+end
+
 defn ish-register-job port text do
   match ish-session do
     :nil -> :nil

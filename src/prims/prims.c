@@ -282,19 +282,41 @@ static bool prim_to_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError
     return type_error(rt, err, "to-list", v, "a list, vector, tuple, dict, or string");
 }
 
+static bool expand_home_path(IdmExec *exec, char **path_io, IdmError *err) {
+    char *path = *path_io;
+    if (path[0] != '~' || (path[1] != '\0' && path[1] != '/')) return true;
+    const char *home = idm_exec_env_get(exec, "HOME");
+    if (!home) home = getenv("HOME");
+    if (!home || home[0] == '\0') return idm_error_set(err, idm_span_unknown(NULL), "cd: HOME not set");
+    IdmBuffer expanded;
+    idm_buf_init(&expanded);
+    bool ok = idm_buf_append(&expanded, home);
+    if (ok && path[1] == '/') ok = idm_buf_append(&expanded, path + 1);
+    if (!ok) {
+        idm_buf_destroy(&expanded);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    free(path);
+    *path_io = idm_buf_take(&expanded);
+    if (!*path_io) return idm_error_oom(err, idm_span_unknown(NULL));
+    return true;
+}
+
 static bool prim_cd(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     size_t len = 0;
     const char *bytes = require_string(args[0], &len, err);
     if (!bytes) return false;
-    if (!idm_current_exec()) return idm_error_set(err, idm_span_unknown(NULL), "cd requires an actor context");
+    IdmExec *exec = idm_current_exec();
+    if (!exec) return idm_error_set(err, idm_span_unknown(NULL), "cd requires an actor context");
     char *path = idm_strndup(bytes, len);
     if (!path) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!expand_home_path(exec, &path, err)) { free(path); return false; }
     char *candidate = NULL;
     if (path[0] == '/') {
         candidate = path;
         path = NULL;
     } else {
-        const char *base = idm_exec_cwd(idm_current_exec());
+        const char *base = idm_exec_cwd(exec);
         char buf[PATH_MAX];
         if (!base) {
             if (!getcwd(buf, sizeof(buf))) {
@@ -321,7 +343,7 @@ static bool prim_cd(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err
         return false;
     }
     free(candidate);
-    if (!idm_exec_set_cwd(idm_current_exec(), resolved)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_exec_set_cwd(exec, resolved)) return idm_error_oom(err, idm_span_unknown(NULL));
     *out = idm_atom(rt, "ok");
     return true;
 }
@@ -2128,6 +2150,7 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_PRINT: return prim_print_impl(rt, args, argc, false, out, err);
         case IDM_PRIM_PRINTLN: return prim_print_impl(rt, args, argc, true, out, err);
         case IDM_PRIM_CD: return prim_cd(rt, args, out, err);
+        case IDM_PRIM_CHDIR: return prim_cd(rt, args, out, err);
         case IDM_PRIM_PWD: return prim_pwd(rt, args, out, err);
         case IDM_PRIM_ENV_GET: return prim_env_get(rt, args, out, err);
         case IDM_PRIM_ENV_SET: return prim_env_set(rt, args, out, err);

@@ -228,6 +228,18 @@ defn hist-notify text entries -> match ish-session do
   end
 end
 
+defn cwd-sync _tag -> match ish-session do
+  :nil -> :ok
+  spid when (eq? spid (self)) -> :ok
+  spid -> do
+    send spid (tuple :ish-cwd (self))
+    receive do
+      {:ish-cwd :nil} -> :ok
+      {:ish-cwd cwd} -> chdir cwd
+    end
+  end
+end
+
 defn exit-attempt st n status shell warned do
   {lines _live} = jobs-poll :go
   stopped = stopped-lines lines
@@ -243,6 +255,7 @@ defn exit-attempt st n status shell warned do
 end
 
 defn serve ed status shell warned do
+  cwd-sync :go
   {lines live} = jobs-poll :go
   print-done (done-lines lines)
   ed2 = arm ed status shell live
@@ -301,7 +314,7 @@ defn recent-restarts do
   (list t . rest) now -> if (lt? (sub now t) 30000) do cons t (recent-restarts rest now) else do recent-restarts rest now end
 end
 
-defn state-loop shell pid restarts jst hist -> receive do
+defn state-loop shell pid restarts jst hist cwd -> receive do
   {:ish-done n} -> n
   {:exit p reason} when (eq? p pid) -> do
     str "ish: session loop crashed: " (inspect reason) |> eprintln
@@ -311,36 +324,45 @@ defn state-loop shell pid restarts jst hist -> receive do
       70
     else do
       {hist2 entries} = history-load shell
-      state-loop shell (start-loop shell entries :false) (cons now recent) jst hist2
+      state-loop shell (start-loop shell entries :false) (cons now recent) jst hist2 cwd
     end
   end
   {:ish-job port text from} -> do
     {jst2 n} = jobs-register jst port text
     send from (tuple :ish-job-id n)
-    state-loop shell pid restarts jst2 hist
+    state-loop shell pid restarts jst2 hist cwd
   end
   {:ish-job-stopped port text from} -> do
     {jst2 n} = jobs-register jst port text
     send from (tuple :ish-job-id n)
-    state-loop shell pid restarts jst2 hist
+    state-loop shell pid restarts jst2 hist cwd
   end
   {:ish-jobs from} -> do
     {lines live jst2} = jobs-snapshot jst
     send from (tuple :ish-jobs lines live)
-    state-loop shell pid restarts jst2 hist
+    state-loop shell pid restarts jst2 hist cwd
   end
   {:ish-job-get n from} -> do
     send from (jobs-lookup jst n)
-    state-loop shell pid restarts jst hist
+    state-loop shell pid restarts jst hist cwd
   end
   {:ish-job-remove port from} -> do
     send from (tuple :ish-job-removed)
-    state-loop shell pid restarts (jobs-remove jst port) hist
+    state-loop shell pid restarts (jobs-remove jst port) hist cwd
   end
   {:ish-hist-append text entries from} -> do
     hist2 = history-append hist entries text
     send from (tuple :ish-hist-ok)
-    state-loop shell pid restarts jst hist2
+    state-loop shell pid restarts jst hist2 cwd
+  end
+  {:ish-cd next from} -> do
+    chdir next
+    send from (tuple :ish-cd-ok)
+    state-loop shell pid restarts jst hist next
+  end
+  {:ish-cwd from} -> do
+    send from (tuple :ish-cwd cwd)
+    state-loop shell pid restarts jst hist cwd
   end
 end
 
@@ -352,5 +374,5 @@ export defn main mode do
   end
   eval-text "implement std/ish" :false
   {hist entries} = history-load shell
-  state-loop shell (start-loop shell entries :true) '() (jobs-init :go) hist
+  state-loop shell (start-loop shell entries :true) '() (jobs-init :go) hist :nil
 end

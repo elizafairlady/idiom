@@ -1,0 +1,24 @@
+w ~ % 
+s add 1 1
+s \r
+w 2
+s add 1 1
+s \r
+w 2
+s  add 2 2
+s \r
+w 4
+s do
+s \r
+w ...> 
+s   3
+s \r
+w ...> 
+s end
+s \r
+w 3
+s  file-read "hist"
+s \r
+w add 1 1
+w do\\n  3\\nend
+s \x04

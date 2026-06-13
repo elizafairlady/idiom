@@ -1,0 +1,4 @@
+extend dict with std/ish do
+  method prompt s -> str "P" (dict-get s :jobs 0) ":" (dict-get s :cols 0) "> "
+  method continuation-prompt s -> str "C" (dict-get s :cols 0) "> "
+end

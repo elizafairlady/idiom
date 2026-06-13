@@ -1,0 +1,11 @@
+w P0:80> 
+s do
+s \r
+w C80> 
+s 1
+s \r
+w C80> 
+s end
+s \r
+w 1
+s \x04

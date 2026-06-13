@@ -1,4 +1,4 @@
 tests/diag/shell-amp.id:2:8: error: '&' is only allowed at the end of a command
-  in check-amp (std/shell.id:289)
-  in %resolver (std/shell.id:448)
+  in check-amp (std/shell.id:335)
+  in %resolver (std/shell.id:494)
   in expansion of 'echo' (tests/diag/shell-amp.id:2:1)

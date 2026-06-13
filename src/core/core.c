@@ -798,6 +798,7 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_PRINT] = {"print", 0, UINT32_MAX},
     [IDM_PRIM_PRINTLN] = {"println", 0, UINT32_MAX},
     [IDM_PRIM_CD] = {"cd", 1, 1},
+    [IDM_PRIM_CHDIR] = {"chdir", 1, 1},
     [IDM_PRIM_PWD] = {"pwd", 0, 0},
     [IDM_PRIM_WRITE_PROCSUB_TEMP] = {"write-procsub-temp", 1, 1},
     [IDM_PRIM_MAKE_PROCSUB_TEMP] = {"make-procsub-temp", 0, 0},

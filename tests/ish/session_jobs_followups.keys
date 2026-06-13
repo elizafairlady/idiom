@@ -1,0 +1,29 @@
+w ~ %
+s sh -c "kill -TSTP 0; while ! test -f release; do sleep 0.05; done; echo one > one"
+s \r
+w [1]+  Stopped
+s sh -c "kill -TSTP 0; echo two > two"
+s \r
+w [2]+  Stopped
+s bg 1
+s \r
+w [1]+ sh -c "kill -TSTP 0; while ! test -f release; do sleep 0.05; done; echo one > one" &
+s fg 2
+s \r
+w sh -c "kill -TSTP 0; echo two > two"
+s touch release
+s \r
+p 200
+s add 0 0
+s \r
+w Done
+s jobs
+s \r
+s fg 9
+s \r
+w no-such-job
+s sleep 0.1 &
+s \r
+w [1] sleep 0.1 &
+s exit 0
+s \r

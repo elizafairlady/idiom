@@ -1,0 +1,9 @@
+[J~ % [4C[J~ % m[5C[J~ % mk[6C[J~ % mkd[7C[J~ % mkdi[8C[J~ % mkdir[9C[J~ % mkdir [10C[J~ % mkdir t[11C[J~ % mkdir te[12C[J~ % mkdir tes[13C[J~ % mkdir test[14C[J~ % mkdir tests[15C
+cd tests
+[J~ % [4C[J~ % c[5C[J~ % cd[6C[J~ % cd [7C[J~ % cd t[8C[J~ % cd te[9C[J~ % cd tes[10C[J~ % cd test[11C[J~ % cd tests[12C
+[J~/tests % [10C[J~/tests % c[11C[J~/tests % cd[12C[J~/tests % cd [13C[J~/tests % cd .[14C[J~/tests % cd ..[15C
+[J~ % [4C[J~ % c[5C[J~ % cd[6C[J~ % cd [7C[J~ % cd .[8C[J~ % cd ./[9C[J~ % cd ./t[10C[J~ % cd ./te[11C[J~ % cd ./tes[12C[J~ % cd ./test[13C[J~ % cd ./tests[14C
+[J~/tests % [10C[J~/tests % c[11C[J~/tests % cd[12C[J~/tests % cd [13C[J~/tests % cd .[14C[J~/tests % cd ..[15C[J~/tests % cd ../[16C[J~/tests % cd ../t[17C[J~/tests % cd ../te[18C[J~/tests % cd ../tes[19C[J~/tests % cd ../test[20C[J~/tests % cd ../tests[21C
+[J~/tests % [10C[J~/tests % c[11C[J~/tests % cd[12C
+[J~ % [4C[J~ % c[5C[J~ % cd[6C[J~ % cd [7C[J~ % cd ~[8C
+[J~ % [4C

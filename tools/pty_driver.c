@@ -99,6 +99,18 @@ static void pause_ms(long ms) {
     nanosleep(&ts, NULL);
 }
 
+static void resize_pty(int master, const char *args) {
+    char *end = NULL;
+    long cols = strtol(args, &end, 10);
+    long rows = end ? strtol(end, NULL, 10) : 0;
+    if (cols <= 0 || rows <= 0) die("bad resize");
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    ws.ws_col = (unsigned short)cols;
+    ws.ws_row = (unsigned short)rows;
+    if (ioctl(master, TIOCSWINSZ, &ws) != 0) die("resize");
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "usage: pty_driver KEYSCRIPT CMD [ARGS...]\n");
@@ -128,7 +140,8 @@ int main(int argc, char **argv) {
         dup2(slave, STDERR_FILENO);
         if (slave > 2) close(slave);
         close(master);
-        setenv("TERM", "xterm", 1);
+        const char *term = getenv("PTY_TERM");
+        setenv("TERM", term && *term ? term : "xterm", 1);
         execvp(argv[2], argv + 2);
         die("execvp");
     }
@@ -141,6 +154,7 @@ int main(int argc, char **argv) {
         if (line[0] == '\0' || line[0] == '#') continue;
         if (line[0] == 's' && line[1] == ' ') send_text(master, line + 2);
         else if (line[0] == 'p' && line[1] == ' ') pause_ms(strtol(line + 2, NULL, 10));
+        else if (line[0] == 'r' && line[1] == ' ') resize_pty(master, line + 2);
         else if (line[0] == 'w' && line[1] == ' ') wait_for(master, line + 2);
         else die("bad script line");
         drain(master, 10);

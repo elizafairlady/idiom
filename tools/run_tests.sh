@@ -98,6 +98,12 @@ for f in tests/ish/*.keys; do
         home="$ROOT/build/ish-home-$name"
         rm -rf "$home"
         mkdir -p "$home"
+        extra_env=
+        pty_env=
+        case "$name" in
+        session_history_cap) extra_env="ISH_HISTSIZE=2" ;;
+        session_dumb) pty_env="PTY_TERM=dumb" ;;
+        esac
         if [ -e "tests/ish/$name.rc" ]; then
             mkdir -p "$home/.config/ish"
             cp "tests/ish/$name.rc" "$home/.config/ish/rc.ish"
@@ -107,14 +113,14 @@ for f in tests/ish/*.keys; do
         [ -e "tests/ish/$name.status" ] && want=$(cat "tests/ish/$name.status")
         if [ "$MODE" != "san" ]; then
             (cd "$home" && env -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u ISH_HISTSIZE \
-                HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist \
+                $extra_env $pty_env HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist \
                 "$ROOT/build/pty_driver" "$ROOT/$f" "$ROOT/$ISH") >"build/ish-$name.out" 2>"build/ish-$name.err"
             rc=$?
             status_pin "tests/ish/$name.status" "" "ISH SESSION STATUS: $name" "$rc" "$want"
             pin_check "tests/ish/$name.out" "build/ish-$name.out" "ISH SESSION FAIL: $name"
         else
             (cd "$home" && env -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u ISH_HISTSIZE \
-                HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist \
+                $extra_env $pty_env HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist \
                 "$ROOT/build/pty_driver" "$ROOT/$f" "$ROOT/$ISH") >"build/san-ish-$name.out" 2>/dev/null || true
             san_check "build/san-ish-$name.out" "ish session $name"
         fi

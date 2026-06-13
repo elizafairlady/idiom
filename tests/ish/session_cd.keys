@@ -1,0 +1,23 @@
+w ~ %
+s mkdir tests
+s \r
+w ~ %
+s cd tests
+s \r
+w ~/tests %
+s cd ..
+s \r
+w ~ %
+s cd ./tests
+s \r
+w ~/tests %
+s cd ../tests
+s \r
+w ~/tests %
+s cd
+s \r
+w ~ %
+s cd ~
+s \r
+w ~ %
+s \x04

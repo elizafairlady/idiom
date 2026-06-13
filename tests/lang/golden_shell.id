@@ -20,6 +20,28 @@ suite do
     end
     assert-inspect got ":caught"
   end
+  test "shell-cd-bare-words-and-home" do
+    got = do
+      start = pwd
+      env-set "HOME" start
+      implement std/shell
+      cd tests
+      here = pwd
+      cd ..
+      back = pwd
+      cd ~
+      home = pwd
+      cd tests
+      cd
+      noarg = pwd
+      cd ./tests
+      dot = pwd
+      cd ../tests
+      parent = pwd
+      tuple (eq? here (str start "/tests")) (eq? back start) (eq? home start) (eq? noarg start) (eq? dot (str start "/tests")) (eq? parent (str start "/tests"))
+    end
+    assert-inspect got "{:true :true :true :true :true :true}"
+  end
   test "shell-env-prefix" do
     got = do
       implement std/shell
