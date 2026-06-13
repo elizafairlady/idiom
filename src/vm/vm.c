@@ -50,6 +50,8 @@ struct IdmExec {
     size_t handler_cap;
     IdmValue raised;
     bool has_raised;
+    IdmValue pending_raise;
+    bool has_pending_raise;
     IdmNamespace **ns_save;
     size_t ns_save_count;
     size_t ns_save_cap;
@@ -619,6 +621,18 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
         IdmRuntime *rt = vm->rt;
     IdmValue result = idm_nil();
     *status = IDM_EXEC_DONE;
+    if (vm->has_pending_raise) {
+        vm->has_pending_raise = false;
+        vm->raised = vm->pending_raise;
+        vm->pending_raise = idm_nil();
+        vm->has_raised = true;
+        IdmBuffer buf;
+        idm_buf_init(&buf);
+        if (idm_value_write(&buf, vm->raised) && buf.data) idm_error_set(err, idm_span_unknown(NULL), "%s", buf.data);
+        else idm_error_set(err, idm_span_unknown(NULL), "error raised");
+        idm_buf_destroy(&buf);
+        return false;
+    }
     for (;;) {
         Frame *frame = current_frame(vm);
         if (!frame) break;
@@ -1358,6 +1372,15 @@ bool idm_exec_push_result(IdmExec *exec, IdmValue value, IdmError *err) {
     return push(exec, value, err);
 }
 
+void idm_exec_inject_raise(IdmExec *exec, IdmValue reason) {
+    exec->pending_raise = reason;
+    exec->has_pending_raise = true;
+}
+
+IdmScheduler *idm_exec_scheduler(const IdmExec *exec) {
+    return exec ? exec->sched : NULL;
+}
+
 void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user) {
     if (!exec) return;
     for (size_t i = 0; i < exec->sp; i++) visit(user, exec->stack[i]);
@@ -1367,6 +1390,7 @@ void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user)
         for (uint32_t l = 0; l < frame->local_count; l++) visit(user, frame->locals[l]);
     }
     visit(user, exec->raised);
+    if (exec->has_pending_raise) visit(user, exec->pending_raise);
     if (exec->has_await) visit(user, exec->await_port);
     if (exec->has_port_request) visit(user, exec->port_request);
 }

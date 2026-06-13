@@ -8,6 +8,14 @@ defn shell-check do
   name r -> error :command name (tuple-get r 1)
 end
 
+defn ish-notify-job port text -> do
+  match ish-session do
+    :nil -> :ok
+    spid -> send spid (tuple :ish-job port text)
+  end
+  port
+end
+
 resolver form do
   defn head-is? do
     node name when (syntax-list? node) ->
@@ -353,13 +361,32 @@ resolver form do
     _ -> syntax-error form "'&' cannot background a '&&' or '||' list"
   end
 
+  defn render-part do
+    p when (syntax-word? p) -> syntax-word-text p
+    p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
+    p when (string-syntax? p) -> syntax-string-text p
+    p when (syntax-int? p) -> str (syntax-int-value p)
+    p when (eq? (syntax-kind p) :float) -> str (syntax->datum p)
+    p when (head-is? p "%-shell-var") -> str "$" (syntax-word-text (syntax-nth p 1))
+    _ -> "..."
+  end
+
+  defn render-parts do
+    '() -> ""
+    (list h) -> render-part h
+    (list h . t) -> str (render-part h) " " (render-parts t)
+  end
+
   defn pw-elem do
     (list {_ e}) -> e
     _ -> syntax-error form "process substitution cannot be combined with '&&' or '||'"
   end
 
   defn emit do
-    chain :nil :true cap _ -> %`(exec %,(elem-graph (bg-elem chain) cap))
+    chain :nil :true cap _ -> do
+      e = bg-elem chain
+      %`(ish-notify-job (exec %,(elem-graph e cap)) %,(make-syntax-string form (render-parts e)))
+    end
     chain :nil _ cap checked -> emit-chain chain cap checked
     chain pw _ cap checked -> emit-pw (pw-elem chain) pw cap checked
   end

@@ -37,9 +37,10 @@ do
 end
 {:ok f tok} = repl-compile "20 + 22"
 do
+  trap-exit :true
   w = repl-spawn f
-  monitor w
-  receive do {:down _ p r} -> r end
+  link w
+  receive do {:exit p r} -> r end
 end
 raise :pinned-diag
 repl-diagnostic

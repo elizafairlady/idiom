@@ -740,7 +740,7 @@ static bool sched_service_tty(IdmScheduler *sched, IdmError *err) {
 static IdmActor *tty_signal_target(IdmScheduler *sched) {
     for (size_t i = 0; i < sched->actor_count; i++) {
         IdmActor *a = sched->actors[i];
-        if (!a->exited && a->status == ACT_WAITING_TTY && !a->tty_line) return a;
+        if (!a->exited && a->status == ACT_WAITING_TTY) return a;
     }
     return NULL;
 }
@@ -1155,6 +1155,19 @@ static bool sched_poll(IdmScheduler *sched, bool mt, bool block, IdmError *err) 
             if (!idm_exec_push_result(a->exec, e->result, err)) return false;
             if (!ready_push(sched, a->pid, err)) return false;
             a->status = ACT_READY;
+        } else if (e && e->port && idm_port_foreground(e->port) && idm_port_stopped(e->port)) {
+            IdmValue detail[2];
+            detail[0] = idm_atom(sched->rt, "suspended");
+            detail[1] = idm_port(e->id);
+            IdmValue items[2];
+            items[0] = idm_atom(sched->rt, "error");
+            items[1] = idm_tuple(sched->rt, detail, 2u, err);
+            if (err->present) return false;
+            IdmValue reason = idm_tuple(sched->rt, items, 2u, err);
+            if (err->present) return false;
+            idm_exec_inject_raise(a->exec, reason);
+            if (!ready_push(sched, a->pid, err)) return false;
+            a->status = ACT_READY;
         }
     }
 
@@ -1449,6 +1462,37 @@ char *idm_sched_take_diagnostic(IdmScheduler *sched) {
     sched->retained_diag = NULL;
     sched_unlock(sched);
     return diag;
+}
+
+bool idm_sched_port_status(IdmScheduler *sched, uint64_t port_id, int *out_state) {
+    sched_lock(sched);
+    PortEntry *e = sched_find_port(sched, port_id);
+    bool found = e != NULL;
+    if (found) {
+        if (e->done) *out_state = 2;
+        else if (e->port && idm_port_stopped(e->port)) *out_state = 1;
+        else *out_state = 0;
+    }
+    sched_unlock(sched);
+    return found;
+}
+
+bool idm_sched_job_resume(IdmScheduler *sched, uint64_t port_id, bool fg) {
+    sched_lock(sched);
+    PortEntry *e = sched_find_port(sched, port_id);
+    bool found = e != NULL;
+    if (found && !e->done && e->port) idm_port_resume(e->port, fg);
+    sched_unlock(sched);
+    return found;
+}
+
+bool idm_sched_job_signal(IdmScheduler *sched, uint64_t port_id, int signo) {
+    sched_lock(sched);
+    PortEntry *e = sched_find_port(sched, port_id);
+    bool found = e != NULL;
+    if (found && !e->done && e->port) idm_port_signal_group(e->port, signo);
+    sched_unlock(sched);
+    return found;
 }
 
 static void eval_contain_failure(IdmScheduler *sched, IdmError *err) {

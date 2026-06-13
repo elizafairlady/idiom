@@ -137,6 +137,23 @@ for f in tests/ish/*.keys; do
         ;;
     esac
 done
+if [ "$MODE" != "san" ]; then
+    for procs in 1 4; do
+        name=session_suspend_fg
+        home="$ROOT/build/ish-home-$name-n$procs"
+        rm -rf "$home"
+        mkdir -p "$home"
+        (cd "$home" && env -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u ISH_HISTSIZE \
+            HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist IDIOMMAXPROCS=$procs \
+            "$ROOT/build/pty_driver" "$ROOT/tests/ish/$name.keys" "$ROOT/$ISH") >"build/ish-$name-n$procs.out" 2>"build/ish-$name-n$procs.err"
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            echo "ISH SESSION FAIL: $name (IDIOMMAXPROCS=$procs, status $rc)"; cat "build/ish-$name-n$procs.err"; fail=1
+        elif ! cmp -s "tests/ish/$name.out" "build/ish-$name-n$procs.out"; then
+            echo "ISH SESSION FAIL: $name (IDIOMMAXPROCS=$procs)"; diff "tests/ish/$name.out" "build/ish-$name-n$procs.out" || true; fail=1
+        fi
+    done
+fi
 [ "$MODE" != "san" ] && echo "ish pty goldens passed ($(ls tests/ish/*.keys | wc -l) cases)"
 
 for f in tests/shell/*.ish; do

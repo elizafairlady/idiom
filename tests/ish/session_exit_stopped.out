@@ -1,0 +1,9 @@
+[J~ % [4C[J~ % s[5C[J~ % sh[6C[J~ % sh [7C[J~ % sh -[8C[J~ % sh -c[9C[J~ % sh -c [10C[J~ % sh -c "[11C[J~ % sh -c "k[12C[J~ % sh -c "ki[13C[J~ % sh -c "kil[14C[J~ % sh -c "kill[15C[J~ % sh -c "kill [16C[J~ % sh -c "kill -[17C[J~ % sh -c "kill -T[18C[J~ % sh -c "kill -TS[19C[J~ % sh -c "kill -TST[20C[J~ % sh -c "kill -TSTP[21C[J~ % sh -c "kill -TSTP [22C[J~ % sh -c "kill -TSTP 0[23C[J~ % sh -c "kill -TSTP 0"[24C
+[1]+  Stopped  sh -c "kill -TSTP 0"
+[J~ [error] % [12C[J~ [error] % e[13C[J~ [error] % ex[14C[J~ [error] % exi[15C[J~ [error] % exit[16C[J~ [error] % exit [17C[J~ [error] % exit 0[18C
+ish: there are stopped jobs
+[J~ [error] % [12C[J~ [error] % a[13C[J~ [error] % ad[14C[J~ [error] % add[15C[J~ [error] % add [16C[J~ [error] % add 1[17C[J~ [error] % add 1 [18C[J~ [error] % add 1 2[19C
+3
+[J~ % [4C[J~ % e[5C[J~ % ex[6C[J~ % exi[7C[J~ % exit[8C[J~ % exit [9C[J~ % exit 0[10C
+ish: there are stopped jobs
+[J~ % [4C

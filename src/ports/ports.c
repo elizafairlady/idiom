@@ -34,6 +34,7 @@ typedef struct {
     pid_t pid;
     int status;
     bool reaped;
+    bool stopped;
 } Stage;
 
 static bool stage_own_temp(Stage *stage, const char *path) {
@@ -63,7 +64,25 @@ struct IdmPort {
     char *launch_error;
     size_t capture_limit;
     bool overflow;
+    bool interactive;
+    bool fg;
+    bool owns_terminal;
+    pid_t pgid;
 };
+
+static pid_t g_shell_pgid = 0;
+static int g_job_tty = -1;
+
+void idm_job_control_init(void) {
+    g_job_tty = STDIN_FILENO;
+    if (getpgrp() != getpid()) setpgid(0, 0);
+    g_shell_pgid = getpid();
+    signal(SIGTTOU, SIG_IGN);
+    signal(SIGTTIN, SIG_IGN);
+    signal(SIGTSTP, SIG_IGN);
+    signal(SIGQUIT, SIG_IGN);
+    tcsetpgrp(g_job_tty, g_shell_pgid);
+}
 
 static size_t capture_limit_from_env(void) {
     const char *text = getenv("IDM_CAPTURE_LIMIT");
@@ -378,7 +397,6 @@ static void child_apply_redirs(const Stage *stage) {
 }
 
 IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx, IdmError *err) {
-    (void)rt;
     const char *launch_cwd = idm_exec_cwd(exec_ctx);
     IdmPort *port = calloc(1u, sizeof(*port));
     if (!port) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
@@ -422,6 +440,8 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         return NULL;
     }
     idm_error_clear(&ignore);
+    port->interactive = rt->interactive;
+    bool foreground = port->interactive && !port->capture;
 
     int cap_out[2] = {-1, -1};
     int cap_err[2] = {-1, -1};
@@ -440,6 +460,15 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         pid_t pid = fork();
         if (pid < 0) { idm_error_set(err, idm_span_unknown(NULL), "fork failed: %s", strerror(errno)); if (stage_pipe[0] >= 0) { close(stage_pipe[0]); close(stage_pipe[1]); } failed = true; break; }
         if (pid == 0) {
+            if (port->interactive) {
+                pid_t grp = i == 0 ? getpid() : port->stages[0].pid;
+                setpgid(0, grp);
+                if (foreground && g_job_tty >= 0) tcsetpgrp(g_job_tty, grp);
+                signal(SIGTSTP, SIG_DFL);
+                signal(SIGTTOU, SIG_DFL);
+                signal(SIGTTIN, SIG_DFL);
+                signal(SIGQUIT, SIG_DFL);
+            }
             if (launch_cwd && chdir(launch_cwd) != 0) child_fail(launch_cwd, "chdir failed");
             if (prev_read >= 0) { dup2(prev_read, 0); }
             if (!last) { dup2(stage_pipe[1], 1); }
@@ -467,6 +496,15 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
             _exit(126);
         }
         port->stages[i].pid = pid;
+        if (port->interactive) {
+            if (i == 0) port->pgid = pid;
+            setpgid(pid, port->pgid);
+            if (foreground && i == 0) {
+                if (g_job_tty >= 0) tcsetpgrp(g_job_tty, port->pgid);
+                port->fg = true;
+                port->owns_terminal = true;
+            }
+        }
         if (prev_read >= 0) close(prev_read);
         if (!last) { close(stage_pipe[1]); prev_read = stage_pipe[0]; }
     }
@@ -486,6 +524,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         for (size_t i = 0; i < port->stage_count; i++) {
             if (port->stages[i].pid > 0) { kill(port->stages[i].pid, SIGKILL); waitpid(port->stages[i].pid, NULL, 0); port->stages[i].reaped = true; }
         }
+        if (port->owns_terminal && g_job_tty >= 0 && g_shell_pgid > 0) tcsetpgrp(g_job_tty, g_shell_pgid);
         idm_port_free(port);
         return NULL;
     }
@@ -536,17 +575,61 @@ void idm_port_drain(IdmPort *port) {
     drain_fd(port, &port->err_fd, &port->err_buf, 2);
 }
 
+bool idm_port_stopped(const IdmPort *port) {
+    bool any = false;
+    for (size_t i = 0; i < port->stage_count; i++) {
+        if (port->stages[i].reaped) continue;
+        if (!port->stages[i].stopped) return false;
+        any = true;
+    }
+    return any;
+}
+
+bool idm_port_foreground(const IdmPort *port) {
+    return port->fg;
+}
+
+void idm_port_signal_group(IdmPort *port, int signo) {
+    if (port->pgid > 0) {
+        kill(-port->pgid, signo);
+        return;
+    }
+    for (size_t i = 0; i < port->stage_count; i++) {
+        if (!port->stages[i].reaped && port->stages[i].pid > 0) kill(port->stages[i].pid, signo);
+    }
+}
+
+void idm_port_resume(IdmPort *port, bool fg) {
+    for (size_t i = 0; i < port->stage_count; i++) port->stages[i].stopped = false;
+    port->fg = fg;
+    if (fg && g_job_tty >= 0 && port->pgid > 0) {
+        tcsetpgrp(g_job_tty, port->pgid);
+        port->owns_terminal = true;
+    }
+    idm_port_signal_group(port, SIGCONT);
+}
+
 bool idm_port_try_complete(IdmPort *port) {
     idm_port_drain(port);
     bool all_reaped = true;
+    int flags = WNOHANG;
+    if (port->interactive) flags |= WUNTRACED | WCONTINUED;
     for (size_t i = 0; i < port->stage_count; i++) {
-        if (port->stages[i].reaped) continue;
+        Stage *stage = &port->stages[i];
+        if (stage->reaped) continue;
         int status = 0;
-        pid_t r = waitpid(port->stages[i].pid, &status, WNOHANG);
-        if (r == port->stages[i].pid) { port->stages[i].status = status; port->stages[i].reaped = true; }
-        else if (r == 0) all_reaped = false;
-        else if (r < 0 && errno == ECHILD) { port->stages[i].status = 0; port->stages[i].reaped = true; }
+        pid_t r = waitpid(stage->pid, &status, flags);
+        if (r == stage->pid) {
+            if (WIFSTOPPED(status)) { stage->stopped = true; all_reaped = false; }
+            else if (WIFCONTINUED(status)) { stage->stopped = false; all_reaped = false; }
+            else { stage->status = status; stage->reaped = true; }
+        }
+        else if (r < 0 && errno == ECHILD) { stage->status = 0; stage->reaped = true; }
         else all_reaped = false;
+    }
+    if (port->owns_terminal && (all_reaped || idm_port_stopped(port))) {
+        if (g_job_tty >= 0 && g_shell_pgid > 0) tcsetpgrp(g_job_tty, g_shell_pgid);
+        port->owns_terminal = false;
     }
     bool fds_open = port->out_fd >= 0 || port->err_fd >= 0;
     return all_reaped && !fds_open;

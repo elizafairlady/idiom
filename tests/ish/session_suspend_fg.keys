@@ -1,0 +1,19 @@
+w ~ %
+s \x1a
+s add 3 4
+s \r
+w 7
+s sh -c "echo run''ning; until test -f go; do sleep 0.1; done; echo wo''ke"
+s \r
+w running
+s \x1a
+w Stopped
+s sh -c "touch go; echo ma''de"
+s \r
+w made
+s fg
+s \r
+w woke
+w {:ok
+s exit 0
+s \r

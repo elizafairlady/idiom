@@ -18,6 +18,9 @@ int idm_sched_session_status(IdmScheduler *sched, IdmValue value, IdmValue reaso
 void idm_sched_watch(IdmScheduler *sched, uint64_t pid);
 char *idm_sched_take_diagnostic(IdmScheduler *sched);
 bool idm_signals_install(IdmError *err);
+bool idm_sched_port_status(IdmScheduler *sched, uint64_t port_id, int *out_state);
+bool idm_sched_job_resume(IdmScheduler *sched, uint64_t port_id, bool fg);
+bool idm_sched_job_signal(IdmScheduler *sched, uint64_t port_id, int signo);
 
 uint64_t idm_actor_pid(const IdmActor *actor);
 bool idm_actor_trap_exit_get(const IdmActor *actor);

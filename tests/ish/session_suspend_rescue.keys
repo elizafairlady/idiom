@@ -1,0 +1,27 @@
+w ~ %
+s try do
+s \r
+s   sh -c "kill -TSTP 0"
+s \r
+s   :after
+s \r
+s   rescue r -> match r do
+s \r
+s     {:error {:suspended p}} -> do
+s \r
+s       job-resume p :bg
+s \r
+s       str "resc" "ued"
+s \r
+s     end
+s \r
+s   end
+s \r
+s end
+s \r
+w rescued
+s jobs
+s \r
+p 100
+s exit 0
+s \r

@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -1972,6 +1973,53 @@ static bool prim_ish_session(IdmRuntime *rt, IdmValue *out) {
     return true;
 }
 
+static IdmScheduler *job_sched(const char *name, IdmError *err) {
+    IdmScheduler *sched = idm_exec_scheduler(idm_current_exec());
+    if (!sched) idm_error_set(err, idm_span_unknown(NULL), "%s requires an actor context", name);
+    return sched;
+}
+
+static bool job_arg_atom(IdmValue v, const char *name) {
+    return v.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(v.as.symbol), name) == 0;
+}
+
+static bool prim_port_status(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_PORT) return type_error(rt, err, "port-status", args[0], "a port");
+    IdmScheduler *sched = job_sched("port-status", err);
+    if (!sched) return false;
+    int state = 0;
+    if (!idm_sched_port_status(sched, args[0].as.id, &state)) return type_error(rt, err, "port-status", args[0], "a live port");
+    *out = idm_atom(rt, state == 2 ? "done" : state == 1 ? "stopped" : "running");
+    return true;
+}
+
+static bool prim_job_resume(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_PORT) return type_error(rt, err, "job-resume", args[0], "a port");
+    bool fg = job_arg_atom(args[1], "fg");
+    if (!fg && !job_arg_atom(args[1], "bg")) return type_error(rt, err, "job-resume", args[1], ":fg or :bg");
+    IdmScheduler *sched = job_sched("job-resume", err);
+    if (!sched) return false;
+    if (!idm_sched_job_resume(sched, args[0].as.id, fg)) return type_error(rt, err, "job-resume", args[0], "a live port");
+    *out = idm_atom(rt, "ok");
+    return true;
+}
+
+static bool prim_job_signal(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_PORT) return type_error(rt, err, "job-signal", args[0], "a port");
+    int signo = job_arg_atom(args[1], "hup") ? SIGHUP
+              : job_arg_atom(args[1], "cont") ? SIGCONT
+              : job_arg_atom(args[1], "term") ? SIGTERM
+              : job_arg_atom(args[1], "kill") ? SIGKILL
+              : job_arg_atom(args[1], "int") ? SIGINT
+              : 0;
+    if (signo == 0) return type_error(rt, err, "job-signal", args[1], ":hup, :cont, :term, :kill, or :int");
+    IdmScheduler *sched = job_sched("job-signal", err);
+    if (!sched) return false;
+    if (!idm_sched_job_signal(sched, args[0].as.id, signo)) return type_error(rt, err, "job-signal", args[0], "a live port");
+    *out = idm_atom(rt, "ok");
+    return true;
+}
+
 bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
     if (!require_arity(rt, prim, argc, err)) return false;
     switch (prim) {
@@ -2114,6 +2162,9 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_TTY_WRITE: return idm_prim_tty_write(rt, args, out, err);
         case IDM_PRIM_TTY_SIZE: return idm_prim_tty_size(rt, out, err);
         case IDM_PRIM_EPRINTLN: return prim_print_to(rt, stderr, args, argc, true, out, err);
+        case IDM_PRIM_PORT_STATUS: return prim_port_status(rt, args, out, err);
+        case IDM_PRIM_JOB_RESUME: return prim_job_resume(rt, args, out, err);
+        case IDM_PRIM_JOB_SIGNAL: return prim_job_signal(rt, args, out, err);
     }
     return idm_error_set(err, idm_span_unknown(NULL), "unimplemented primitive '%s'", idm_primitive_name(prim));
 }

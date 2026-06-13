@@ -429,15 +429,22 @@ defn raw-read state -> do
   result
 end
 
+defn cooked-line state -> match tty-read-line do
+  :eof -> tuple :eof state
+  {:signal :interrupt} -> do
+    tty-write "\n"
+    tuple :cancel (reset state)
+  end
+  {:signal _} -> cooked-line state
+  {:line l} -> do
+    full = str (buffer-of state) l
+    tuple :line full (sput state :buffer full)
+  end
+end
+
 defn cooked-read state -> do
   tty-write (if (eq? (buffer-of state) "") do sget state :prompt else do sget state :cont-prompt end)
-  match tty-read-line do
-    :eof -> tuple :eof state
-    {:line l} -> do
-      full = str (buffer-of state) l
-      tuple :line full (sput state :buffer full)
-    end
-  end
+  cooked-line state
 end
 
 defn cooked? state -> or (eq? (sget state :dumb) :true) (eq? (env-get "TERM") "dumb")

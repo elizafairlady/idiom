@@ -166,7 +166,10 @@ typedef enum {
     IDM_PRIM_TTY_READ_LINE,
     IDM_PRIM_TTY_WRITE,
     IDM_PRIM_TTY_SIZE,
-    IDM_PRIM_EPRINTLN
+    IDM_PRIM_EPRINTLN,
+    IDM_PRIM_PORT_STATUS,
+    IDM_PRIM_JOB_RESUME,
+    IDM_PRIM_JOB_SIGNAL
 } IdmPrimitive;
 
 typedef struct {

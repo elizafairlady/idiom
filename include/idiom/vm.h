@@ -38,6 +38,8 @@ bool idm_exec_take_port_request(IdmExec *exec, IdmValue *out_graph);
 bool idm_exec_take_await(IdmExec *exec, IdmValue *out_port);
 bool idm_exec_take_tty(IdmExec *exec, bool *out_line_mode, bool *out_has_timeout, int64_t *out_timeout_ms);
 bool idm_exec_push_result(IdmExec *exec, IdmValue value, IdmError *err);
+void idm_exec_inject_raise(IdmExec *exec, IdmValue reason);
+IdmScheduler *idm_exec_scheduler(const IdmExec *exec);
 IdmExec *idm_current_exec(void);
 
 typedef void (*IdmRootVisitor)(void *user, IdmValue value);

@@ -3,6 +3,7 @@
 #include "idiom/common.h"
 #include "idiom/core.h"
 #include "idiom/expand.h"
+#include "idiom/ports.h"
 #include "idiom/reader.h"
 #include "idiom/syntax.h"
 #include "idiom/value.h"
@@ -125,6 +126,7 @@ static void usage(FILE *out) {
 }
 
 static int run_session(void) {
+    idm_job_control_init();
     IdmRuntime rt;
     idm_runtime_init(&rt);
     rt.interactive = true;

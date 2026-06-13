@@ -861,6 +861,9 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_TTY_WRITE] = {"tty-write", 1, 1},
     [IDM_PRIM_TTY_SIZE] = {"tty-size", 0, 0},
     [IDM_PRIM_EPRINTLN] = {"eprintln", 0, UINT32_MAX},
+    [IDM_PRIM_PORT_STATUS] = {"port-status", 1, 1},
+    [IDM_PRIM_JOB_RESUME] = {"job-resume", 2, 2},
+    [IDM_PRIM_JOB_SIGNAL] = {"job-signal", 2, 2},
 };
 
 size_t idm_primitive_count(void) {
