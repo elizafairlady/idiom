@@ -15,6 +15,7 @@
 static char *g_seen;
 static size_t g_seen_len;
 static size_t g_seen_cap;
+static size_t g_wait_pos;
 
 static void die(const char *what) {
     fprintf(stderr, "pty_driver: %s: %s\n", what, strerror(errno));
@@ -49,7 +50,13 @@ static void drain(int master, int timeout_ms) {
 
 static void wait_for(int master, const char *text) {
     for (int i = 0; i < 500; i++) {
-        if (g_seen && strstr(g_seen, text)) return;
+        if (g_seen) {
+            char *m = strstr(g_seen + g_wait_pos, text);
+            if (m) {
+                g_wait_pos = (size_t)(m - g_seen) + strlen(text);
+                return;
+            }
+        }
         drain(master, 10);
     }
     fprintf(stderr, "pty_driver: timed out waiting for '%s'\n", text);

@@ -1038,6 +1038,13 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         i++;
     }
 
+    bool prealloc_cells = ctx->frame != IDM_FRAME_TOP;
+    if (prealloc_cells) {
+        size_t group_recs = 0;
+        for (size_t r = 0; r < rec_count; r++) if (recs[r].kind == BODY_REC_GROUPS) group_recs++;
+        prealloc_cells = group_recs >= 2u;
+    }
+
     for (size_t r = 0; r < rec_count && !failed; r++) {
         BodyRec *rec = &recs[r];
         if (rec->kind == BODY_REC_BIND) {
@@ -1072,6 +1079,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             IdmCore *letrec = idm_core_letrec(rec->form->span);
             if (!letrec) { idm_error_oom(err, rec->form->span); failed = true; break; }
             if (top_level) idm_core_letrec_set_global(letrec);
+            else if (prealloc_cells) idm_core_letrec_set_fill_only(letrec);
             for (size_t k = 0; k < rec->group_count; k++) {
                 IdmCore *value = expand_defn_group(ctx, &rec->groups[k], work, err);
                 if (!value || !idm_core_letrec_add(letrec, rec->groups[k].name, rec->groups[k].slot, value)) {
@@ -1249,6 +1257,29 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     core = do_expr;
                 }
             }
+        }
+    }
+
+    if (prealloc_cells && !failed) {
+        IdmCore *prelude = idm_core_letrec(idm_span_unknown(NULL));
+        bool ok = prelude != NULL;
+        for (size_t r = 0; ok && r < rec_count; r++) {
+            if (recs[r].kind != BODY_REC_GROUPS) continue;
+            for (size_t k = 0; ok && k < recs[r].group_count; k++) {
+                IdmCore *nil = idm_core_literal(idm_nil(), idm_span_unknown(NULL));
+                ok = nil != NULL && idm_core_letrec_add(prelude, recs[r].groups[k].name, recs[r].groups[k].slot, nil);
+                if (!ok && nil) idm_core_free(nil);
+            }
+        }
+        ok = ok && idm_core_letrec_set_body(prelude, core);
+        if (!ok) {
+            idm_core_free(prelude);
+            idm_core_free(core);
+            core = NULL;
+            idm_error_oom(err, idm_span_unknown(NULL));
+            failed = true;
+        } else {
+            core = prelude;
         }
     }
 

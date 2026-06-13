@@ -232,6 +232,10 @@ void idm_core_letrec_set_global(IdmCore *letrec) {
     if (letrec && letrec->kind == IDM_CORE_LETREC) letrec->as.letrec.global = true;
 }
 
+void idm_core_letrec_set_fill_only(IdmCore *letrec) {
+    if (letrec && letrec->kind == IDM_CORE_LETREC) letrec->as.letrec.fill_only = true;
+}
+
 IdmCore *idm_core_global_ref(uint32_t id, IdmSpan span) {
     IdmCore *core = core_alloc(IDM_CORE_GLOBAL_REF, span);
     if (!core) return NULL;
@@ -1095,12 +1099,14 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
                 }
                 return compile_expr(core->as.letrec.body, module, tail, err);
             }
-            uint32_t nil_const = 0;
-            if (!idm_bc_add_const(module, idm_nil(), &nil_const)) return idm_error_oom(err, core->span);
-            for (size_t i = 0; i < core->as.letrec.count; i++) {
-                if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, nil_const, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit_u32(module, IDM_OP_STORE_LOCAL, core->as.letrec.bindings[i].slot, NULL)) return idm_error_oom(err, core->span);
+            if (!core->as.letrec.fill_only) {
+                uint32_t nil_const = 0;
+                if (!idm_bc_add_const(module, idm_nil(), &nil_const)) return idm_error_oom(err, core->span);
+                for (size_t i = 0; i < core->as.letrec.count; i++) {
+                    if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, nil_const, NULL)) return idm_error_oom(err, core->span);
+                    if (!idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, core->span);
+                    if (!idm_bc_emit_u32(module, IDM_OP_STORE_LOCAL, core->as.letrec.bindings[i].slot, NULL)) return idm_error_oom(err, core->span);
+                }
             }
             for (size_t i = 0; i < core->as.letrec.count; i++) {
                 if (!idm_bc_emit_u32(module, IDM_OP_LOAD_LOCAL, core->as.letrec.bindings[i].slot, NULL)) return idm_error_oom(err, core->span);

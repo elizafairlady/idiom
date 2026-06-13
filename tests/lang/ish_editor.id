@@ -161,4 +161,28 @@ suite do
     s2 = feed s1 (list :up)
     assert-eq (dict-get s2 :buffer :nil) "kept"
   end
+  test "rune-motion-crosses-whole-codepoint" do
+    zhong = from-runes (list 20013)
+    s = with-buffer (fresh :go) (str zhong "x") 4
+    s1 = feed s (list :left)
+    assert-eq (dict-get s1 :cursor :nil) 3
+    s2 = feed s1 (list :left)
+    assert-eq (dict-get s2 :cursor :nil) 0
+  end
+  test "rune-backspace-deletes-whole-codepoint" do
+    zhong = from-runes (list 20013)
+    s = feed (with-buffer (fresh :go) (str "a" zhong) 4) (list :backspace)
+    assert-eq (dict-get s :buffer :nil) "a"
+  end
+  test "redraw-wraps-by-display-width-not-bytes" do
+    zhong = from-runes (list 20013)
+    s = dict-put (dict-put (with-buffer (fresh :go) (str zhong zhong) 6) :prompt "") :cols 5
+    {st _} = redraw s
+    assert-eq (tuple (dict-get st :row :nil) (dict-get st :below :nil)) (tuple 0 0)
+  end
+  test "redraw-cursor-forward-uses-display-columns" do
+    zhong = from-runes (list 20013)
+    {_ out} = redraw (with-buffer (fresh :go) (str zhong zhong) 6)
+    assert (contains? out (esc-seq "6C"))
+  end
 end

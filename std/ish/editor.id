@@ -1,6 +1,7 @@
 package ish
 
 use std/string
+use std/string/runes
 
 defn csi text -> str (byte-str 27) "[" text
 
@@ -68,8 +69,30 @@ defn word-fwd b i -> skip-fwd b (skip-fwd b i &plain-byte?) &word-byte?
 
 defn move-to state c -> edited (sput state :cursor c)
 
-defn key-left state -> move-to state (imax 0 (sub (cursor-of state) 1))
-defn key-right state -> move-to state (imin (add (cursor-of state) 1) (str-len (buffer-of state)))
+defn cont-byte? b -> and (gte? b 128) (lt? b 192)
+
+defn rune-back-lead do
+  _b 0 -> 0
+  b j -> if (cont-byte? (str-byte b j)) do rune-back-lead b (sub j 1) else do j end
+end
+
+defn rune-back do
+  _b 0 -> 0
+  b i -> rune-back-lead b (sub i 1)
+end
+
+defn rune-fwd-next do
+  b i when (gte? i (str-len b)) -> i
+  b i -> if (cont-byte? (str-byte b i)) do rune-fwd-next b (add i 1) else do i end
+end
+
+defn rune-fwd do
+  b i when (gte? i (str-len b)) -> str-len b
+  b i -> rune-fwd-next b (add i 1)
+end
+
+defn key-left state -> move-to state (rune-back (buffer-of state) (cursor-of state))
+defn key-right state -> move-to state (rune-fwd (buffer-of state) (cursor-of state))
 defn key-home state -> move-to state (line-start (buffer-of state) (cursor-of state))
 defn key-line-end state -> move-to state (line-stop (buffer-of state) (cursor-of state))
 defn key-word-back state -> move-to state (word-back (buffer-of state) (cursor-of state))
@@ -89,12 +112,12 @@ end
 
 defn key-backspace state do
   c = cursor-of state
-  if (eq? c 0) do edited state else do delete-range state (sub c 1) c end
+  if (eq? c 0) do edited state else do delete-range state (rune-back (buffer-of state) c) c end
 end
 
 defn key-delete state do
   c = cursor-of state
-  if (eq? c (str-len (buffer-of state))) do edited state else do delete-range state c (add c 1) end
+  if (eq? c (str-len (buffer-of state))) do edited state else do delete-range state c (rune-fwd (buffer-of state) c) end
 end
 
 defn key-eof-or-delete state -> if (eq? (str-len (buffer-of state)) 0) do tuple :eof state else do key-delete state end
@@ -246,13 +269,13 @@ defn skip-csi-bytes do
   s i -> skip-csi-bytes s (add i 1)
 end
 
-defn visible-scan do
-  s i n when (eq? i (str-len s)) -> n
-  s i n when (and (eq? (str-byte s i) 27) (eq? (str-byte s (add i 1)) 91)) -> visible-scan s (skip-csi-bytes s (add i 2)) n
-  s i n -> visible-scan s (add i 1) (add n 1)
+defn strip-csi do
+  s i acc when (eq? i (str-len s)) -> acc
+  s i acc when (and (eq? (str-byte s i) 27) (eq? (str-byte s (add i 1)) 91)) -> strip-csi s (skip-csi-bytes s (add i 2)) acc
+  s i acc -> strip-csi s (add i 1) (str acc (byte-str (str-byte s i)))
 end
 
-defn visible-len s -> visible-scan s 0 0
+defn visible-len s -> width (strip-csi s 0 "")
 
 defn end-pos off cols ->
   if (and (gt? off 0) (eq? (mod off cols) 0)) do
@@ -279,7 +302,7 @@ end
 defn rows-upto do
   _state '() _i _cols _n acc -> acc
   _state _lines _i _cols 0 acc -> acc
-  state (list h . t) i cols n acc -> rows-upto state t (add i 1) cols (sub n 1) (add acc (line-rows (add (visible-len (prompt-for state i)) (str-len h)) cols))
+  state (list h . t) i cols n acc -> rows-upto state t (add i 1) cols (sub n 1) (add acc (line-rows (add (visible-len (prompt-for state i)) (width h)) cols))
 end
 
 defn render-lines do
@@ -298,12 +321,14 @@ export defn redraw state do
   b = buffer-of state
   lines = split b "\n"
   {li lc} = locate lines (cursor-of state) 0
-  coff = add (visible-len (prompt-for state li)) lc
-  cvis = add (visible-len (prompt-for state li)) (str-len (nth-entry lines li))
+  line-li = nth-entry lines li
+  pw = visible-len (prompt-for state li)
+  coff = add pw (width (str-slice line-li 0 lc))
+  cvis = add pw (width line-li)
   {cr cc} = if (eq? coff cvis) do end-pos coff cols else do tuple (div coff cols) (mod coff cols) end
   cursor-row = add (rows-upto state lines 0 cols li 0) cr
   last-index = sub (list-len lines) 1
-  {er _ec} = end-pos (add (visible-len (prompt-for state last-index)) (str-len (nth-entry lines last-index))) cols
+  {er _ec} = end-pos (add (visible-len (prompt-for state last-index)) (width (nth-entry lines last-index))) cols
   end-row = add (rows-upto state lines 0 cols last-index 0) er
   up-old = if (gt? (sget state :row) 0) do csi (str (sget state :row) "A") else do "" end
   up-new = if (gt? (sub end-row cursor-row) 0) do csi (str (sub end-row cursor-row) "A") else do "" end
@@ -424,9 +449,7 @@ end
 
 defn raw-read state do
   tty-raw!
-  result = edit-loop (paint state)
-  tty-restore!
-  result
+  edit-loop (paint state)
 end
 
 defn cooked-line state -> match tty-read-line do

@@ -277,6 +277,7 @@ struct IdmCore {
             size_t cap;
             IdmCore *body;
             bool global;
+            bool fill_only;
         } letrec;
         struct {
             IdmCore *receiver;
@@ -352,6 +353,7 @@ IdmCore *idm_core_letrec(IdmSpan span);
 bool idm_core_letrec_add(IdmCore *letrec, const char *name, uint32_t slot, IdmCore *value);
 bool idm_core_letrec_set_body(IdmCore *letrec, IdmCore *body);
 void idm_core_letrec_set_global(IdmCore *letrec);
+void idm_core_letrec_set_fill_only(IdmCore *letrec);
 IdmCore *idm_core_global_ref(uint32_t id, IdmSpan span);
 IdmCore *idm_core_receive(IdmCore *receiver, IdmCore *timeout, IdmCore *timeout_body, IdmSpan span);
 IdmCore *idm_core_raise(IdmCore *value, IdmSpan span);

@@ -37,4 +37,23 @@ suite do
     end
     assert-inspect got "42"
   end
+  test "fn-multiarg-bind-rhs" do
+    got = do
+      f = fn a b -> add a b
+      g = fn a b c -> add a (add b c)
+      tuple (f 40 2) (g 38 2 2)
+    end
+    assert-inspect got "{42 42}"
+  end
+  test "defn-forward-ref-block" do
+    got = do
+      defn a x -> b (add x 1)
+      m = 10
+      defn b x -> c (add x m)
+      n = 100
+      defn c x -> add x n
+      a 0
+    end
+    assert-inspect got "111"
+  end
 end

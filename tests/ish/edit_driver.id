@@ -6,16 +6,21 @@ defn serve state -> match (read state) do
     if (ends-with? text "\\") do
       serve (continue st)
     else do
+      tty-restore!
       tty-write "\r\n"
       println (str "GOT[" text "]")
       serve (push-history (reset st) text)
     end
   {:cancel st} -> do
+    tty-restore!
     tty-write "\r\n"
     println "CANCELLED"
     serve st
   end
-  {:eof _st} -> println "BYE"
+  {:eof _st} -> do
+    tty-restore!
+    println "BYE"
+  end
 end
 
 println "READY"

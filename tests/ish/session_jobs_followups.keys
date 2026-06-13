@@ -19,6 +19,7 @@ s \r
 w Done
 s jobs
 s \r
+p 100
 s fg 9
 s \r
 w no-such-job

@@ -1,0 +1,48 @@
+use std/test
+use std/string/runes
+implement std/test
+
+suite do
+  test "char-width-ascii" do
+    assert-eq (char-width 65) 1
+  end
+  test "char-width-nul" do
+    assert-eq (char-width 0) 0
+  end
+  test "char-width-wide-cjk" do
+    assert-eq (tuple (char-width 20013) (char-width 25991)) (tuple 2 2)
+  end
+  test "char-width-wide-hangul" do
+    assert-eq (char-width 44032) 2
+  end
+  test "char-width-fullwidth" do
+    assert-eq (char-width 65281) 2
+  end
+  test "char-width-cjk-hole" do
+    assert-eq (char-width 12351) 1
+  end
+  test "char-width-emoji" do
+    assert-eq (char-width 128512) 2
+  end
+  test "char-width-combining" do
+    assert-eq (tuple (char-width 768) (char-width 8205)) (tuple 0 0)
+  end
+  test "char-width-zero-width-space" do
+    assert-eq (char-width 8203) 0
+  end
+  test "width-ascii" do
+    assert-eq (width "hello") 5
+  end
+  test "width-empty" do
+    assert-eq (width "") 0
+  end
+  test "width-cjk-string" do
+    assert-eq (width (from-runes (list 20013 25991))) 4
+  end
+  test "width-combining-string" do
+    assert-eq (width (from-runes (list 101 769))) 1
+  end
+  test "width-mixed" do
+    assert-eq (width (from-runes (list 97 20013 98))) 4
+  end
+end

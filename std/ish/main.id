@@ -259,7 +259,9 @@ defn serve ed status shell warned do
   {lines live} = jobs-poll :go
   print-done (done-lines lines)
   ed2 = arm ed status shell live
-  match (read-entry ed2) do
+  entry = read-entry ed2
+  tty-restore!
+  match entry do
     {:eof st} -> do
       eof-mark st
       exit-attempt st 0 status shell warned
