@@ -29,7 +29,7 @@ suite do
         send parent misses
       end)
       cd "/"
-      (range 0 100).map (fn _i -> await (exec {:exec {:stage (list {:lit "true"}) (list) (list)} :false}))
+      (range 0 100).map (fn _i -> await (exec {:exec {:stage (list {:lit "true"}) (list) (list)} {:stdio :inherit :inherit :inherit}}))
       misses = receive do m -> m end
       file-remove "/tmp/idiom_actor_cwd_marker.txt"
       misses

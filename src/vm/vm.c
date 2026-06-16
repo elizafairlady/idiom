@@ -41,6 +41,13 @@ struct IdmExec {
     IdmValue port_request;
     bool has_await;
     IdmValue await_port;
+    bool has_port_read_request;
+    IdmValue port_read_port;
+    const char *port_read_stream;
+    size_t port_read_max;
+    bool has_port_write_request;
+    IdmValue port_write_port;
+    IdmValue port_write_data;
     bool has_tty_request;
     bool tty_line_mode;
     bool tty_has_timeout;
@@ -203,6 +210,66 @@ static bool op_tty_block(Vm *vm, IdmPrimitive prim, uint32_t argc, IdmError *err
     }
     vm->tty_line_mode = prim == IDM_PRIM_TTY_READ_LINE;
     vm->has_tty_request = true;
+    return true;
+}
+
+static bool port_stream_value(IdmRuntime *rt, IdmValue value, const char **out, IdmError *err) {
+    if (value.tag == IDM_VAL_ATOM) {
+        const char *text = idm_symbol_text(value.as.symbol);
+        if (strcmp(text, "stdout") == 0 || strcmp(text, "stderr") == 0) {
+            *out = text;
+            return true;
+        }
+    }
+    idm_error_set(err, idm_span_unknown(NULL), "port-read expects :stdout or :stderr");
+    return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "port-read"), value);
+}
+
+static bool op_port_read_block(Vm *vm, uint32_t argc, IdmError *err) {
+    if (argc != 3u) {
+        idm_error_set(err, idm_span_unknown(NULL), "primitive 'port-read' arity mismatch: got %u, want 3..3", argc);
+        return idm_error_reason(vm->rt, err, "arity", 4, idm_atom(vm->rt, "port-read"), idm_int((int64_t)argc), idm_int(3), idm_int(3));
+    }
+    IdmValue maxv;
+    IdmValue streamv;
+    IdmValue port;
+    if (!pop(vm, &maxv, err) || !pop(vm, &streamv, err) || !pop(vm, &port, err)) return false;
+    if (port.tag != IDM_VAL_PORT) {
+        idm_error_set(err, idm_span_unknown(NULL), "port-read expects a port");
+        return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "port-read"), port);
+    }
+    const char *stream = NULL;
+    if (!port_stream_value(vm->rt, streamv, &stream, err)) return false;
+    if (maxv.tag != IDM_VAL_INT || maxv.as.i <= 0) {
+        idm_error_set(err, idm_span_unknown(NULL), "port-read expects a positive byte count");
+        return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "port-read"), maxv);
+    }
+    vm->port_read_port = port;
+    vm->port_read_stream = stream;
+    vm->port_read_max = (size_t)maxv.as.i;
+    vm->has_port_read_request = true;
+    return true;
+}
+
+static bool op_port_write_block(Vm *vm, uint32_t argc, IdmError *err) {
+    if (argc != 2u) {
+        idm_error_set(err, idm_span_unknown(NULL), "primitive 'port-write' arity mismatch: got %u, want 2..2", argc);
+        return idm_error_reason(vm->rt, err, "arity", 4, idm_atom(vm->rt, "port-write"), idm_int((int64_t)argc), idm_int(2), idm_int(2));
+    }
+    IdmValue data;
+    IdmValue port;
+    if (!pop(vm, &data, err) || !pop(vm, &port, err)) return false;
+    if (port.tag != IDM_VAL_PORT) {
+        idm_error_set(err, idm_span_unknown(NULL), "port-write expects a port");
+        return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "port-write"), port);
+    }
+    if (data.tag != IDM_VAL_STRING) {
+        idm_error_set(err, idm_span_unknown(NULL), "port-write expects a string");
+        return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "port-write"), data);
+    }
+    vm->port_write_port = port;
+    vm->port_write_data = data;
+    vm->has_port_write_request = true;
     return true;
 }
 
@@ -846,6 +913,16 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                         *status = IDM_EXEC_BLOCK_TTY;
                         return true;
                     }
+                    if (vm->self && vm->sched && prim == IDM_PRIM_PORT_READ) {
+                        if (!op_port_read_block(vm, argc, err)) return false;
+                        *status = IDM_EXEC_BLOCK_PORT_READ;
+                        return true;
+                    }
+                    if (vm->self && vm->sched && prim == IDM_PRIM_PORT_WRITE) {
+                        if (!op_port_write_block(vm, argc, err)) return false;
+                        *status = IDM_EXEC_BLOCK_PORT_WRITE;
+                        return true;
+                    }
                     if (!generic_prim_call(vm, prim, argc, err)) return false;
                 }
                 break;
@@ -1403,6 +1480,28 @@ bool idm_exec_take_await(IdmExec *exec, IdmValue *out_port) {
     return true;
 }
 
+bool idm_exec_take_port_read(IdmExec *exec, IdmValue *out_port, const char **out_stream, size_t *out_max) {
+    if (!exec->has_port_read_request) return false;
+    *out_port = exec->port_read_port;
+    *out_stream = exec->port_read_stream;
+    *out_max = exec->port_read_max;
+    exec->has_port_read_request = false;
+    exec->port_read_port = idm_nil();
+    exec->port_read_stream = NULL;
+    exec->port_read_max = 0;
+    return true;
+}
+
+bool idm_exec_take_port_write(IdmExec *exec, IdmValue *out_port, IdmValue *out_data) {
+    if (!exec->has_port_write_request) return false;
+    *out_port = exec->port_write_port;
+    *out_data = exec->port_write_data;
+    exec->has_port_write_request = false;
+    exec->port_write_port = idm_nil();
+    exec->port_write_data = idm_nil();
+    return true;
+}
+
 bool idm_exec_take_tty(IdmExec *exec, bool *out_line_mode, bool *out_has_timeout, int64_t *out_timeout_ms) {
     if (!exec->has_tty_request) return false;
     *out_line_mode = exec->tty_line_mode;
@@ -1437,4 +1536,9 @@ void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user)
     if (exec->has_pending_raise) visit(user, exec->pending_raise);
     if (exec->has_await) visit(user, exec->await_port);
     if (exec->has_port_request) visit(user, exec->port_request);
+    if (exec->has_port_read_request) visit(user, exec->port_read_port);
+    if (exec->has_port_write_request) {
+        visit(user, exec->port_write_port);
+        visit(user, exec->port_write_data);
+    }
 }

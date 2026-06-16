@@ -2128,6 +2128,54 @@ static bool prim_port_status(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmE
     return true;
 }
 
+static bool port_stream_arg(IdmValue v, const char **out_stream) {
+    if (job_arg_atom(v, "stdout")) {
+        *out_stream = "stdout";
+        return true;
+    }
+    if (job_arg_atom(v, "stderr")) {
+        *out_stream = "stderr";
+        return true;
+    }
+    return false;
+}
+
+static bool prim_port_read(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_PORT) return type_error(rt, err, "port-read", args[0], "a port");
+    const char *stream = NULL;
+    if (!port_stream_arg(args[1], &stream)) return type_error(rt, err, "port-read", args[1], ":stdout or :stderr");
+    if (args[2].tag != IDM_VAL_INT || args[2].as.i <= 0) return type_error(rt, err, "port-read", args[2], "a positive byte count");
+    IdmScheduler *sched = job_sched("port-read", err);
+    if (!sched) return false;
+    bool found = false;
+    if (!idm_sched_port_read(sched, args[0].as.id, stream, (size_t)args[2].as.i, out, &found, err)) return false;
+    if (!found) return type_error(rt, err, "port-read", args[0], "a live port");
+    return true;
+}
+
+static bool prim_port_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_PORT) return type_error(rt, err, "port-write", args[0], "a port");
+    size_t len = 0;
+    const char *data = require_string(args[1], &len, err);
+    if (!data) return false;
+    IdmScheduler *sched = job_sched("port-write", err);
+    if (!sched) return false;
+    bool found = false;
+    if (!idm_sched_port_write(sched, args[0].as.id, data, len, out, &found, err)) return false;
+    if (!found) return type_error(rt, err, "port-write", args[0], "a live port");
+    return true;
+}
+
+static bool prim_port_close_input(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (args[0].tag != IDM_VAL_PORT) return type_error(rt, err, "port-close-input", args[0], "a port");
+    IdmScheduler *sched = job_sched("port-close-input", err);
+    if (!sched) return false;
+    bool found = false;
+    if (!idm_sched_port_close_input(sched, args[0].as.id, out, &found, err)) return false;
+    if (!found) return type_error(rt, err, "port-close-input", args[0], "a live port");
+    return true;
+}
+
 static bool prim_job_resume(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     if (args[0].tag != IDM_VAL_PORT) return type_error(rt, err, "job-resume", args[0], "a port");
     bool fg = job_arg_atom(args[1], "fg");
@@ -2331,6 +2379,9 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_TTY_SIZE: return idm_prim_tty_size(rt, out, err);
         case IDM_PRIM_EPRINTLN: return prim_print_to(rt, stderr, args, argc, true, out, err);
         case IDM_PRIM_PORT_STATUS: return prim_port_status(rt, args, out, err);
+        case IDM_PRIM_PORT_READ: return prim_port_read(rt, args, out, err);
+        case IDM_PRIM_PORT_WRITE: return prim_port_write(rt, args, out, err);
+        case IDM_PRIM_PORT_CLOSE_INPUT: return prim_port_close_input(rt, args, out, err);
         case IDM_PRIM_JOB_RESUME: return prim_job_resume(rt, args, out, err);
         case IDM_PRIM_JOB_SIGNAL: return prim_job_signal(rt, args, out, err);
     }

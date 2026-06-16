@@ -355,9 +355,14 @@ resolver form do
     (list _ . t) -> check-amp t
   end
 
+  defn graph-stdio do
+    cap when (eq? (syntax-atom-text cap) "true") -> %`{:stdio :inherit :pipe :pipe}
+    _ -> %`{:stdio :inherit :inherit :inherit}
+  end
+
   defn build-graph do
-    (list s) cap -> %`{:exec %,s %,cap}
-    stages cap -> %`{:pipeline (list %,@stages) %,cap :true}
+    (list s) cap -> %`{:exec %,s %,(graph-stdio cap)}
+    stages cap -> %`{:pipeline (list %,@stages) %,(graph-stdio cap) :true}
   end
 
   defn form->graph f cap -> build-graph (split-stages (collect-parts f 1 (syntax-length f)) '()) cap
@@ -453,7 +458,7 @@ resolver form do
   defn write-sub-graph sub do
     sub-parts = collect-parts sub 1 (syntax-length sub)
     {argv redirs} = scan-body sub-parts
-    %`{:exec {:stage (list %,@argv) (list {:redir %,(make-syntax-atom form "<") 0 {:temp __psw}} %,@redirs) (list)} :false}
+    %`{:exec {:stage (list %,@argv) (list {:redir %,(make-syntax-atom form "<") 0 {:temp __psw}} %,@redirs) (list)} {:stdio :inherit :inherit :inherit}}
   end
 
   defn bg-elem do

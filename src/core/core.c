@@ -1069,6 +1069,9 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_MAKE_ERROR] = {"make-error", 1, 1},
     [IDM_PRIM_SPAWN_LINK] = {"spawn-link", 1, 1},
     [IDM_PRIM_SPAWN_MONITOR] = {"spawn-monitor", 1, 1},
+    [IDM_PRIM_PORT_READ] = {"port-read", 3, 3},
+    [IDM_PRIM_PORT_WRITE] = {"port-write", 2, 2},
+    [IDM_PRIM_PORT_CLOSE_INPUT] = {"port-close-input", 1, 1},
 };
 
 size_t idm_primitive_count(void) {

@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +38,12 @@ typedef struct {
     bool stopped;
 } Stage;
 
+typedef enum {
+    STDIO_INHERIT,
+    STDIO_PIPE,
+    STDIO_NULL
+} StdioPolicy;
+
 static bool stage_own_temp(Stage *stage, const char *path) {
     if (stage->owned_temp_count == stage->owned_temp_cap) {
         size_t cap = stage->owned_temp_cap ? stage->owned_temp_cap * 2u : 4u;
@@ -54,8 +61,11 @@ static bool stage_own_temp(Stage *stage, const char *path) {
 struct IdmPort {
     Stage *stages;
     size_t stage_count;
-    bool capture;
     bool pipefail;
+    StdioPolicy stdin_policy;
+    StdioPolicy stdout_policy;
+    StdioPolicy stderr_policy;
+    int in_fd;
     int out_fd;
     int err_fd;
     IdmBuffer out_buf;
@@ -72,6 +82,15 @@ struct IdmPort {
 
 static pid_t g_shell_pgid = 0;
 static int g_job_tty = -1;
+static pthread_once_t g_sigpipe_once = PTHREAD_ONCE_INIT;
+
+static void ignore_sigpipe(void) {
+    signal(SIGPIPE, SIG_IGN);
+}
+
+static void ignore_sigpipe_once(void) {
+    pthread_once(&g_sigpipe_once, ignore_sigpipe);
+}
 
 void idm_job_control_init(void) {
     g_job_tty = STDIN_FILENO;
@@ -96,6 +115,35 @@ static size_t capture_limit_from_env(void) {
 
 static bool value_is_atom(IdmValue v, const char *name) {
     return v.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(v.as.symbol), name) == 0;
+}
+
+static bool parse_stdio_policy(IdmValue v, StdioPolicy *out) {
+    if (value_is_atom(v, "inherit")) { *out = STDIO_INHERIT; return true; }
+    if (value_is_atom(v, "pipe") || value_is_atom(v, "capture")) { *out = STDIO_PIPE; return true; }
+    if (value_is_atom(v, "null")) { *out = STDIO_NULL; return true; }
+    return false;
+}
+
+static bool parse_stdio_tuple(IdmValue v, StdioPolicy *in, StdioPolicy *out, StdioPolicy *err) {
+    if (!idm_is_tuple(v) || idm_sequence_count(v) < 4) return false;
+    IdmError ignore;
+    idm_error_init(&ignore);
+    IdmValue tag = idm_sequence_item(v, 0, &ignore);
+    IdmValue inv = idm_sequence_item(v, 1, &ignore);
+    IdmValue outv = idm_sequence_item(v, 2, &ignore);
+    IdmValue errv = idm_sequence_item(v, 3, &ignore);
+    idm_error_clear(&ignore);
+    return value_is_atom(tag, "stdio")
+        && parse_stdio_policy(inv, in)
+        && parse_stdio_policy(outv, out)
+        && parse_stdio_policy(errv, err);
+}
+
+static void parse_legacy_capture(IdmValue cap, StdioPolicy *in, StdioPolicy *out, StdioPolicy *err) {
+    bool capture = value_is_atom(cap, "true");
+    *in = STDIO_INHERIT;
+    *out = capture ? STDIO_PIPE : STDIO_INHERIT;
+    *err = capture ? STDIO_PIPE : STDIO_INHERIT;
 }
 
 static bool list_to_array(IdmValue list, IdmValue **out_items, size_t *out_count) {
@@ -338,6 +386,7 @@ void idm_port_free(IdmPort *port) {
     if (!port) return;
     for (size_t i = 0; i < port->stage_count; i++) stage_destroy(&port->stages[i]);
     free(port->stages);
+    if (port->in_fd >= 0) close(port->in_fd);
     if (port->out_fd >= 0) close(port->out_fd);
     if (port->err_fd >= 0) close(port->err_fd);
     idm_buf_destroy(&port->out_buf);
@@ -400,8 +449,12 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
     const char *launch_cwd = idm_exec_cwd(exec_ctx);
     IdmPort *port = calloc(1u, sizeof(*port));
     if (!port) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
+    port->in_fd = -1;
     port->out_fd = -1;
     port->err_fd = -1;
+    port->stdin_policy = STDIO_INHERIT;
+    port->stdout_policy = STDIO_INHERIT;
+    port->stderr_policy = STDIO_INHERIT;
     port->capture_limit = capture_limit_from_env();
     idm_buf_init(&port->out_buf);
     idm_buf_init(&port->err_buf);
@@ -412,16 +465,20 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
     IdmValue tag = idm_sequence_item(graph, 0, &ignore);
     if (value_is_atom(tag, "exec")) {
         IdmValue stage = idm_sequence_item(graph, 1, &ignore);
-        IdmValue cap = idm_sequence_item(graph, 2, &ignore);
-        port->capture = value_is_atom(cap, "true");
+        IdmValue io = idm_sequence_item(graph, 2, &ignore);
+        if (!parse_stdio_tuple(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy)) {
+            parse_legacy_capture(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy);
+        }
         port->stage_count = 1;
         port->stages = calloc(1u, sizeof(*port->stages));
         if (!port->stages || !parse_stage(stage, exec_ctx, &port->stages[0])) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid command stage"); idm_port_free(port); return NULL; }
     } else if (value_is_atom(tag, "pipeline")) {
         IdmValue list = idm_sequence_item(graph, 1, &ignore);
-        IdmValue cap = idm_sequence_item(graph, 2, &ignore);
+        IdmValue io = idm_sequence_item(graph, 2, &ignore);
         IdmValue pf = idm_sequence_item(graph, 3, &ignore);
-        port->capture = value_is_atom(cap, "true");
+        if (!parse_stdio_tuple(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy)) {
+            parse_legacy_capture(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy);
+        }
         port->pipefail = value_is_atom(pf, "true");
         IdmValue *sv = NULL;
         size_t sc = 0;
@@ -441,12 +498,71 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
     }
     idm_error_clear(&ignore);
     port->interactive = rt->interactive;
-    bool foreground = port->interactive && !port->capture;
+    bool foreground = port->interactive && port->stdout_policy == STDIO_INHERIT && port->stderr_policy == STDIO_INHERIT;
 
     int cap_out[2] = {-1, -1};
     int cap_err[2] = {-1, -1};
-    if (port->capture) {
-        if (pipe(cap_out) < 0 || pipe(cap_err) < 0) { idm_error_set(err, idm_span_unknown(NULL), "pipe failed: %s", strerror(errno)); idm_port_free(port); return NULL; }
+    int input_pipe[2] = {-1, -1};
+    int null_in = -1;
+    int null_out = -1;
+    if (port->stdout_policy == STDIO_PIPE || port->stderr_policy == STDIO_PIPE) {
+        bool out_pipe = port->stdout_policy == STDIO_PIPE;
+        bool err_pipe = port->stderr_policy == STDIO_PIPE;
+        if ((out_pipe && pipe(cap_out) < 0) || (err_pipe && pipe(cap_err) < 0)) {
+            int saved = errno;
+            if (cap_out[0] >= 0) close(cap_out[0]);
+            if (cap_out[1] >= 0) close(cap_out[1]);
+            if (cap_err[0] >= 0) close(cap_err[0]);
+            if (cap_err[1] >= 0) close(cap_err[1]);
+            idm_error_set(err, idm_span_unknown(NULL), "pipe failed: %s", strerror(saved));
+            idm_port_free(port);
+            return NULL;
+        }
+    }
+    if (port->stdin_policy == STDIO_PIPE) {
+        ignore_sigpipe_once();
+        if (pipe(input_pipe) < 0) {
+            int saved = errno;
+            if (cap_out[0] >= 0) close(cap_out[0]);
+            if (cap_out[1] >= 0) close(cap_out[1]);
+            if (cap_err[0] >= 0) close(cap_err[0]);
+            if (cap_err[1] >= 0) close(cap_err[1]);
+            idm_error_set(err, idm_span_unknown(NULL), "pipe failed: %s", strerror(saved));
+            idm_port_free(port);
+            return NULL;
+        }
+        port->in_fd = input_pipe[1];
+    }
+    if (port->stdin_policy == STDIO_NULL) {
+        null_in = open("/dev/null", O_RDONLY);
+        if (null_in < 0) {
+            int saved = errno;
+            if (cap_out[0] >= 0) close(cap_out[0]);
+            if (cap_out[1] >= 0) close(cap_out[1]);
+            if (cap_err[0] >= 0) close(cap_err[0]);
+            if (cap_err[1] >= 0) close(cap_err[1]);
+            if (input_pipe[0] >= 0) close(input_pipe[0]);
+            if (input_pipe[1] >= 0) close(input_pipe[1]);
+            idm_error_set(err, idm_span_unknown(NULL), "open /dev/null failed: %s", strerror(saved));
+            idm_port_free(port);
+            return NULL;
+        }
+    }
+    if (port->stdout_policy == STDIO_NULL || port->stderr_policy == STDIO_NULL) {
+        null_out = open("/dev/null", O_WRONLY);
+        if (null_out < 0) {
+            int saved = errno;
+            if (cap_out[0] >= 0) close(cap_out[0]);
+            if (cap_out[1] >= 0) close(cap_out[1]);
+            if (cap_err[0] >= 0) close(cap_err[0]);
+            if (cap_err[1] >= 0) close(cap_err[1]);
+            if (input_pipe[0] >= 0) close(input_pipe[0]);
+            if (input_pipe[1] >= 0) close(input_pipe[1]);
+            if (null_in >= 0) close(null_in);
+            idm_error_set(err, idm_span_unknown(NULL), "open /dev/null failed: %s", strerror(saved));
+            idm_port_free(port);
+            return NULL;
+        }
     }
 
     int prev_read = -1;
@@ -471,9 +587,20 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
             }
             if (launch_cwd && chdir(launch_cwd) != 0) child_fail(launch_cwd, "chdir failed");
             if (prev_read >= 0) { dup2(prev_read, 0); }
+            else if (port->stdin_policy == STDIO_PIPE && i == 0 && input_pipe[0] >= 0) { dup2(input_pipe[0], 0); }
+            else if (port->stdin_policy == STDIO_NULL && i == 0 && null_in >= 0) { dup2(null_in, 0); }
             if (!last) { dup2(stage_pipe[1], 1); }
-            else if (port->capture) { dup2(cap_out[1], 1); dup2(cap_err[1], 2); }
+            else {
+                if (port->stdout_policy == STDIO_PIPE && cap_out[1] >= 0) dup2(cap_out[1], 1);
+                else if (port->stdout_policy == STDIO_NULL && null_out >= 0) dup2(null_out, 1);
+                if (port->stderr_policy == STDIO_PIPE && cap_err[1] >= 0) dup2(cap_err[1], 2);
+                else if (port->stderr_policy == STDIO_NULL && null_out >= 0) dup2(null_out, 2);
+            }
             if (prev_read >= 0) close(prev_read);
+            if (input_pipe[0] >= 0) close(input_pipe[0]);
+            if (input_pipe[1] >= 0) close(input_pipe[1]);
+            if (null_in >= 0) close(null_in);
+            if (null_out >= 0) close(null_out);
             if (stage_pipe[0] >= 0) close(stage_pipe[0]);
             if (stage_pipe[1] >= 0) close(stage_pipe[1]);
             if (cap_out[0] >= 0) close(cap_out[0]);
@@ -509,17 +636,23 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         if (!last) { close(stage_pipe[1]); prev_read = stage_pipe[0]; }
     }
     if (prev_read >= 0) close(prev_read);
-    if (port->capture) {
-        close(cap_out[1]);
-        close(cap_err[1]);
-        if (failed) { close(cap_out[0]); close(cap_err[0]); }
-        else {
+    if (input_pipe[0] >= 0) close(input_pipe[0]);
+    if (null_in >= 0) close(null_in);
+    if (null_out >= 0) close(null_out);
+    if (port->stdout_policy == STDIO_PIPE || port->stderr_policy == STDIO_PIPE) {
+        if (cap_out[1] >= 0) close(cap_out[1]);
+        if (cap_err[1] >= 0) close(cap_err[1]);
+        if (failed) {
+            if (cap_out[0] >= 0) close(cap_out[0]);
+            if (cap_err[0] >= 0) close(cap_err[0]);
+        } else {
             port->out_fd = cap_out[0];
             port->err_fd = cap_err[0];
-            set_nonblocking(port->out_fd);
-            set_nonblocking(port->err_fd);
+            if (port->out_fd >= 0) set_nonblocking(port->out_fd);
+            if (port->err_fd >= 0) set_nonblocking(port->err_fd);
         }
     }
+    if (!failed && port->in_fd >= 0) set_nonblocking(port->in_fd);
     if (failed) {
         for (size_t i = 0; i < port->stage_count; i++) {
             if (port->stages[i].pid > 0) { kill(port->stages[i].pid, SIGKILL); waitpid(port->stages[i].pid, NULL, 0); port->stages[i].reaped = true; }
@@ -537,6 +670,10 @@ size_t idm_port_live_fds(const IdmPort *port, int *out_fds, size_t max) {
     if (port->out_fd >= 0 && n < max) out_fds[n++] = port->out_fd;
     if (port->err_fd >= 0 && n < max) out_fds[n++] = port->err_fd;
     return n;
+}
+
+int idm_port_input_fd(const IdmPort *port) {
+    return port->stdin_policy == STDIO_PIPE ? port->in_fd : -1;
 }
 
 static void forward_bytes(int fd, const char *data, size_t len) {
@@ -573,6 +710,90 @@ static void drain_fd(IdmPort *port, int *fd, IdmBuffer *buf, int forward_to) {
 void idm_port_drain(IdmPort *port) {
     drain_fd(port, &port->out_fd, &port->out_buf, -1);
     drain_fd(port, &port->err_fd, &port->err_buf, 2);
+}
+
+static bool take_buffer_prefix(IdmBuffer *buf, size_t max, char **out_data, size_t *out_len, IdmError *err) {
+    size_t take = buf->len < max ? buf->len : max;
+    char *copy = idm_strndup(buf->data ? buf->data : "", take);
+    if (!copy) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (take < buf->len) {
+        memmove(buf->data, buf->data + take, buf->len - take);
+        buf->len -= take;
+        buf->data[buf->len] = '\0';
+    } else {
+        buf->len = 0;
+        if (buf->data) buf->data[0] = '\0';
+    }
+    *out_data = copy;
+    *out_len = take;
+    return true;
+}
+
+bool idm_port_read(IdmPort *port, const char *stream, size_t max, char **out_data, size_t *out_len, IdmPortIoStatus *out_status, IdmError *err) {
+    *out_data = NULL;
+    *out_len = 0;
+    IdmBuffer *buf = NULL;
+    int *fd = NULL;
+    bool has_stream = false;
+    if (strcmp(stream, "stdout") == 0) {
+        buf = &port->out_buf;
+        fd = &port->out_fd;
+        has_stream = port->stdout_policy == STDIO_PIPE;
+    } else if (strcmp(stream, "stderr") == 0) {
+        buf = &port->err_buf;
+        fd = &port->err_fd;
+        has_stream = port->stderr_policy == STDIO_PIPE;
+    } else {
+        return idm_error_set(err, idm_span_unknown(NULL), "unknown port stream '%s'", stream);
+    }
+    idm_port_drain(port);
+    if (buf->len == 0) {
+        *out_status = !has_stream ? IDM_PORT_IO_CLOSED : (*fd >= 0 ? IDM_PORT_IO_AGAIN : IDM_PORT_IO_EOF);
+        return true;
+    }
+    if (!take_buffer_prefix(buf, max, out_data, out_len, err)) return false;
+    *out_status = IDM_PORT_IO_OK;
+    return true;
+}
+
+bool idm_port_write(IdmPort *port, const char *data, size_t len, size_t *out_written, IdmPortIoStatus *out_status, IdmError *err) {
+    *out_written = 0;
+    if (port->stdin_policy != STDIO_PIPE || port->in_fd < 0) {
+        *out_status = IDM_PORT_IO_CLOSED;
+        return true;
+    }
+    if (len == 0) {
+        *out_status = IDM_PORT_IO_OK;
+        return true;
+    }
+    ignore_sigpipe_once();
+    for (;;) {
+        ssize_t w = write(port->in_fd, data, len);
+        if (w >= 0) {
+            *out_written = (size_t)w;
+            *out_status = IDM_PORT_IO_OK;
+            return true;
+        }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            *out_status = IDM_PORT_IO_AGAIN;
+            return true;
+        }
+        if (errno == EPIPE || errno == EBADF) {
+            close(port->in_fd);
+            port->in_fd = -1;
+            *out_status = IDM_PORT_IO_CLOSED;
+            return true;
+        }
+        return idm_error_set(err, idm_span_unknown(NULL), "port write failed: %s", strerror(errno));
+    }
+}
+
+IdmPortIoStatus idm_port_close_input(IdmPort *port) {
+    if (port->stdin_policy != STDIO_PIPE || port->in_fd < 0) return IDM_PORT_IO_CLOSED;
+    close(port->in_fd);
+    port->in_fd = -1;
+    return IDM_PORT_IO_OK;
 }
 
 bool idm_port_stopped(const IdmPort *port) {
@@ -630,6 +851,10 @@ bool idm_port_try_complete(IdmPort *port) {
     if (port->owns_terminal && (all_reaped || idm_port_stopped(port))) {
         if (g_job_tty >= 0 && g_shell_pgid > 0) tcsetpgrp(g_job_tty, g_shell_pgid);
         port->owns_terminal = false;
+    }
+    if (all_reaped && port->in_fd >= 0) {
+        close(port->in_fd);
+        port->in_fd = -1;
     }
     bool fds_open = port->out_fd >= 0 || port->err_fd >= 0;
     return all_reaped && !fds_open;
