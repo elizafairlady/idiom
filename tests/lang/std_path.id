@@ -7,18 +7,25 @@ suite do
     assert-eq (join "a/b" "c.id") "a/b/c.id"
     assert-eq (join "a/" "b") "a/b"
     assert-eq (join "" "b") "b"
+    assert-eq ("root" |> join "") "root/"
   end
   test "path-parts" do
     assert-eq ("/x/y/z.id" |> dirname) "/x/y"
     assert-eq ("/x/y/z.id" |> basename) "z.id"
     assert-eq ("plain" |> dirname) "."
     assert-eq ("/top" |> dirname) "/"
+    assert-eq ("/" |> dirname) "/"
+    assert-eq ("/" |> basename) ""
+    assert-eq ("a/b/" |> basename) ""
     assert-eq ("z.tar.gz" |> extname) ".gz"
     assert-eq ("noext" |> extname) ""
+    assert-eq (".profile" |> extname) ""
+    assert-eq ("dir.with.dot/name" |> extname) ""
   end
   test "path-absolute" do
     assert-eq ("/etc" |> absolute?) :true
     assert-eq ("rel" |> absolute?) :false
     assert-eq ("/abs/x" |> expand) "/abs/x"
+    assert-eq ("rel" |> expand |> absolute?) :true
   end
 end

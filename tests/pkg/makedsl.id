@@ -6,7 +6,7 @@ export defmacro rule stx do
     _ when (gt? n 5) -> syntax-nth stx 4
     _ -> %`(list)
   end
-  %`{:rule %,(syntax-nth stx 2) %,(deps-of 0) (fn _ig %,(syntax-nth stx (sub n 1)))}
+  %`{:rule %,(syntax-nth stx 2) %,(deps-of 0) (fn %,(syntax-nth stx (sub n 1)))}
 end
 
 export defn rule-name do

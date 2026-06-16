@@ -1,6 +1,6 @@
 use std/test
 activate std/test
-use std/map
+import std/map as Map
 use std/enum
 
 suite do
@@ -25,7 +25,7 @@ suite do
   end
   test "absence-is-nil-empty-is-a-value" do
     m = %{:a 1}
-    missing = get m :missing
+    missing = Map.get m :missing
     empty = '(1 2 3).filter (fn _x -> :false)
     assert-eq missing :nil
     assert-eq empty '()
@@ -38,7 +38,7 @@ suite do
     assert-eq [].to-list '()
     assert-eq [1 2].to-list '(1 2)
     assert-eq '(1 2).to-list '(1 2)
-    match (assert-raises (fn _ig do (:nil).to-list end)) do
+    match (assert-raises (fn do (:nil).to-list end)) do
       {:error {:runtime msg}} -> assert (str-contains? msg "does not implement trait 'Enum#")
     end
   end
@@ -64,8 +64,8 @@ suite do
     assert-eq (cons 1 '()) '(1)
     assert-eq (append '(1) '(2)) '(1 2)
     assert-eq (append '() '(9)) '(9)
-    assert-inspect (assert-raises (fn _ig -> first '())) "{:error {:type-error :first ()}}"
-    assert-inspect (assert-raises (fn _ig -> rest '())) "{:error {:type-error :rest ()}}"
+    assert-inspect (assert-raises (fn -> first '())) "{:error {:type-error :first ()}}"
+    assert-inspect (assert-raises (fn -> rest '())) "{:error {:type-error :rest ()}}"
   end
   test "pattern-matrix-distinguishes-empties" do
     f = fn do

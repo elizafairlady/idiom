@@ -3,7 +3,7 @@ package test
 use std/enum
 
 export defrules test do
-  (_ name body) -> %`{:test %,name (fn _ig %,body)}
+  (_ name body) -> %`{:test %,name (fn %,body)}
 end
 
 export defmacro suite stx do
@@ -39,7 +39,7 @@ end
 
 export defn assert-raises thunk do
   caught = try do
-    thunk :go
+    thunk
     :no-raise
     rescue r -> {:raised r}
   end
@@ -69,7 +69,7 @@ defn run-one do
     parent = self
     spawn (fn do
       outcome = try do
-        thunk :go
+        thunk
         :ok
         rescue r -> {:failed r}
       end

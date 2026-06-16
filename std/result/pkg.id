@@ -1,0 +1,63 @@
+package result
+
+export defn ok v -> {:ok v}
+
+export defn err reason -> {:error reason}
+
+export defn result? do
+  {:ok _} -> :true
+  {:error _} -> :true
+  _ -> :false
+end
+
+export defn ok-result? do
+  {:ok _} -> :true
+  _ -> :false
+end
+
+export defn error-result? do
+  {:error _} -> :true
+  _ -> :false
+end
+
+export defn map do
+  {:ok v} f -> {:ok (v |> f)}
+  {:error e} _ -> {:error e}
+  other _ -> error {:bad-result other}
+end
+
+export defn map-error do
+  {:ok v} _ -> {:ok v}
+  {:error e} f -> {:error (e |> f)}
+  other _ -> error {:bad-result other}
+end
+
+export defn and-then do
+  {:ok v} f -> v |> f
+  {:error e} _ -> {:error e}
+  other _ -> error {:bad-result other}
+end
+
+export defn or-else do
+  {:ok v} _ -> {:ok v}
+  {:error e} f -> e |> f
+  other _ -> error {:bad-result other}
+end
+
+export defn unwrap! do
+  {:ok v} -> v
+  {:error e} -> error e
+  other -> error {:bad-result other}
+end
+
+export defn unwrap-or do
+  {:ok v} _ -> v
+  {:error _} default -> default
+  other _ -> error {:bad-result other}
+end
+
+export defn to-list do
+  {:ok v} -> list v
+  {:error _} -> '()
+  other -> error {:bad-result other}
+end

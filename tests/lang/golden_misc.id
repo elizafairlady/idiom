@@ -31,13 +31,13 @@ suite do
   end
   test "apply-basic" do
     got = do
-      apply (fn x y -> add x y) (list 40 2)
+      list 40 2 |> apply (fn x y -> add x y)
     end
     assert-inspect got "42"
   end
   test "apply-to-list" do
     got = do
-      apply (fn a b c -> add a (add b c)) [1 2 3].to-list
+      [1 2 3].to-list |> apply (fn a b c -> add a (add b c))
     end
     assert-inspect got "6"
   end
@@ -354,7 +354,7 @@ suite do
       f = &list
       g = add
       empty = list
-      {(list) {} [] %{} empty (f 1 2) (apply &list (list 3 4)) (g 40 2)}
+      {(list) {} [] %{} empty (f 1 2) ((list 3 4) |> apply &list) (g 40 2)}
     end
     assert-inspect got "{() {} [] %{} () (1 2) (3 4) 42}"
   end

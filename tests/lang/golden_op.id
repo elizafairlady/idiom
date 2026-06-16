@@ -38,7 +38,7 @@ suite do
   test "glued-minus-vs-infix" do
     got = do
       f = fn a b do {a b} end
-      raised = match (assert-raises (fn _ig do f 1 - 2 end)) do {:error _} -> :applied-one-arg end
+      raised = match (assert-raises (fn do f 1 - 2 end)) do {:error _} -> :applied-one-arg end
       x = 10
       {raised (x - 1) (2 * -3)}
     end

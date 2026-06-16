@@ -12,7 +12,10 @@ suite do
   test "regex-literal-and-captures" do
     rx = r"a(b+)c"
     m = scan rx "xxabbbc"
+    assert (regex? rx)
+    assert-eq (regex? "a") :false
     assert (result? m)
+    assert-eq (result? :not-result) :false
     assert-eq (text-of m) "abbbc"
     assert-eq m.text-of "abbbc"
     assert-eq (start-of m) 2
@@ -40,6 +43,10 @@ suite do
     assert (result? (scan-full r"a+" "aaa"))
     assert (result? (r"a+".scan-full "aaa"))
     assert-eq (scan-full r"a+" "aaab") :nil
+    assert-eq (text-of (scan-at r"a+" "baa" 1)) "aa"
+    assert-eq (scan-at r"a+" "baa" 0) :nil
+    assert-eq (text-of (scan-from r"a+" "baa" 0)) "aa"
+    assert-eq (scan-from r"a+" "bbb" 0) :nil
     assert-eq (test? r"[0-9]+" "abc123") :true
     assert-eq (r"[0-9]+".test? "abc123") :true
     assert-eq ("[0-9]+".test? "abc123") :true

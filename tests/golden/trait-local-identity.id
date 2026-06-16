@@ -1,4 +1,4 @@
-mk-a = fn _ig do
+mk-a = fn do
   trait P do
     method size x
   end
@@ -7,7 +7,7 @@ mk-a = fn _ig do
   end
   size 5
 end
-mk-b = fn _ig do
+mk-b = fn do
   trait P do
     method size x
   end
@@ -16,7 +16,7 @@ mk-b = fn _ig do
   end
   size "hello"
 end
-mk-c = fn _ig do
+mk-c = fn do
   trait P do
     method size x
   end
@@ -25,9 +25,9 @@ mk-c = fn _ig do
   end
   size 5
 end
-println (mk-a 0)
-println (mk-b 0)
+println (mk-a)
+println (mk-b)
 println (try do
-  mk-c 0
+  mk-c
   rescue _r -> :no-cross-dispatch
 end)

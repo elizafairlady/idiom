@@ -1198,8 +1198,8 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
             case IDM_OP_APPLY: {
                 IdmValue arglist;
                 IdmValue callee;
-                if (!pop(vm, &arglist, err)) return false;
                 if (!pop(vm, &callee, err)) return false;
+                if (!pop(vm, &arglist, err)) return false;
                 size_t argc = 0;
                 IdmValue cursor = arglist;
                 while (idm_is_pair(cursor)) {

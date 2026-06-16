@@ -6,16 +6,21 @@ use std/enum
 suite do
   test "file-roundtrip" do
     p = "/tmp/idiom_test_file_rt"
-    write! p "contents"
+    assert-eq (write p "contents") :ok
     assert-eq (read! p) "contents"
+    assert-eq (p |> write! "second") :ok
+    assert-eq (read p) {:ok "second"}
     assert-eq (exists? p) :true
     assert-eq (remove p) :ok
     assert-eq (exists? p) :false
+    assert-inspect (remove p) "{:error :enoent}"
   end
   test "file-errors-tagged" do
     assert-inspect (read "/tmp/idiom_no_such_file") "{:error :enoent}"
     r = assert-raises (fn do read! "/tmp/idiom_no_such_file" end)
     assert-eq (r |> tuple-get 0) :error
+    r2 = assert-raises (fn do write! "/tmp/idiom_no_such_parent/x" "data" end)
+    assert-eq r2 {:error {:file-write "/tmp/idiom_no_such_parent/x" :enoent}}
   end
   test "file-stat" do
     p = "/tmp/idiom_test_stat"
@@ -25,7 +30,9 @@ suite do
     end
     assert-eq (s |> tuple-get 1) :file
     assert-eq (s |> tuple-get 2) 5
+    assert (gte? (mtime! p) 0)
     assert-eq (dir? "/tmp") :true
+    assert-eq (dir? p) :false
     remove p
   end
   test "file-mkdir" do
@@ -36,7 +43,7 @@ suite do
     assert-inspect (mkdir d) "{:error :eexist}"
     assert-eq (remove d) :ok
     assert-eq (d |> mkdir!) :ok
-    r = assert-raises (fn _ig do mkdir! d end)
+    r = assert-raises (fn do mkdir! d end)
     assert-eq r {:error {:file-mkdir d :eexist}}
     assert-inspect (mkdir "/tmp/idiom_no_such_parent/x") "{:error :enoent}"
     remove d
@@ -50,7 +57,7 @@ suite do
     f = str base "/a/file"
     write! f "x"
     assert-inspect (mkdir-p f) "{:error :eexist}"
-    r = assert-raises (fn _ig do mkdir-p! f end)
+    r = assert-raises (fn do mkdir-p! f end)
     assert-eq r {:error {:file-mkdir f :eexist}}
     remove f
     remove (str base "/a/b/c")
@@ -67,7 +74,7 @@ suite do
     assert-eq (append! p "-three") :ok
     assert-eq (read! p) "one-two-three"
     assert-inspect (append "/tmp/idiom_no_such_parent/x" "data") "{:error :enoent}"
-    r = assert-raises (fn _ig do append! "/tmp/idiom_no_such_parent/x" "data" end)
+    r = assert-raises (fn do append! "/tmp/idiom_no_such_parent/x" "data" end)
     assert-eq r {:error {:file-append "/tmp/idiom_no_such_parent/x" :enoent}}
     assert-eq (remove p) :ok
   end

@@ -4,16 +4,16 @@ use std/enum
 
 suite do
   test "integer-overflow-traps" do
-    assert-eq (assert-raises (fn _ig do 9223372036854775807 + 1 end)) {:error {:overflow :add}}
-    assert-eq (assert-raises (fn _ig do 0 - 9223372036854775807 - 2 end)) {:error {:overflow :sub}}
-    assert-eq (assert-raises (fn _ig do 4611686018427387904 * 4 end)) {:error {:overflow :mul}}
-    assert-eq (assert-raises (fn _ig do 2 ** 64 end)) {:error {:overflow :pow}}
+    assert-eq (assert-raises (fn do 9223372036854775807 + 1 end)) {:error {:overflow :add}}
+    assert-eq (assert-raises (fn do 0 - 9223372036854775807 - 2 end)) {:error {:overflow :sub}}
+    assert-eq (assert-raises (fn do 4611686018427387904 * 4 end)) {:error {:overflow :mul}}
+    assert-eq (assert-raises (fn do 2 ** 64 end)) {:error {:overflow :pow}}
     int-min = 0 - 9223372036854775807 - 1
-    assert-eq (assert-raises (fn _ig do neg int-min end)) {:error {:overflow :neg}}
-    assert-eq (assert-raises (fn _ig do int-min / -1 end)) {:error {:overflow :div}}
-    assert-eq (assert-raises (fn _ig do int-min % -1 end)) {:error {:overflow :mod}}
-    assert-eq (assert-raises (fn _ig do int-min // -1 end)) {:error {:overflow :floor-div}}
-    assert-eq (assert-raises (fn _ig do abs int-min end)) {:error {:overflow :abs}}
+    assert-eq (assert-raises (fn do neg int-min end)) {:error {:overflow :neg}}
+    assert-eq (assert-raises (fn do int-min / -1 end)) {:error {:overflow :div}}
+    assert-eq (assert-raises (fn do int-min % -1 end)) {:error {:overflow :mod}}
+    assert-eq (assert-raises (fn do int-min // -1 end)) {:error {:overflow :floor-div}}
+    assert-eq (assert-raises (fn do abs int-min end)) {:error {:overflow :abs}}
   end
   test "floor-division-operators" do
     assert-eq (-7 // 2) -4
@@ -21,8 +21,8 @@ suite do
     assert-eq (-7 / 2) -3
     assert-eq (-7 % 2) -1
     assert-eq (1 + -7 // 2 * 2) -7
-    assert-eq (assert-raises (fn _ig do 1 // 0 end)) {:error {:div-by-zero :floor-div}}
-    assert-eq (assert-raises (fn _ig do 1 %% 0 end)) {:error {:div-by-zero :floor-mod}}
+    assert-eq (assert-raises (fn do 1 // 0 end)) {:error {:div-by-zero :floor-div}}
+    assert-eq (assert-raises (fn do 1 %% 0 end)) {:error {:div-by-zero :floor-mod}}
   end
   test "int64-boundary-literals" do
     assert-eq 9223372036854775807 (9223372036854775806 + 1)
@@ -30,10 +30,17 @@ suite do
     assert-inspect 9223372036854775807 "9223372036854775807"
     assert-inspect -9223372036854775808 "-9223372036854775808"
   end
+  test "negative-literals-after-open-delimiters" do
+    assert-eq {-3 -1} {(neg 3) (neg 1)}
+    assert-eq [-3 -1] [(neg 3) (neg 1)]
+    assert-eq %{-3 :x -1 :y} %{(neg 3) :x (neg 1) :y}
+    assert-eq (-3 + 1) -2
+    assert-eq '(-3 -1) (list (neg 3) (neg 1))
+  end
   test "one-arithmetic" do
     assert-eq (1 + 2.5) 3.5
     assert-eq (add 1 2.5) 3.5
-    assert-eq (apply &add (list 1 2.5)) 3.5
+    assert-eq ((list 1 2.5) |> apply &add) 3.5
     assert-eq (2.0 * 2) 4.0
     assert-eq (1.5 < 2) :true
     assert-eq (lte? 2 2.0) :true
@@ -42,23 +49,23 @@ suite do
     assert-eq (1 == 1.0) :false
   end
   test "error-shapes" do
-    assert-eq (assert-raises (fn _ig do add 1 :nope end)) {:error {:type-error :add 1 :nope}}
-    assert-eq (assert-raises (fn _ig do 1 < :nope end)) {:error {:type-error :lt? 1 :nope}}
-    assert-eq (assert-raises (fn _ig do 1 / 0 end)) {:error {:div-by-zero :div}}
-    assert-eq (assert-raises (fn _ig do 1 % 0 end)) {:error {:div-by-zero :mod}}
-    assert-eq (assert-raises (fn _ig do first :nope end)) {:error {:type-error :first :nope}}
-    assert-eq (assert-raises (fn _ig do apply 5 (list 1) end)) {:error {:not-callable 5}}
-    assert-eq (assert-raises (fn _ig do apply &str-len (list "a" "b") end)) {:error {:arity :str-len 2 1 1}}
-    assert-eq (assert-raises (fn _ig do tuple-get {1 2} 5 end)) {:error {:index-out-of-range 5}}
-    got = assert-raises (fn _ig do
+    assert-eq (assert-raises (fn do add 1 :nope end)) {:error {:type-error :add 1 :nope}}
+    assert-eq (assert-raises (fn do 1 < :nope end)) {:error {:type-error :lt? 1 :nope}}
+    assert-eq (assert-raises (fn do 1 / 0 end)) {:error {:div-by-zero :div}}
+    assert-eq (assert-raises (fn do 1 % 0 end)) {:error {:div-by-zero :mod}}
+    assert-eq (assert-raises (fn do first :nope end)) {:error {:type-error :first :nope}}
+    assert-eq (assert-raises (fn do (list 1) |> apply 5 end)) {:error {:not-callable 5}}
+    assert-eq (assert-raises (fn do (list "a" "b") |> apply &str-len end)) {:error {:arity :str-len 2 1 1}}
+    assert-eq (assert-raises (fn do tuple-get {1 2} 5 end)) {:error {:index-out-of-range 5}}
+    got = assert-raises (fn do
       defn just-one 1 -> :one
       just-one 2
     end)
     assert-eq got {:error {:no-clause :just-one {2}}}
   end
   test "error-macro-arities" do
-    assert-eq (assert-raises (fn _ig do error :bad end)) {:error :bad}
-    assert-eq (assert-raises (fn _ig do error :bad 42 end)) {:error {:bad 42}}
+    assert-eq (assert-raises (fn do error :bad end)) {:error :bad}
+    assert-eq (assert-raises (fn do error :bad 42 end)) {:error {:bad 42}}
     got = try do
       error :code 7 :extra
       :unreached
@@ -79,7 +86,7 @@ suite do
     end
     assert-eq captured :boom
     assert-eq (try do
-      apply &raise (list :applied)
+      (list :applied) |> apply &raise
       rescue r -> r
     end) :applied
     assert-eq (try do
@@ -165,7 +172,7 @@ suite do
     assert-inspect got ":odd"
   end
   test "guard-budget-bounded" do
-    got = assert-raises (fn _ig do
+    got = assert-raises (fn do
       defn spin-guard n -> spin-guard n
       defn pick do
         n when (spin-guard n) -> n

@@ -1,0 +1,24 @@
+package function
+
+export defn identity x -> x
+
+export defn const x -> fn _ -> x
+
+export defn compose f g -> fn x -> f (g x)
+
+export defn pipe x f -> f x
+
+export defn then x f -> f x
+
+export defn tap x f -> do
+  f x
+  x
+end
+
+export defn flip f -> fn a b -> f b a
+
+export defn curry2 f -> fn a -> fn b -> f a b
+
+export defn uncurry2 f -> fn a b -> (f a) b
+
+export defn apply2 {a b} f -> f a b

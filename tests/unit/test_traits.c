@@ -361,7 +361,7 @@ static void test_trait_identity_semantics(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     expect_runtime_error_contains(&rt, "<local-traits-do-not-share-dispatch>",
-        "mk-a = fn _ig do\n"
+        "mk-a = fn do\n"
         "  trait P do\n"
         "    method size x\n"
         "  end\n"
@@ -370,7 +370,7 @@ static void test_trait_identity_semantics(void) {
         "  end\n"
         "  size 5\n"
         "end\n"
-        "mk-b = fn _ig do\n"
+        "mk-b = fn do\n"
         "  trait P do\n"
         "    method size x\n"
         "  end\n"
@@ -379,7 +379,7 @@ static void test_trait_identity_semantics(void) {
         "  end\n"
         "  add (size \"hello\") (size 5)\n"
         "end\n"
-        "add (mk-a 0) (mk-b 0)\n",
+        "add (mk-a) (mk-b)\n",
         "type 'int' does not implement trait 'P#");
     check_value_written(&rt,
         "trait Q do\n"

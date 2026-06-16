@@ -134,7 +134,7 @@ suite do
     assert-eq got 7
   end
   test "non-match-raises-structured-reason" do
-    got = assert-raises (fn _ig do
+    got = assert-raises (fn do
       {a b} = {1 2 3}
       a
     end)
@@ -144,7 +144,7 @@ suite do
         assert (str-contains? (error-message got) "no clause of '<fn>'")
       end
     end
-    got2 = assert-raises (fn _ig do
+    got2 = assert-raises (fn do
       {:ok v} = {:error :enoent}
       v
     end)
@@ -171,7 +171,7 @@ suite do
   test "repeated-name-requires-equal-values" do
     {a a} = {1 1}
     assert-eq a 1
-    got = assert-raises (fn _ig do
+    got = assert-raises (fn do
       {b b} = {1 2}
       b
     end)

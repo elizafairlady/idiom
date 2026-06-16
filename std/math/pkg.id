@@ -1,0 +1,184 @@
+package math
+
+abs-raw = &abs
+floor-raw = &floor
+round-raw = &round
+ceil-raw = &ceil
+truncate-raw = &truncate
+sqrt-raw = &sqrt
+pow-raw = &pow
+div-raw = &div
+mod-raw = &mod
+floor-div-raw = &floor-div
+floor-mod-raw = &floor-mod
+divmod-raw = &divmod
+sin-raw = &sin
+cos-raw = &cos
+tan-raw = &tan
+asin-raw = &asin
+acos-raw = &acos
+atan-raw = &atan
+atan2-raw = &atan2
+exp-raw = &exp
+log-raw = &log
+log2-raw = &log2
+log10-raw = &log10
+hypot-raw = &hypot
+nan-p-raw = &nan?
+finite-p-raw = &finite?
+infinite-p-raw = &infinite?
+nan-raw = &nan
+inf-raw = &inf
+bit-and-raw = &bit-and
+bit-or-raw = &bit-or
+bit-xor-raw = &bit-xor
+bit-not-raw = &bit-not
+shift-left-raw = &shift-left
+shift-right-raw = &shift-right
+bit-count-raw = &bit-count
+bit-length-raw = &bit-length
+to-int-raw = &to-int
+to-float-raw = &to-float
+
+export defn pi -> 3.141592653589793
+
+export defn tau -> 6.283185307179586
+
+export defn e -> 2.718281828459045
+
+export defn nan -> (nan-raw)
+
+export defn inf -> (inf-raw)
+
+export defn abs n -> n |> abs-raw
+
+export defn floor n -> n |> floor-raw
+
+export defn round n -> n |> round-raw
+
+export defn ceil n -> n |> ceil-raw
+
+export defn truncate n -> n |> truncate-raw
+
+export defn sqrt n -> n |> sqrt-raw
+
+export defn pow x y -> x |> pow-raw y
+
+export defn quot x y -> x |> div-raw y
+
+export defn rem x y -> x |> mod-raw y
+
+export defn quot-rem x y -> {(x |> quot y) (x |> rem y)}
+
+export defn floor-div x y -> x |> floor-div-raw y
+
+export defn floor-mod x y -> x |> floor-mod-raw y
+
+export defn divmod x y -> x |> divmod-raw y
+
+export defn sin n -> n |> sin-raw
+
+export defn cos n -> n |> cos-raw
+
+export defn tan n -> n |> tan-raw
+
+export defn asin n -> n |> asin-raw
+
+export defn acos n -> n |> acos-raw
+
+export defn atan n -> n |> atan-raw
+
+export defn atan2 y x -> y |> atan2-raw x
+
+export defn exp n -> n |> exp-raw
+
+export defn log n -> n |> log-raw
+
+export defn log2 n -> n |> log2-raw
+
+export defn log10 n -> n |> log10-raw
+
+export defn hypot x y -> x |> hypot-raw y
+
+export defn nan? n -> n |> nan-p-raw
+
+export defn finite? n -> n |> finite-p-raw
+
+export defn infinite? n -> n |> infinite-p-raw
+
+export defn bit-and a b -> a |> bit-and-raw b
+
+export defn bit-or a b -> a |> bit-or-raw b
+
+export defn bit-xor a b -> a |> bit-xor-raw b
+
+export defn bit-not n -> n |> bit-not-raw
+
+export defn shift-left n bits -> n |> shift-left-raw bits
+
+export defn shift-right n bits -> n |> shift-right-raw bits
+
+export defn bit-count n -> n |> bit-count-raw
+
+export defn bit-length n -> n |> bit-length-raw
+
+export defn to-int n -> n |> to-int-raw
+
+export defn to-float n -> n |> to-float-raw
+
+export defn zero? n -> n |> eq? 0
+
+export defn positive? n -> n |> gt? 0
+
+export defn negative? n -> n |> lt? 0
+
+export defn nonnegative? n -> n |> gte? 0
+
+export defn nonpositive? n -> n |> lte? 0
+
+export defn even? n -> n |> floor-mod 2 |> eq? 0
+
+export defn odd? n -> n |> floor-mod 2 |> neq? 0
+
+export defn min a b -> cond (a |> lt? b) a b
+
+export defn max a b -> cond (a |> gt? b) a b
+
+export defn clamp x lo hi -> x |> max lo |> min hi
+
+export defn between? x lo hi -> and (x |> gte? lo) (x |> lte? hi)
+
+export defn sign do
+  n when (n |> lt? 0) -> -1
+  0 -> 0
+  _ -> 1
+end
+
+defn gcd-loop do
+  a 0 -> a |> abs
+  a b -> gcd-loop b (a |> floor-mod b)
+end
+
+export defn gcd a b -> a |> abs |> gcd-loop (b |> abs)
+
+export defn lcm do
+  0 _ -> 0
+  _ 0 -> 0
+  a b -> a |> floor-div (gcd a b) |> mul b |> abs
+end
+
+export defn square n -> mul n n
+
+export defn cube n -> n |> mul n |> mul n
+
+export defn pow-int do
+  _ n when (n |> lt? 0) -> error {:negative-exponent n}
+  _ 0 -> 1
+  x n -> x |> mul (pow-int x (n - 1))
+end
+
+export defn factorial do
+  n when (n |> lt? 0) -> error {:negative-factorial n}
+  0 -> 1
+  n -> n |> mul (factorial (n - 1))
+end

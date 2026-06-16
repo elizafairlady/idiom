@@ -1,6 +1,6 @@
 package supervisor
 
-use std/map
+import std/map as Map
 use std/enum
 
 export defn start do
@@ -29,7 +29,7 @@ defn spawn-child f -> spawn-link f
 
 defn start-children do
   '() children -> children
-  (list {id f restart} . rest) children -> start-children rest (put children (spawn-child f) {id f restart})
+  (list {id f restart} . rest) children -> start-children rest (Map.put children (spawn-child f) {id f restart})
 end
 
 defn loop state -> match state do
@@ -41,17 +41,17 @@ defn loop state -> match state do
       :ok
     end
     {:count from} -> do
-      send from {:child-count (self) (size children)}
+      send from {:child-count (self) (Map.size children)}
       loop state
     end
   end
 end
 
 defn handle-exit state pid reason -> match state do
-  {children restarts intensity period} -> match (get children pid) do
+  {children restarts intensity period} -> match (Map.get children pid) do
     :nil -> loop state
     {id f restart} ->
-      cond (restart? restart reason) (restart-child {(del children pid) restarts intensity period} id f restart) (loop {(del children pid) restarts intensity period})
+      cond (restart? restart reason) (restart-child {(Map.del children pid) restarts intensity period} id f restart) (loop {(Map.del children pid) restarts intensity period})
   end
 end
 
@@ -69,13 +69,13 @@ defn restart-child state id f restart -> match state do
       shutdown children
       exit {:shutdown :max-restart-intensity}
     else do
-      loop {(put children (spawn-child f) {id f restart}) (cons now recent) intensity period}
+      loop {(Map.put children (spawn-child f) {id f restart}) (cons now recent) intensity period}
     end
   end
 end
 
 defn shutdown children do
-  (keys children).map (fn pid do
+  (Map.keys children).map (fn pid do
   unlink pid
   exit pid :kill
   end)

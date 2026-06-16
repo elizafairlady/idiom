@@ -148,6 +148,30 @@ static bool is_wordish(TokenKind kind) {
     }
 }
 
+static bool previous_token_allows_negative_literal(const TokenVec *out) {
+    if (out->count == 0) return true;
+    switch (out->items[out->count - 1u].kind) {
+        case TOK_NEWLINE:
+        case TOK_SEMI:
+        case TOK_LPAREN:
+        case TOK_LBRACKET:
+        case TOK_LBRACE:
+        case TOK_PERCENT_LBRACE:
+        case TOK_QUOTE:
+        case TOK_QUASIQUOTE:
+        case TOK_COMMA:
+        case TOK_COMMA_AT:
+        case TOK_PERCENT_QUOTE:
+        case TOK_PERCENT_QUASIQUOTE:
+        case TOK_PERCENT_COMMA:
+        case TOK_PERCENT_COMMA_AT:
+        case TOK_DOLLAR_LPAREN:
+            return true;
+        default:
+            return false;
+    }
+}
+
 static bool continues_word(const Lexer *lx, const TokenVec *out) {
     return out->count > 0 && lx->pos == lx->previous_end && is_wordish(out->items[out->count - 1u].kind);
 }
@@ -437,7 +461,8 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
             leading_space = false;
             continue;
         }
-        if (isdigit((unsigned char)ch) || (ch == '-' && leading_space && isdigit((unsigned char)peek_n(&lx, 1)))) {
+        if (isdigit((unsigned char)ch) || (ch == '-' && isdigit((unsigned char)peek_n(&lx, 1)) &&
+            (leading_space || previous_token_allows_negative_literal(out)))) {
             if (ch == '-') advance(&lx);
             while (isdigit((unsigned char)peek(&lx))) advance(&lx);
             bool is_float = false;

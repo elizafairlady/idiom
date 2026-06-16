@@ -157,7 +157,7 @@ defn dispatch res print? text -> match res do
   end
   {:ok f tok} -> do
     session = (self)
-    pid = repl-spawn (fn -> send session {:eval-value (self) (apply f '())})
+    pid = repl-spawn (fn -> send session {:eval-value (self) ('() |> apply f)})
     link pid
     observe pid tok print? text
   end

@@ -1,0 +1,73 @@
+package range
+
+use std/enum
+
+export record Range do
+  field start
+  field stop
+  field step
+  field closed
+end
+
+defn valid-step step -> cond (step |> eq? 0) (error {:range-step-zero}) step
+
+export defn new do
+  first stop -> Range first stop 1 :false
+  first stop step -> Range first stop (valid-step step) :false
+end
+
+export defn inclusive do
+  first stop -> Range first stop 1 :true
+  first stop step -> Range first stop (valid-step step) :true
+end
+
+export defn exclusive do
+  first stop -> Range first stop 1 :false
+  first stop step -> Range first stop (valid-step step) :false
+end
+
+defn positive-step? r -> r.step |> gt? 0
+
+defn done-exclusive? cur r -> cond (r |> positive-step?) (cur |> gte? r.stop) (cur |> lte? r.stop)
+
+defn done-inclusive? cur r -> cond (r |> positive-step?) (cur |> gt? r.stop) (cur |> lt? r.stop)
+
+defn done? cur r -> cond (r.closed |> eq? :true) (cur |> done-inclusive? r) (cur |> done-exclusive? r)
+
+export defn empty? r -> r.start |> done? r
+
+defn fold-range cur r acc f ->
+  cond (cur |> done? r) acc (fold-range (cur + r.step) r (f cur acc) f)
+
+export defn reduce r acc f -> r.start |> fold-range r acc f
+
+export defn to-list r -> (r |> reduce '() &cons).reverse
+
+defn size-from cur r acc ->
+  cond (cur |> done? r) acc (size-from (cur + r.step) r (acc + 1))
+
+export defn size r -> r.start |> size-from r 0
+
+export defn first r -> if (empty? r) do :nil else do r.start end
+
+defn last-from cur r prev ->
+  cond (cur |> done? r) prev (last-from (cur + r.step) r cur)
+
+export defn last r -> r.start |> last-from r :nil
+
+defn within-positive? r x ->
+  cond (r.closed |> eq? :true) (and (x |> gte? r.start) (x |> lte? r.stop)) (and (x |> gte? r.start) (x |> lt? r.stop))
+
+defn within-negative? r x ->
+  cond (r.closed |> eq? :true) (and (x |> lte? r.start) (x |> gte? r.stop)) (and (x |> lte? r.start) (x |> gt? r.stop))
+
+defn within? r x -> cond (r |> positive-step?) (r |> within-positive? x) (r |> within-negative? x)
+
+export defn contains? r x ->
+  and (r |> within? x) (x |> sub r.start |> floor-mod (r.step |> abs) |> eq? 0)
+
+implement Iter on Range do
+  method foldl r acc f -> r |> reduce acc f
+end
+
+implement Enum on Range

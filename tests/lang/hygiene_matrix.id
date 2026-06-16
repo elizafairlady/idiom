@@ -386,7 +386,7 @@ suite do
   end
   test "implement inside fn body active for its runtime extent" do
     got = do
-      mk = fn _ig do
+      mk = fn do
         activate tests/pkg/exporter
         fn x -> x <+> (answer q)
       end

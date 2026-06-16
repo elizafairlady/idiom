@@ -2,21 +2,30 @@ package string
 
 use std/enum
 
-export defn length s -> str-len s
+export defn length s -> s |> str-len
 
-export defn slice s a b -> str-slice s a b
+export defn empty? s -> s |> str-len |> eq? 0
 
-export defn at s i -> str-byte s i
+export defn slice s a b -> s |> str-slice a b
 
-export defn contains? s sub -> str-contains? s sub
+export defn at s i -> s |> str-byte i
 
-export defn find s sub -> str-find s sub 0
+export defn find-from s sub i -> s |> str-find sub i
 
-export defn starts-with? s prefix ->
-  and (lte? (str-len prefix) (str-len s)) (eq? (str-slice s 0 (str-len prefix)) prefix)
+export defn contains? s sub -> s |> str-contains? sub
 
-export defn ends-with? s suffix ->
-  and (lte? (str-len suffix) (str-len s)) (eq? (str-slice s (sub (str-len s) (str-len suffix)) (str-len s)) suffix)
+export defn find s sub -> s |> str-find sub 0
+
+export defn starts-with? s prefix -> do
+  n = prefix |> str-len
+  and (n |> lte? (s |> str-len)) (s |> str-slice 0 n |> eq? prefix)
+end
+
+export defn ends-with? s suffix -> do
+  n = suffix |> str-len
+  len = s |> str-len
+  and (n |> lte? len) (s |> str-slice (len - n) len |> eq? suffix)
+end
 
 defn space? do
   32 -> :true
@@ -28,22 +37,34 @@ end
 
 defn scan-left do
   s i n when (eq? i n) -> i
-  s i n -> cond (space? (str-byte s i)) (scan-left s (add i 1) n) i
+  s i n -> cond (s |> str-byte i |> space?) (scan-left s (add i 1) n) i
 end
 
 defn scan-right do
   s i when (eq? i 0) -> 0
-  s i -> cond (space? (str-byte s (sub i 1))) (scan-right s (sub i 1)) i
+  s i -> cond (s |> str-byte (i - 1) |> space?) (scan-right s (sub i 1)) i
 end
 
-export defn trim-left s -> str-slice s (scan-left s 0 (str-len s)) (str-len s)
-export defn trim-right s -> str-slice s 0 (scan-right s (str-len s))
+defn blank-from do
+  _ i n when (eq? i n) -> :true
+  s i n -> cond (s |> str-byte i |> space?) (blank-from s (add i 1) n) :false
+end
+
+export defn blank? s -> s |> blank-from 0 (s |> str-len)
+
+export defn trim-left s -> do
+  n = s |> str-len
+  s |> str-slice (s |> scan-left 0 n) n
+end
+export defn trim-right s -> s |> str-slice 0 (s |> scan-right (s |> str-len))
 export defn trim s -> s |> trim-left |> trim-right
+export defn trim-leading s -> s |> trim-left
+export defn trim-trailing s -> s |> trim-right
 
 defn split-from do
-  s sep i acc -> match (str-find s sep i) do
-    :nil -> cons (str-slice s i (str-len s)) acc
-    at -> split-from s sep (add at (str-len sep)) (cons (str-slice s i at) acc)
+  s sep i acc -> match (s |> str-find sep i) do
+    :nil -> cons (s |> str-slice i (s |> str-len)) acc
+    at -> split-from s sep (at + (sep |> str-len)) (cons (s |> str-slice i at) acc)
   end
 end
 
@@ -52,12 +73,32 @@ defn rev do
   (list h . t) acc -> rev t (cons h acc)
 end
 
-export defn split do
-  s sep when (eq? (str-len sep) 0) -> error {:split :empty-separator}
-  s sep -> rev (split-from s sep 0 '()) '()
+defn take-runes do
+  _ n when (lte? n 0) -> '()
+  '() _ -> '()
+  (list h . t) n -> cons h (take-runes t (sub n 1))
 end
 
-export defn join xs sep -> join-list (xs.to-list) sep
+defn drop-runes do
+  xs n when (lte? n 0) -> xs
+  '() _ -> '()
+  (list _ . t) n -> drop-runes t (sub n 1)
+end
+
+defn last-rune-from do
+  x '() -> x
+  _ (list h . t) -> last-rune-from h t
+end
+
+export defn split do
+  s sep when (sep |> str-len |> eq? 0) -> error {:split :empty-separator}
+  s sep -> s |> split-from sep 0 '() |> rev '()
+end
+
+export defn split-lines s -> s |> split "\n"
+export defn lines s -> s |> split-lines
+
+export defn join xs sep -> xs.to-list |> join-list sep
 
 defn join-list do
   '() _sep -> ""
@@ -79,29 +120,73 @@ end
 
 defn pad do
   s n ch left? -> do
-    gap = sub n (str-len s)
+    gap = n - (s |> str-len)
     if (lte? gap 0) do
       s
     else do
-      padding = repeat ch gap
+      padding = ch |> repeat gap
       cond left? "${padding}${s}" "${s}${padding}"
     end
   end
 end
 
-export defn pad-left s n ch -> pad s n ch :true
-export defn pad-right s n ch -> pad s n ch :false
+export defn pad-left s n ch -> s |> pad n ch :true
+export defn pad-right s n ch -> s |> pad n ch :false
 
 defn map-bytes do
   s i n f acc when (eq? i n) -> acc
-  s i n f acc -> map-bytes s (add i 1) n f "${acc}#{byte-str (f (str-byte s i))}"
+  s i n f acc -> map-bytes s (i + 1) n f "${acc}#{byte-str (f (s |> str-byte i))}"
 end
 
 defn upbyte b -> cond (and (gte? b 97) (lte? b 122)) (sub b 32) b
 defn downbyte b -> cond (and (gte? b 65) (lte? b 90)) (add b 32) b
 
-export defn upcase s -> map-bytes s 0 (str-len s) &upbyte ""
-export defn downcase s -> map-bytes s 0 (str-len s) &downbyte ""
+export defn upcase s -> s |> map-bytes 0 (s |> str-len) &upbyte ""
+export defn downcase s -> s |> map-bytes 0 (s |> str-len) &downbyte ""
+
+export defn capitalize do
+  "" -> ""
+  s -> match (s |> str-to-list) do
+    '() -> ""
+    (list h . t) -> "#{h |> upbyte |> ord->str}#{t |> from-runes |> downcase}"
+  end
+end
+
+export defn chars s -> s |> str-to-list
+export defn runes s -> s |> str-to-list
+
+export defn reverse s -> s |> str-to-list |> rev '() |> from-runes
+
+export defn first do
+  "" -> :nil
+  s -> s |> str->ord
+end
+
+export defn first! do
+  "" -> error {:empty-string}
+  s -> s |> str->ord
+end
+
+export defn last do
+  "" -> :nil
+  s -> match (s |> str-to-list) do
+    '() -> :nil
+    (list h . t) -> last-rune-from h t
+  end
+end
+
+export defn last! do
+  "" -> error {:empty-string}
+  s -> match (s |> str-to-list) do
+    (list h . t) -> last-rune-from h t
+  end
+end
+
+export defn take s n -> s |> str-to-list |> take-runes n |> from-runes
+
+export defn drop s n -> s |> str-to-list |> drop-runes n |> from-runes
+
+export defn slice-runes s a b -> s |> drop a |> take (sub b a)
 
 export defn parse-int! do
   s -> match (parse-int s) do
