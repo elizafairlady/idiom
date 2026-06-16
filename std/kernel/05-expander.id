@@ -21,15 +21,15 @@ export defmacro operator stx do
   end
 
   defn apply-opt do
-    "precedence" v {p a f} -> tuple (syntax-int-value v) a f
-    "assoc" v {p a f} -> tuple p (opt-word v) f
-    "fixity" v {p a f} -> tuple p a (opt-word v)
-    other _ _ -> syntax-error stx (str "unknown operator keyword '" other "'")
+    "precedence" v {p a f} -> {(syntax-int-value v) a f}
+    "assoc" v {p a f} -> {p (opt-word v) f}
+    "fixity" v {p a f} -> {p a (opt-word v)}
+    other _ _ -> syntax-error stx "unknown operator keyword '${other}'"
   end
 
   defn parse-opts do
     i arrow acc when (eq? i arrow) -> acc
-    i arrow acc when (eq? (add i 1) arrow) -> syntax-error stx (str "operator keyword '" (kw-text (syntax-nth stx i)) "' requires a value")
+    i arrow acc when (eq? (add i 1) arrow) -> syntax-error stx "operator keyword '#{kw-text (syntax-nth stx i)}' requires a value"
     i arrow acc -> parse-opts (add i 2) arrow (apply-opt (kw-text (syntax-nth stx i)) (syntax-nth stx (add i 1)) acc)
   end
 
@@ -41,6 +41,6 @@ export defmacro operator stx do
   defn finish {p a f} target -> expander-register-operator (syntax-nth stx 2) p a f target
 
   arrow = find-arrow 3
-  finish (parse-opts 3 arrow (tuple 50 "left" "infix")) (target-of arrow)
+  finish (parse-opts 3 arrow {50 "left" "infix"}) (target-of arrow)
   %`(do end)
 end

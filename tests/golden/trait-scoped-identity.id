@@ -1,0 +1,10 @@
+do
+  use tests/pkg/sizea
+  implement Size on int
+  println (size 5)
+end
+do
+  use tests/pkg/sizeb
+  implement Size on int
+  println (size 5)
+end

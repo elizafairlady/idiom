@@ -1,0 +1,7 @@
+use tests/pkg/protomethod
+implement ProtoMethod on int do
+  method tag x -> :int
+end
+
+println (describe 42)
+println (tag 42)

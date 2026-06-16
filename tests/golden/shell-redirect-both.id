@@ -1,4 +1,4 @@
-implement std/shell
+activate std/shell
 sh -c "echo o; echo e >&2" &> /tmp/idiom_gold_both
 println "got:$(sort /tmp/idiom_gold_both)"
 rm /tmp/idiom_gold_both

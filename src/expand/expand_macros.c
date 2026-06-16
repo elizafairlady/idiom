@@ -14,15 +14,15 @@ bool run_phase_core(ExpandContext *ctx, IdmCore *core, IdmError *err) {
         return false;
     }
     IdmNamespace *old_main_ns = ctx->rt->main_ns;
-    int old_protocol_phase = ctx->rt->protocol_phase;
+    int old_trait_phase = ctx->rt->trait_phase;
     if (ctx->phase_ns) ctx->rt->main_ns = ctx->phase_ns;
-    ctx->rt->protocol_phase = 1;
+    ctx->rt->trait_phase = 1;
     IdmValue ignored = idm_nil();
     bool ok = idm_vm_run(ctx->rt, module, main_fn, &ignored, err);
     ctx->rt->main_ns = old_main_ns;
-    ctx->rt->protocol_phase = old_protocol_phase;
+    ctx->rt->trait_phase = old_trait_phase;
     if (ok) {
-        if (!idm_phase_env_add_module(ctx->phase_env, module, main_fn)) {
+        if (!idm_phase_env_add_module(ctx->phase_env, module, main_fn, err)) {
             idm_bc_destroy(module);
             free(module);
             return idm_error_oom(err, idm_span_unknown(NULL));
@@ -81,15 +81,15 @@ bool local_macro_invoke(void *user, IdmRuntime *rt, uint32_t payload, const IdmS
     if (err && err->present) return false;
     IdmValue result = idm_nil();
     IdmNamespace *old_main_ns = rt->main_ns;
-    int old_protocol_phase = rt->protocol_phase;
+    int old_trait_phase = rt->trait_phase;
     IdmNamespace *macro_ns = ctx->macros[payload].phase_env ? ctx->macros[payload].phase_env->ns : ctx->macros[payload].phase_ns;
     if (macro_ns) rt->main_ns = macro_ns;
-    rt->protocol_phase = 1;
+    rt->trait_phase = 1;
     bool ok = ctx->macros[payload].closure_backed
         ? idm_vm_call_closure(rt, ctx->macros[payload].transformer, &arg, 1, &result, err)
         : idm_vm_call_function(rt, &ctx->macros[payload].module->module, ctx->macros[payload].function_index, &arg, 1, &result, err);
     rt->main_ns = old_main_ns;
-    rt->protocol_phase = old_protocol_phase;
+    rt->trait_phase = old_trait_phase;
     if (!ok) return false;
     const IdmSyntax *result_syntax = idm_syntax_get(result, err);
     if (!result_syntax) return false;
@@ -162,11 +162,11 @@ IdmCore *expand_macro_use(ExpandContext *ctx, const IdmSyntax *use_syntax, const
 }
 
 static bool expand_macro_syntax_only(ExpandContext *ctx, const IdmSyntax *syntax, IdmSyntax **out_syntax, IdmError *err) {
-    if (syn_is_protocol(syntax, "%-group")) {
+    if (syn_is_form(syntax, "%-group")) {
         if (syntax->as.seq.count != 2) return idm_error_set(err, syntax->span, "%-group expects one child");
         return expand_macro_syntax_only(ctx, syntax->as.seq.items[1], out_syntax, err);
     }
-    if (syn_is_protocol(syntax, "%-expr") && syntax->as.seq.count >= 2 && syntax->as.seq.items[1]->kind == IDM_SYN_WORD) {
+    if (syn_is_form(syntax, "%-expr") && syntax->as.seq.count >= 2 && syntax->as.seq.items[1]->kind == IDM_SYN_WORD) {
         uint32_t payload = 0;
         if (resolve_transformer(ctx, syntax->as.seq.items[1], &payload, err)) {
             IdmSyntax *expanded = NULL;
@@ -279,6 +279,10 @@ bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *f
         macro_def_destroy(macro);
         return false;
     }
+    if (!idm_bc_intern_literals(ctx->rt, &macro->module->module, err)) {
+        macro_def_destroy(macro);
+        return false;
+    }
     uint32_t payload = (uint32_t)ctx->macro_count;
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) {
@@ -304,6 +308,11 @@ bool register_resolver(ExpandContext *ctx, IdmCore *fn, IdmSpan span, IdmError *
     ctx->decl_resolver_module = idm_module_ref_create(ctx->rt);
     if (!ctx->decl_resolver_module) return idm_error_oom(err, span);
     if (!idm_core_compile_function_body(fn->as.fn.body, "%resolver", fn->as.fn.arity, &ctx->decl_resolver_module->module, &ctx->decl_resolver_fn, err)) {
+        idm_module_ref_release(ctx->decl_resolver_module);
+        ctx->decl_resolver_module = NULL;
+        return false;
+    }
+    if (!idm_bc_intern_literals(ctx->rt, &ctx->decl_resolver_module->module, err)) {
         idm_module_ref_release(ctx->decl_resolver_module);
         ctx->decl_resolver_module = NULL;
         return false;
@@ -335,10 +344,16 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
     memset(macro, 0, sizeof(*macro));
     macro->name = idm_strdup(name);
     if (!macro->name) return idm_error_oom(err, name_syntax->span);
-    if (!idm_runtime_register_gc_value(rt, transformer)) {
+    if (!idm_bc_intern_literals(rt, (IdmBytecodeModule *)closure_module, err)) {
         free(macro->name);
         macro->name = NULL;
-        return idm_error_oom(err, name_syntax->span);
+        return false;
+    }
+    transformer = idm_value_copy(rt, &rt->immortal, transformer, err);
+    if (err->present) {
+        free(macro->name);
+        macro->name = NULL;
+        return false;
     }
     macro->closure_backed = true;
     macro->transformer = transformer;
@@ -398,7 +413,7 @@ bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, con
 static const char *operator_decl_token_text(const IdmSyntax *syn) {
     if (!syn) return NULL;
     if (syn->kind == IDM_SYN_WORD) return syn->as.text;
-    if (syn_is_protocol(syn, "%-word") && syn->as.seq.count == 2 && syn->as.seq.items[1]->kind == IDM_SYN_STRING) return syn->as.seq.items[1]->as.text;
+    if (syn_is_form(syn, "%-word") && syn->as.seq.count == 2 && syn->as.seq.items[1]->kind == IDM_SYN_STRING) return syn->as.seq.items[1]->as.text;
     return NULL;
 }
 

@@ -9,7 +9,7 @@ static IdmModuleRef *relocated_module_ref(ExpandContext *ctx, IdmModuleRef *src,
 static bool install_macro_twin(ExpandContext *ctx, const char *name, IdmScopeId base, size_t macros_before, IdmError *err);
 static bool install_relocated_operator(ExpandContext *ctx, const IdmOperatorDef *op, IdmScopeId min_id, int64_t delta, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err);
 static const char *idm_std_root(void);
-static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *protocol_name_hint, bool kernel_mode, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err);
+static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *unit_name_hint, bool kernel_mode, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err);
 
 IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier, IdmSyntax *const *items, size_t cont_index, size_t cont_count, IdmSpan span, IdmError *err) {
     const IdmArtifact *art = artifact_get(ctx, path, span, err);
@@ -60,7 +60,7 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
             qualified = idm_buf_take(&qb);
             bind_name = qualified;
         }
-        ok = idm_binding_table_add(&ctx->bindings, bind_name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &act_scopes, consumer_slot, IDM_FRAME_GLOBAL, NULL);
+        ok = idm_binding_table_add_with_arity(&ctx->bindings, bind_name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &act_scopes, consumer_slot, IDM_FRAME_GLOBAL, art->exports[i].arity, NULL);
         free(qualified);
     }
     for (size_t i = 0; i < art->global_count && ok; i++) {
@@ -72,7 +72,7 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
         idm_scope_set_init(&gscopes);
         if (!idm_scope_set_copy(&gscopes, &art->globals[i].scopes)) { ok = false; break; }
         idm_scope_set_relocate(&gscopes, min_id, delta);
-        ok = idm_binding_table_add(&ctx->bindings, art->globals[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &gscopes, consumer_slot, IDM_FRAME_GLOBAL, NULL);
+        ok = idm_binding_table_add_with_arity(&ctx->bindings, art->globals[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &gscopes, consumer_slot, IDM_FRAME_GLOBAL, art->globals[i].arity, NULL);
         idm_scope_set_destroy(&gscopes);
     }
     for (size_t i = 0; qualifier && i < art->macro_count && ok; i++) {
@@ -97,7 +97,8 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
         idm_module_ref_release(module);
         free(qualified);
     }
-    if (ok) ok = install_artifact_protocols(ctx, art->protocols, art->protocol_count, &act_scopes, qualifier, provider, provider_key, err);
+    if (ok) ok = install_artifact_traits(ctx, art->traits, art->trait_count, &act_scopes, qualifier, provider, provider_key, err);
+    if (ok) ok = install_artifact_types(ctx, art->types, art->type_count, &act_scopes, qualifier, provider, provider_key, err);
     idm_scope_set_destroy(&act_scopes);
     if (!ok) {
         free(export_src);
@@ -138,11 +139,9 @@ static void expand_cache_destroy(void *p) {
     ExpandCache *cache = p;
     if (!cache) return;
     if (cache->kernel_ready) {
-        if (cache->kernel.module) idm_runtime_unregister_gc_module(cache->rt, cache->kernel.module);
         idm_artifact_destroy(&cache->kernel);
     }
     for (size_t i = 0; i < cache->pkg_count; i++) {
-        if (cache->pkgs[i]->art.module) idm_runtime_unregister_gc_module(cache->rt, cache->pkgs[i]->art.module);
         idm_artifact_destroy(&cache->pkgs[i]->art);
         free(cache->pkgs[i]->path);
         free(cache->pkgs[i]);
@@ -197,11 +196,6 @@ static ExpandCache *kernel_artifact_get(IdmRuntime *rt, IdmError *err) {
     if (idm_artifact_cache_load(rt, cache->kernel_path, src_hash, &cache->kernel)) {
         idm_buf_destroy(&src);
         cache->kernel_scope_end = cache->kernel.scope_end;
-        if (cache->kernel.module && !idm_runtime_register_gc_module(rt, cache->kernel.module)) {
-            idm_artifact_destroy(&cache->kernel);
-            idm_error_oom(err, idm_span_unknown(NULL));
-            return NULL;
-        }
         cache->kernel_ready = true;
         return cache;
     }
@@ -209,7 +203,7 @@ static ExpandCache *kernel_artifact_get(IdmRuntime *rt, IdmError *err) {
     bool read_ok = idm_reader_read_string(label, src.data ? src.data : "", &pkg, err);
     idm_buf_destroy(&src);
     if (!read_ok) return NULL;
-    if (!syn_is_protocol(pkg, "%-package-begin")) {
+    if (!syn_is_form(pkg, "%-package-begin")) {
         idm_syn_free(pkg);
         idm_error_set(err, idm_span_unknown(NULL), "kernel source must be a program");
         return NULL;
@@ -224,7 +218,7 @@ static ExpandCache *kernel_artifact_get(IdmRuntime *rt, IdmError *err) {
     cache->kernel.scope_end = store.next_scope;
     memcpy(cache->kernel.src_hash, src_hash, 32u);
     cache->kernel_scope_end = store.next_scope;
-    if (cache->kernel.module && !idm_runtime_register_gc_module(rt, cache->kernel.module)) {
+    if (cache->kernel.module && !idm_bc_intern_literals(rt, cache->kernel.module, err)) {
         idm_artifact_destroy(&cache->kernel);
         idm_error_oom(err, idm_span_unknown(NULL));
         return NULL;
@@ -250,13 +244,11 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
     for (size_t i = 0; i < k->macro_count; i++) {
         if (!install_imported_macro(ctx, k->macros[i].name, &ctx->empty_scopes, k->macros[i].module, k->macros[i].function_index, k->macros[i].phase_ns, k->macros[i].phase_env, kernel_name, kernel_key, err)) return false;
     }
-    for (size_t i = 0; i < k->method_count; i++) {
-        if (!install_method_surface(ctx, kernel_name, k->methods[i].name, k->methods[i].arity, &ctx->empty_scopes, kernel_name, kernel_key, err)) return false;
-    }
     if (k->resolver_module) {
         if (!install_imported_macro(ctx, "%resolver", &ctx->empty_scopes, k->resolver_module, k->resolver_fn, k->resolver_phase_ns, k->resolver_phase_env, kernel_name, kernel_key, err)) return false;
     }
-    if (!install_artifact_protocols(ctx, k->protocols, k->protocol_count, &ctx->empty_scopes, NULL, kernel_name, kernel_key, err)) return false;
+    if (!install_artifact_traits(ctx, k->traits, k->trait_count, &ctx->empty_scopes, NULL, kernel_name, kernel_key, err)) return false;
+    if (!install_artifact_types(ctx, k->types, k->type_count, &ctx->empty_scopes, NULL, kernel_name, kernel_key, err)) return false;
     size_t import_count = k->export_count + k->global_count;
     if (import_count != 0) {
         ctx->kernel_import_src = malloc(import_count * sizeof(*ctx->kernel_import_src));
@@ -268,18 +260,18 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
             ctx->kernel_import_src[n] = k->exports[i].slot;
             ctx->kernel_import_dst[n] = consumer_slot;
             n++;
-            if (!idm_binding_table_add(&ctx->bindings, k->exports[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &ctx->empty_scopes, consumer_slot, IDM_FRAME_GLOBAL, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (!idm_binding_table_add_with_arity(&ctx->bindings, k->exports[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &ctx->empty_scopes, consumer_slot, IDM_FRAME_GLOBAL, k->exports[i].arity, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
         }
         for (size_t i = 0; i < k->global_count; i++) {
             uint32_t consumer_slot = ctx->global_seq++;
             ctx->kernel_import_src[n] = k->globals[i].slot;
             ctx->kernel_import_dst[n] = consumer_slot;
             n++;
-            if (!idm_binding_table_add(&ctx->bindings, k->globals[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &k->globals[i].scopes, consumer_slot, IDM_FRAME_GLOBAL, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (!idm_binding_table_add_with_arity(&ctx->bindings, k->globals[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &k->globals[i].scopes, consumer_slot, IDM_FRAME_GLOBAL, k->globals[i].arity, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
         }
         ctx->kernel_import_count = import_count;
     }
-    ctx->kernel_wrap = import_count != 0 || k->method_count != 0;
+    ctx->kernel_wrap = import_count != 0;
     return true;
 }
 
@@ -339,26 +331,12 @@ void artifact_provider_key(const unsigned char hash[32], char out[17]) {
     out[16] = '\0';
 }
 
-static void identity_hash_seed(const char *identity, unsigned char out[32]) {
-    memset(out, 0, 32u);
-    const char *suffix = strrchr(identity, '#');
-    if (!suffix || strlen(suffix + 1u) < 16u) return;
-    suffix++;
-    for (size_t i = 0; i < 8u; i++) {
-        unsigned byte = 0;
-        for (size_t j = 0; j < 2u; j++) {
-            char c = suffix[i * 2u + j];
-            unsigned nibble = (c >= '0' && c <= '9') ? (unsigned)(c - '0') : (c >= 'a' && c <= 'f') ? (unsigned)(c - 'a' + 10) : 0u;
-            byte = byte << 4 | nibble;
-        }
-        out[i] = (unsigned char)byte;
-    }
-}
-
-bool install_artifact_protocols(ExpandContext *ctx, const IdmPkgProtocol *protocols, size_t protocol_count, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err) {
+bool install_artifact_traits(ExpandContext *ctx, const IdmPkgTrait *traits, size_t trait_count, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err) {
     if (!scopes) scopes = &ctx->empty_scopes;
-    for (size_t i = 0; i < protocol_count; i++) {
-        const IdmPkgProtocol *entry = &protocols[i];
+    for (size_t i = 0; i < trait_count; i++) {
+        const IdmPkgTrait *entry = &traits[i];
+        SurfaceCheckpoint checkpoint;
+        surface_checkpoint(ctx, &checkpoint);
         char *qualified = NULL;
         const char *bind_name = entry->name;
         if (qualifier) {
@@ -371,7 +349,79 @@ bool install_artifact_protocols(ExpandContext *ctx, const IdmPkgProtocol *protoc
             qualified = idm_buf_take(&qb);
             bind_name = qualified;
         }
-        int guard = surface_install_guard(ctx, provider, provider_key, bind_name, bind_name, IDM_BIND_SPACE_PROTOCOL, scopes, err);
+        int guard = surface_install_guard(ctx, provider, provider_key, bind_name, bind_name, IDM_BIND_SPACE_TRAIT, scopes, err);
+        if (guard < 0) {
+            surface_rollback(ctx, &checkpoint);
+            free(qualified);
+            return false;
+        }
+        if (guard == 0) {
+            free(qualified);
+            continue;
+        }
+        if (ctx->trait_count == ctx->trait_cap) {
+            size_t cap = ctx->trait_cap ? ctx->trait_cap * 2u : 4u;
+            TraitDef *next = realloc(ctx->traits, cap * sizeof(*next));
+            if (!next) {
+                surface_rollback(ctx, &checkpoint);
+                free(qualified);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            ctx->traits = next;
+            ctx->trait_cap = cap;
+        }
+        TraitDef *t = &ctx->traits[ctx->trait_count];
+        memset(t, 0, sizeof(*t));
+        t->name = idm_strdup(entry->identity);
+        if (!t->name ||
+            !idm_trait_requirement_defs_copy(entry->requirements, entry->requirement_count, &t->requirements) ||
+            !idm_trait_method_defs_copy(entry->methods, entry->method_count, &t->methods)) {
+            trait_def_destroy(t);
+            surface_rollback(ctx, &checkpoint);
+            free(qualified);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        t->requirement_count = entry->requirement_count;
+        t->method_count = entry->method_count;
+        uint32_t payload = (uint32_t)ctx->trait_count;
+        if (!idm_binding_table_add(&ctx->bindings, bind_name, IDM_PHASE_ANY, IDM_BIND_SPACE_TRAIT, IDM_BIND_TRAIT, scopes, payload, ctx->frame, NULL)) {
+            trait_def_destroy(t);
+            surface_rollback(ctx, &checkpoint);
+            free(qualified);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        ctx->trait_count++;
+        if (!qualifier) {
+            for (size_t m = 0; m < entry->method_count; m++) {
+                if (!install_method_surface(ctx, entry->identity, entry->methods[m].name, entry->methods[m].arity, scopes, provider, provider_key, err)) {
+                    surface_rollback(ctx, &checkpoint);
+                    free(qualified);
+                    return false;
+                }
+            }
+        }
+        free(qualified);
+    }
+    return true;
+}
+
+bool install_artifact_types(ExpandContext *ctx, const IdmPkgType *types, size_t type_count, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err) {
+    if (!scopes) scopes = &ctx->empty_scopes;
+    for (size_t i = 0; i < type_count; i++) {
+        const IdmPkgType *entry = &types[i];
+        char *qualified = NULL;
+        const char *bind_name = entry->name;
+        if (qualifier) {
+            IdmBuffer qb;
+            idm_buf_init(&qb);
+            if (!idm_buf_append(&qb, qualifier) || !idm_buf_append_char(&qb, '.') || !idm_buf_append(&qb, entry->name)) {
+                idm_buf_destroy(&qb);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            qualified = idm_buf_take(&qb);
+            bind_name = qualified;
+        }
+        int guard = surface_install_guard(ctx, provider, provider_key, bind_name, bind_name, IDM_BIND_SPACE_TYPE, scopes, err);
         if (guard < 0) {
             free(qualified);
             return false;
@@ -380,34 +430,66 @@ bool install_artifact_protocols(ExpandContext *ctx, const IdmPkgProtocol *protoc
             free(qualified);
             continue;
         }
-        if (ctx->protocol_count == ctx->protocol_cap) {
-            size_t cap = ctx->protocol_cap ? ctx->protocol_cap * 2u : 4u;
-            ProtocolDef *next = realloc(ctx->protocols, cap * sizeof(*next));
+        SurfaceCheckpoint checkpoint;
+        surface_checkpoint(ctx, &checkpoint);
+        if (ctx->type_count == ctx->type_cap) {
+            size_t cap = ctx->type_cap ? ctx->type_cap * 2u : 4u;
+            TypeDef *next = realloc(ctx->types, cap * sizeof(*next));
             if (!next) {
+                surface_rollback(ctx, &checkpoint);
                 free(qualified);
                 return idm_error_oom(err, idm_span_unknown(NULL));
             }
-            ctx->protocols = next;
-            ctx->protocol_cap = cap;
+            ctx->types = next;
+            ctx->type_cap = cap;
         }
-        ProtocolDef *p = &ctx->protocols[ctx->protocol_count];
-        memset(p, 0, sizeof(*p));
-        p->name = idm_strdup(entry->identity);
-        if (!p->name || !idm_protocol_method_defs_copy(entry->methods, entry->method_count, &p->art.methods)) {
-            protocol_def_destroy(p);
+        TypeDef *t = &ctx->types[ctx->type_count];
+        memset(t, 0, sizeof(*t));
+        t->name = idm_strdup(bind_name);
+        t->identity = idm_strdup(entry->identity);
+        if (!t->name || !t->identity || !idm_scope_set_copy(&t->scopes, scopes)) {
+            type_def_destroy(t);
+            surface_rollback(ctx, &checkpoint);
             free(qualified);
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
-        p->art.method_count = entry->method_count;
-        identity_hash_seed(entry->identity, p->art.src_hash);
-        uint32_t payload = (uint32_t)ctx->protocol_count;
-        if (!idm_binding_table_add(&ctx->bindings, bind_name, IDM_PHASE_ANY, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, scopes, payload, ctx->frame, NULL)) {
-            protocol_def_destroy(p);
+        if (entry->field_count != 0) {
+            t->fields = calloc(entry->field_count, sizeof(*t->fields));
+            if (!t->fields) {
+                type_def_destroy(t);
+                surface_rollback(ctx, &checkpoint);
+                free(qualified);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            t->field_count = entry->field_count;
+            for (size_t f = 0; f < entry->field_count; f++) {
+                t->fields[f] = idm_strdup(entry->fields[f]);
+                if (!t->fields[f]) {
+                    type_def_destroy(t);
+                    surface_rollback(ctx, &checkpoint);
+                    free(qualified);
+                    return idm_error_oom(err, idm_span_unknown(NULL));
+                }
+            }
+        }
+        uint32_t payload = (uint32_t)ctx->type_count;
+        if (!idm_binding_table_add(&ctx->bindings, bind_name, IDM_PHASE_ANY, IDM_BIND_SPACE_TYPE, IDM_BIND_TYPE, scopes, payload, ctx->frame, NULL)) {
+            type_def_destroy(t);
+            surface_rollback(ctx, &checkpoint);
             free(qualified);
             return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        ctx->type_count++;
+        if (!qualifier) {
+            for (size_t f = 0; f < entry->field_count; f++) {
+                if (!install_method_surface(ctx, entry->identity, entry->fields[f], 1u, scopes, provider, provider_key, err)) {
+                    surface_rollback(ctx, &checkpoint);
+                    free(qualified);
+                    return false;
+                }
+            }
         }
         free(qualified);
-        ctx->protocol_count++;
     }
     return true;
 }
@@ -493,7 +575,7 @@ const IdmArtifact *artifact_get(ExpandContext *ctx, const char *path, IdmSpan sp
     if (!loaded) {
         IdmSyntax *pkg = NULL;
         bool read_ok = idm_reader_read_string(label, src.data ? src.data : "", &pkg, err);
-        if (read_ok && !syn_is_protocol(pkg, "%-package-begin")) {
+        if (read_ok && !syn_is_form(pkg, "%-package-begin")) {
             idm_syn_free(pkg);
             idm_error_set(err, span, "package source must be a program");
             read_ok = false;
@@ -549,7 +631,7 @@ const IdmArtifact *artifact_get(ExpandContext *ctx, const char *path, IdmSpan sp
         cache->pkgs = grown;
         cache->pkg_cap = cap;
     }
-    if (entry->art.module && !idm_runtime_register_gc_module(ctx->rt, entry->art.module)) {
+    if (entry->art.module && !idm_bc_intern_literals(ctx->rt, entry->art.module, err)) {
         idm_artifact_destroy(&entry->art);
         free(entry->path);
         free(entry);
@@ -610,7 +692,8 @@ static IdmModuleRef *relocated_module_ref(ExpandContext *ctx, IdmModuleRef *src,
     }
     uint32_t const_off = 0, fn_off = 0, code_off = 0;
     if (!idm_bc_link(&clone->module, &src->module, &const_off, &fn_off, &code_off, err) ||
-        !idm_bc_relocate_syntax_scopes(ctx->rt, &clone->module, min_id, delta, err)) {
+        !idm_bc_relocate_syntax_scopes(ctx->rt, &clone->module, min_id, delta, err) ||
+        !idm_bc_intern_literals(ctx->rt, &clone->module, err)) {
         idm_module_ref_release(clone);
         return NULL;
     }
@@ -626,7 +709,8 @@ IdmBytecodeModule *relocated_module_copy(ExpandContext *ctx, const IdmBytecodeMo
     idm_bc_init(module);
     uint32_t const_off = 0, fn_off = 0, code_off = 0;
     if (!idm_bc_link(module, src, &const_off, &fn_off, &code_off, err) ||
-        (delta != 0 && !idm_bc_relocate_syntax_scopes(ctx->rt, module, min_id, delta, err))) {
+        (delta != 0 && !idm_bc_relocate_syntax_scopes(ctx->rt, module, min_id, delta, err)) ||
+        !idm_bc_intern_literals(ctx->rt, module, err)) {
         idm_bc_destroy(module);
         free(module);
         return NULL;
@@ -655,34 +739,31 @@ static bool install_relocated_operator(ExpandContext *ctx, const IdmOperatorDef 
     return ok;
 }
 
-bool activate_artifact(ExpandContext *ctx, const char *protocol_name, const IdmArtifact *art, IdmScopeId base, const IdmScopeSet *act_scopes, IdmSpan span, IdmError *err) {
+bool activate_artifact(ExpandContext *ctx, const char *activation_name, const IdmArtifact *art, IdmScopeId base, const IdmScopeSet *act_scopes, IdmSpan span, IdmError *err) {
     (void)span;
     IdmScopeId min_id = art->scope_base;
     int64_t delta = (int64_t)base - (int64_t)art->scope_base;
     char provider_key[17];
     artifact_provider_key(art->src_hash, provider_key);
     for (size_t i = 0; i < art->operator_count; i++) {
-        if (!install_relocated_operator(ctx, &art->operators[i], min_id, delta, act_scopes, protocol_name, provider_key, err)) return false;
+        if (!install_relocated_operator(ctx, &art->operators[i], min_id, delta, act_scopes, activation_name, provider_key, err)) return false;
     }
     for (size_t i = 0; i < art->macro_count; i++) {
         IdmModuleRef *module = relocated_module_ref(ctx, art->macros[i].module, min_id, delta, err);
         if (!module) return false;
         size_t before = ctx->macro_count;
-        bool ok = install_imported_macro(ctx, art->macros[i].name, act_scopes, module, art->macros[i].function_index, art->macros[i].phase_ns, art->macros[i].phase_env, protocol_name, provider_key, err);
+        bool ok = install_imported_macro(ctx, art->macros[i].name, act_scopes, module, art->macros[i].function_index, art->macros[i].phase_ns, art->macros[i].phase_env, activation_name, provider_key, err);
         idm_module_ref_release(module);
         if (!ok || !install_macro_twin(ctx, art->macros[i].name, base, before, err)) return false;
-    }
-    for (size_t i = 0; i < art->method_count; i++) {
-        if (!install_method_surface(ctx, protocol_name, art->methods[i].name, art->methods[i].arity, act_scopes, protocol_name, provider_key, err)) return false;
     }
     if (art->resolver_module) {
         IdmModuleRef *module = relocated_module_ref(ctx, art->resolver_module, min_id, delta, err);
         if (!module) return false;
-        bool ok = install_imported_macro(ctx, "%resolver", act_scopes, module, art->resolver_fn, art->resolver_phase_ns ? art->resolver_phase_ns : ctx->phase_ns, art->resolver_phase_env ? art->resolver_phase_env : ctx->phase_env, protocol_name, provider_key, err);
+        bool ok = install_imported_macro(ctx, "%resolver", act_scopes, module, art->resolver_fn, art->resolver_phase_ns ? art->resolver_phase_ns : ctx->phase_ns, art->resolver_phase_env ? art->resolver_phase_env : ctx->phase_env, activation_name, provider_key, err);
         idm_module_ref_release(module);
         if (!ok) return false;
     }
-    return install_artifact_protocols(ctx, art->protocols, art->protocol_count, act_scopes, NULL, protocol_name, provider_key, err);
+    return true;
 }
 
 static const char *idm_std_root(void) {
@@ -690,29 +771,28 @@ static const char *idm_std_root(void) {
     return (root && *root) ? root : "std";
 }
 
-static char *protocol_spelling_dup(const char *identity) {
+static char *trait_spelling_dup(const char *identity) {
     const char *start = strrchr(identity, '/');
     start = start ? start + 1u : identity;
     const char *suffix = strrchr(start, '#');
     return suffix ? idm_strndup(start, (size_t)(suffix - start)) : idm_strdup(start);
 }
 
-static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *protocol_name_hint, bool kernel_mode, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err) {
+static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *unit_name_hint, bool kernel_mode, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err) {
     ExpandContext ctx;
     ctx_init(&ctx, rt);
     ctx.scope_store = *store;
     ctx.runner = &ctx.local_runner;
-    const char *protocol_name = NULL;
-    if (protocol_name_hint && *protocol_name_hint) {
-        protocol_name = idm_symbol_text(idm_intern(&rt->intern, IDM_SYMBOL_ATOM, protocol_name_hint));
-        if (!protocol_name) {
+    const char *unit_name = NULL;
+    if (unit_name_hint && *unit_name_hint) {
+        unit_name = idm_symbol_text(idm_intern(&rt->intern, IDM_SYMBOL_ATOM, unit_name_hint));
+        if (!unit_name) {
             idm_error_oom(err, pkg ? pkg->span : idm_span_unknown(NULL));
             *store = ctx.scope_store;
             ctx_destroy(&ctx);
             return false;
         }
-        ctx.protocol_name = protocol_name;
-        ctx_set_unit(&ctx, protocol_name, src_hash);
+        ctx_set_unit(&ctx, unit_name, src_hash);
     }
     ctx.phase_ns = idm_fresh_phase_namespace(rt, err);
     if (!ctx.phase_ns) {
@@ -752,7 +832,6 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             }
         }
     }
-    if (ok && ctx.protocol_name && !predeclare_protocol_methods(&ctx, scoped_pkg->as.seq.items, 1, scoped_pkg->as.seq.count, err)) ok = false;
     IdmCore *body = ok ? expand_body_items(&ctx, scoped_pkg->as.seq.items, 1, scoped_pkg->as.seq.count, false, err) : NULL;
     idm_syn_free(scoped_pkg);
     rt->phase_reads = old_reads;
@@ -785,6 +864,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             for (size_t i = 0; i < export_count; i++) {
                 exports[i].name = idm_strdup(ctx.exports[i].name);
                 exports[i].slot = ctx.exports[i].global_id;
+                exports[i].arity = ctx.exports[i].arity;
                 if (!exports[i].name) { for (size_t j = 0; j < i; j++) free(exports[j].name); free(exports); exports = NULL; copy_ok = false; break; }
             }
         }
@@ -798,6 +878,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             for (size_t i = 0; i < global_count; i++) {
                 globals[i].name = idm_strdup(ctx.package_globals[i].name);
                 globals[i].slot = ctx.package_globals[i].slot;
+                globals[i].arity = ctx.package_globals[i].arity;
                 if (!globals[i].name || !idm_scope_set_copy(&globals[i].scopes, &ctx.package_globals[i].scopes)) {
                     for (size_t j = 0; j <= i; j++) idm_pkg_global_destroy(&globals[j]);
                     free(globals);
@@ -808,55 +889,71 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             }
         }
     }
-    size_t method_count = ctx.decl_method_count;
-    IdmProtocolMethodDef *methods = NULL;
-    if (copy_ok && !idm_protocol_method_defs_copy(ctx.decl_methods, method_count, &methods)) copy_ok = false;
-    size_t pkg_protocol_count = 0;
-    IdmPkgProtocol *pkg_protocols = NULL;
+    size_t type_count = 0;
+    IdmPkgType *types = NULL;
     if (copy_ok) {
-        for (size_t i = 0; i < ctx.protocol_count; i++) if (ctx.protocols[i].exported) pkg_protocol_count++;
+        for (size_t i = 0; i < ctx.type_count; i++) if (ctx.types[i].exported) type_count++;
     }
-    if (copy_ok && pkg_protocol_count != 0) {
-        pkg_protocols = calloc(pkg_protocol_count, sizeof(*pkg_protocols));
-        if (!pkg_protocols) copy_ok = false;
+    if (copy_ok && type_count != 0) {
+        types = calloc(type_count, sizeof(*types));
+        if (!types) copy_ok = false;
         size_t k = 0;
-        for (size_t i = 0; copy_ok && i < ctx.protocol_count; i++) {
-            const ProtocolDef *p = &ctx.protocols[i];
-            if (!p->exported) continue;
-            pkg_protocols[k].name = protocol_spelling_dup(p->name);
-            pkg_protocols[k].identity = idm_strdup(p->name);
-            if (!pkg_protocols[k].name || !pkg_protocols[k].identity || !idm_protocol_method_defs_copy(p->art.methods, p->art.method_count, &pkg_protocols[k].methods)) copy_ok = false;
-            else pkg_protocols[k].method_count = p->art.method_count;
-            k++;
-        }
-        if (!copy_ok && pkg_protocols) {
-            for (size_t j = 0; j < pkg_protocol_count; j++) idm_pkg_protocol_destroy(&pkg_protocols[j]);
-            free(pkg_protocols);
-            pkg_protocols = NULL;
-        }
-        if (!copy_ok) pkg_protocol_count = 0;
-    }
-    if (copy_ok && method_count != 0) {
-        IdmCore *define = idm_core_define_protocol(idm_atom(rt, ctx.protocol_name ? ctx.protocol_name : (name ? name : "<protocol>")), pkg ? pkg->span : idm_span_unknown(NULL));
-        IdmCore *seq = define ? idm_core_do(pkg ? pkg->span : idm_span_unknown(NULL)) : NULL;
-        if (!define || !seq || !idm_core_do_add(seq, define)) {
-            idm_core_free(define);
-            idm_core_free(seq);
-            copy_ok = false;
-        } else {
-            for (size_t i = 0; i < method_count && copy_ok; i++) {
-                IdmCore *default_fn = ctx.decl_methods[i].default_fn;
-                ctx.decl_methods[i].default_fn = NULL;
-                if (!idm_core_define_protocol_add_method(define, idm_atom(rt, ctx.decl_methods[i].name), ctx.decl_methods[i].arity, default_fn)) {
-                    idm_core_free(default_fn);
-                    copy_ok = false;
-                    break;
+        for (size_t i = 0; copy_ok && i < ctx.type_count; i++) {
+            const TypeDef *t = &ctx.types[i];
+            if (!t->exported) continue;
+            types[k].name = idm_strdup(t->name);
+            types[k].identity = idm_strdup(t->identity);
+            if (!types[k].name || !types[k].identity || !idm_scope_set_copy(&types[k].scopes, &t->scopes)) copy_ok = false;
+            if (copy_ok && t->field_count != 0) {
+                types[k].fields = calloc(t->field_count, sizeof(*types[k].fields));
+                if (!types[k].fields) copy_ok = false;
+                else {
+                    types[k].field_count = t->field_count;
+                    for (size_t f = 0; f < t->field_count; f++) {
+                        types[k].fields[f] = idm_strdup(t->fields[f]);
+                        if (!types[k].fields[f]) { copy_ok = false; break; }
+                    }
                 }
             }
-            if (copy_ok && !idm_core_do_add(seq, body)) copy_ok = false;
-            if (copy_ok) body = seq;
-            else idm_core_free(seq);
+            k++;
         }
+        if (!copy_ok && types) {
+            for (size_t j = 0; j < type_count; j++) idm_pkg_type_destroy(&types[j]);
+            free(types);
+            types = NULL;
+        }
+        if (!copy_ok) type_count = 0;
+    }
+    size_t pkg_trait_count = 0;
+    IdmPkgTrait *pkg_traits = NULL;
+    if (copy_ok) {
+        for (size_t i = 0; i < ctx.trait_count; i++) if (ctx.traits[i].exported) pkg_trait_count++;
+    }
+    if (copy_ok && pkg_trait_count != 0) {
+        pkg_traits = calloc(pkg_trait_count, sizeof(*pkg_traits));
+        if (!pkg_traits) copy_ok = false;
+        size_t k = 0;
+        for (size_t i = 0; copy_ok && i < ctx.trait_count; i++) {
+            const TraitDef *t = &ctx.traits[i];
+            if (!t->exported) continue;
+            pkg_traits[k].name = trait_spelling_dup(t->name);
+            pkg_traits[k].identity = idm_strdup(t->name);
+            if (!pkg_traits[k].name || !pkg_traits[k].identity ||
+                !idm_trait_requirement_defs_copy(t->requirements, t->requirement_count, &pkg_traits[k].requirements) ||
+                !idm_trait_method_defs_copy(t->methods, t->method_count, &pkg_traits[k].methods)) {
+                copy_ok = false;
+            } else {
+                pkg_traits[k].requirement_count = t->requirement_count;
+                pkg_traits[k].method_count = t->method_count;
+            }
+            k++;
+        }
+        if (!copy_ok && pkg_traits) {
+            for (size_t j = 0; j < pkg_trait_count; j++) idm_pkg_trait_destroy(&pkg_traits[j]);
+            free(pkg_traits);
+            pkg_traits = NULL;
+        }
+        if (!copy_ok) pkg_trait_count = 0;
     }
     size_t macro_count = 0;
     size_t op_count = 0;
@@ -949,8 +1046,8 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
         if (globals) { for (size_t i = 0; i < global_count; i++) idm_pkg_global_destroy(&globals[i]); free(globals); }
         if (macros) { for (size_t i = 0; i < macro_count; i++) idm_pkg_macro_destroy(&macros[i]); free(macros); }
         if (operators) { for (size_t i = 0; i < op_count; i++) { free(operators[i].name); free(operators[i].target_name); idm_scope_set_destroy(&operators[i].scopes); } free(operators); }
-        if (methods) { for (size_t i = 0; i < method_count; i++) idm_protocol_method_def_destroy(&methods[i]); free(methods); }
-        if (pkg_protocols) { for (size_t i = 0; i < pkg_protocol_count; i++) idm_pkg_protocol_destroy(&pkg_protocols[i]); free(pkg_protocols); }
+        if (types) { for (size_t i = 0; i < type_count; i++) idm_pkg_type_destroy(&types[i]); free(types); }
+        if (pkg_traits) { for (size_t i = 0; i < pkg_trait_count; i++) idm_pkg_trait_destroy(&pkg_traits[i]); free(pkg_traits); }
         idm_module_ref_release(res_module);
         idm_phase_env_release(res_phase_env);
         idm_phase_env_release(pkg_phase_env);
@@ -972,10 +1069,10 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
     out->macro_count = macro_count;
     out->operators = operators;
     out->operator_count = op_count;
-    out->methods = methods;
-    out->method_count = method_count;
-    out->protocols = pkg_protocols;
-    out->protocol_count = pkg_protocol_count;
+    out->types = types;
+    out->type_count = type_count;
+    out->traits = pkg_traits;
+    out->trait_count = pkg_trait_count;
     out->resolver_module = res_module;
     out->resolver_fn = res_fn;
     out->resolver_phase_ns = res_phase_ns;
@@ -986,6 +1083,6 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
     return true;
 }
 
-bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const char *protocol_name_hint, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err) {
-    return compile_package_artifact(parent->rt, &parent->scope_store, pkg, protocol_name_hint, false, src_hash, out, err);
+bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const char *unit_name_hint, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err) {
+    return compile_package_artifact(parent->rt, &parent->scope_store, pkg, unit_name_hint, false, src_hash, out, err);
 }

@@ -23,7 +23,7 @@ export defmacro syntax-case stx do
     ctx pattern_tuple input_var_syn i n tail -> do
       b = build_binding ctx (syntax-nth pattern_tuple i) input_var_syn i
       rest = build_bindings_loop ctx pattern_tuple input_var_syn (i + 1) n tail
-      if (eq? b :nil) do rest else do cons b rest end
+      cond (eq? b :nil) rest (cons b rest)
     end
   end
 
@@ -37,11 +37,7 @@ export defmacro syntax-case stx do
     ctx pattern_tuple input_var_syn i n -> do
       elem = syntax-nth pattern_tuple i
       rest = build_elem_checks ctx pattern_tuple input_var_syn (i + 1) n
-      if (syntax-word? elem) do
-        rest
-      else do
-        %`(cond (eq? (syntax->datum (syntax-nth %,input_var_syn %,(make-syntax-int ctx i))) %,(literal_datum ctx elem)) %,rest :false)
-      end
+      cond (syntax-word? elem) rest %`(cond (eq? (syntax->datum (syntax-nth %,input_var_syn %,(make-syntax-int ctx i))) %,(literal_datum ctx elem)) %,rest :false)
     end
   end
 
@@ -70,31 +66,23 @@ export defmacro syntax-case stx do
     result_expr = make-syntax-expr ctx (collect_from (arrow + 1) clause_len clause)
     guard_expr = guard_of ctx clause arrow
     n = syntax-length pattern_tuple
-    ellipsis? = if (n < 3) do :false else do eq? (word_text_or_empty (syntax-nth pattern_tuple (n - 1))) "..." end
-    fixed_n = if ellipsis? do n - 2 else do n end
+    ellipsis? = cond (n < 3) :false (eq? (word_text_or_empty (syntax-nth pattern_tuple (n - 1))) "...")
+    fixed_n = cond ellipsis? (n - 2) n
     head_text = word_text_or_empty (syntax-nth pattern_tuple 0)
-    head_check = if (eq? head_text "_") do
-      make-syntax-atom ctx "true"
-    else do
-      %`(eq? (syntax-word-text (syntax-nth %,input_var_syn 0)) %,(make-syntax-string ctx head_text))
-    end
+    head_check = cond (eq? head_text "_") (make-syntax-atom ctx "true") %`(eq? (syntax-word-text (syntax-nth %,input_var_syn 0)) %,(make-syntax-string ctx head_text))
     guarded_result = %`(cond %,guard_expr %,result_expr %,else_chain)
     repeat_tail = if ellipsis? do
       repeat_var = syntax-nth pattern_tuple fixed_n
       repeat_value = %`(syntax-slice %,input_var_syn %,(make-syntax-int ctx fixed_n) (syntax-length %,input_var_syn))
       repeat_binding = build_binding_value ctx repeat_var repeat_value
-      if (eq? repeat_binding :nil) do list guarded_result else do cons repeat_binding (list guarded_result) end
+      cond (eq? repeat_binding :nil) (list guarded_result) (cons repeat_binding (list guarded_result))
     else do
       list guarded_result
     end
     body_items = build_bindings_loop ctx pattern_tuple input_var_syn 1 fixed_n repeat_tail
     body_syn = make-syntax-body ctx body_items
     elem_checks = build_elem_checks ctx pattern_tuple input_var_syn 1 fixed_n
-    len_check = if ellipsis? do
-      %`(gte? (syntax-length %,input_var_syn) %,(make-syntax-int ctx fixed_n))
-    else do
-      %`(eq? (syntax-length %,input_var_syn) %,(make-syntax-int ctx n))
-    end
+    len_check = cond ellipsis? %`(gte? (syntax-length %,input_var_syn) %,(make-syntax-int ctx fixed_n)) %`(eq? (syntax-length %,input_var_syn) %,(make-syntax-int ctx n))
     elem_cond = %`(cond %,elem_checks %,body_syn %,else_chain)
     head_cond = %`(cond %,head_check %,elem_cond %,else_chain)
     inner_cond = %`(cond %,len_check %,head_cond %,else_chain)

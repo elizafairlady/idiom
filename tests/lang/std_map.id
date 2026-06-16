@@ -1,11 +1,11 @@
 use std/test
-implement std/test
+activate std/test
 use std/map
 use std/enum
 
 suite do
   test "map-basics" do
-    m = dict :a 1 :b 2
+    m = %{:a 1 :b 2}
     assert-eq (m |> get :a) 1
     assert-eq (m |> get :zz) :nil
     assert-eq (m |> get-or :zz 9) 9
@@ -13,18 +13,18 @@ suite do
     assert-eq (m |> has? :b) :true
   end
   test "map-update-pipeline" do
-    m = dict |> put :n 1 |> update :n 0 (fn v -> add v 10) |> del :gone
+    m = %{} |> put :n 1 |> update :n 0 (fn v -> add v 10) |> del :gone
     assert-eq (m |> get :n) 11
     assert-eq (m |> size) 1
   end
   test "map-get-bang" do
-    m = dict :a 1
+    m = %{:a 1}
     assert-eq (m |> get! :a) 1
     assert-eq (assert-raises (fn _ig do m |> get! :zz end)) {:error {:key-not-found :zz}}
   end
   test "map-merge-keys" do
-    m = (dict :a 1) |> merge (dict :b 2 :a 9)
+    m = %{:a 1} |> merge %{:b 2 :a 9}
     assert-eq (m |> get :a) 9
-    assert-eq (m |> keys |> length) 2
+    assert-eq (keys m).length 2
   end
 end

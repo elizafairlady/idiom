@@ -5,7 +5,7 @@ static void method_surface_def_destroy(MethodSurfaceDef *method);
 static bool seed_primitive(ExpandContext *ctx, const char *name, IdmPrimitive primitive);
 static const char *operator_fixity_name(IdmOpFixity fixity);
 static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap);
-static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index);
+static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity);
 static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, const IdmBinding *b);
 static const IdmOperatorDef *op_lookup_fixity(const ExpandContext *ctx, const IdmSyntax *syn, IdmOpFixity fixity);
 
@@ -38,6 +38,12 @@ void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     ctx->protocols = NULL;
     ctx->protocol_count = 0;
     ctx->protocol_cap = 0;
+    ctx->traits = NULL;
+    ctx->trait_count = 0;
+    ctx->trait_cap = 0;
+    ctx->types = NULL;
+    ctx->type_count = 0;
+    ctx->type_cap = 0;
     ctx->method_surfaces = NULL;
     ctx->method_surface_count = 0;
     ctx->method_surface_cap = 0;
@@ -69,7 +75,7 @@ void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     ctx->enclosing = NULL;
     ctx->phase_ns = rt->main_ns;
     ctx->phase_env = NULL;
-    ctx->protocol_name = NULL;
+    ctx->trait_name = NULL;
     ctx->kernel_import_src = NULL;
     ctx->kernel_import_dst = NULL;
     ctx->kernel_import_count = 0;
@@ -141,10 +147,6 @@ static void capture_bindings_destroy(CaptureBinding *captures, size_t count) {
 
 void macro_def_destroy(MacroDef *macro) {
     if (!macro) return;
-    if (macro->closure_backed) {
-        idm_runtime_unregister_gc_value(macro->rt, macro->transformer);
-        macro->closure_backed = false;
-    }
     idm_module_ref_release(macro->module);
     macro->module = NULL;
     free(macro->name);
@@ -158,7 +160,7 @@ void macro_def_destroy(MacroDef *macro) {
 
 static void method_surface_def_destroy(MethodSurfaceDef *method) {
     if (!method) return;
-    free(method->protocol);
+    free(method->trait);
     free(method->name);
     idm_scope_set_destroy(&method->scopes);
     memset(method, 0, sizeof(*method));
@@ -169,6 +171,26 @@ void protocol_def_destroy(ProtocolDef *protocol) {
     free(protocol->name);
     idm_artifact_destroy(&protocol->art);
     memset(protocol, 0, sizeof(*protocol));
+}
+
+void trait_def_destroy(TraitDef *trait) {
+    if (!trait) return;
+    free(trait->name);
+    for (size_t i = 0; i < trait->requirement_count; i++) idm_trait_requirement_def_destroy(&trait->requirements[i]);
+    free(trait->requirements);
+    for (size_t i = 0; i < trait->method_count; i++) idm_trait_method_def_destroy(&trait->methods[i]);
+    free(trait->methods);
+    memset(trait, 0, sizeof(*trait));
+}
+
+void type_def_destroy(TypeDef *type) {
+    if (!type) return;
+    free(type->name);
+    free(type->identity);
+    idm_scope_set_destroy(&type->scopes);
+    for (size_t i = 0; i < type->field_count; i++) free(type->fields[i]);
+    free(type->fields);
+    memset(type, 0, sizeof(*type));
 }
 
 bool record_activation(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err) {
@@ -233,6 +255,8 @@ void surface_checkpoint(ExpandContext *ctx, SurfaceCheckpoint *checkpoint) {
     checkpoint->macro_count = ctx->macro_count;
     checkpoint->operator_count = ctx->operator_count;
     checkpoint->protocol_count = ctx->protocol_count;
+    checkpoint->trait_count = ctx->trait_count;
+    checkpoint->type_count = ctx->type_count;
     checkpoint->method_surface_count = ctx->method_surface_count;
     checkpoint->decl_method_count = ctx->decl_method_count;
     checkpoint->decl_resolver = ctx->decl_resolver;
@@ -248,8 +272,10 @@ void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint) {
     while (ctx->macro_count > checkpoint->macro_count) macro_def_destroy(&ctx->macros[--ctx->macro_count]);
     while (ctx->operator_count > checkpoint->operator_count) idm_operator_def_destroy(&ctx->operators[--ctx->operator_count]);
     while (ctx->protocol_count > checkpoint->protocol_count) protocol_def_destroy(&ctx->protocols[--ctx->protocol_count]);
+    while (ctx->trait_count > checkpoint->trait_count) trait_def_destroy(&ctx->traits[--ctx->trait_count]);
+    while (ctx->type_count > checkpoint->type_count) type_def_destroy(&ctx->types[--ctx->type_count]);
     while (ctx->method_surface_count > checkpoint->method_surface_count) method_surface_def_destroy(&ctx->method_surfaces[--ctx->method_surface_count]);
-    while (ctx->decl_method_count > checkpoint->decl_method_count) idm_protocol_method_def_destroy(&ctx->decl_methods[--ctx->decl_method_count]);
+    while (ctx->decl_method_count > checkpoint->decl_method_count) idm_trait_method_def_destroy(&ctx->decl_methods[--ctx->decl_method_count]);
     if (!checkpoint->decl_resolver && ctx->decl_resolver) {
         idm_module_ref_release(ctx->decl_resolver_module);
         ctx->decl_resolver_module = NULL;
@@ -287,9 +313,13 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->operators);
     for (size_t i = 0; i < ctx->protocol_count; i++) protocol_def_destroy(&ctx->protocols[i]);
     free(ctx->protocols);
+    for (size_t i = 0; i < ctx->trait_count; i++) trait_def_destroy(&ctx->traits[i]);
+    free(ctx->traits);
+    for (size_t i = 0; i < ctx->type_count; i++) type_def_destroy(&ctx->types[i]);
+    free(ctx->types);
     for (size_t i = 0; i < ctx->method_surface_count; i++) method_surface_def_destroy(&ctx->method_surfaces[i]);
     free(ctx->method_surfaces);
-    for (size_t i = 0; i < ctx->decl_method_count; i++) idm_protocol_method_def_destroy(&ctx->decl_methods[i]);
+    for (size_t i = 0; i < ctx->decl_method_count; i++) idm_trait_method_def_destroy(&ctx->decl_methods[i]);
     free(ctx->decl_methods);
     idm_module_ref_release(ctx->decl_resolver_module);
     idm_phase_env_release(ctx->decl_resolver_phase_env);
@@ -303,7 +333,9 @@ void ctx_destroy(ExpandContext *ctx) {
 }
 
 static bool seed_primitive(ExpandContext *ctx, const char *name, IdmPrimitive primitive) {
-    return idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_VALUE, &ctx->empty_scopes, (uint32_t)primitive, IDM_FRAME_GLOBAL, NULL);
+    const IdmPrimitiveInfo *info = idm_primitive_info(primitive);
+    IdmArity arity = info ? idm_arity_range(info->min_arity, info->max_arity) : idm_arity_unknown();
+    return idm_binding_table_add_with_arity(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_VALUE, &ctx->empty_scopes, (uint32_t)primitive, IDM_FRAME_GLOBAL, arity, NULL);
 }
 
 static const char *operator_fixity_name(IdmOpFixity fixity) {
@@ -383,7 +415,7 @@ bool register_operator(ExpandContext *ctx, const char *name, uint8_t precedence,
     return true;
 }
 
-bool install_method_surface(ExpandContext *ctx, const char *protocol, const char *name, uint32_t arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err) {
+bool install_method_surface(ExpandContext *ctx, const char *trait, const char *name, uint32_t arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err) {
     int guard = surface_install_guard(ctx, provider, provider_key, name, name, IDM_BIND_SPACE_DEFAULT, scopes ? scopes : &ctx->empty_scopes, err);
     if (guard <= 0) return guard == 0;
     if (ctx->method_surface_count == ctx->method_surface_cap) {
@@ -395,10 +427,10 @@ bool install_method_surface(ExpandContext *ctx, const char *protocol, const char
     }
     MethodSurfaceDef *method = &ctx->method_surfaces[ctx->method_surface_count];
     memset(method, 0, sizeof(*method));
-    method->protocol = idm_strdup(protocol);
+    method->trait = idm_strdup(trait);
     method->name = idm_strdup(name);
     method->arity = arity;
-    if (!method->protocol || !method->name || !idm_scope_set_copy(&method->scopes, scopes ? scopes : &ctx->empty_scopes)) {
+    if (!method->trait || !method->name || !idm_scope_set_copy(&method->scopes, scopes ? scopes : &ctx->empty_scopes)) {
         method_surface_def_destroy(method);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
@@ -445,6 +477,40 @@ ProtocolDef *resolve_protocol_def(ExpandContext *ctx, const IdmSyntax *name_synt
     return &ctx->protocols[binding->payload];
 }
 
+TraitDef *resolve_trait_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status) {
+    if (!name_syntax || name_syntax->kind != IDM_SYN_WORD) {
+        if (out_status) *out_status = IDM_RESOLVE_UNBOUND;
+        return NULL;
+    }
+    const IdmScopeSet *scopes = idm_syn_scope_set(name_syntax, 0);
+    IdmScopeSet empty;
+    idm_scope_set_init(&empty);
+    const IdmScopeSet *lookup = scopes ? scopes : &empty;
+    const IdmBinding *binding = NULL;
+    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_TRAIT, lookup, &binding);
+    idm_scope_set_destroy(&empty);
+    if (out_status) *out_status = status;
+    if (status != IDM_RESOLVE_OK || !binding || binding->kind != IDM_BIND_TRAIT || binding->payload >= ctx->trait_count) return NULL;
+    return &ctx->traits[binding->payload];
+}
+
+TypeDef *resolve_type_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status) {
+    if (!name_syntax || name_syntax->kind != IDM_SYN_WORD) {
+        if (out_status) *out_status = IDM_RESOLVE_UNBOUND;
+        return NULL;
+    }
+    const IdmScopeSet *scopes = idm_syn_scope_set(name_syntax, 0);
+    IdmScopeSet empty;
+    idm_scope_set_init(&empty);
+    const IdmScopeSet *lookup = scopes ? scopes : &empty;
+    const IdmBinding *binding = NULL;
+    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_TYPE, lookup, &binding);
+    idm_scope_set_destroy(&empty);
+    if (out_status) *out_status = status;
+    if (status != IDM_RESOLVE_OK || !binding || binding->kind != IDM_BIND_TYPE || binding->payload >= ctx->type_count) return NULL;
+    return &ctx->types[binding->payload];
+}
+
 bool ctx_seed(ExpandContext *ctx, IdmError *err) {
     for (size_t i = 0; i < idm_primitive_count(); i++) {
         if ((IdmPrimitive)i == IDM_PRIM_RECORD_NEW) continue;
@@ -454,7 +520,7 @@ bool ctx_seed(ExpandContext *ctx, IdmError *err) {
     return true;
 }
 
-char *protocol_identity(ExpandContext *ctx, const char *name, const IdmSyntax *form, unsigned char out_hash[32], IdmError *err) {
+char *scoped_identity(ExpandContext *ctx, const char *name, const IdmSyntax *form, unsigned char out_hash[32], IdmError *err) {
     IdmBuffer ser;
     idm_buf_init(&ser);
     if (!idm_syn_serialize(&ser, form, err)) {
@@ -467,7 +533,7 @@ char *protocol_identity(ExpandContext *ctx, const char *name, const IdmSyntax *f
     artifact_provider_key(out_hash, key);
     IdmBuffer buf;
     idm_buf_init(&buf);
-    bool ok = !ctx->protocol_name || (idm_buf_append(&buf, ctx->protocol_name) && idm_buf_append_char(&buf, '/'));
+    bool ok = !ctx->trait_name || (idm_buf_append(&buf, ctx->trait_name) && idm_buf_append_char(&buf, '/'));
     if (!ok || !idm_buf_append(&buf, name) || !idm_buf_append_char(&buf, '#') || !idm_buf_append(&buf, key)) {
         idm_buf_destroy(&buf);
         idm_error_oom(err, form->span);
@@ -516,26 +582,34 @@ bool binder_scopes_pruned(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmS
     return true;
 }
 
-bool local_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_slot) {
+bool local_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, uint32_t *out_slot) {
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return false;
     uint32_t slot = ctx->next_slot++;
-    bool ok = idm_binding_table_add(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_LOCAL, &scopes, slot, ctx->frame, NULL);
+    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_LOCAL, &scopes, slot, ctx->frame, arity, NULL);
     idm_scope_set_destroy(&scopes);
     if (!ok) return false;
     if (out_slot) *out_slot = slot;
     return true;
 }
 
-bool global_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_id) {
+bool local_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_slot) {
+    return local_push_def_binder_with_arity(ctx, name, name_syntax, idm_arity_unknown(), out_slot);
+}
+
+bool global_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, uint32_t *out_id) {
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return false;
     uint32_t id = ctx->global_seq++;
-    bool ok = idm_binding_table_add(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &scopes, id, IDM_FRAME_GLOBAL, NULL);
+    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &scopes, id, IDM_FRAME_GLOBAL, arity, NULL);
     idm_scope_set_destroy(&scopes);
     if (!ok) return false;
     if (out_id) *out_id = id;
     return true;
+}
+
+bool global_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_id) {
+    return global_push_def_binder_with_arity(ctx, name, name_syntax, idm_arity_unknown(), out_id);
 }
 
 bool local_push_scoped(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_slot) {
@@ -587,7 +661,7 @@ static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap)
     return true;
 }
 
-static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index) {
+static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity) {
     if (!capture_array_grow(arr, count, cap)) return -1;
     CaptureBinding *c = &(*arr)[*count];
     c->name = idm_strdup(word->as.text);
@@ -599,14 +673,16 @@ static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, cons
     c->kind = kind;
     c->source_index = source_index;
     c->capture_index = (uint32_t)*count;
+    c->arity = arity;
     (*count)++;
     return (int)c->capture_index;
 }
 
-bool capture_lookup_existing(const CaptureBinding *captures, size_t count, const IdmSyntax *word, uint32_t *out) {
+bool capture_lookup_existing(const CaptureBinding *captures, size_t count, const IdmSyntax *word, uint32_t *out, const IdmArity **out_arity) {
     for (size_t i = 0; i < count; i++) {
         if (strcmp(captures[i].name, word->as.text) == 0 && scopes_subset_for_ref(&captures[i].scopes, word)) {
-            *out = captures[i].capture_index;
+            if (out) *out = captures[i].capture_index;
+            if (out_arity) *out_arity = &captures[i].arity;
             return true;
         }
     }
@@ -615,15 +691,15 @@ bool capture_lookup_existing(const CaptureBinding *captures, size_t count, const
 
 static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, const IdmBinding *b) {
     uint32_t existing = 0;
-    if (capture_lookup_existing(g->captures, g->capture_count, word, &existing)) return (int)existing;
+    if (capture_lookup_existing(g->captures, g->capture_count, word, &existing, NULL)) return (int)existing;
     if (!g->prev) return -1;
     if (g->prev->frame == b->frame_id) {
         IdmCaptureKind kind = b->kind == IDM_BIND_ARG ? IDM_CAP_ARG : IDM_CAP_LOCAL;
-        return capture_append(&g->captures, &g->capture_count, &g->capture_cap, word, &b->scopes, kind, b->payload);
+        return capture_append(&g->captures, &g->capture_count, &g->capture_cap, word, &b->scopes, kind, b->payload, b->arity);
     }
     int parent = saved_materialize(g->prev, word, b);
     if (parent < 0) return -1;
-    return capture_append(&g->captures, &g->capture_count, &g->capture_cap, word, &b->scopes, IDM_CAP_UPVALUE, (uint32_t)parent);
+    return capture_append(&g->captures, &g->capture_count, &g->capture_cap, word, &b->scopes, IDM_CAP_UPVALUE, (uint32_t)parent, b->arity);
 }
 
 bool materialize_capture(ExpandContext *ctx, const IdmSyntax *word, const IdmBinding *b, uint32_t *out) {
@@ -631,11 +707,11 @@ bool materialize_capture(ExpandContext *ctx, const IdmSyntax *word, const IdmBin
     int idx;
     if (ctx->enclosing->frame == b->frame_id) {
         IdmCaptureKind kind = b->kind == IDM_BIND_ARG ? IDM_CAP_ARG : IDM_CAP_LOCAL;
-        idx = capture_append(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, word, &b->scopes, kind, b->payload);
+        idx = capture_append(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, word, &b->scopes, kind, b->payload, b->arity);
     } else {
         int parent = saved_materialize(ctx->enclosing, word, b);
         if (parent < 0) return false;
-        idx = capture_append(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, word, &b->scopes, IDM_CAP_UPVALUE, (uint32_t)parent);
+        idx = capture_append(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, word, &b->scopes, IDM_CAP_UPVALUE, (uint32_t)parent, b->arity);
     }
     if (idx < 0) return false;
     *out = (uint32_t)idx;
@@ -690,14 +766,14 @@ bool syn_is_word(const IdmSyntax *syn, const char *word) {
     return syn && syn->kind == IDM_SYN_WORD && strcmp(syn->as.text, word) == 0;
 }
 
-bool syn_is_protocol(const IdmSyntax *syn, const char *head) {
+bool syn_is_form(const IdmSyntax *syn, const char *head) {
     return syn && syn->kind == IDM_SYN_LIST && syn->as.seq.count > 0 && syn_is_word(syn->as.seq.items[0], head);
 }
 
 const char *package_path_text(const IdmSyntax *syn) {
     if (!syn) return NULL;
     if (syn->kind == IDM_SYN_WORD) return syn->as.text;
-    if (syn_is_protocol(syn, "%-word") && syn->as.seq.count == 2 && syn->as.seq.items[1]->kind == IDM_SYN_STRING) return syn->as.seq.items[1]->as.text;
+    if (syn_is_form(syn, "%-word") && syn->as.seq.count == 2 && syn->as.seq.items[1]->kind == IDM_SYN_STRING) return syn->as.seq.items[1]->as.text;
     return NULL;
 }
 
@@ -795,7 +871,7 @@ bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, Idm
         for (size_t i = ctx->method_surface_count; i > 0; i--) {
             const MethodSurfaceDef *m = &ctx->method_surfaces[i - 1u];
             IdmValue items[3];
-            items[0] = idm_atom(rt, m->protocol);
+            items[0] = idm_atom(rt, m->trait);
             items[1] = idm_atom(rt, m->name);
             items[2] = idm_int((int64_t)m->arity);
             IdmValue entry = idm_tuple(rt, items, 3u, err);

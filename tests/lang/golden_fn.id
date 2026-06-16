@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "fn-clause-multiarg" do
@@ -8,7 +8,7 @@ suite do
         a 0 -> a
         a b -> add a b
       end
-      tuple (f 7 0) (f 3 4)
+      {(f 7 0) (f 3 4)}
     end
     assert-inspect got "{7 7}"
   end
@@ -22,7 +22,7 @@ suite do
     got = do
       use std/enum
       square = fn x -> mul x x
-      [1 2 3 4] |> map &square
+      [1 2 3 4].map &square
     end
     assert-inspect got "(1 4 9 16)"
   end
@@ -41,7 +41,7 @@ suite do
     got = do
       f = fn a b -> add a b
       g = fn a b c -> add a (add b c)
-      tuple (f 40 2) (g 38 2 2)
+      {(f 40 2) (g 38 2 2)}
     end
     assert-inspect got "{42 42}"
   end

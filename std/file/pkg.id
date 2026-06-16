@@ -14,21 +14,21 @@ export defn append path data -> file-append path data
 export defn read! do
   path -> match (file-read path) do
     {:ok data} -> data
-    {:error reason} -> error (tuple :file-read path reason)
+    {:error reason} -> error {:file-read path reason}
   end
 end
 
 export defn write! do
   path data -> match (file-write path data) do
     :ok -> :ok
-    {:error reason} -> error (tuple :file-write path reason)
+    {:error reason} -> error {:file-write path reason}
   end
 end
 
 export defn mtime! do
   path -> match (file-stat path) do
     {:ok {:stat _kind _size m}} -> m
-    {:error reason} -> error (tuple :file-stat path reason)
+    {:error reason} -> error {:file-stat path reason}
   end
 end
 
@@ -42,20 +42,21 @@ end
 export defn mkdir! do
   path -> match (file-mkdir path) do
     :ok -> :ok
-    {:error reason} -> error (tuple :file-mkdir path reason)
+    {:error reason} -> error {:file-mkdir path reason}
   end
 end
 
 export defn append! do
   path data -> match (file-append path data) do
     :ok -> :ok
-    {:error reason} -> error (tuple :file-append path reason)
+    {:error reason} -> error {:file-append path reason}
   end
 end
 
 defn mkdir-step do
   path -> match (file-mkdir path) do
-    {:error :eexist} -> if (dir? path) do :ok else do tuple :error :eexist end
+    {:error :eexist} when (dir? path) -> :ok
+    {:error :eexist} -> {:error :eexist}
     r -> r
   end
 end
@@ -71,6 +72,6 @@ end
 export defn mkdir-p! do
   path -> match (mkdir-p path) do
     :ok -> :ok
-    {:error reason} -> error (tuple :file-mkdir path reason)
+    {:error reason} -> error {:file-mkdir path reason}
   end
 end

@@ -1,5 +1,6 @@
 use std/test
-implement std/test
+activate std/test
+use std/enum
 
 suite do
   test "actor-capture" do
@@ -14,10 +15,10 @@ suite do
       parent = self
       spawn (fn do
         cd "/tmp"
-        send parent (tuple :child pwd)
+        send parent {:child pwd}
       end)
       receive do
-        {:child cp} -> tuple (eq? cp "/tmp") (eq? pwd p0)
+        {:child cp} -> {(eq? cp "/tmp") (eq? pwd p0)}
       end
     end
     assert-inspect got "{:true :true}"
@@ -36,7 +37,7 @@ suite do
   end
   test "apply-to-list" do
     got = do
-      apply (fn a b c -> add a (add b c)) (to-list [1 2 3])
+      apply (fn a b c -> add a (add b c)) [1 2 3].to-list
     end
     assert-inspect got "6"
   end
@@ -98,7 +99,7 @@ suite do
         parts 0 -> parts
         (list _ . t) k -> dropn t (sub k 1)
       end
-      tuple (fact 5) (classify (sub 0 3)) (classify 0) (classify 7) (dropn '(1 2 3 4) 2)
+      {(fact 5) (classify (sub 0 3)) (classify 0) (classify 7) (dropn '(1 2 3 4) 2)}
     end
     assert-inspect got "{120 :negative :zero :positive (3 4)}"
   end
@@ -111,19 +112,19 @@ suite do
   test "defrules-basic" do
     got = do
       defrules swap do
-        (_ a b) -> %`(tuple %,b %,a)
+        (_ a b) -> %`{%,b %,a}
       end
       defrules pick do
         (_ a) when (syntax-int? a) -> %`(add %,a 1)
-        (_ a) -> %`(tuple :other %,a)
+        (_ a) -> %`{:other %,a}
       end
-      tuple (swap 1 2) (pick 41) (pick :x)
+      {(swap 1 2) (pick 41) (pick :x)}
     end
     assert-inspect got "{{2 1} 42 {:other :x}}"
   end
   test "defrules-export" do
     got = do
-      implement tests/pkg/rulespkg
+      activate tests/pkg/rulespkg
       twice-of 21
     end
     assert-inspect got "42"
@@ -171,14 +172,14 @@ suite do
   end
   test "export-macro" do
     got = do
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
       answer foo
     end
     assert-inspect got "99"
   end
   test "export-operator" do
     got = do
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
       3 <+> 4
     end
     assert-inspect got "7"
@@ -199,13 +200,13 @@ suite do
   end
   test "gte" do
     got = do
-      if (gte? 2 2) do 42 else do 0 end
+      cond (gte? 2 2) 42 0
     end
     assert-inspect got "42"
   end
   test "html-dsl" do
     got = do
-      implement tests/pkg/htmldsl
+      activate tests/pkg/htmldsl
       html do
         body class: "main" do
           h1 "Title"
@@ -226,9 +227,9 @@ suite do
   test "import-default-alias" do
     got = do
       import std/enum
-      enum.map [1 2 3] (fn x -> mul x x)
+      enum.range 1 4
     end
-    assert-inspect got "(1 4 9)"
+    assert-inspect got "(1 2 3)"
   end
   test "link-trap" do
     got = do
@@ -256,33 +257,33 @@ suite do
   end
   test "lte" do
     got = do
-      if (lte? 2 2) do 42 else do 0 end
+      cond (lte? 2 2) 42 0
     end
     assert-inspect got "42"
   end
   test "make-dsl-diamond" do
     got = do
       use tests/pkg/makedsl
-      implement tests/pkg/makedsl
+      activate tests/pkg/makedsl
       rules = list (rule :base do :b end) (rule :l deps: (list :base) do :l end) (rule :r deps: (list :base) do :r end) (rule :top deps: (list :l :r) do :t end)
-      tuple (build rules :top) (try do
+      {(build rules :top) (try do
         build rules :missing
-        rescue r -> tuple :caught r
-      end)
+        rescue r -> {:caught r}
+      end)}
     end
     assert-inspect got "{({:base :b} {:l :l} {:r :r} {:top :t}) {:caught {:error {:unknown-target :missing}}}}"
   end
   test "make-dsl" do
     got = do
       use tests/pkg/makedsl
-      implement tests/pkg/makedsl
-      implement std/shell
+      activate tests/pkg/makedsl
+      activate std/shell
       rules = list (rule :prep do
           x = sh -c "printf prep"
-          tuple :prep-out x
+          {:prep-out x}
         end) (rule :out deps: (list :prep) do
           y = sh -c "printf built"
-          tuple :out-out y
+          {:out-out y}
         end) (rule :unused do
           :never
         end)
@@ -308,6 +309,34 @@ suite do
     end
     assert-inspect got "42"
   end
+  test "spawn-link-delivers-exit" do
+    got = do
+      trap-exit :true; c = spawn-link (fn -> exit :boom); receive do {:exit pid :boom} -> 42; {:exit pid other} -> 0 end
+    end
+    assert-inspect got "42"
+  end
+  test "guarded-receive-rematches-skipped-messages" do
+    got = do
+      send self 1; send self 2; send self 3
+      defn want target -> receive do n when (eq? n target) -> n; after 50 -> :miss end
+      {(want 3) (want 1) (want 2)}
+    end
+    assert-inspect got "{3 1 2}"
+  end
+  test "guard-free-drain-leaves-stragglers" do
+    got = do
+      send self {:keep 1}; send self {:take 2}; send self {:keep 3}; send self {:take 4}
+      defn drain acc -> receive do {:take n} -> drain (cons n acc); after 30 -> acc end
+      drain (list)
+    end
+    assert-inspect got "(4 2)"
+  end
+  test "spawn-monitor-delivers-down" do
+    got = do
+      {pid ref} = spawn-monitor (fn -> 1); receive do {:down r p reason} -> 42 end
+    end
+    assert-inspect got "42"
+  end
   test "multiclause-defn" do
     got = do
       defn f 0 -> 40; defn f n -> n; add (f 0) 2
@@ -325,7 +354,7 @@ suite do
       f = &list
       g = add
       empty = list
-      tuple (list) (tuple) (vector) (dict) empty (f 1 2) (apply &list (list 3 4)) (g 40 2)
+      {(list) {} [] %{} empty (f 1 2) (apply &list (list 3 4)) (g 40 2)}
     end
     assert-inspect got "{() {} [] %{} () (1 2) (3 4) 42}"
   end
@@ -365,7 +394,7 @@ suite do
       protocol m do
         export defmacro answer s -> (make-syntax-int s 99)
       end
-      implement m
+      activate m
       answer foo
     end
     assert-inspect got "99"
@@ -375,7 +404,7 @@ suite do
       protocol arith do
         operator <+> precedence: 6 assoc: left fixity: infix -> add
       end
-      implement arith
+      activate arith
       3 <+> 4
     end
     assert-inspect got "7"
@@ -405,7 +434,7 @@ suite do
         defn %,(syntax-nth stx 3) v -> mul v 2
       end
       defpair one-of two-of
-      tuple (one-of 3) (two-of 3)
+      {(one-of 3) (two-of 3)}
     end
     assert-inspect got "{3 6}"
   end
@@ -510,9 +539,9 @@ suite do
       protocol Inner do
         export defmacro go y do %`6 end
       end
-      implement Outer
+      activate Outer
       a = do
-        implement Inner
+        activate Inner
         go x
       end
       {a (go x)}
@@ -581,7 +610,7 @@ suite do
           (_ a) -> a
         end
       end
-      tuple last-is-decl used-in-scope rules-last
+      {last-is-decl used-in-scope rules-last}
     end
     assert-inspect got "{:nil 3 :nil}"
   end

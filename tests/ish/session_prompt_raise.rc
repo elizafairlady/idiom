@@ -1,3 +1,3 @@
-extend dict with std/ish do
+implement Prompt on dict do
   method prompt _s -> error :prompt-boom
 end

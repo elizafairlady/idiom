@@ -8,6 +8,6 @@ end end
 mk-twin twin-b
 shadowed = do
   defn add a b -> :shadow
-  tuple (twin-a 1) (twin-b 1)
+  {(twin-a 1) (twin-b 1)}
 end
-tuple (twin-a 20) (twin-b 20) shadowed
+{(twin-a 20) (twin-b 20) shadowed}

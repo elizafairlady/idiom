@@ -1,0 +1,57 @@
+package regex
+
+defn as-regex do
+  rx when (regex-raw-regex? rx) -> rx
+  source -> compile! source
+end
+
+export defn compile do
+  source -> compile source '()
+  source opts -> regex-raw-compile source opts
+end
+
+export defn compile! do
+  source -> compile! source '()
+  source opts -> match (compile source opts) do
+    {:ok rx} -> rx
+    {:error reason} -> error reason
+  end
+end
+
+export defn regex? value -> regex-raw-regex? value
+export defn result? value -> regex-raw-result? value
+
+export trait Pattern do
+  method source-of rx -> regex-raw-source (as-regex rx)
+  method options-of rx -> regex-raw-options (as-regex rx)
+  method group-count rx -> regex-raw-group-count (as-regex rx)
+  method group-names rx -> regex-raw-group-names (as-regex rx)
+
+  method scan rx s -> regex-raw-scan-from (as-regex rx) s 0
+  method scan-at rx s offset -> regex-raw-scan-at (as-regex rx) s offset
+  method scan-from rx s offset -> regex-raw-scan-from (as-regex rx) s offset
+  method scan-full rx s -> regex-raw-scan-full (as-regex rx) s
+  method test? rx s -> regex-raw-test? (as-regex rx) s
+  method scan-all rx s -> regex-raw-scan-all (as-regex rx) s
+
+  method sub rx s replacement -> regex-raw-replace (as-regex rx) s replacement
+  method sub-all rx s replacement -> regex-raw-replace-all (as-regex rx) s replacement
+  method split-on rx s -> regex-raw-split-on (as-regex rx) s
+end
+
+implement Pattern on regex
+implement Pattern on string
+
+export trait MatchResult do
+  method start-of result -> regex-raw-result-start result
+  method end-of result -> regex-raw-result-end result
+  method text-of result -> regex-raw-result-text result
+  method capture result index -> regex-raw-capture result index
+  method capture-range result index -> regex-raw-capture-range result index
+  method capture-named result name -> regex-raw-capture-named result name
+  method captures result -> regex-raw-captures result
+end
+
+implement MatchResult on regex-result
+
+export defn escape s -> regex-raw-escape s

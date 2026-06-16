@@ -4,19 +4,19 @@ defn status-name do
   :done -> "Done"
 end
 
-defn job-line n mark status text -> str "[" n "]" mark "  " (status-name status) "  " text
+defn job-line n mark status text -> "[${n}]${mark}  #{status-name status}  ${text}"
 
-defn jobs-init _tag -> tuple '() 1
+defn jobs-init _tag -> {'() 1}
 
 defn find-port do
   '() _p -> :nil
-  (list {n port text} . _) p when (eq? port p) -> tuple n port text
+  (list {n port text} . _) p when (eq? port p) -> {n port text}
   (list _ . t) p -> find-port t p
 end
 
 defn jobs-register {entries next} port text -> match (find-port entries port) do
-  :nil -> tuple (tuple (cons (tuple next port text) entries) (add next 1)) next
-  {n _ _} -> tuple (tuple entries next) n
+  :nil -> {{(cons {next port text} entries) (add next 1)} next}
+  {n _ _} -> {{entries next} n}
 end
 
 defn mark-for do
@@ -26,26 +26,23 @@ defn mark-for do
 end
 
 defn snap-lines do
-  '() _i acc live -> tuple acc live
+  '() _i acc live -> {acc live}
   (list {n port text} . t) i acc live -> do
     s = port-status port
-    snap-lines t (add i 1) (cons (tuple n (mark-for i) s text port) acc) (if (eq? s :done) do live else do add live 1 end)
+    snap-lines t (add i 1) (cons {n (mark-for i) s text port} acc) (cond (eq? s :done) live (add live 1))
   end
 end
 
 defn keep-undone do
   '() -> '()
-  (list {n port text} . t) -> if (eq? (port-status port) :done) do
-    keep-undone t
-  else do
-    cons (tuple n port text) (keep-undone t)
-  end
+  (list {_n port _text} . t) when (eq? (port-status port) :done) -> keep-undone t
+  (list {n port text} . t) -> cons {n port text} (keep-undone t)
 end
 
 defn jobs-snapshot {entries next} do
   {lines live} = snap-lines entries 0 '() 0
   kept = keep-undone entries
-  tuple lines live (tuple kept (if (eq? kept '()) do 1 else do next end))
+  {lines live {kept (cond (eq? kept '()) 1 next)}}
 end
 
 defn drop-port do
@@ -56,30 +53,30 @@ end
 
 defn jobs-remove {entries next} port do
   kept = drop-port entries port
-  tuple kept (if (eq? kept '()) do 1 else do next end)
+  {kept (cond (eq? kept '()) 1 next)}
 end
 
 defn entry-for do
   '() _n -> :nil
-  (list {n port text} . _) :nil -> tuple n port text
-  (list {n port text} . _) m when (eq? n m) -> tuple n port text
+  (list {n port text} . _) :nil -> {n port text}
+  (list {n port text} . _) m when (eq? n m) -> {n port text}
   (list _ . t) m -> entry-for t m
 end
 
 defn jobs-lookup {entries _next} n -> match (entry-for entries n) do
-  :nil -> tuple :ish-no-job
-  {m port text} -> tuple :ish-job m port text
+  :nil -> {:ish-no-job}
+  {m port text} -> {:ish-job m port text}
 end
 
 defn done-lines do
   '() -> '()
-  (list {n mark :done text port} . t) -> cons (tuple n mark :done text port) (done-lines t)
+  (list {n mark :done text port} . t) -> cons {n mark :done text port} (done-lines t)
   (list _ . t) -> done-lines t
 end
 
 defn stopped-lines do
   '() -> '()
-  (list {n mark :stopped text port} . t) -> cons (tuple n mark :stopped text port) (stopped-lines t)
+  (list {n mark :stopped text port} . t) -> cons {n mark :stopped text port} (stopped-lines t)
   (list _ . t) -> stopped-lines t
 end
 
@@ -103,7 +100,7 @@ end
 defn jobs-cmd _tag -> match ish-session do
   :nil -> :nil
   spid -> do
-    send spid (tuple :ish-jobs (self))
+    send spid {:ish-jobs (self)}
     receive do
       {:ish-jobs lines _live} -> jobs-print lines
     end
@@ -113,9 +110,9 @@ end
 defn job-take n -> match ish-session do
   :nil -> error :no-job-control
   spid -> do
-    send spid (tuple :ish-job-get n (self))
+    send spid {:ish-job-get n (self)}
     receive do
-      {:ish-job m port text} -> tuple m port text
+      {:ish-job m port text} -> {m port text}
       {:ish-no-job} -> error :no-such-job n
     end
   end
@@ -129,23 +126,19 @@ defn fg-cmd n do
   match ish-session do
     :nil -> :ok
     spid -> do
-      send spid (tuple :ish-job-remove port (self))
+      send spid {:ish-job-remove port (self)}
       receive do
         {:ish-job-removed} -> :ok
       end
     end
   end
-  if (eq? (tuple-get r 0) :ok) do
-    :nil
-  else do
-    error :command text (tuple-get r 1)
-  end
+  cond (eq? (tuple-get r 0) :ok) :nil (error :command text (tuple-get r 1))
 end
 
 defn bg-cmd n do
   {m port text} = job-take n
   job-resume port :bg
-  str "[" m "]+ " text " &" |> println
+  "[${m}]+ ${text} &" |> println
   :nil
 end
 
@@ -154,17 +147,9 @@ export defmacro jobs _stx do
 end
 
 export defmacro fg stx do
-  if (gt? (syntax-length stx) 2) do
-    %`(fg-cmd %,(syntax-nth stx 2))
-  else do
-    %`(fg-cmd :nil)
-  end
+  cond (gt? (syntax-length stx) 2) %`(fg-cmd %,(syntax-nth stx 2)) %`(fg-cmd :nil)
 end
 
 export defmacro bg stx do
-  if (gt? (syntax-length stx) 2) do
-    %`(bg-cmd %,(syntax-nth stx 2))
-  else do
-    %`(bg-cmd :nil)
-  end
+  cond (gt? (syntax-length stx) 2) %`(bg-cmd %,(syntax-nth stx 2)) %`(bg-cmd :nil)
 end

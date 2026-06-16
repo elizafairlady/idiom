@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 use std/file
 use std/enum
 
@@ -77,7 +77,7 @@ suite do
     names = match (ls "/tmp") do
       {:ok ns} -> ns
     end
-    assert-eq (names |> member? "idiom_test_dir_probe") :true
+    assert-eq (names.member? "idiom_test_dir_probe") :true
     remove p
   end
 end

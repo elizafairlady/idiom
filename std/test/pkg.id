@@ -1,7 +1,9 @@
 package test
 
+use std/enum
+
 export defrules test do
-  (_ name body) -> %`(tuple :test %,name (fn _ig %,body))
+  (_ name body) -> %`{:test %,name (fn _ig %,body)}
 end
 
 export defmacro suite stx do
@@ -11,62 +13,54 @@ export defmacro suite stx do
   end
   body = syntax-nth stx 2
   body-form? = and (syntax-list? body) (gt? (syntax-length body) 0) (syntax-word? (syntax-nth body 0)) (eq? (syntax-word-text (syntax-nth body 0)) "%-body")
-  if body-form? do
-    %`(run-suite (list %,@(parts-of 1 (syntax-length body) body)))
-  else do
-    %`(run-suite %,body)
-  end
+  cond body-form? %`(run-suite (list %,@(parts-of 1 (syntax-length body) body))) %`(run-suite %,body)
 end
 
 export defn assert do
-  :false -> error (tuple :assert-failed :false)
-  :nil -> error (tuple :assert-failed :nil)
+  :false -> error {:assert-failed :false}
+  :nil -> error {:assert-failed :nil}
   v -> :ok
 end
 
 export defn assert-eq do
   a b when (eq? a b) -> :ok
-  a b -> error (tuple :assert-eq :got a :want b)
+  a b -> error {:assert-eq :got a :want b}
 end
 
 export defn assert-neq do
   a b when (neq? a b) -> :ok
-  a b -> error (tuple :assert-neq a b)
+  a b -> error {:assert-neq a b}
 end
 
 export defn assert-inspect do
   v expected when (eq? (inspect v) expected) -> :ok
-  v expected -> error (tuple :assert-inspect :got (inspect v) :want expected)
+  v expected -> error {:assert-inspect :got (inspect v) :want expected}
 end
 
 export defn assert-raises thunk do
   caught = try do
     thunk :go
     :no-raise
-    rescue r -> tuple :raised r
+    rescue r -> {:raised r}
   end
   match caught do
     {:raised r} -> r
-    _ -> error (tuple :assert-raises :nothing-raised)
+    _ -> error {:assert-raises :nothing-raised}
   end
 end
 
 export defn assert-expand-error do
   source expected -> match (expand-check source) do
     {:error {:expand msg}} ->
-      if (str-contains? msg expected) do
-        :ok
-      else do
-        error (tuple :assert-expand-error :got msg :want expected)
-      end
-    :ok -> error (tuple :assert-expand-error :compiled source)
+      cond (str-contains? msg expected) :ok (error {:assert-expand-error :got msg :want expected})
+    :ok -> error {:assert-expand-error :compiled source}
   end
 end
 
 export defn assert-compiles do
   source -> match (expand-check source) do
     :ok -> :ok
-    {:error {:expand msg}} -> error (tuple :assert-compiles :failed msg :source source)
+    {:error {:expand msg}} -> error {:assert-compiles :failed msg :source source}
   end
 end
 
@@ -77,9 +71,9 @@ defn run-one do
       outcome = try do
         thunk :go
         :ok
-        rescue r -> tuple :failed r
+        rescue r -> {:failed r}
       end
-      send parent (tuple :test-outcome outcome)
+      send parent {:test-outcome outcome}
     end)
     outcome = receive do
       {:test-outcome o} -> o
@@ -87,7 +81,7 @@ defn run-one do
     match outcome do
       :ok -> failures
       {:failed r} -> do
-        str "FAIL " name ": " (inspect r) |> println
+        "FAIL ${name}: #{inspect r}" |> println
         add failures 1
       end
     end
@@ -95,17 +89,17 @@ defn run-one do
 end
 
 defn run-all do
-  '() failures total -> tuple failures total
+  '() failures total -> {failures total}
   (list t . rest) failures total -> run-all rest (run-one t failures) (add total 1)
 end
 
 export defn run-suite tests do
-  result = run-all (to-list tests) 0 0
+  result = run-all (tests.to-list) 0 0
   match result do
     {0 total} -> do
-      str "ok: " total " tests" |> println
+      "ok: ${total} tests" |> println
       :ok
     end
-    {failures total} -> error (tuple :suite-failed failures :of total)
+    {failures total} -> error {:suite-failed failures :of total}
   end
 end

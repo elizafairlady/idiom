@@ -3,8 +3,8 @@ defn home-abbrev cwd do
   if (present? h) do
     if (eq? cwd h) do
       "~"
-    else if (starts-with? cwd (str h "/")) do
-      str "~" (str-slice cwd (str-len h) (str-len cwd))
+    else if (starts-with? cwd "${h}/") do
+      "~#{str-slice cwd (str-len h) (str-len cwd)}"
     else do
       cwd
     end
@@ -17,27 +17,40 @@ defn status-mark do
   :nil -> ""
   0 -> ""
   :error -> " [error]"
-  s -> str " [" s "]"
+  s -> " [${s}]"
 end
 
-defn default-prompt pst -> str (home-abbrev (dict-get pst :cwd "")) (status-mark (dict-get pst :status :nil)) " % "
+defn default-prompt pst -> "#{home-abbrev (dict-get pst :cwd "")}#{status-mark (dict-get pst :status :nil)} % "
 
-defn prompt-state status jobs -> dict :cwd (pwd) :status status :jobs jobs :cols (term-cols :go)
-
-defn fenced-prompt pst -> match (try do tuple :ok (prompt pst); rescue r -> tuple :rescued r end) do
-  {:ok p} -> p
-  {:rescued r} -> do
-    str "ish: prompt raised: " (inspect r) |> eprintln
-    default-prompt pst
-  end
+export trait Prompt do
+  method prompt state -> default-prompt state
+  method continuation-prompt _state -> "...> "
 end
 
-defn fenced-cont pst -> match (try do tuple :ok (continuation-prompt pst); rescue r -> tuple :rescued r end) do
-  {:ok p} -> p
-  {:rescued r} -> do
-    str "ish: prompt raised: " (inspect r) |> eprintln
-    "...> "
-  end
+defn prompt-state status jobs -> %{:cwd (pwd) :status status :jobs jobs :cols (term-cols :go)}
+
+defn fenced-prompt do
+  pst when (implements? Prompt pst) ->
+    match (try do {:ok (prompt pst)}; rescue r -> {:rescued r} end) do
+      {:ok p} -> p
+      {:rescued r} -> do
+        "ish: prompt raised: #{inspect r}" |> eprintln
+        default-prompt pst
+      end
+    end
+  pst -> default-prompt pst
+end
+
+defn fenced-cont do
+  pst when (implements? Prompt pst) ->
+    match (try do {:ok (continuation-prompt pst)}; rescue r -> {:rescued r} end) do
+      {:ok p} -> p
+      {:rescued r} -> do
+        "ish: prompt raised: #{inspect r}" |> eprintln
+        "...> "
+      end
+    end
+  _ -> "...> "
 end
 
 defn arm ed status shell jobs do
@@ -51,16 +64,22 @@ defn arm ed status shell jobs do
   end
 end
 
-defn accept-mark st -> if (cooked? st) do :ok else do tty-write "\r\n" end
+defn accept-mark do
+  st when (cooked? st) -> :ok
+  _ -> tty-write "\r\n"
+end
 
-defn eof-mark _st -> if (eq? (tty?) :true) do tty-write "\r\n" else do :ok end
+defn eof-mark do
+  _st when (eq? (tty?) :true) -> tty-write "\r\n"
+  _ -> :ok
+end
 
 defn read-entry ed -> match (read ed) do
-  {:eof st} -> tuple :eof st
-  {:cancel st} -> tuple :cancel st
+  {:eof st} -> {:eof st}
+  {:cancel st} -> {:cancel st}
   {:line text st} -> match (repl-compile text) do
     :incomplete -> read-entry (continue st)
-    res -> tuple :entry text res st
+    res -> {:entry text res st}
   end
 end
 
@@ -83,11 +102,11 @@ defn eval-down reason tok text do
   repl-abort tok
   match reason do
     {:error {:command name :capture-overflow}} -> do
-      str "ish: " name ": capture overflow" |> eprintln
+      "ish: ${name}: capture overflow" |> eprintln
       1
     end
     {:error {:command name s}} -> do
-      str "ish: " name ": exit status " s |> eprintln
+      "ish: ${name}: exit status ${s}" |> eprintln
       s
     end
     {:error {:suspended port}} -> do
@@ -95,7 +114,7 @@ defn eval-down reason tok text do
       if (or (eq? spid :nil) (eq? spid (self))) do
         print-diag reason
       else do
-        send spid (tuple :ish-job-stopped port text (self))
+        send spid {:ish-job-stopped port text (self)}
         receive do
           {:ish-job-id n} -> job-line n "+" :stopped text |> eprintln
         end
@@ -110,8 +129,8 @@ defn eval-down reason tok text do
       eprintln "^C"
       :error
     end
-    other -> match (try do tuple :num (mod other 1) (add other 0); rescue _e -> :not-int end) do
-      {:num 0 n} -> tuple :exit n
+    other -> match (try do {:num (mod other 1) (add other 0)}; rescue _e -> :not-int end) do
+      {:num 0 n} -> {:exit n}
       _ -> do
         print-diag other
         :error
@@ -138,7 +157,7 @@ defn dispatch res print? text -> match res do
   end
   {:ok f tok} -> do
     session = (self)
-    pid = repl-spawn (fn -> send session (tuple :eval-value (self) (apply f '())))
+    pid = repl-spawn (fn -> send session {:eval-value (self) (apply f '())})
     link pid
     observe pid tok print? text
   end
@@ -152,34 +171,28 @@ defn eval-text text print? -> match (repl-compile text) do
   res -> dispatch res print? text
 end
 
-defn config-home _tag do
-  v = env-get "XDG_CONFIG_HOME"
-  if (present? v) do
-    v
-  else do
-    match (env-get "HOME") do
-      h when (present? h) -> str h "/.config"
+defn config-home _tag ->
+  match (env-get "XDG_CONFIG_HOME") do
+    v when (present? v) -> v
+    _ -> match (env-get "HOME") do
+      h when (present? h) -> "${h}/.config"
       _ -> :nil
     end
   end
-end
 
 defn rc-file _tag do
   primary = match (config-home :go) do
     :nil -> :nil
-    c -> str c "/ish/rc.ish"
+    c -> "${c}/ish/rc.ish"
   end
-  if (and (neq? primary :nil) (eq? (file-exists? primary) :true)) do
-    primary
-  else do
-    match (env-get "HOME") do
+  cond (and (neq? primary :nil) (eq? (file-exists? primary) :true)) primary
+    (match (env-get "HOME") do
       h when (present? h) -> do
-        fallback = str h "/.ishrc"
-        if (eq? (file-exists? fallback) :true) do fallback else do :nil end
+        fallback = "${h}/.ishrc"
+        cond (eq? (file-exists? fallback) :true) fallback :nil
       end
       _ -> :nil
-    end
-  end
+    end)
 end
 
 defn run-rc _tag -> match (rc-file :go) do
@@ -187,7 +200,7 @@ defn run-rc _tag -> match (rc-file :go) do
   path -> match (file-read path) do
     {:ok src} -> eval-text src :false
     {:error r} -> do
-      str "ish: cannot read " path ": " (inspect r) |> eprintln
+      "ish: cannot read ${path}: #{inspect r}" |> eprintln
       :error
     end
   end
@@ -199,13 +212,12 @@ defn first-hist ed -> match (sget ed :history) do
 end
 
 defn jobs-poll _tag -> match ish-session do
-  :nil -> tuple '() 0
-  spid -> if (eq? spid (self)) do
-    tuple '() 0
-  else do
-    send spid (tuple :ish-jobs (self))
+  :nil -> {'() 0}
+  spid when (eq? spid (self)) -> {'() 0}
+  spid -> do
+    send spid {:ish-jobs (self)}
     receive do
-      {:ish-jobs lines live} -> tuple lines live
+      {:ish-jobs lines live} -> {lines live}
     end
   end
 end
@@ -221,7 +233,7 @@ end
 defn hist-notify text entries -> match ish-session do
   :nil -> :ok
   spid -> do
-    send spid (tuple :ish-hist-append text entries (self))
+    send spid {:ish-hist-append text entries (self)}
     receive do
       {:ish-hist-ok} -> :ok
     end
@@ -232,7 +244,7 @@ defn cwd-sync _tag -> match ish-session do
   :nil -> :ok
   spid when (eq? spid (self)) -> :ok
   spid -> do
-    send spid (tuple :ish-cwd (self))
+    send spid {:ish-cwd (self)}
     receive do
       {:ish-cwd :nil} -> :ok
       {:ish-cwd cwd} -> chdir cwd
@@ -295,9 +307,9 @@ end
 defn run-loop shell entries rc do
   trap-exit :true
   base = initial-state "idiom> "
-  ed = if (eq? (tty?) :true) do base else do sput base :dumb :true end
+  ed = cond (eq? (tty?) :true) base (sput base :dumb :true)
   ed2 = sput ed :history entries
-  rcr = if (and shell rc) do run-rc :go else do 0 end
+  rcr = cond (and shell rc) (run-rc :go) 0
   match rcr do
     {:exit n} -> n
     _ -> serve ed2 :nil shell :false
@@ -306,20 +318,21 @@ end
 
 defn start-loop shell entries rc do
   parent = (self)
-  pid = spawn (fn -> send parent (tuple :ish-done (run-loop shell entries rc)))
+  pid = spawn (fn -> send parent {:ish-done (run-loop shell entries rc)})
   link pid
   pid
 end
 
 defn recent-restarts do
   '() _now -> '()
-  (list t . rest) now -> if (lt? (sub now t) 30000) do cons t (recent-restarts rest now) else do recent-restarts rest now end
+  (list t . rest) now when (lt? (sub now t) 30000) -> cons t (recent-restarts rest now)
+  (list _ . rest) now -> recent-restarts rest now
 end
 
 defn state-loop shell pid restarts jst hist cwd -> receive do
   {:ish-done n} -> n
   {:exit p reason} when (eq? p pid) -> do
-    str "ish: session loop crashed: " (inspect reason) |> eprintln
+    "ish: session loop crashed: #{inspect reason}" |> eprintln
     now = time-ms
     recent = recent-restarts restarts now
     if (gte? (list-len recent) 3) do
@@ -331,17 +344,17 @@ defn state-loop shell pid restarts jst hist cwd -> receive do
   end
   {:ish-job port text from} -> do
     {jst2 n} = jobs-register jst port text
-    send from (tuple :ish-job-id n)
+    send from {:ish-job-id n}
     state-loop shell pid restarts jst2 hist cwd
   end
   {:ish-job-stopped port text from} -> do
     {jst2 n} = jobs-register jst port text
-    send from (tuple :ish-job-id n)
+    send from {:ish-job-id n}
     state-loop shell pid restarts jst2 hist cwd
   end
   {:ish-jobs from} -> do
     {lines live jst2} = jobs-snapshot jst
-    send from (tuple :ish-jobs lines live)
+    send from {:ish-jobs lines live}
     state-loop shell pid restarts jst2 hist cwd
   end
   {:ish-job-get n from} -> do
@@ -349,21 +362,21 @@ defn state-loop shell pid restarts jst hist cwd -> receive do
     state-loop shell pid restarts jst hist cwd
   end
   {:ish-job-remove port from} -> do
-    send from (tuple :ish-job-removed)
+    send from {:ish-job-removed}
     state-loop shell pid restarts (jobs-remove jst port) hist cwd
   end
   {:ish-hist-append text entries from} -> do
     hist2 = history-append hist entries text
-    send from (tuple :ish-hist-ok)
+    send from {:ish-hist-ok}
     state-loop shell pid restarts jst hist2 cwd
   end
   {:ish-cd next from} -> do
     chdir next
-    send from (tuple :ish-cd-ok)
+    send from {:ish-cd-ok}
     state-loop shell pid restarts jst hist next
   end
   {:ish-cwd from} -> do
-    send from (tuple :ish-cwd cwd)
+    send from {:ish-cwd cwd}
     state-loop shell pid restarts jst hist cwd
   end
 end
@@ -372,9 +385,9 @@ export defn main mode do
   shell = eq? mode :shell
   trap-exit :true
   if shell do
-    eval-text "implement std/shell" :false
+    eval-text "activate std/shell" :false
   end
-  eval-text "implement std/ish" :false
+  eval-text "activate std/ish\nuse std/ish" :false
   {hist entries} = history-load shell
   state-loop shell (start-loop shell entries :true) '() (jobs-init :go) hist :nil
 end

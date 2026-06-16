@@ -1,7 +1,7 @@
 defn shell-ok? r -> eq? (tuple-get r 0) :ok
 
 defn shell-merge a b ->
-  tuple (tuple-get b 0) (tuple-get b 1) (str (tuple-get a 2) (tuple-get b 2)) (str (tuple-get a 3) (tuple-get b 3))
+  {(tuple-get b 0) (tuple-get b 1) "#{tuple-get a 2}#{tuple-get b 2}" "#{tuple-get a 3}#{tuple-get b 3}"}
 
 defn shell-check do
   _ r when (shell-ok? r) -> :nil
@@ -14,7 +14,7 @@ defn shell-cd path do
     :nil -> :nil
     spid when (eq? spid (self)) -> :nil
     spid -> do
-      send spid (tuple :ish-cd (pwd) (self))
+      send spid {:ish-cd (pwd) (self)}
       receive do
         {:ish-cd-ok} -> :nil
       end
@@ -35,8 +35,8 @@ export defmacro cd stx do
     p when (syntax-word? p) -> syntax-word-text p
     p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
     p when (string-syntax? p) -> syntax-string-text p
-    p when (syntax-int? p) -> str (syntax-int-value p)
-    p when (eq? (syntax-kind p) :float) -> str (syntax->datum p)
+    p when (syntax-int? p) -> "#{syntax-int-value p}"
+    p when (eq? (syntax-kind p) :float) -> "#{syntax->datum p}"
     _ -> :nil
   end
 
@@ -45,12 +45,12 @@ export defmacro cd stx do
     stx i n _acc when (and (gt? i 2) (eq? (syntax-adjacent? (syntax-nth stx i)) :false)) -> syntax-error stx "cd takes zero or one path"
     stx i n acc -> match (render-static-part (syntax-nth stx i)) do
       :nil -> syntax-error (syntax-nth stx i) "cd path must be a literal shell word or string"
-      text -> path-text stx (add i 1) n (str acc text)
+      text -> path-text stx (add i 1) n "${acc}${text}"
     end
   end
 
   n = syntax-length stx
-  path = if (eq? n 2) do "~" else do path-text stx 2 n "" end
+  path = cond (eq? n 2) "~" (path-text stx 2 n "")
   %`(shell-cd %,(make-syntax-string stx path))
 end
 
@@ -59,7 +59,7 @@ defn ish-register-job port text do
     :nil -> :nil
     spid when (eq? spid (self)) -> :nil
     spid -> do
-      send spid (tuple :ish-job port text (self))
+      send spid {:ish-job port text (self)}
       receive do
         {:ish-job-id n} -> n
       end
@@ -68,14 +68,14 @@ defn ish-register-job port text do
 end
 
 defn ish-notify-job port text do
-  ish-register-job port text
+  _ = ish-register-job port text
   port
 end
 
 defn ish-announce-job port text do
-  match (ish-register-job port text) do
+  _ = match (ish-register-job port text) do
     :nil -> :ok
-    n -> str "[" n "] " text " &" |> eprintln
+    n -> "[${n}] ${text} &" |> eprintln
   end
   :nil
 end
@@ -106,14 +106,20 @@ resolver form do
 
   defn string-syntax? p -> eq? (syntax-kind p) :string
 
+  defn command-sub? p -> head-is? p "%-command-sub"
+
+  defn command-sub-arg part ->
+    %`{:lit (capture-stdout (await (exec %,(form->graph (syntax-nth part 1) (make-syntax-atom form "true")))))}
+
   defn part->arg do
-    part when (head-is? part "%-procsub-write") -> %`(tuple :lit __psw)
+    part when (head-is? part "%-procsub-write") -> %`{:lit __psw}
     part when (head-is? part "%-procsub-read") ->
-      %`(tuple :temp (write-procsub-temp (await (exec %,(form->graph (syntax-nth part 1) (make-syntax-atom form "true"))))))
-    part when (syntax-word? part) -> %`(tuple :lit %,(make-syntax-string form (syntax-word-text part)))
-    part when (head-is? part "%-word") -> %`(tuple :lit %,(make-syntax-string form (syntax-string-text (syntax-nth part 1))))
-    part when (head-is? part "%-shell-var") -> %`(tuple :env %,(make-syntax-string form (syntax-word-text (syntax-nth part 1))))
-    part -> %`(tuple :lit (str %,part))
+      %`{:temp (write-procsub-temp (await (exec %,(form->graph (syntax-nth part 1) (make-syntax-atom form "true")))))}
+    part when (command-sub? part) -> command-sub-arg part
+    part when (syntax-word? part) -> %`{:lit %,(make-syntax-string form (syntax-word-text part))}
+    part when (head-is? part "%-word") -> %`{:lit %,(make-syntax-string form (syntax-string-text (syntax-nth part 1)))}
+    part when (head-is? part "%-shell-var") -> %`{:env %,(make-syntax-string form (syntax-word-text (syntax-nth part 1)))}
+    part -> %`{:lit "#{%,part}"}
   end
 
   defn redir-fd do
@@ -121,11 +127,11 @@ resolver form do
     _ -> 1
   end
 
-  defn mk-dup fdn ton -> %`(tuple :dup %,(make-syntax-int form fdn) %,(make-syntax-int form ton))
+  defn mk-dup fdn ton -> %`{:dup %,(make-syntax-int form fdn) %,(make-syntax-int form ton)}
 
   defn heredoc? part -> head-is? part "%-heredoc"
 
-  defn mk-heredoc part -> %`(tuple :redir :heredoc 0 (tuple :lit %,(syntax-nth part 1)))
+  defn mk-heredoc part -> %`{:redir :heredoc 0 {:lit %,(syntax-nth part 1)}}
 
   defn drop-n do
     parts 0 -> parts
@@ -162,13 +168,13 @@ resolver form do
 
   defn interp-seg? p -> head-is? p "%-string"
 
-  defn seg? p -> or (static-seg? p) (var-seg? p) (interp-seg? p)
+  defn seg? p -> or (static-seg? p) (var-seg? p) (interp-seg? p) (command-sub? p)
 
   defn seg-text do
     p when (syntax-word? p) -> syntax-word-text p
     p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
     p when (string-syntax? p) -> syntax-string-text p
-    p -> str (syntax-int-value p)
+    p -> "#{syntax-int-value p}"
   end
 
   defn seg-glob? do
@@ -184,7 +190,7 @@ resolver form do
 
   defn run-text do
     _ 0 -> ""
-    (list h . t) k -> str (seg-text h) (run-text t (sub k 1))
+    (list h . t) k -> "#{seg-text h}#{run-text t (sub k 1)}"
   end
 
   defn run-glob? do
@@ -194,20 +200,22 @@ resolver form do
 
   defn run-dynamic? do
     _ 0 -> :false
-    (list h . t) k -> or (var-seg? h) (interp-seg? h) (run-dynamic? t (sub k 1))
+    (list h . t) k -> or (var-seg? h) (interp-seg? h) (command-sub? h) (run-dynamic? t (sub k 1))
   end
 
   defn seg-cat-part do
     p when (var-seg? p) -> part->arg p
-    p when (seg-glob? p) -> %`(tuple :glob %,(make-syntax-string form (seg-text p)))
-    p when (static-seg? p) -> %`(tuple :lit %,(make-syntax-string form (seg-text p)))
-    p -> %`(tuple :lit (str %,p))
+    p when (command-sub? p) -> part->arg p
+    p when (seg-glob? p) -> %`{:glob %,(make-syntax-string form (seg-text p))}
+    p when (static-seg? p) -> %`{:lit %,(make-syntax-string form (seg-text p))}
+    p -> %`{:lit "#{%,p}"}
   end
 
   defn seg-lit-part do
     p when (var-seg? p) -> part->arg p
-    p when (static-seg? p) -> %`(tuple :lit %,(make-syntax-string form (seg-text p)))
-    p -> %`(tuple :lit (str %,p))
+    p when (command-sub? p) -> part->arg p
+    p when (static-seg? p) -> %`{:lit %,(make-syntax-string form (seg-text p))}
+    p -> %`{:lit "#{%,p}"}
   end
 
   defn cat-parts do
@@ -216,96 +224,107 @@ resolver form do
   end
 
   defn mk-run do
-    parts k when (run-dynamic? parts k) -> %`(tuple :cat (list %,@(cat-parts parts &seg-cat-part k)))
-    parts k when (run-glob? parts k) -> %`(tuple :glob %,(make-syntax-string form (run-text parts k)))
-    parts k -> %`(tuple :lit %,(make-syntax-string form (run-text parts k)))
+    parts k when (run-dynamic? parts k) -> %`{:cat (list %,@(cat-parts parts &seg-cat-part k))}
+    parts k when (run-glob? parts k) -> %`{:glob %,(make-syntax-string form (run-text parts k))}
+    parts k -> %`{:lit %,(make-syntax-string form (run-text parts k))}
   end
 
   defn mk-join-lit do
-    parts k when (run-dynamic? parts k) -> %`(tuple :cat (list %,@(cat-parts parts &seg-lit-part k)))
-    parts k -> %`(tuple :lit %,(make-syntax-string form (run-text parts k)))
+    parts k when (run-dynamic? parts k) -> %`{:cat (list %,@(cat-parts parts &seg-lit-part k))}
+    parts k -> %`{:lit %,(make-syntax-string form (run-text parts k))}
   end
 
-  defn join-len do
-    '() -> 1
-    parts when (seg? (first parts)) -> run-len parts
-    _ -> 1
+  defn mk-redir-fd op-word fdn target ->
+    %`{:redir %,(make-syntax-atom form (syntax-word-text op-word)) %,(make-syntax-int form fdn) %,target}
+
+  defn take-target do
+    parts when (seg? (first parts)) -> do
+      n = run-len parts
+      {(mk-run parts n) n}
+    end
+    parts -> {(part->arg (first parts)) 1}
   end
 
-  defn redir-target do
-    parts when (seg? (first parts)) -> mk-join-lit parts (run-len parts)
-    parts -> part->arg (first parts)
-  end
-
-  defn mk-redir-fd op-word fdn target-parts ->
-    %`(tuple :redir %,(make-syntax-atom form (syntax-word-text op-word)) %,(make-syntax-int form fdn) %,(redir-target target-parts))
-
-  defn mk-redir op-word target-parts -> mk-redir-fd op-word (redir-fd (syntax-word-text op-word)) target-parts
-
-  defn skip-count do
-    parts when (fd-dup3? parts) -> 3
-    parts when (fd-redir? parts) -> add 2 (join-len (drop-n parts 2))
-    parts when (dup2? parts) -> 2
-    parts when (plain-redir? parts) -> add 1 (join-len (drop-n parts 1))
-    (list h . _) when (heredoc? h) -> 1
-    _ -> 0
-  end
-
-  defn argv-of do
-    '() -> '()
-    parts when (gt? (skip-count parts) 0) -> argv-of (drop-n parts (skip-count parts))
-    parts when (seg? (first parts)) -> cons (mk-run parts (run-len parts)) (argv-of (drop-n parts (run-len parts)))
-    (list h . t) -> cons (part->arg h) (argv-of t)
-  end
-
-  defn redirs-of do
-    '() -> '()
+  defn take-redir do
     parts when (fd-dup3? parts) ->
-      cons (mk-dup (syntax-int-value (first parts)) (syntax-int-value (first (rest (rest parts))))) (redirs-of (drop-n parts 3))
-    parts when (fd-redir? parts) ->
-      cons (mk-redir-fd (first (rest parts)) (syntax-int-value (first parts)) (drop-n parts 2)) (redirs-of (drop-n parts (skip-count parts)))
+      {(mk-dup (syntax-int-value (first parts)) (syntax-int-value (first (rest (rest parts))))) 3}
+    parts when (fd-redir? parts) -> do
+      {target n} = take-target (drop-n parts 2)
+      {(mk-redir-fd (first (rest parts)) (syntax-int-value (first parts)) target) (add 2 n)}
+    end
     parts when (dup2? parts) ->
-      cons (mk-dup 1 (syntax-int-value (first (rest parts)))) (redirs-of (drop-n parts 2))
-    parts when (plain-redir? parts) ->
-      cons (mk-redir (first parts) (rest parts)) (redirs-of (drop-n parts (skip-count parts)))
-    (list h . t) when (heredoc? h) -> cons (mk-heredoc h) (redirs-of t)
-    parts when (seg? (first parts)) -> redirs-of (drop-n parts (run-len parts))
-    (list _ . t) -> redirs-of t
+      {(mk-dup 1 (syntax-int-value (first (rest parts)))) 2}
+    parts when (plain-redir? parts) -> do
+      op-word = first parts
+      {target n} = take-target (rest parts)
+      {(mk-redir-fd op-word (redir-fd (syntax-word-text op-word)) target) (add 1 n)}
+    end
+    (list h . _) when (heredoc? h) -> {(mk-heredoc h) 1}
+  end
+
+  defn redir-head? do
+    parts when (fd-dup3? parts) -> :true
+    parts when (fd-redir? parts) -> :true
+    parts when (dup2? parts) -> :true
+    parts when (plain-redir? parts) -> :true
+    (list h . _) when (heredoc? h) -> :true
+    _ -> :false
+  end
+
+  defn add-arg a {argv redirs} -> {(cons a argv) redirs}
+  defn add-redir r {argv redirs} -> {argv (cons r redirs)}
+
+  defn scan-body do
+    '() -> {'() '()}
+    parts when (redir-head? parts) -> do
+      {redir n} = take-redir parts
+      add-redir redir (scan-body (drop-n parts n))
+    end
+    parts when (seg? (first parts)) -> do
+      n = run-len parts
+      add-arg (mk-run parts n) (scan-body (drop-n parts n))
+    end
+    (list h . t) -> add-arg (part->arg h) (scan-body t)
   end
 
   defn eq-empty-word? p -> and (head-is? p "%-word") (eq? (syntax-string-text (syntax-nth p 1)) "=")
 
   defn env-entry do
     (list a b . _) when (and (syntax-word? a) (syntax-adjacent? b) (eq-empty-word? b)) ->
-      tuple (syntax-word-text a) %`(tuple :lit "") 2
+      {(syntax-word-text a) %`{:lit ""} 2}
     (list a b c . t) when (and (syntax-word? a) (word-is? b "=") (syntax-adjacent? b) (syntax-adjacent? c)) ->
       env-entry-value (syntax-word-text a) (cons c t)
     _ -> :nil
   end
 
+  defn take-env-value do
+    vparts when (seg? (first vparts)) -> do
+      n = run-len vparts
+      {(mk-join-lit vparts n) n}
+    end
+    vparts -> {(mk-join-lit vparts 1) 1}
+  end
+
   defn env-entry-value name vparts do
-    k = join-len vparts
-    tuple name (mk-join-lit vparts k) (add 2 k)
+    {arg n} = take-env-value vparts
+    {name arg (add 2 n)}
   end
 
-  defn envs-of parts -> envs-of-entry (env-entry parts) parts
+  defn scan-envs parts -> scan-envs-go (env-entry parts) parts
 
-  defn envs-of-entry do
-    :nil _ -> '()
-    {name arg k} parts -> cons %`(tuple %,(make-syntax-string form name) %,arg) (envs-of (drop-n parts k))
-  end
-
-  defn strip-envs parts -> strip-envs-entry (env-entry parts) parts
-
-  defn strip-envs-entry do
-    :nil parts -> parts
-    {_ _ k} parts -> strip-envs (drop-n parts k)
+  defn scan-envs-go do
+    :nil parts -> {'() parts}
+    {name arg k} parts -> do
+      {envs body} = scan-envs (drop-n parts k)
+      {(cons %`{%,(make-syntax-string form name) %,arg} envs) body}
+    end
   end
 
   defn stage-of parts do
-    body = strip-envs parts
+    {envs body} = scan-envs parts
     check-stage body
-    %`(tuple :stage (list %,@(argv-of body)) (list %,@(redirs-of body)) (list %,@(envs-of parts)))
+    {argv redirs} = scan-body body
+    %`{:stage (list %,@argv) (list %,@redirs) (list %,@envs)}
   end
 
   defn check-stage do
@@ -337,8 +356,8 @@ resolver form do
   end
 
   defn build-graph do
-    (list s) cap -> %`(tuple :exec %,s %,cap)
-    stages cap -> %`(tuple :pipeline (list %,@stages) %,cap :true)
+    (list s) cap -> %`{:exec %,s %,cap}
+    stages cap -> %`{:pipeline (list %,@stages) %,cap :true}
   end
 
   defn form->graph f cap -> build-graph (split-stages (collect-parts f 1 (syntax-length f)) '()) cap
@@ -346,9 +365,9 @@ resolver form do
   defn elem-graph parts cap -> build-graph (split-stages parts '()) cap
 
   defn split-chain do
-    '() cur op -> cons (tuple op cur) '()
-    (list h . t) cur op when (word-is? h "&&") -> cons (tuple op cur) (split-chain t '() :and)
-    (list h . t) cur op when (word-is? h "||") -> cons (tuple op cur) (split-chain t '() :or)
+    '() cur op -> cons {op cur} '()
+    (list h . t) cur op when (word-is? h "&&") -> cons {op cur} (split-chain t '() :and)
+    (list h . t) cur op when (word-is? h "||") -> cons {op cur} (split-chain t '() :or)
     (list h . t) cur op -> split-chain t (append cur (cons h '())) op
   end
 
@@ -367,7 +386,10 @@ resolver form do
     _ -> "command"
   end
 
-  defn elem-name parts -> head-name (strip-envs (after-last-pipe parts '()))
+  defn elem-name parts -> do
+    {_envs body} = scan-envs (after-last-pipe parts '())
+    head-name body
+  end
 
   defn exit-elem? do
     (list h) -> word-is? h "exit"
@@ -430,7 +452,8 @@ resolver form do
 
   defn write-sub-graph sub do
     sub-parts = collect-parts sub 1 (syntax-length sub)
-    %`(tuple :exec (tuple :stage (list %,@(argv-of sub-parts)) (list (tuple :redir %,(make-syntax-atom form "<") 0 (tuple :temp __psw)) %,@(redirs-of sub-parts)) (list)) :false)
+    {argv redirs} = scan-body sub-parts
+    %`{:exec {:stage (list %,@argv) (list {:redir %,(make-syntax-atom form "<") 0 {:temp __psw}} %,@redirs) (list)} :false}
   end
 
   defn bg-elem do
@@ -442,16 +465,16 @@ resolver form do
     p when (syntax-word? p) -> syntax-word-text p
     p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
     p when (string-syntax? p) -> syntax-string-text p
-    p when (syntax-int? p) -> str (syntax-int-value p)
-    p when (eq? (syntax-kind p) :float) -> str (syntax->datum p)
-    p when (head-is? p "%-shell-var") -> str "$" (syntax-word-text (syntax-nth p 1))
+    p when (syntax-int? p) -> "#{syntax-int-value p}"
+    p when (eq? (syntax-kind p) :float) -> "#{syntax->datum p}"
+    p when (head-is? p "%-shell-var") -> "$#{syntax-word-text (syntax-nth p 1)}"
     _ -> "..."
   end
 
   defn render-parts do
     '() -> ""
     (list h) -> render-part h
-    (list h . t) -> str (render-part h) " " (render-parts t)
+    (list h . t) -> "#{render-part h} #{render-parts t}"
   end
 
   defn pw-elem do
@@ -462,11 +485,7 @@ resolver form do
   defn emit-bg e cap do
     launch = %`(exec %,(elem-graph e cap))
     text = make-syntax-string form (render-parts e)
-    if (eq? (syntax-property form "value-context") "true") do
-      %`(ish-notify-job %,launch %,text)
-    else do
-      %`(ish-announce-job %,launch %,text)
-    end
+    cond (eq? (syntax-property form "value-context") "true") %`(ish-notify-job %,launch %,text) %`(ish-announce-job %,launch %,text)
   end
 
   defn emit do

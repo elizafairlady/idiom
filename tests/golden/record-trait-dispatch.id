@@ -1,0 +1,22 @@
+trait Label do
+  method label-of x
+end
+
+record Point do
+  field x
+end
+
+record User do
+  field name
+end
+
+implement Label on Point do
+  method label-of p -> str "point:" p.x
+end
+
+implement Label on User do
+  method label-of u -> str "user:" u.name
+end
+
+println (label-of (Point 7))
+println (label-of (User "ada"))

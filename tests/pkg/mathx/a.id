@@ -1,3 +1,4 @@
 package mathx
+export defn zero-answer -> 42
 export defn dbl x -> add x x
 export defn quad x -> dbl (dbl x)

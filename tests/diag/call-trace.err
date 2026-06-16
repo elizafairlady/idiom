@@ -1,4 +1,4 @@
-tests/diag/call-trace.id:1:24: error: main actor exited with reason {:error {:type-error :add 1 :not-a-number}}
+tests/diag/call-trace.id:1:24: error: main actor exited with reason type error in 'add': 1 :not-a-number
   in level3 (tests/diag/call-trace.id:1)
   in level2 (tests/diag/call-trace.id:2)
   in level1 (tests/diag/call-trace.id:3)

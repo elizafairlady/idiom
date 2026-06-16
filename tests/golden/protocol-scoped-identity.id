@@ -1,8 +1,0 @@
-do
-  implement tests/pkg/sizea
-  println (size 5)
-end
-do
-  implement tests/pkg/sizeb
-  println (size 5)
-end

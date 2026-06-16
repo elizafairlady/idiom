@@ -7,6 +7,7 @@ LDFLAGS ?= -lpthread -lm
 LIB_SRCS := \
  src/common/common.c \
  src/value/value.c \
+ src/regex/regex.c \
  src/syntax/syntax.c \
  src/reader/reader.c \
   src/bytecode/bytecode.c \

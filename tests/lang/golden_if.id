@@ -1,10 +1,16 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "if-chain" do
     got = do
-      if :false do 0 else if :false do 1 else do 42 end
+      if :false do
+        0
+      else if :false do
+        1
+      else do
+        42
+      end
     end
     assert-inspect got "42"
   end
@@ -12,25 +18,61 @@ suite do
     got = do
       defn classify do
         n -> do
-          size = if (gt? n 100) do :big else if (gt? n 10) do :medium else do :small end
-          label = if (eq? size :small) do "s" else do "L" end
-          tuple size label
+          size = if (gt? n 100) do
+            :big
+          else if (gt? n 10) do
+            :medium
+          else do
+            :small
+          end
+          label = if (eq? size :small) do
+            "s"
+          else do
+            "L"
+          end
+          {size label}
         end
       end
-      tuple (classify 5) (classify 50) (classify 500)
+      {(classify 5) (classify 50) (classify 500)}
     end
     assert-inspect got "{{:small \"s\"} {:medium \"L\"} {:big \"L\"}}"
   end
   test "if-else" do
     got = do
-      if :false do 0 else do 42 end
+      if :false do
+        0
+      else do
+        42
+      end
     end
     assert-inspect got "42"
   end
   test "if-single" do
     got = do
-      if :true do 42 end
+      if :true do
+        42
+      end
     end
     assert-inspect got "42"
+  end
+  test "kernel-not" do
+    assert-eq (ok? 1) :true
+    assert-eq (ok? :false) :false
+    assert-eq (ok? {:error :x}) :false
+    assert-eq (not? :false) :true
+    assert-eq (not? :nil) :true
+    assert-eq (not? {:error :x}) :true
+    assert-eq (not? 1) :false
+  end
+  test "if-truthiness-is-canonical" do
+    got = do
+      ok? = fn _value -> :false
+      if 1 do
+        :then
+      else do
+        :else
+      end
+    end
+    assert-eq got :then
   end
 end

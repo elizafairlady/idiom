@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 defmacro pair-sum stx do syntax-case stx do
   (_ e) -> %`(do
@@ -10,12 +10,12 @@ end end
 
 suite do
   test "tuple-pattern-binds" do
-    {a b} = tuple 1 2
+    {a b} = {1 2}
     assert-eq a 1
     assert-eq b 2
   end
   test "nested-pattern-binds" do
-    {a {b c}} = tuple 1 (tuple 2 3)
+    {a {b c}} = {1 {2 3}}
     assert-eq (list a b c) (list 1 2 3)
   end
   test "list-and-cons-patterns" do
@@ -44,11 +44,11 @@ suite do
   end
   test "bracket-patterns-match-vectors-only" do
     g = fn do
-      [a b] -> tuple :vec a b
-      (list a b) -> tuple :list a b
+      [a b] -> {:vec a b}
+      (list a b) -> {:list a b}
     end
-    assert-eq (g [1 2]) (tuple :vec 1 2)
-    assert-eq (g (list 1 2)) (tuple :list 1 2)
+    assert-eq (g [1 2]) {:vec 1 2}
+    assert-eq (g (list 1 2)) {:list 1 2}
     h = fn do
       :nil -> :was-nil
       '() -> :was-empty-list
@@ -65,28 +65,28 @@ suite do
     assert-eq (q [1 2]) :other
   end
   test "literal-assert-and-bind" do
-    {:ok v} = tuple :ok 42
+    {:ok v} = {:ok 42}
     assert-eq v 42
-    {:ok :done} = tuple :ok :done
+    {:ok :done} = {:ok :done}
     :yes = :yes
     assert-eq v 42
   end
   test "wildcard-positions" do
-    {_ b _} = tuple 1 2 3
+    {_ b _} = {1 2 3}
     assert-eq b 2
   end
   test "rebind-through-pattern" do
     a = 1
-    {a b} = tuple (add a 10) 2
+    {a b} = {(add a 10) 2}
     assert-eq a 11
-    {a c} = tuple 100 3
+    {a c} = {100 3}
     assert-eq (list a b c) (list 100 2 3)
     a = 0
     assert-eq a 0
   end
   test "pattern-bind-inside-do-and-fn" do
     got = do
-      {a b} = tuple 4 5
+      {a b} = {4 5}
       add a b
     end
     assert-eq got 9
@@ -94,7 +94,7 @@ suite do
       {x y} = p
       mul x y
     end
-    assert-eq (f (tuple 6 7)) 42
+    assert-eq (f {6 7}) 42
     defn g p do
       {:ok n} = p
       add n 1
@@ -103,7 +103,7 @@ suite do
   end
   test "forward-reference-from-later-defn" do
     got = do
-      {q r} = tuple 3 4
+      {q r} = {3 4}
       defn use-q x -> add x q
       use-q r
     end
@@ -111,18 +111,24 @@ suite do
   end
   test "non-match-raises-structured-reason" do
     got = assert-raises (fn _ig do
-      {a b} = tuple 1 2 3
+      {a b} = {1 2 3}
       a
     end)
     match got do
-      {:error {:no-clause _name args}} -> assert-eq args {{1 2 3}}
+      {:error {:no-clause :fn args}} -> do
+        assert-eq args {{1 2 3}}
+        assert (str-contains? (error-message got) "no clause of '<fn>'")
+      end
     end
     got2 = assert-raises (fn _ig do
-      {:ok v} = tuple :error :enoent
+      {:ok v} = {:error :enoent}
       v
     end)
     match got2 do
-      {:error {:no-clause _name args}} -> assert-eq args {{:error :enoent}}
+      {:error {:no-clause :fn args}} -> do
+        assert-eq args {{:error :enoent}}
+        assert (str-contains? (error-message got2) "no clause of '<fn>'")
+      end
     end
   end
   test "plain-bind-unchanged" do
@@ -130,26 +136,29 @@ suite do
     x = add x 1
     defn use-x n -> add n x
     assert-eq (use-x 40) 42
-    _ = tuple 1 2
+    _ = {1 2}
   end
   test "macro-introduced-pattern-bind-is-hygienic" do
     pa = 100
-    got = pair-sum (tuple 1 2)
+    got = pair-sum {1 2}
     assert-eq got 3
     assert-eq pa 100
   end
   test "repeated-name-requires-equal-values" do
-    {a a} = tuple 1 1
+    {a a} = {1 1}
     assert-eq a 1
     got = assert-raises (fn _ig do
-      {b b} = tuple 1 2
+      {b b} = {1 2}
       b
     end)
     match got do
-      {:error {:no-clause _name args}} -> assert-eq args {{1 2}}
+      {:error {:no-clause :fn args}} -> do
+        assert-eq args {{1 2}}
+        assert (str-contains? (error-message got) "no clause of '<fn>'")
+      end
     end
   end
   test "paren-group-rejected-in-pattern" do
-    assert-expand-error "{a (b c)} = tuple 1 2\na" "unsupported pattern"
+    assert-expand-error "{a (b c)} = {1 2}\na" "unsupported pattern"
   end
 end

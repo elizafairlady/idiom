@@ -55,8 +55,8 @@ static IdmCore *quasisyntax_items_list(ExpandContext *ctx, IdmSyntax *const *ite
     for (size_t i = count; i > 0; i--) {
         const IdmSyntax *item = items[i - 1u];
         const IdmSyntax *splice_item = item;
-        if (syn_is_protocol(item, "%-expr") && item->as.seq.count == 2 && syn_is_protocol(item->as.seq.items[1], "%-unsyntax-splicing")) splice_item = item->as.seq.items[1];
-        bool splice = syn_is_protocol(splice_item, "%-unsyntax-splicing");
+        if (syn_is_form(item, "%-expr") && item->as.seq.count == 2 && syn_is_form(item->as.seq.items[1], "%-unsyntax-splicing")) splice_item = item->as.seq.items[1];
+        bool splice = syn_is_form(splice_item, "%-unsyntax-splicing");
         if (splice) {
             if (splice_item->as.seq.count != 2) {
                 idm_core_free(tail);
@@ -79,24 +79,24 @@ static IdmCore *quasisyntax_items_list(ExpandContext *ctx, IdmSyntax *const *ite
 }
 
 static IdmCore *quasisyntax_template(ExpandContext *ctx, const IdmSyntax *template, const IdmSyntax *template_ctx, IdmError *err) {
-    if (syn_is_protocol(template, "%-unsyntax")) {
+    if (syn_is_form(template, "%-unsyntax")) {
         if (template->as.seq.count != 2) return expand_error(err, template->span, "unsyntax expects one expression");
         return expand_syntax(ctx, template->as.seq.items[1], err);
     }
-    if (syn_is_protocol(template, "%-unsyntax-splicing")) return expand_error(err, template->span, "unsyntax-splicing is only valid inside sequence templates");
-    if (syn_is_protocol(template, "%-group") && template->as.seq.count == 2 && syn_is_protocol(template->as.seq.items[1], "%-expr") && template->as.seq.items[1]->as.seq.count == 2 && syn_is_protocol(template->as.seq.items[1]->as.seq.items[1], "%-body")) {
+    if (syn_is_form(template, "%-unsyntax-splicing")) return expand_error(err, template->span, "unsyntax-splicing is only valid inside sequence templates");
+    if (syn_is_form(template, "%-group") && template->as.seq.count == 2 && syn_is_form(template->as.seq.items[1], "%-expr") && template->as.seq.items[1]->as.seq.count == 2 && syn_is_form(template->as.seq.items[1]->as.seq.items[1], "%-body")) {
         return quasisyntax_template(ctx, template->as.seq.items[1]->as.seq.items[1], template_ctx, err);
     }
-    if (syn_is_protocol(template, "%-expr") || syn_is_protocol(template, "%-body")) {
+    if (syn_is_form(template, "%-expr") || syn_is_form(template, "%-body")) {
         IdmCore *items = quasisyntax_items_list(ctx, template->as.seq.items + 1, template->as.seq.count - 1u, template_ctx, err);
         if (!items) return NULL;
-        IdmPrimitive prim = syn_is_protocol(template, "%-expr") ? IDM_PRIM_MAKE_SYNTAX_EXPR : IDM_PRIM_MAKE_SYNTAX_BODY;
+        IdmPrimitive prim = syn_is_form(template, "%-expr") ? IDM_PRIM_MAKE_SYNTAX_EXPR : IDM_PRIM_MAKE_SYNTAX_BODY;
         IdmCore *app = syntax_constructor_call(ctx, prim, template_ctx, err);
         if (!app) { idm_core_free(items); return NULL; }
         if (!primitive_app_add(app, items, err, template->span)) return NULL;
         return app;
     }
-    if (syn_is_protocol(template, "%-group")) {
+    if (syn_is_form(template, "%-group")) {
         if (template->as.seq.count != 2) return expand_error(err, template->span, "%-group expects one child");
         IdmCore *child = quasisyntax_template(ctx, template->as.seq.items[1], template_ctx, err);
         if (!child) return NULL;
@@ -149,7 +149,7 @@ static IdmCore *quasisyntax_template(ExpandContext *ctx, const IdmSyntax *templa
     return expand_error(err, template->span, "unsupported quasisyntax template node");
 }
 
-IdmCore *expand_protocol_quasisyntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+IdmCore *expand_form_quasisyntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count != 2) return expand_error(err, syn->span, "%-quasisyntax expects one child");
     return quasisyntax_template(ctx, syn->as.seq.items[1], syn->as.seq.items[1], err);
 }
@@ -214,7 +214,7 @@ static bool quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, I
             if (strcmp(head, "%-group") == 0) {
                 if (t->as.seq.count != 2) return idm_error_set(err, t->span, "%-group expects one child");
                 const IdmSyntax *child = t->as.seq.items[1];
-                if (syn_is_protocol(child, "%-expr")) return quote_datum_list(ctx, child->as.seq.items, 1, child->as.seq.count, out, err);
+                if (syn_is_form(child, "%-expr")) return quote_datum_list(ctx, child->as.seq.items, 1, child->as.seq.count, out, err);
                 return quote_datum_list(ctx, t->as.seq.items, 1, t->as.seq.count, out, err);
             }
             const char *sym = quote_symbol_for_head(head);
@@ -237,7 +237,7 @@ bool expand_quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, I
     return quote_datum(ctx, t, out, err);
 }
 
-IdmCore *expand_protocol_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+IdmCore *expand_form_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count != 2) return expand_error(err, syn->span, "%-quote expects one child");
     IdmValue value = idm_nil();
     if (!quote_datum(ctx, syn->as.seq.items[1], &value, err)) return NULL;
@@ -255,7 +255,7 @@ static IdmCore *quasiquote_list(ExpandContext *ctx, IdmSyntax *const *items, siz
     if (!tail) { idm_error_oom(err, span); return NULL; }
     for (size_t i = count; i > start; i--) {
         const IdmSyntax *item = items[i - 1u];
-        if (syn_is_protocol(item, "%-unquote-splicing")) {
+        if (syn_is_form(item, "%-unquote-splicing")) {
             if (item->as.seq.count != 2) { idm_core_free(tail); return expand_error(err, item->span, "unquote-splicing expects one expression"); }
             IdmCore *spliced = expand_syntax(ctx, item->as.seq.items[1], err);
             if (!spliced) { idm_core_free(tail); return NULL; }
@@ -289,11 +289,11 @@ static IdmCore *quasiquote_container(ExpandContext *ctx, const IdmSyntax *t, Idm
 }
 
 static IdmCore *quasiquote_template(ExpandContext *ctx, const IdmSyntax *t, IdmError *err) {
-    if (syn_is_protocol(t, "%-unquote")) {
+    if (syn_is_form(t, "%-unquote")) {
         if (t->as.seq.count != 2) return expand_error(err, t->span, "unquote expects one expression");
         return expand_syntax(ctx, t->as.seq.items[1], err);
     }
-    if (syn_is_protocol(t, "%-unquote-splicing")) return expand_error(err, t->span, "unquote-splicing is only valid inside a sequence");
+    if (syn_is_form(t, "%-unquote-splicing")) return expand_error(err, t->span, "unquote-splicing is only valid inside a sequence");
     switch (t->kind) {
         case IDM_SYN_NIL:
         case IDM_SYN_WORD:
@@ -314,7 +314,7 @@ static IdmCore *quasiquote_template(ExpandContext *ctx, const IdmSyntax *t, IdmE
             if (strcmp(head, "%-group") == 0) {
                 if (t->as.seq.count != 2) return expand_error(err, t->span, "%-group expects one child");
                 const IdmSyntax *child = t->as.seq.items[1];
-                if (syn_is_protocol(child, "%-expr")) return quasiquote_list(ctx, child->as.seq.items, 1, child->as.seq.count, t->span, err);
+                if (syn_is_form(child, "%-expr")) return quasiquote_list(ctx, child->as.seq.items, 1, child->as.seq.count, t->span, err);
                 return quasiquote_template(ctx, child, err);
             }
             return datum_constant(ctx, t, err);
@@ -323,7 +323,7 @@ static IdmCore *quasiquote_template(ExpandContext *ctx, const IdmSyntax *t, IdmE
     return expand_error(err, t->span, "unsupported quasiquote template");
 }
 
-IdmCore *expand_protocol_quasiquote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+IdmCore *expand_form_quasiquote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count != 2) return expand_error(err, syn->span, "%-quasiquote expects one child");
     return quasiquote_template(ctx, syn->as.seq.items[1], err);
 }
@@ -340,7 +340,7 @@ static IdmCore *expand_command_sub(ExpandContext *ctx, const IdmSyntax *part, Id
     return command;
 }
 
-IdmCore *expand_protocol_string(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+IdmCore *expand_form_string(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     IdmCore *app = primitive_app(IDM_PRIM_STR, syn->span);
     if (!app) return (IdmCore *)(uintptr_t)idm_error_oom(err, syn->span);
     if (syn->as.seq.count <= 1) {
@@ -355,7 +355,7 @@ IdmCore *expand_protocol_string(ExpandContext *ctx, const IdmSyntax *syn, IdmErr
     }
     for (size_t i = 1; i < syn->as.seq.count; i++) {
         const IdmSyntax *part = syn->as.seq.items[i];
-        IdmCore *pc = syn_is_protocol(part, "%-command-sub") ? expand_command_sub(ctx, part, err) : expand_syntax(ctx, part, err);
+        IdmCore *pc = syn_is_form(part, "%-command-sub") ? expand_command_sub(ctx, part, err) : expand_syntax(ctx, part, err);
         if (!pc || !idm_core_app_add_arg(app, pc)) {
             idm_core_free(pc);
             idm_core_free(app);

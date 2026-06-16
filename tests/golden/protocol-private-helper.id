@@ -5,6 +5,6 @@ protocol Helped do
     (_ e) -> %`(helper %,e)
   end end
 end
-implement Helped
+activate Helped
 println (twice-h 21)
 println (helper 5)

@@ -5,7 +5,7 @@ export defn get-or m k default -> dict-get m k default
 
 export defn get! do
   m k when (dict-has? m k) -> dict-get m k :nil
-  _ k -> error (tuple :key-not-found k)
+  _ k -> error {:key-not-found k}
 end
 export defn put m k v -> dict-put m k v
 export defn del m k -> dict-del m k

@@ -1,12 +1,12 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "package-decl" do
     got = do
       package demo
       use std/enum
-      [1 2 3] |> map (fn x -> mul x 2) |> sum
+      ([1 2 3].map (fn x -> mul x 2)).sum
     end
     assert-inspect got "12"
   end
@@ -17,16 +17,30 @@ suite do
     end
     assert-inspect got "32"
   end
+  test "package-zero-arity-export" do
+    got = do
+      use tests/pkg/mathx
+      zero-answer
+    end
+    assert-inspect got "42"
+  end
+  test "package-zero-arity-qualified-export" do
+    got = do
+      import tests/pkg/mathx as math
+      math.zero-answer
+    end
+    assert-inspect got "42"
+  end
   test "package-macro-phase" do
     got = do
-      implement tests/pkg/macropriv
+      activate tests/pkg/macropriv
       phase-answer anything
     end
     assert-inspect got "77"
   end
   test "package-macro-private-runtime" do
     got = do
-      implement tests/pkg/macropriv
+      activate tests/pkg/macropriv
       inc-private 41
     end
     assert-inspect got "42"

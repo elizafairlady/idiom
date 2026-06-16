@@ -1,15 +1,15 @@
-protocol Describe do
+trait Describe do
   method describe x -> str "value:" x
 end
 
-implement Describe
-extend int with Describe do
+implement Describe on int do
   method describe n -> str "int:" n
 end
-extend string with Describe do
+implement Describe on string do
   method describe s -> str "string:" s
 end
+implement Describe on pair
 println (describe 7)
 println (describe "hi")
 println (describe (cons 1 2))
-println (7.describe)
+println 7.describe

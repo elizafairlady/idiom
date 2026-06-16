@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 defmacro twin-a stx do syntax-case stx do (_ e) -> %`(add %,e 1) end end
 defmacro mk-twin stx do syntax-case stx do
@@ -13,7 +13,7 @@ mk-twin twin-b
 suite do
   test "bare operator over provider operator shadows like any rebind" do
     got = do
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
       operator <+> precedence: 50 assoc: left fixity: infix -> sub
       3 <+> 4
     end
@@ -21,31 +21,31 @@ suite do
   end
   test "bare defmacro over provider macro shadows like any rebind" do
     got = do
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
       defmacro answer stx -> make-syntax-int stx 5
       answer x
     end
     assert-eq got 5
   end
   test "provider over bare operator collides naming the unit" do
-    assert-expand-error "operator <+> precedence: 50 assoc: left fixity: infix -> sub\nimplement tests/pkg/exporter\n3 <+> 4" "surface '<+>' from '<expand-check>' is already active in this context"
+    assert-expand-error "operator <+> precedence: 50 assoc: left fixity: infix -> sub\nactivate tests/pkg/exporter\n3 <+> 4" "surface '<+>' from '<expand-check>' is already active in this context"
   end
   test "provider over bare defmacro collides naming the unit" do
-    assert-expand-error "defmacro answer stx -> make-syntax-int stx 5\nimplement tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
+    assert-expand-error "defmacro answer stx -> make-syntax-int stx 5\nactivate tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
   end
   test "provider over registered macro collides naming the unit" do
-    assert-expand-error "defmacro mk stx do syntax-case stx do\n  (_ n) -> do\n    expander-register-macro (syntax-nth stx 2) (fn s -> make-syntax-int s 5)\n    %`(do end)\n  end\nend end\nmk answer\nimplement tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
+    assert-expand-error "defmacro mk stx do syntax-case stx do\n  (_ n) -> do\n    expander-register-macro (syntax-nth stx 2) (fn s -> make-syntax-int s 5)\n    %`(do end)\n  end\nend end\nmk answer\nactivate tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
   end
   test "provider over provider still collides naming the provider" do
-    assert-expand-error "implement tests/pkg/exporter\nimplement tests/pkg/exporter2\nanswer x" "from 'tests/pkg/exporter' is already active in this context"
+    assert-expand-error "activate tests/pkg/exporter\nactivate tests/pkg/exporter2\nanswer x" "from 'tests/pkg/exporter' is already active in this context"
   end
   test "registered macro expands identically to defmacro" do
-    assert-inspect (tuple (twin-a 20) (twin-b 20)) "{21 21}"
+    assert-inspect {(twin-a 20) (twin-b 20)} "{21 21}"
   end
   test "registered macro keeps definition-site add under caller shadow like defmacro" do
     got = do
       defn add a b -> :shadow
-      tuple (twin-a 1) (twin-b 1)
+      {(twin-a 1) (twin-b 1)}
     end
     assert-inspect got "{2 2}"
   end

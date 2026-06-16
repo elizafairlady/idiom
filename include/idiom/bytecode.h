@@ -22,11 +22,6 @@ typedef enum {
     IDM_OP_POP,
     IDM_OP_JUMP,
     IDM_OP_JUMP_IF_FALSE,
-    IDM_OP_ADD,
-    IDM_OP_SUB,
-    IDM_OP_MUL,
-    IDM_OP_EQ,
-    IDM_OP_LT,
     IDM_OP_PRIM_CALL,
     IDM_OP_SELF,
     IDM_OP_SPAWN,
@@ -50,11 +45,14 @@ typedef enum {
     IDM_OP_ENTER_NAMESPACE,
     IDM_OP_IMPORT_GLOBAL,
     IDM_OP_LEAVE_NAMESPACE,
-    IDM_OP_DEFINE_PROTOCOL,
-    IDM_OP_EXTEND_PROTOCOL,
+    IDM_OP_DEFINE_TRAIT,
+    IDM_OP_IMPLEMENT_TRAIT,
     IDM_OP_CALL_METHOD,
     IDM_OP_TAIL_CALL_METHOD,
-    IDM_OP_EXIT_SIGNAL
+    IDM_OP_EXIT_SIGNAL,
+    IDM_OP_SPAWN_LINK,
+    IDM_OP_SPAWN_MONITOR,
+    IDM_OP_TAIL_RECV
 } IdmOpcode;
 
 typedef struct {
@@ -96,6 +94,7 @@ typedef struct IdmBytecodeModule {
 void idm_bc_init(IdmBytecodeModule *module);
 void idm_bc_destroy(IdmBytecodeModule *module);
 bool idm_bc_add_const(IdmBytecodeModule *module, IdmValue value, uint32_t *out_index);
+bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError *err);
 bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t arity, uint32_t local_count, size_t entry, uint32_t *out_index);
 bool idm_bc_set_function_entry(IdmBytecodeModule *module, uint32_t function_index, size_t entry);
 bool idm_bc_note_span(IdmBytecodeModule *module, IdmSpan span);

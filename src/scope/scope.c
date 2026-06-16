@@ -149,7 +149,60 @@ void idm_binding_table_destroy(IdmBindingTable *table) {
     table->next_id = 1u;
 }
 
-bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id) {
+IdmArity idm_arity_unknown(void) {
+    IdmArity arity;
+    arity.kind = IDM_ARITY_UNKNOWN;
+    arity.min = 0;
+    arity.max = 0;
+    arity.mask = 0;
+    return arity;
+}
+
+IdmArity idm_arity_range(uint32_t min, uint32_t max) {
+    IdmArity arity;
+    arity.kind = IDM_ARITY_RANGE;
+    arity.min = min;
+    arity.max = max;
+    arity.mask = 0;
+    return arity;
+}
+
+IdmArity idm_arity_exact(uint32_t exact) {
+    IdmArity arity;
+    arity.kind = IDM_ARITY_SET;
+    arity.min = exact;
+    arity.max = exact;
+    arity.mask = exact < 64u ? (UINT64_C(1) << exact) : 0;
+    return arity;
+}
+
+bool idm_arity_add_exact(IdmArity *arity, uint32_t exact) {
+    if (!arity) return false;
+    if (arity->kind == IDM_ARITY_UNKNOWN) {
+        *arity = idm_arity_exact(exact);
+        return true;
+    }
+    if (arity->kind == IDM_ARITY_RANGE) {
+        if (exact < arity->min) arity->min = exact;
+        if (exact > arity->max) arity->max = exact;
+        return true;
+    }
+    if (exact < arity->min) arity->min = exact;
+    if (exact > arity->max) arity->max = exact;
+    if (exact < 64u) arity->mask |= UINT64_C(1) << exact;
+    else arity->kind = IDM_ARITY_RANGE;
+    return true;
+}
+
+bool idm_arity_accepts(const IdmArity *arity, uint32_t argc) {
+    if (!arity || arity->kind == IDM_ARITY_UNKNOWN) return false;
+    if (argc < arity->min || argc > arity->max) return false;
+    if (arity->kind == IDM_ARITY_RANGE) return true;
+    if (argc >= 64u) return false;
+    return (arity->mask & (UINT64_C(1) << argc)) != 0;
+}
+
+bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id) {
     if (table->count == table->cap) {
         size_t cap = table->cap ? table->cap * 2u : 16u;
         IdmBinding *items = realloc(table->items, cap * sizeof(*items));
@@ -170,9 +223,14 @@ bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, 
     binding->id = table->next_id++;
     binding->payload = payload;
     binding->frame_id = frame_id;
+    binding->arity = arity;
     table->count++;
     if (out_id) *out_id = binding->id;
     return true;
+}
+
+bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id) {
+    return idm_binding_table_add_with_arity(table, name, phase, space, kind, scopes, payload, frame_id, idm_arity_unknown(), out_id);
 }
 
 void idm_binding_table_truncate(IdmBindingTable *table, size_t count) {
@@ -219,6 +277,8 @@ const char *idm_binding_space_name(IdmBindingSpace space) {
         case IDM_BIND_SPACE_SHELL: return "shell";
         case IDM_BIND_SPACE_LABEL: return "label";
         case IDM_BIND_SPACE_PROTOCOL: return "protocol";
+        case IDM_BIND_SPACE_TRAIT: return "trait";
+        case IDM_BIND_SPACE_TYPE: return "type";
     }
     return "<bad-space>";
 }
@@ -235,6 +295,8 @@ const char *idm_binding_kind_name(IdmBindingKind kind) {
         case IDM_BIND_ARG: return "arg";
         case IDM_BIND_GLOBAL: return "global";
         case IDM_BIND_PROTOCOL: return "protocol";
+        case IDM_BIND_TRAIT: return "trait";
+        case IDM_BIND_TYPE: return "type";
         case IDM_BIND_METHOD: return "method";
     }
     return "<bad-kind>";

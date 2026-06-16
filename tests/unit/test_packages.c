@@ -46,18 +46,18 @@ static void test_surface_forms_are_kernel_sourced(void) {
 static void test_artifact_cache_relocation(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    check_value_written(&rt, "implement tests/pkg/macropriv\nphase-answer x\n", "77");
-    check_value_written(&rt, "implement tests/pkg/macropriv\ninc-private 41\n", "42");
+    check_value_written(&rt, "activate tests/pkg/macropriv\nphase-answer x\n", "77");
+    check_value_written(&rt, "activate tests/pkg/macropriv\ninc-private 41\n", "42");
     expect_expand_error_rt(&rt, "<cached-private-still-hidden>",
         "use tests/pkg/macropriv\n"
         "hidden 1\n",
         "unbound identifier 'hidden'");
-    check_value_written(&rt, "implement tests/pkg/exporter\n3 <+> 4\nanswer x\n", "99");
-    check_value_written(&rt, "implement tests/pkg/exporter\n3 <+> 4\n", "7");
+    check_value_written(&rt, "activate tests/pkg/exporter\n3 <+> 4\nanswer x\n", "99");
+    check_value_written(&rt, "activate tests/pkg/exporter\n3 <+> 4\n", "7");
     check_value_written(&rt,
-        "implement std/shell\n"
+        "activate std/shell\n"
         "x = do\n"
-        "  implement std/shell\n"
+        "  activate std/shell\n"
         "  1\n"
         "end\n"
         "add x 1\n",
@@ -200,7 +200,7 @@ static void test_stale_cache_runs_no_phase_init(void) {
     CHECK(idm_bc_emit_u32(phase, IDM_OP_PRIM_CALL, (uint32_t)IDM_PRIM_FILE_WRITE, NULL));
     CHECK(idm_bc_emit(phase, 2u, NULL));
     CHECK(idm_bc_emit_op(phase, IDM_OP_RETURN, NULL));
-    CHECK(idm_phase_env_add_module(art.phase_env, phase, phase_fn));
+    CHECK(idm_phase_env_add_module(art.phase_env, phase, phase_fn, &err));
 
     IdmBuffer blob;
     idm_buf_init(&blob);

@@ -1,5 +1,10 @@
 #include "test_util.h"
 
+static bool emit_prim_call(IdmBytecodeModule *module, IdmPrimitive prim, uint32_t argc) {
+    return idm_bc_emit_u32(module, IDM_OP_PRIM_CALL, (uint32_t)prim, NULL) &&
+           idm_bc_emit(module, argc, NULL);
+}
+
 static void test_values(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
@@ -25,6 +30,25 @@ static void test_values(void) {
     CHECK(idm_heap_object_count(&rt.heap) == 2u);
     IdmValue car = idm_car(list, &err);
     CHECK(car.tag == IDM_VAL_INT && car.as.i == 1);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_gc_deep_pair_chain(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmValue list = idm_empty_list();
+    for (size_t i = 0; i < 100000u; i++) {
+        list = idm_cons(&rt, idm_int((int64_t)i), list, &err);
+        CHECK(!err.present);
+    }
+    IdmValue roots[1] = { list };
+    idm_heap_collect(&rt.heap, roots, 1u);
+    CHECK(idm_heap_object_count(&rt.heap) == 100000u);
+    idm_heap_collect(&rt.heap, NULL, 0u);
+    CHECK(idm_heap_object_count(&rt.heap) == 0u);
     idm_error_clear(&err);
     idm_runtime_destroy(&rt);
 }
@@ -106,7 +130,7 @@ static void test_vm_call_and_locals(void) {
     CHECK(idm_bc_set_function_entry(&module, add2, module.code_count));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 1, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_ADD, NULL));
+    CHECK(emit_prim_call(&module, IDM_PRIM_ADD, 2));
     CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
     CHECK(idm_bc_set_function_entry(&module, main_fn, module.code_count));
     uint32_t c20 = 0;
@@ -122,7 +146,7 @@ static void test_vm_call_and_locals(void) {
     CHECK(idm_bc_emit_u32(&module, IDM_OP_STORE_LOCAL, 0, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_LOCAL, 0, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c1, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_SUB, NULL));
+    CHECK(emit_prim_call(&module, IDM_PRIM_SUB, 2));
     CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -193,7 +217,7 @@ static void test_vm_guard_error_is_clause_failure(void) {
     CHECK(idm_bc_set_function_entry(&module, guard, module.code_count));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c0, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_LT, NULL));
+    CHECK(emit_prim_call(&module, IDM_PRIM_LT, 2));
     CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
     CHECK(idm_bc_set_function_entry(&module, guarded, module.code_count));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c1, NULL));
@@ -562,7 +586,7 @@ static void test_source_expansion_capabilities(void) {
     idm_error_clear(&err);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<expand-test>", "implement std/shell\necho hello\n", &core, &err));
+    CHECK(idm_expand_string(&rt, "<expand-test>", "activate std/shell\necho hello\n", &core, &err));
     CHECK(!err.present);
     CHECK(core != NULL);
     {
@@ -904,8 +928,47 @@ static void test_serialize_depth_guard(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_value_copy(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+
+    IdmValue s = idm_string(&rt, "hi", &err);
+    IdmValue lst = idm_cons(&rt, idm_int(1), idm_cons(&rt, idm_int(2), idm_empty_list(), &err), &err);
+    IdmValue items[2] = { s, lst };
+    IdmValue orig = idm_tuple(&rt, items, 2u, &err);
+    CHECK(!err.present);
+
+    IdmValue copy = idm_value_copy(&rt, &rt.heap, orig, &err);
+    CHECK(!err.present);
+    CHECK(idm_value_equal(orig, copy));
+    CHECK(orig.as.obj != copy.as.obj);
+    IdmValue cs = idm_sequence_item(copy, 0u, &err);
+    IdmValue os = idm_sequence_item(orig, 0u, &err);
+    CHECK(cs.as.obj != os.as.obj);
+    CHECK(idm_value_equal(cs, os));
+
+    IdmValue k = idm_cell(&rt, idm_nil(), &err);
+    IdmValue titems[2] = { idm_int(1), k };
+    IdmValue t = idm_tuple(&rt, titems, 2u, &err);
+    CHECK(idm_cell_set(k, t, &err));
+    IdmValue tcopy = idm_value_copy(&rt, &rt.heap, t, &err);
+    CHECK(!err.present);
+    CHECK(tcopy.as.obj != t.as.obj);
+    IdmValue kcopy = idm_sequence_item(tcopy, 1u, &err);
+    CHECK(kcopy.tag == IDM_VAL_CELL);
+    CHECK(kcopy.as.obj != k.as.obj);
+    IdmValue inner = idm_cell_get(kcopy, &err);
+    CHECK(inner.as.obj == tcopy.as.obj);
+
+    idm_runtime_destroy(&rt);
+}
+
 void run_substrate_suite(void) {
     test_values();
+    test_value_copy();
+    test_gc_deep_pair_chain();
     test_reader_basic();
     test_reader_shell_protocols();
     test_reader_quote();

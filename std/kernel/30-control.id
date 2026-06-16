@@ -21,8 +21,8 @@ export defrules match do
 end
 
 export defrules error do
-  (_ value) -> %`(raise (tuple :error %,value))
-  (_ first rest ...) -> %`(raise (tuple :error (tuple %,first %,@rest)))
+  (_ value) -> %`(raise (make-error %,value))
+  (_ first rest ...) -> %`(raise (make-error {%,first %,@rest}))
 end
 
 export defrules case do
@@ -31,6 +31,10 @@ end
 
 export defrules unless do
   (_ condition body) -> %`(cond %,condition :nil %,body)
+end
+
+export defrules not? do
+  (_ value) -> %`(cond (ok? %,value) :false :true)
 end
 
 export defrules and do

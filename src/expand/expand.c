@@ -1,8 +1,13 @@
 #include "internal.h"
 
+#include "idiom/regex.h"
+
+#include <ctype.h>
 #include <pthread.h>
+#include <string.h>
 
 static IdmPrimitive primitive_from_binding(const IdmBinding *binding);
+static IdmCore *maybe_zero_arity_call(IdmCore *callee, const IdmArity *arity, bool callee_position, IdmSpan span, IdmError *err);
 static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, bool callee_position, IdmError *err);
 static IdmCore *expand_word_ref(ExpandContext *ctx, const IdmSyntax *word, IdmError *err);
 static IdmCore *expand_word_callee(ExpandContext *ctx, const IdmSyntax *word, IdmError *err);
@@ -11,9 +16,13 @@ static IdmCore *expand_raise_parts(ExpandContext *ctx, IdmSyntax *const *items, 
 static const IdmSyntax *try_section_head(const IdmSyntax *stmt);
 static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, IdmError *err);
 static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
+static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static bool syn_is_dot(const IdmSyntax *s);
 static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word);
-static IdmCore *expand_method_surface_call(ExpandContext *ctx, const MethodSurfaceDef *method, IdmCore *receiver, IdmSyntax *const *items, size_t arg_start, size_t end, IdmError *err);
+static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const MethodSurfaceDef *method, IdmCore *receiver, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err);
+static IdmCore *parse_postfix_expr(ExpandContext *ctx, IdmSyntax *const *items, size_t *pos, size_t end, bool stop_at_operator, IdmError *err);
+static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size_t *pos, size_t end, bool stop_at_operator, IdmCore *receiver, IdmError *err);
+static bool arg_parse_at_stop(ExpandContext *ctx, IdmSyntax *const *items, size_t pos, size_t end, bool stop_at_operator);
 static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static bool enforest_at_end_or_operator(EnforestParser *parser);
 static IdmCore *parse_enforest_primary(EnforestParser *parser);
@@ -22,13 +31,17 @@ static IdmCore *operator_callee(ExpandContext *ctx, const IdmOperatorDef *op, co
 static IdmCore *make_operator_app(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *left, IdmCore *right, IdmSpan span, IdmError *err);
 static IdmCore *make_operator_unary(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *operand, IdmSpan span, IdmError *err);
 static IdmCore *parse_enforest_expr(EnforestParser *parser, uint8_t min_prec);
-static IdmCore *expand_protocol_expr(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
-static IdmCore *expand_protocol_body(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
-static IdmCore *expand_protocol_group(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
-static IdmCore *expand_protocol_expression(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
-static IdmCore *expand_protocol_syntax_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+static IdmCore *expand_form_expr(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+static IdmCore *expand_form_body(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+static IdmCore *expand_form_group(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+static IdmCore *expand_form_expression(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+static IdmCore *expand_form_syntax_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+static IdmCore *expand_form_regex(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 static IdmCore *expand_program(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 static IdmCore *expand_container(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+static bool word_has_subtraction_shape(const char *text);
+static bool syntax_is_literal_value(const IdmSyntax *syn);
+static bool syntax_is_negative_number(const IdmSyntax *syn);
 
 static IdmPrimitive primitive_from_binding(const IdmBinding *binding) {
     return (IdmPrimitive)binding->payload;
@@ -38,10 +51,94 @@ static bool binding_phase_visible(const IdmBinding *binding, int phase) {
     return binding->phase == phase || binding->phase == IDM_PHASE_ANY;
 }
 
+static IdmCore *maybe_zero_arity_call(IdmCore *callee, const IdmArity *arity, bool callee_position, IdmSpan span, IdmError *err) {
+    if (!callee) {
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    if (callee_position || !idm_arity_accepts(arity, 0u)) return callee;
+    IdmCore *app = idm_core_app(callee, span);
+    if (!app) {
+        idm_core_free(callee);
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    return app;
+}
+
+static bool word_has_subtraction_shape(const char *text) {
+    if (!text) return false;
+    for (size_t i = 1; text[i] != '\0' && text[i + 1u] != '\0'; i++) {
+        if (text[i] != '-') continue;
+        unsigned char before = (unsigned char)text[i - 1u];
+        unsigned char after = (unsigned char)text[i + 1u];
+        bool left = isalnum(before) || before == '_' || before == '?' || before == '!';
+        bool right = isdigit(after);
+        if (left && right) return true;
+    }
+    return false;
+}
+
+static bool word_is_subtraction_of_bindings(ExpandContext *ctx, const IdmSyntax *word) {
+    const char *t = word->as.text;
+    if (!t || t[0] == '-') return false;
+    const IdmScopeSet *scopes = idm_syn_scope_set(word, 0);
+    if (!scopes) scopes = &ctx->empty_scopes;
+    size_t start = 0, segs = 0, idents = 0;
+    bool saw_dash = false;
+    for (size_t i = 0;; i++) {
+        if (t[i] != '-' && t[i] != '\0') continue;
+        size_t len = i - start;
+        if (len == 0) return false;
+        bool all_digits = true;
+        for (size_t j = start; j < i; j++) {
+            if (!isdigit((unsigned char)t[j])) { all_digits = false; break; }
+        }
+        if (!all_digits) {
+            char *seg = idm_strndup(t + start, len);
+            if (!seg) return false;
+            bool bound = idm_binding_resolve(&ctx->bindings, seg, ctx->phase, IDM_BIND_SPACE_DEFAULT, scopes, NULL) == IDM_RESOLVE_OK;
+            free(seg);
+            if (!bound) return false;
+            idents++;
+        }
+        segs++;
+        if (t[i] == '\0') break;
+        saw_dash = true;
+        start = i + 1u;
+    }
+    return saw_dash && segs >= 2 && idents >= 1;
+}
+
+static bool syntax_is_literal_value(const IdmSyntax *syn) {
+    if (!syn) return false;
+    switch (syn->kind) {
+        case IDM_SYN_NIL:
+        case IDM_SYN_ATOM:
+        case IDM_SYN_INT:
+        case IDM_SYN_FLOAT:
+        case IDM_SYN_STRING:
+        case IDM_SYN_VECTOR:
+        case IDM_SYN_TUPLE:
+        case IDM_SYN_DICT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool syntax_is_negative_number(const IdmSyntax *syn) {
+    if (!syn) return false;
+    return (syn->kind == IDM_SYN_INT && syn->as.integer < 0) || (syn->kind == IDM_SYN_FLOAT && syn->as.real < 0.0);
+}
+
 static void note_unbound_context(ExpandContext *ctx, const IdmSyntax *word, IdmError *err) {
     if (!err || !err->present) return;
     for (size_t i = 0; i < word->origins.count; i++) {
         idm_error_note(err, "in expansion of '%s'", word->origins.items[i]);
+    }
+    if (word_has_subtraction_shape(word->as.text) || word_is_subtraction_of_bindings(ctx, word)) {
+        idm_error_note(err, "identifier '%s' was read as one word; use spaces around '-' for subtraction", word->as.text);
     }
     int other = ctx->phase == 0 ? 1 : 0;
     const IdmScopeSet *scopes = idm_syn_scope_set(word, 0);
@@ -66,36 +163,45 @@ static void note_unbound_context(ExpandContext *ctx, const IdmSyntax *word, IdmE
 
 static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, bool callee_position, IdmError *err) {
     uint32_t cap = 0;
-    if (capture_lookup_existing(ctx->captures, ctx->capture_count, word, &cap)) return idm_core_capture_ref(cap, word->span);
+    const IdmArity *capture_arity = NULL;
+    if (capture_lookup_existing(ctx->captures, ctx->capture_count, word, &cap, &capture_arity)) {
+        IdmCore *ref = idm_core_capture_ref(cap, word->span);
+        return maybe_zero_arity_call(ref, capture_arity, callee_position, word->span, err);
+    }
     IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
     const IdmBinding *binding = resolve_default(ctx, word, &status);
     if (status == IDM_RESOLVE_OK) {
         if (binding->kind == IDM_BIND_LOCAL) {
-            if (binding->frame_id == ctx->frame) return idm_core_local_ref(binding->payload, word->span);
-            if (materialize_capture(ctx, word, binding, &cap)) return idm_core_capture_ref(cap, word->span);
+            if (binding->frame_id == ctx->frame) {
+                IdmCore *ref = idm_core_local_ref(binding->payload, word->span);
+                return maybe_zero_arity_call(ref, &binding->arity, callee_position, word->span, err);
+            }
+            if (materialize_capture(ctx, word, binding, &cap)) {
+                IdmCore *ref = idm_core_capture_ref(cap, word->span);
+                return maybe_zero_arity_call(ref, &binding->arity, callee_position, word->span, err);
+            }
             return (IdmCore *)(uintptr_t)idm_error_oom(err, word->span);
         }
         if (binding->kind == IDM_BIND_ARG) {
-            if (binding->frame_id == ctx->frame) return idm_core_arg_ref(binding->payload, word->span);
-            if (materialize_capture(ctx, word, binding, &cap)) return idm_core_capture_ref(cap, word->span);
+            if (binding->frame_id == ctx->frame) {
+                IdmCore *ref = idm_core_arg_ref(binding->payload, word->span);
+                return maybe_zero_arity_call(ref, &binding->arity, callee_position, word->span, err);
+            }
+            if (materialize_capture(ctx, word, binding, &cap)) {
+                IdmCore *ref = idm_core_capture_ref(cap, word->span);
+                return maybe_zero_arity_call(ref, &binding->arity, callee_position, word->span, err);
+            }
             return (IdmCore *)(uintptr_t)idm_error_oom(err, word->span);
         }
-        if (binding->kind == IDM_BIND_GLOBAL) return idm_core_global_ref(binding->payload, word->span);
+        if (binding->kind == IDM_BIND_GLOBAL) {
+            IdmCore *ref = idm_core_global_ref(binding->payload, word->span);
+            return maybe_zero_arity_call(ref, &binding->arity, callee_position, word->span, err);
+        }
         if (binding->kind == IDM_BIND_METHOD) return expand_error(err, word->span, "method '%s' requires a receiver", word->as.text);
         if (binding->kind == IDM_BIND_VALUE) {
             IdmPrimitive prim = primitive_from_binding(binding);
-            const IdmPrimitiveInfo *info = idm_primitive_info(prim);
-            if (!callee_position && info && info->min_arity == 0) {
-                IdmCore *callee = idm_core_primitive(prim, word->span);
-                if (!callee) return (IdmCore *)(uintptr_t)idm_error_oom(err, word->span);
-                IdmCore *app = idm_core_app(callee, word->span);
-                if (!app) {
-                    idm_core_free(callee);
-                    return (IdmCore *)(uintptr_t)idm_error_oom(err, word->span);
-                }
-                return app;
-            }
-            return idm_core_primitive(prim, word->span);
+            IdmCore *ref = idm_core_primitive(prim, word->span);
+            return maybe_zero_arity_call(ref, &binding->arity, callee_position, word->span, err);
         }
     }
     if (status == IDM_RESOLVE_AMBIGUOUS) {
@@ -127,7 +233,7 @@ static IdmCore *expand_word_callee(ExpandContext *ctx, const IdmSyntax *word, Id
 
 static bool head_is_bound(ExpandContext *ctx, const IdmSyntax *word) {
     uint32_t cap = 0;
-    if (capture_lookup_existing(ctx->captures, ctx->capture_count, word, &cap)) return true;
+    if (capture_lookup_existing(ctx->captures, ctx->capture_count, word, &cap, NULL)) return true;
     IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
     (void)resolve_default(ctx, word, &status);
     return status == IDM_RESOLVE_OK;
@@ -143,7 +249,7 @@ static IdmCore *expand_raise_parts(ExpandContext *ctx, IdmSyntax *const *items, 
 }
 
 static const IdmSyntax *try_section_head(const IdmSyntax *stmt) {
-    if (!syn_is_protocol(stmt, "%-expr") || stmt->as.seq.count < 2) return NULL;
+    if (!syn_is_form(stmt, "%-expr") || stmt->as.seq.count < 2) return NULL;
     const IdmSyntax *head = stmt->as.seq.items[1];
     return head && head->kind == IDM_SYN_WORD ? head : NULL;
 }
@@ -173,7 +279,7 @@ static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, Id
 }
 
 static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
-    if (end - start != 2u || !syn_is_protocol(items[start + 1u], "%-body")) return expand_error(err, items[start]->span, "try requires a do/end body");
+    if (end - start != 2u || !syn_is_form(items[start + 1u], "%-body")) return expand_error(err, items[start]->span, "try requires a do/end body");
     const IdmSyntax *body_syn = items[start + 1u];
     IdmSyntax *const *stmts = body_syn->as.seq.items;
     size_t scount = body_syn->as.seq.count;
@@ -214,6 +320,69 @@ static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, si
         guarded = ensure;
     }
     return guarded;
+}
+
+static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
+    if (start + 2u >= end) return expand_error(err, items[start]->span, "implements? expects 'implements? TRAIT value'");
+    if (items[start + 1u]->kind != IDM_SYN_WORD) return expand_error(err, items[start + 1u]->span, "implements? expects a trait name");
+
+    size_t trait_end = end;
+    IdmSyntax *trait_name = make_qualified_word(items, start + 1u, &trait_end, err);
+    if (!trait_name) return NULL;
+    if (trait_end >= end) {
+        IdmSpan span = trait_name->span;
+        idm_syn_free(trait_name);
+        return expand_error(err, span, "implements? expects a value after the trait name");
+    }
+
+    IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
+    TraitDef *trait = resolve_trait_def(ctx, trait_name, &status);
+    if (status == IDM_RESOLVE_AMBIGUOUS) {
+        IdmSpan span = trait_name->span;
+        const char *name = trait_name->as.text;
+        expand_error(err, span, "ambiguous trait '%s'", name);
+        idm_syn_free(trait_name);
+        return NULL;
+    }
+    if (!trait) {
+        IdmSpan span = trait_name->span;
+        const char *name = trait_name->as.text;
+        expand_error(err, span, "unbound trait '%s'", name);
+        idm_syn_free(trait_name);
+        return NULL;
+    }
+
+    IdmCore *value = expand_parts(ctx, items, trait_end, end, err);
+    if (!value) {
+        idm_syn_free(trait_name);
+        return NULL;
+    }
+    IdmCore *identity = idm_core_literal(idm_atom(ctx->rt, trait->name), trait_name->span);
+    idm_syn_free(trait_name);
+    if (!identity) {
+        idm_core_free(value);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+    }
+    IdmCore *callee = idm_core_primitive(IDM_PRIM_TRAIT_IMPLEMENTED_P, items[start]->span);
+    IdmCore *app = callee ? idm_core_app(callee, items[start]->span) : NULL;
+    if (!app) {
+        idm_core_free(value);
+        idm_core_free(identity);
+        idm_core_free(callee);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+    }
+    if (!idm_core_app_add_arg(app, value)) {
+        idm_core_free(value);
+        idm_core_free(identity);
+        idm_core_free(app);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+    }
+    if (!idm_core_app_add_arg(app, identity)) {
+        idm_core_free(identity);
+        idm_core_free(app);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+    }
+    return app;
 }
 
 static bool syn_is_dot(const IdmSyntax *s) {
@@ -259,32 +428,98 @@ static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word) {
     return resolve_method_surface(ctx, word, &method_status) != NULL || method_status == IDM_RESOLVE_AMBIGUOUS;
 }
 
-static IdmCore *expand_method_surface_call(ExpandContext *ctx, const MethodSurfaceDef *method, IdmCore *receiver, IdmSyntax *const *items, size_t arg_start, size_t end, IdmError *err) {
-    size_t argc = (receiver ? 1u : 0u) + (end - arg_start);
+static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const MethodSurfaceDef *method, IdmCore *receiver, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err) {
+    size_t argc = (receiver ? 1u : 0u) + arg_count;
     if (argc != method->arity) {
         idm_core_free(receiver);
-        return expand_error(err, (arg_start < end ? items[arg_start]->span : idm_span_unknown(NULL)), "method '%s.%s' expects %u argument(s), got %zu", method->protocol, method->name, method->arity, argc);
+        for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
+        return expand_error(err, span, "method '%s.%s' expects %u argument(s), got %zu", method->trait, method->name, method->arity, argc);
     }
-    IdmCore *call = idm_core_method_call(idm_atom(ctx->rt, method->protocol), idm_atom(ctx->rt, method->name), receiver ? receiver->span : (arg_start < end ? items[arg_start]->span : idm_span_unknown(NULL)));
+    IdmCore *call = idm_core_method_call(idm_atom(ctx->rt, method->trait), idm_atom(ctx->rt, method->name), receiver ? receiver->span : span);
     if (!call) {
         idm_core_free(receiver);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, arg_start < end ? items[arg_start]->span : idm_span_unknown(NULL));
+        for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     if (receiver && !idm_core_method_call_add_arg(call, receiver)) {
         idm_core_free(receiver);
+        for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
         idm_core_free(call);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, receiver->span);
     }
-    for (size_t i = arg_start; i < end; i++) {
-        IdmCore *arg = expand_syntax(ctx, items[i], err);
-        if (!arg || !idm_core_method_call_add_arg(call, arg)) {
-            idm_core_free(arg);
+    for (size_t i = 0; i < arg_count; i++) {
+        if (!idm_core_method_call_add_arg(call, args[i])) {
+            for (size_t j = i; j < arg_count; j++) idm_core_free(args[j]);
             idm_core_free(call);
-            if (!err->present) idm_error_oom(err, items[i]->span);
+            if (!err->present) idm_error_oom(err, span);
             return NULL;
         }
+        args[i] = NULL;
     }
     return call;
+}
+
+static bool arg_parse_at_stop(ExpandContext *ctx, IdmSyntax *const *items, size_t pos, size_t end, bool stop_at_operator) {
+    return pos >= end || (stop_at_operator && op_lookup(ctx, items[pos], false) != NULL);
+}
+
+static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size_t *pos, size_t end, bool stop_at_operator, IdmCore *receiver, IdmError *err) {
+    while (!arg_parse_at_stop(ctx, items, *pos, end, stop_at_operator) && syn_is_dot(items[*pos])) {
+        size_t dot = *pos;
+        if (dot + 1u >= end || items[dot + 1u]->kind != IDM_SYN_WORD) {
+            idm_core_free(receiver);
+            return expand_error(err, items[dot]->span, "dot dispatch expects a method name");
+        }
+        IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
+        const MethodSurfaceDef *method = resolve_method_surface(ctx, items[dot + 1u], &method_status);
+        if (method_status == IDM_RESOLVE_AMBIGUOUS) {
+            idm_core_free(receiver);
+            return expand_error(err, items[dot + 1u]->span, "ambiguous method '%s'", items[dot + 1u]->as.text);
+        }
+        if (!method) {
+            idm_core_free(receiver);
+            return expand_error(err, items[dot + 1u]->span, "unbound method '%s'", items[dot + 1u]->as.text);
+        }
+        if (method->arity == 0) {
+            idm_core_free(receiver);
+            return expand_error(err, items[dot + 1u]->span, "method '%s.%s' cannot be used with dot dispatch because it takes no receiver", method->trait, method->name);
+        }
+        size_t extra_count = (size_t)method->arity - 1u;
+        IdmCore **args = extra_count ? calloc(extra_count, sizeof(*args)) : NULL;
+        if (extra_count && !args) {
+            idm_core_free(receiver);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, items[dot + 1u]->span);
+        }
+        *pos = dot + 2u;
+        for (size_t i = 0; i < extra_count; i++) {
+            if (arg_parse_at_stop(ctx, items, *pos, end, stop_at_operator)) {
+                for (size_t j = 0; j < i; j++) idm_core_free(args[j]);
+                free(args);
+                idm_core_free(receiver);
+                return expand_error(err, items[dot + 1u]->span, "method '%s.%s' expects %u argument(s), got %zu", method->trait, method->name, method->arity, i + 1u);
+            }
+            args[i] = parse_postfix_expr(ctx, items, pos, end, stop_at_operator, err);
+            if (!args[i]) {
+                for (size_t j = 0; j < i; j++) idm_core_free(args[j]);
+                free(args);
+                idm_core_free(receiver);
+                return NULL;
+            }
+        }
+        receiver = expand_method_surface_call_cores(ctx, method, receiver, args, extra_count, items[dot + 1u]->span, err);
+        free(args);
+        if (!receiver) return NULL;
+    }
+    return receiver;
+}
+
+static IdmCore *parse_postfix_expr(ExpandContext *ctx, IdmSyntax *const *items, size_t *pos, size_t end, bool stop_at_operator, IdmError *err) {
+    if (arg_parse_at_stop(ctx, items, *pos, end, stop_at_operator)) return expand_error(err, idm_span_unknown(NULL), "expected expression");
+    IdmSyntax *head = items[(*pos)++];
+    if (syn_is_dot(head)) return expand_error(err, head->span, "dot dispatch requires a receiver");
+    IdmCore *core = expand_syntax(ctx, head, err);
+    if (!core) return NULL;
+    return parse_dot_tail(ctx, items, pos, end, stop_at_operator, core, err);
 }
 
 IdmCore *expand_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
@@ -330,18 +565,7 @@ IdmCore *expand_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start,
     for (size_t i = 0; i < syn_count; i++) idm_syn_free(synthetic[i]);
     free(synthetic);
     free(collapsed);
-    if (!saw_dot) return expand_parts_inner(ctx, items, start, end, err);
-
-    for (size_t i = start + 1u; i + 1u < end; i++) {
-        if (!syn_is_dot(items[i]) || items[i + 1u]->kind != IDM_SYN_WORD) continue;
-        IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
-        const MethodSurfaceDef *method = resolve_method_surface(ctx, items[i + 1u], &method_status);
-        if (method_status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, items[i + 1u]->span, "ambiguous method '%s'", items[i + 1u]->as.text);
-        if (!method) continue;
-        IdmCore *receiver = expand_parts_inner(ctx, items, start, i, err);
-        if (!receiver) return NULL;
-        return expand_method_surface_call(ctx, method, receiver, items, i + 2u, end, err);
-    }
+    (void)saw_dot;
     return expand_parts_inner(ctx, items, start, end, err);
 }
 
@@ -369,17 +593,39 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
         IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
         const MethodSurfaceDef *method = resolve_method_surface(ctx, items[start], &method_status);
         if (method_status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, items[start]->span, "ambiguous method '%s'", items[start]->as.text);
-        if (method) return expand_method_surface_call(ctx, method, NULL, items, start + 1u, end, err);
+        if (method) {
+            IdmCore **args = len > 1u ? calloc(len - 1u, sizeof(*args)) : NULL;
+            if (len > 1u && !args) return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+            size_t pos = start + 1u;
+            size_t arg_count = 0;
+            while (pos < end) {
+                args[arg_count] = parse_postfix_expr(ctx, items, &pos, end, false, err);
+                if (!args[arg_count]) {
+                    for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
+                    free(args);
+                    return NULL;
+                }
+                arg_count++;
+            }
+            IdmCore *call = expand_method_surface_call_cores(ctx, method, NULL, args, arg_count, items[start]->span, err);
+            free(args);
+            return call;
+        }
     }
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "fn") == 0) return expand_fn_parts(ctx, items, start, end, err);
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "receive") == 0) return expand_receive_parts(ctx, items, start, end, err);
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "raise") == 0) return expand_raise_parts(ctx, items, start, end, err);
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "try") == 0) return expand_try_parts(ctx, items, start, end, err);
+    if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "implements?") == 0) return expand_implements_parts(ctx, items, start, end, err);
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "cond") == 0) {
-        if (len != 4) return expand_error(err, items[start]->span, "cond expects exactly three arguments: condition, then, else");
+        if (len != 3 && len != 4) return expand_error(err, items[start]->span, "cond expects two or three arguments: condition, then[, else]");
         IdmCore *condition = expand_syntax(ctx, items[start + 1u], err);
         IdmCore *then_branch = condition ? expand_syntax(ctx, items[start + 2u], err) : NULL;
-        IdmCore *else_branch = then_branch ? expand_syntax(ctx, items[start + 3u], err) : NULL;
+        IdmCore *else_branch = NULL;
+        if (then_branch) {
+            else_branch = len == 4 ? expand_syntax(ctx, items[start + 3u], err)
+                                   : idm_core_literal(idm_nil(), items[start]->span);
+        }
         if (!condition || !then_branch || !else_branch) {
             idm_core_free(condition);
             idm_core_free(then_branch);
@@ -401,8 +647,6 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
             return expand_error(err, items[start]->span, "'%s' (records/method dispatch) is not implemented", w);
         if (strcmp(w, "record") == 0)
             return expand_error(err, items[start]->span, "record expects 'record NAME do field ... end'");
-        if (strcmp(w, "extend") == 0)
-            return expand_error(err, items[start]->span, "extend expects 'extend TYPE with PROTOCOL do ... end'");
     }
     if (items[start]->kind == IDM_SYN_WORD && !head_is_bound(ctx, items[start]) &&
         !op_lookup(ctx, items[start], true) && !op_lookup(ctx, items[start], false)) {
@@ -435,6 +679,32 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
         return expr;
     }
 
+    if (start + 1u < end && syn_is_dot(items[start + 1u])) {
+        size_t pos = start;
+        IdmCore *expr = parse_postfix_expr(ctx, items, &pos, end, false, err);
+        if (!expr) return NULL;
+        if (pos != end) {
+            idm_core_free(expr);
+            return expand_error(err, items[pos]->span, "unexpected trailing syntax after expression");
+        }
+        return expr;
+    }
+
+    bool literal_only_tail = true;
+    for (size_t i = start + 1u; i < end; i++) {
+        if (items[i]->kind == IDM_SYN_WORD || syn_is_dot(items[i])) {
+            literal_only_tail = false;
+            break;
+        }
+    }
+    if (syntax_is_literal_value(items[start]) && literal_only_tail) {
+        expand_error(err, items[start]->span, "literal cannot be used as a function");
+        if (start + 1u < end && syntax_is_negative_number(items[start + 1u])) {
+            idm_error_note(err, "whitespace before a negative literal makes this an application; use spaces around '-' for subtraction");
+        }
+        return NULL;
+    }
+
     IdmCore *callee = items[start]->kind == IDM_SYN_WORD ? expand_word_callee(ctx, items[start], err) : expand_syntax(ctx, items[start], err);
     if (!callee) return NULL;
     if (err && err->present) return NULL;
@@ -444,12 +714,13 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
         idm_error_oom(err, items[start]->span);
         return NULL;
     }
-    for (size_t i = start + 1u; i < end; i++) {
-        IdmCore *arg = expand_syntax(ctx, items[i], err);
+    size_t pos = start + 1u;
+    while (pos < end) {
+        IdmCore *arg = parse_postfix_expr(ctx, items, &pos, end, false, err);
         if (!arg || !idm_core_app_add_arg(app, arg)) {
             idm_core_free(arg);
             idm_core_free(app);
-            if (!err->present) idm_error_oom(err, items[i]->span);
+            if (!err->present) idm_error_oom(err, pos < end ? items[pos]->span : items[start]->span);
             return NULL;
         }
     }
@@ -479,7 +750,7 @@ static IdmCore *parse_enforest_primary(EnforestParser *parser) {
         return expand_fn_parts(parser->ctx, parser->items, start, parser->end, parser->err);
     }
 
-    if (head->kind == IDM_SYN_WORD && parser->pos < parser->end && !op_lookup(parser->ctx, parser->items[parser->pos], false)) {
+    if (head->kind == IDM_SYN_WORD && parser->pos < parser->end && !syn_is_dot(parser->items[parser->pos]) && !op_lookup(parser->ctx, parser->items[parser->pos], false)) {
         IdmCore *callee = expand_word_callee(parser->ctx, head, parser->err);
         if (!callee || parser->err->present) return NULL;
         IdmCore *app = idm_core_app(callee, head->span);
@@ -489,7 +760,7 @@ static IdmCore *parse_enforest_primary(EnforestParser *parser) {
             return NULL;
         }
         while (!enforest_at_end_or_operator(parser)) {
-            IdmCore *arg = expand_syntax(parser->ctx, parser->items[parser->pos++], parser->err);
+            IdmCore *arg = parse_postfix_expr(parser->ctx, parser->items, &parser->pos, parser->end, true, parser->err);
             if (!arg || !idm_core_app_add_arg(app, arg)) {
                 idm_core_free(arg);
                 idm_core_free(app);
@@ -497,10 +768,12 @@ static IdmCore *parse_enforest_primary(EnforestParser *parser) {
                 return NULL;
             }
         }
-        return app;
+        return parse_dot_tail(parser->ctx, parser->items, &parser->pos, parser->end, true, app, parser->err);
     }
 
-    return expand_syntax(parser->ctx, head, parser->err);
+    IdmCore *core = expand_syntax(parser->ctx, head, parser->err);
+    if (!core) return NULL;
+    return parse_dot_tail(parser->ctx, parser->items, &parser->pos, parser->end, true, core, parser->err);
 }
 
 static bool core_app_prepend_arg(IdmCore *app, IdmCore *arg) {
@@ -603,7 +876,7 @@ static IdmCore *parse_enforest_expr(EnforestParser *parser, uint8_t min_prec) {
     return left;
 }
 
-static IdmCore *expand_protocol_expr(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+static IdmCore *expand_form_expr(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count < 2) return expand_error(err, syn->span, "empty %%-expr");
     if (syn->as.seq.items[1]->kind == IDM_SYN_WORD) {
         uint32_t payload = 0;
@@ -613,7 +886,7 @@ static IdmCore *expand_protocol_expr(ExpandContext *ctx, const IdmSyntax *syn, I
     return expand_parts(ctx, syn->as.seq.items, 1, syn->as.seq.count, err);
 }
 
-static IdmCore *expand_protocol_body(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+static IdmCore *expand_form_body(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     SurfaceCheckpoint checkpoint;
     surface_checkpoint(ctx, &checkpoint);
     IdmCore *core = expand_body_items(ctx, syn->as.seq.items, 1, syn->as.seq.count, true, err);
@@ -621,7 +894,7 @@ static IdmCore *expand_protocol_body(ExpandContext *ctx, const IdmSyntax *syn, I
     return core;
 }
 
-static IdmCore *expand_protocol_group(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+static IdmCore *expand_form_group(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count != 2) return expand_error(err, syn->span, "%-group expects one child");
     bool saved = ctx->value_context;
     ctx->value_context = true;
@@ -630,7 +903,7 @@ static IdmCore *expand_protocol_group(ExpandContext *ctx, const IdmSyntax *syn, 
     return core;
 }
 
-static IdmCore *expand_protocol_expression(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+static IdmCore *expand_form_expression(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count != 2) return expand_error(err, syn->span, "%-expression expects one child");
     const IdmSyntax *child = syn->as.seq.items[1];
     if (child->kind == IDM_SYN_WORD && child->as.text[0] == '&' && child->as.text[1] != '\0') {
@@ -648,15 +921,33 @@ static IdmCore *expand_protocol_expression(ExpandContext *ctx, const IdmSyntax *
     return expand_syntax(ctx, child, err);
 }
 
-static IdmCore *expand_protocol_syntax_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+static IdmCore *expand_form_syntax_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count != 2) return expand_error(err, syn->span, "%-syntax expects one child");
     IdmValue value = idm_syntax_value(ctx->rt, syn->as.seq.items[1], err);
     if (err && err->present) return NULL;
     return idm_core_literal(value, syn->span);
 }
 
+static IdmCore *expand_form_regex(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+    if (syn->as.seq.count != 2 || syn->as.seq.items[1]->kind != IDM_SYN_STRING) return expand_error(err, syn->span, "%-regex expects one string child");
+    const IdmSyntax *body = syn->as.seq.items[1];
+    IdmError inner;
+    idm_error_init(&inner);
+    IdmRegex *rx = NULL;
+    bool ok = idm_regex_compile(body->as.text, strlen(body->as.text), 0, &rx, &inner);
+    if (!ok) {
+        expand_error(err, syn->span, "%s", inner.message ? inner.message : "invalid regex literal");
+        idm_error_clear(&inner);
+        return NULL;
+    }
+    idm_error_clear(&inner);
+    IdmValue value = idm_regex_value(ctx->rt, rx, err);
+    if (err && err->present) return NULL;
+    return idm_core_literal(value, syn->span);
+}
+
 static IdmCore *expand_program(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
-    if (!syn_is_protocol(syn, "%-package-begin")) return expand_error(err, syn->span, "expected %%-package-begin syntax");
+    if (!syn_is_form(syn, "%-package-begin")) return expand_error(err, syn->span, "expected %%-package-begin syntax");
     return expand_body_items(ctx, syn->as.seq.items, 1, syn->as.seq.count, true, err);
 }
 
@@ -667,7 +958,6 @@ static IdmCore *expand_container(ExpandContext *ctx, const IdmSyntax *syn, IdmEr
         case IDM_SYN_VECTOR: prim = IDM_PRIM_VECTOR; break;
         case IDM_SYN_TUPLE: prim = IDM_PRIM_TUPLE; break;
         case IDM_SYN_DICT:
-            if (syn->as.seq.count % 2u != 0) return expand_error(err, syn->span, "dict literal requires key/value pairs");
             prim = IDM_PRIM_DICT;
             break;
         default:
@@ -680,14 +970,21 @@ static IdmCore *expand_container(ExpandContext *ctx, const IdmSyntax *syn, IdmEr
         idm_core_free(callee);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, syn->span);
     }
-    for (size_t i = 0; i < syn->as.seq.count; i++) {
-        IdmCore *elem = expand_syntax(ctx, syn->as.seq.items[i], err);
+    size_t pos = 0;
+    size_t elem_count = 0;
+    while (pos < syn->as.seq.count) {
+        IdmCore *elem = parse_postfix_expr(ctx, syn->as.seq.items, &pos, syn->as.seq.count, false, err);
         if (!elem || !idm_core_app_add_arg(app, elem)) {
             idm_core_free(elem);
             idm_core_free(app);
             if (!err->present) idm_error_oom(err, syn->span);
             return NULL;
         }
+        elem_count++;
+    }
+    if (syn->kind == IDM_SYN_DICT && elem_count % 2u != 0) {
+        idm_core_free(app);
+        return expand_error(err, syn->span, "dict literal requires key/value pairs");
     }
     return app;
 }
@@ -701,17 +998,21 @@ IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) 
     if (err && err->present) return NULL;
 
     if (syn->kind == IDM_SYN_WORD) return expand_word_ref(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-expr")) return expand_protocol_expr(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-body")) return expand_protocol_body(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-group")) return expand_protocol_group(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-expression")) return expand_protocol_expression(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-syntax")) return expand_protocol_syntax_quote(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-quasisyntax")) return expand_protocol_quasisyntax(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-quote")) return expand_protocol_quote(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-quasiquote")) return expand_protocol_quasiquote(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-string")) return expand_protocol_string(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-package-begin")) return expand_program(ctx, syn, err);
-    if (syn_is_protocol(syn, "%-word") || syn_is_protocol(syn, "%-shell-var") || syn_is_protocol(syn, "%-redirect")) {
+    if (syn_is_form(syn, "%-expr")) return expand_form_expr(ctx, syn, err);
+    if (syn_is_form(syn, "%-body")) return expand_form_body(ctx, syn, err);
+    if (syn_is_form(syn, "%-group")) return expand_form_group(ctx, syn, err);
+    if (syn_is_form(syn, "%-expression")) return expand_form_expression(ctx, syn, err);
+    if (syn_is_form(syn, "%-syntax")) return expand_form_syntax_quote(ctx, syn, err);
+    if (syn_is_form(syn, "%-quasisyntax")) return expand_form_quasisyntax(ctx, syn, err);
+    if (syn_is_form(syn, "%-quote")) return expand_form_quote(ctx, syn, err);
+    if (syn_is_form(syn, "%-quasiquote")) return expand_form_quasiquote(ctx, syn, err);
+    if (syn_is_form(syn, "%-string")) return expand_form_string(ctx, syn, err);
+    if (syn_is_form(syn, "%-regex")) return expand_form_regex(ctx, syn, err);
+    if (syn_is_form(syn, "%-package-begin")) return expand_program(ctx, syn, err);
+    if (syn_is_form(syn, "%-command-sub")) {
+        return expand_error(err, syn->span, "command substitution requires shell or string context");
+    }
+    if (syn_is_form(syn, "%-word") || syn_is_form(syn, "%-shell-var") || syn_is_form(syn, "%-redirect")) {
         return expand_error(err, syn->span, "shell syntax requires command graph expansion");
     }
     if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT)
@@ -853,7 +1154,7 @@ IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_
         free(module);
         return repl_compile_fail(repl, err);
     }
-    if (!idm_runtime_register_gc_module(repl->rt, module)) return repl_compile_fail(repl, err);
+    if (!idm_bc_intern_literals(repl->rt, module, err)) return repl_compile_fail(repl, err);
     IdmValue thunk = idm_closure_in_module(repl->rt, module, main_fn, NULL, 0, repl->rt->main_ns, err);
     if (err->present) return repl_compile_fail(repl, err);
     repl->token = ++repl->next_token;
@@ -907,7 +1208,7 @@ bool idm_repl_loop_thunk(IdmRepl *repl, const char *source, IdmValue *out_thunk,
         free(module);
         return compiled ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
     }
-    if (!idm_runtime_register_gc_module(repl->rt, module)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_bc_intern_literals(repl->rt, module, err)) return false;
     IdmNamespace *ns = idm_namespace_get_or_create(repl->rt, "ish-loop");
     if (!ns) return idm_error_oom(err, idm_span_unknown(NULL));
     *out_thunk = idm_closure_in_module(repl->rt, module, main_fn, NULL, 0, ns, err);
@@ -919,7 +1220,6 @@ void idm_repl_destroy(IdmRepl *repl) {
     if (repl->rt && repl->rt->repl == repl) repl->rt->repl = NULL;
     idm_sched_destroy(repl->sched);
     for (size_t i = 0; i < repl->module_count; i++) {
-        idm_runtime_unregister_gc_module(repl->rt, repl->modules[i]);
         idm_bc_destroy(repl->modules[i]);
         free(repl->modules[i]);
     }

@@ -1,5 +1,5 @@
 {:operators ({:== 30 :left :infix} {:!= 30 :left :infix} {:< 30 :left :infix} {:> 30 :left :infix} {:<= 30 :left :infix} {:>= 30 :left :infix} {:+ 50 :left :infix} {:- 50 :left :infix} {:* 60 :left :infix} {:/ 60 :left :infix} {:% 60 :left :infix} {:// 60 :left :infix} {:%% 60 :left :infix} {:** 70 :right :infix} {:- 80 :left :prefix} {:|> 10 :left :infix} {:|>> 10 :left :infix})}
-{:macros (:operator :syntax-case :defrules :if :match :error :case :unless :and :or)}
+{:macros (:operator :syntax-case :defrules :if :match :error :case :unless :not? :and :or)}
 {:protocols ()}
 {:resolvers ()}
 {:methods ()}

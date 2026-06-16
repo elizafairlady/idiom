@@ -11,7 +11,7 @@ defn ff n -> add n 1
 ff x
 defmacro mm stx do syntax-case stx do (_ a) -> %`(dbl %,a) end end
 mm (ff 100)
-implement std/shell
+activate std/shell
 y = printf from-repl-shell
 y
 {p q} = tuple 5 6
@@ -46,15 +46,14 @@ raise :pinned-diag
 repl-diagnostic
 repl-diagnostic
 inspect (ish-session)
-protocol Greet do
+trait Greet do
   method greet x
 end
-implement Greet
-extend int with Greet do
+implement Greet on int do
   method greet n -> str "hi-" n
 end
 greet 7
-extend int with Greet do
+implement Greet on int do
   method greet n -> str "yo-" n
 end
 greet 7

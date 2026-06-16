@@ -1,4 +1,4 @@
-implement std/shell
+activate std/shell
 a = echo one && echo two
 println a
 b = false || echo rescue

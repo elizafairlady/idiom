@@ -1,5 +1,6 @@
 use std/test
-implement std/test
+activate std/test
+use std/enum
 
 suite do
   test "integer-overflow-traps" do
@@ -62,10 +63,26 @@ suite do
       error :code 7 :extra
       :unreached
       rescue r -> match r do
-        {:error {:code n more}} -> tuple n more
+        {:error {:code n more}} -> {n more}
       end
     end
     assert-eq got {7 :extra}
+  end
+  test "zero-arity-defn-reference-calls" do
+    defn answer -> 42
+    assert-eq answer 42
+  end
+  test "zero-arity-local-function-binding-reference-calls" do
+    f = fn -> 9
+    assert-eq f 9
+  end
+  test "zero-arity-captured-binding-reference-calls" do
+    make = fn _tag do
+      f = fn -> 11
+      fn _go -> f
+    end
+    thunk = make :ready
+    assert-eq (thunk :go) 11
   end
   test "float-prints-distinguishably" do
     assert-inspect 1.0 "1.0"
@@ -76,20 +93,20 @@ suite do
     assert-inspect 1 "1"
   end
   test "dict-equality-structural" do
-    assert-eq (dict :a 1 :b 2) (dict :b 2 :a 1)
-    m = dict :a 1 :b 2
+    assert-eq %{:a 1 :b 2} %{:b 2 :a 1}
+    m = %{:a 1 :b 2}
     assert-eq m (dict-put m :a (dict-get m :a :nil))
-    assert-neq (dict :a 1) (dict :a 1 :b 2)
-    assert-neq (dict :a 1) (dict :a 2)
-    assert-inspect (dict-put (dict :a 1 :b 2) :a 9) "%{:a 9 :b 2}"
+    assert-neq %{:a 1} %{:a 1 :b 2}
+    assert-neq %{:a 1} %{:a 2}
+    assert-inspect (dict-put %{:a 1 :b 2} :a 9) "%{:a 9 :b 2}"
   end
   test "strings-byte-storage-rune-iteration" do
     assert-eq (str-len "héllo") 6
     assert-eq (str-byte "é" 0) 195
     assert-eq (str-byte "é" 1) 169
-    assert-eq (to-list "abc") '(97 98 99)
-    assert-eq (to-list "") '()
-    assert-inspect (to-list "é") "(233)"
+    assert-eq "abc".to-list '(97 98 99)
+    assert-eq "".to-list '()
+    assert-inspect "é".to-list "(233)"
   end
   test "tail-call-constant-stack" do
     got = do
@@ -106,7 +123,7 @@ suite do
       defn parity do
         0 :even -> :even
         0 :odd -> :odd
-        n p -> parity (n - 1) (if (eq? p :even) do :odd else do :even end)
+        n p -> parity (n - 1) (cond (eq? p :even) :odd :even)
       end
       parity 100001 :even
     end
@@ -124,16 +141,15 @@ suite do
       {:error {:runtime msg}} -> assert (str-contains? msg "exceeded its budget")
     end
   end
-  test "extend-sequential-rebind" do
+  test "trait-implement-sequential-rebind" do
     got = do
-      protocol Tag do
+      trait Tag do
         method tag x
       end
-      implement Tag
-      extend int with Tag do
+      implement Tag on int do
         method tag _n -> :first
       end
-      extend int with Tag do
+      implement Tag on int do
         method tag _n -> :second
       end
       tag 1
@@ -142,10 +158,10 @@ suite do
   end
   test "tail-method-dispatch" do
     got = do
-      protocol Down do
-        method down n -> if (eq? n 0) do :done else do down (n - 1) end
+      trait Down do
+        method down n -> cond (eq? n 0) :done (down (n - 1))
       end
-      implement Down
+      implement Down on int
       down 200000
     end
     assert-inspect got ":done"

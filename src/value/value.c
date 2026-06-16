@@ -1,5 +1,6 @@
 #include "idiom/value.h"
 
+#include "idiom/regex.h"
 #include "idiom/syntax.h"
 
 #include <pthread.h>
@@ -15,8 +16,16 @@ typedef enum {
     IDM_OBJ_SYNTAX,
     IDM_OBJ_CELL,
     IDM_OBJ_CLOSURE,
-    IDM_OBJ_RECORD
+    IDM_OBJ_RECORD,
+    IDM_OBJ_REGEX,
+    IDM_OBJ_REGEX_RESULT
 } IdmObjectKind;
+
+typedef enum {
+    IDM_GC_WHITE,
+    IDM_GC_GREY,
+    IDM_GC_BLACK
+} IdmGcColor;
 
 typedef struct {
     char *bytes;
@@ -59,9 +68,11 @@ typedef struct {
 
 struct IdmObject {
     IdmObjectKind kind;
-    bool marked;
+    IdmGcColor color;
+    IdmHeap *heap;
     size_t bytes;
     struct IdmObject *next;
+    struct IdmObject *grey_next;
     union {
         IdmStringObj string;
         IdmPairObj pair;
@@ -71,6 +82,8 @@ struct IdmObject {
         IdmCellObj cell;
         IdmClosureObj closure;
         IdmRecordObj record;
+        IdmRegex *regex;
+        IdmRegexResult *regex_result;
     } as;
 };
 
@@ -78,22 +91,22 @@ struct IdmSymbol {
     char *text;
     uint32_t id;
     IdmSymbolKind kind;
+    uint32_t hash;
+    struct IdmSymbol *hnext;
 };
 
-static pthread_mutex_t g_alloc_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_intern_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_ns_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t g_gcreg_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text);
 static IdmNamespace *namespace_get_or_create_unlocked(IdmRuntime *rt, const char *name);
-static bool register_gc_module_unlocked(IdmRuntime *rt, const IdmBytecodeModule *module);
 
 static IdmObject *heap_alloc_unlocked(IdmHeap *heap, IdmObjectKind kind) {
     IdmObject *obj = calloc(1u, sizeof(*obj));
     if (!obj) return NULL;
     obj->kind = kind;
-    obj->marked = false;
+    obj->color = IDM_GC_WHITE;
+    obj->heap = heap;
     obj->bytes = sizeof(*obj);
     obj->next = heap->objects;
     heap->objects = obj;
@@ -103,17 +116,21 @@ static IdmObject *heap_alloc_unlocked(IdmHeap *heap, IdmObjectKind kind) {
 }
 
 static IdmObject *heap_alloc(IdmHeap *heap, IdmObjectKind kind) {
-    pthread_mutex_lock(&g_alloc_mu);
+    pthread_mutex_lock(&heap->lock);
     IdmObject *obj = heap_alloc_unlocked(heap, kind);
-    pthread_mutex_unlock(&g_alloc_mu);
+    pthread_mutex_unlock(&heap->lock);
     return obj;
 }
 
-static void heap_account(IdmHeap *heap, IdmObject *obj, size_t extra) {
-    pthread_mutex_lock(&g_alloc_mu);
+static void heap_account_unlocked(IdmHeap *heap, IdmObject *obj, size_t extra) {
     obj->bytes += extra;
     heap->bytes_allocated += extra;
-    pthread_mutex_unlock(&g_alloc_mu);
+}
+
+static void heap_account(IdmHeap *heap, IdmObject *obj, size_t extra) {
+    pthread_mutex_lock(&heap->lock);
+    heap_account_unlocked(heap, obj, extra);
+    pthread_mutex_unlock(&heap->lock);
 }
 
 static size_t syn_footprint(const IdmSyntax *syn) {
@@ -152,12 +169,17 @@ static void object_free(IdmObject *obj) {
         free(obj->as.closure.captures);
     }
     if (obj->kind == IDM_OBJ_RECORD) free(obj->as.record.type);
+    if (obj->kind == IDM_OBJ_REGEX) idm_regex_free(obj->as.regex);
+    if (obj->kind == IDM_OBJ_REGEX_RESULT) idm_regex_result_free(obj->as.regex_result);
     free(obj);
 }
 
 void idm_runtime_init(IdmRuntime *rt) {
     idm_intern_init(&rt->intern);
+    rt->cached_true = idm_atom(rt, "true");
+    rt->cached_false = idm_atom(rt, "false");
     idm_heap_init(&rt->heap);
+    idm_heap_init(&rt->immortal);
     rt->macro_intro_active = false;
     rt->macro_intro_scope = 0;
     rt->local_expand_user = NULL;
@@ -177,14 +199,8 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->ns_count = 0;
     rt->ns_cap = 0;
     rt->main_ns = idm_namespace_get_or_create(rt, "main");
-    memset(rt->protocol_worlds, 0, sizeof(rt->protocol_worlds));
-    rt->protocol_phase = 0;
-    rt->gc_modules = NULL;
-    rt->gc_module_count = 0;
-    rt->gc_module_cap = 0;
-    rt->gc_values = NULL;
-    rt->gc_value_count = 0;
-    rt->gc_value_cap = 0;
+    memset(rt->trait_worlds, 0, sizeof(rt->trait_worlds));
+    rt->trait_phase = 0;
     rt->expand_cache = NULL;
     rt->expand_cache_free = NULL;
     rt->phase_reads = NULL;
@@ -209,76 +225,32 @@ bool idm_runtime_own_temp(IdmRuntime *rt, const char *path) {
     return true;
 }
 
-bool idm_runtime_register_gc_module(IdmRuntime *rt, const IdmBytecodeModule *module) {
-    pthread_mutex_lock(&g_gcreg_mu);
-    bool ok = register_gc_module_unlocked(rt, module);
-    pthread_mutex_unlock(&g_gcreg_mu);
-    return ok;
-}
-
-static bool register_gc_module_unlocked(IdmRuntime *rt, const IdmBytecodeModule *module) {
-    if (!module) return false;
-    if (rt->gc_module_count == rt->gc_module_cap) {
-        size_t cap = rt->gc_module_cap ? rt->gc_module_cap * 2u : 16u;
-        const IdmBytecodeModule **grown = realloc(rt->gc_modules, cap * sizeof(*grown));
-        if (!grown) return false;
-        rt->gc_modules = grown;
-        rt->gc_module_cap = cap;
-    }
-    rt->gc_modules[rt->gc_module_count++] = module;
-    return true;
-}
-
-void idm_runtime_unregister_gc_module(IdmRuntime *rt, const IdmBytecodeModule *module) {
-    for (size_t i = 0; i < rt->gc_module_count; i++) {
-        if (rt->gc_modules[i] == module) {
-            rt->gc_modules[i] = rt->gc_modules[rt->gc_module_count - 1u];
-            rt->gc_module_count--;
-            return;
-        }
-    }
-}
-
-bool idm_runtime_register_gc_value(IdmRuntime *rt, IdmValue value) {
-    if (rt->gc_value_count == rt->gc_value_cap) {
-        size_t cap = rt->gc_value_cap ? rt->gc_value_cap * 2u : 8u;
-        IdmValue *grown = realloc(rt->gc_values, cap * sizeof(*grown));
-        if (!grown) return false;
-        rt->gc_values = grown;
-        rt->gc_value_cap = cap;
-    }
-    rt->gc_values[rt->gc_value_count++] = value;
-    return true;
-}
-
-void idm_runtime_unregister_gc_value(IdmRuntime *rt, IdmValue value) {
-    for (size_t i = 0; i < rt->gc_value_count; i++) {
-        if (rt->gc_values[i].tag == value.tag && rt->gc_values[i].as.obj == value.as.obj) {
-            rt->gc_values[i] = rt->gc_values[rt->gc_value_count - 1u];
-            rt->gc_value_count--;
-            return;
-        }
-    }
-}
-
-static void runtime_protocol_method_destroy(IdmRuntimeProtocolMethod *method) {
+static void runtime_trait_method_destroy(IdmRuntimeTraitMethod *method) {
     if (!method) return;
-    free(method->protocol);
+    free(method->trait);
     free(method->method);
     memset(method, 0, sizeof(*method));
 }
 
-static void runtime_protocol_impl_destroy(IdmRuntimeProtocolImpl *impl) {
+static void runtime_trait_contract_destroy(IdmRuntimeTraitContract *contract) {
+    if (!contract) return;
+    free(contract->name);
+    for (size_t i = 0; i < contract->requirement_count; i++) free(contract->requirements[i]);
+    free(contract->requirements);
+    memset(contract, 0, sizeof(*contract));
+}
+
+static void runtime_trait_impl_destroy(IdmRuntimeTraitImpl *impl) {
     if (!impl) return;
-    free(impl->protocol);
+    free(impl->trait);
     free(impl->method);
     free(impl->type);
     memset(impl, 0, sizeof(*impl));
 }
 
-static void runtime_protocol_conformance_destroy(IdmRuntimeProtocolConformance *conf) {
+static void runtime_trait_conformance_destroy(IdmRuntimeTraitConformance *conf) {
     if (!conf) return;
-    free(conf->protocol);
+    free(conf->trait);
     free(conf->type);
     free(conf->provider);
     free(conf->provider_key);
@@ -287,15 +259,17 @@ static void runtime_protocol_conformance_destroy(IdmRuntimeProtocolConformance *
 
 void idm_runtime_destroy(IdmRuntime *rt) {
     for (size_t w = 0; w < 2u; w++) {
-        IdmProtocolWorld *world = &rt->protocol_worlds[w];
-        for (size_t i = 0; i < world->method_count; i++) runtime_protocol_method_destroy(&world->methods[i]);
+        IdmTraitWorld *world = &rt->trait_worlds[w];
+        for (size_t i = 0; i < world->contract_count; i++) runtime_trait_contract_destroy(&world->contracts[i]);
+        free(world->contracts);
+        for (size_t i = 0; i < world->method_count; i++) runtime_trait_method_destroy(&world->methods[i]);
         free(world->methods);
-        for (size_t i = 0; i < world->impl_count; i++) runtime_protocol_impl_destroy(&world->impls[i]);
+        for (size_t i = 0; i < world->impl_count; i++) runtime_trait_impl_destroy(&world->impls[i]);
         free(world->impls);
-        for (size_t i = 0; i < world->conformance_count; i++) runtime_protocol_conformance_destroy(&world->conformances[i]);
+        for (size_t i = 0; i < world->conformance_count; i++) runtime_trait_conformance_destroy(&world->conformances[i]);
         free(world->conformances);
     }
-    memset(rt->protocol_worlds, 0, sizeof(rt->protocol_worlds));
+    memset(rt->trait_worlds, 0, sizeof(rt->trait_worlds));
     for (size_t i = 0; i < rt->ns_count; i++) {
         free(rt->namespaces[i]->name);
         free(rt->namespaces[i]->slots);
@@ -317,15 +291,8 @@ void idm_runtime_destroy(IdmRuntime *rt) {
     rt->owned_temps = NULL;
     rt->owned_temp_count = 0;
     rt->owned_temp_cap = 0;
-    free(rt->gc_modules);
-    rt->gc_modules = NULL;
-    rt->gc_module_count = 0;
-    rt->gc_module_cap = 0;
-    free(rt->gc_values);
-    rt->gc_values = NULL;
-    rt->gc_value_count = 0;
-    rt->gc_value_cap = 0;
     idm_heap_destroy(&rt->heap);
+    idm_heap_destroy(&rt->immortal);
     idm_intern_destroy(&rt->intern);
 }
 
@@ -397,16 +364,21 @@ void idm_intern_init(IdmIntern *intern) {
     intern->count = 0;
     intern->cap = 0;
     intern->next_id = 1u;
+    intern->buckets = NULL;
+    intern->bucket_count = 0;
 }
 
 void idm_intern_destroy(IdmIntern *intern) {
     if (!intern) return;
     for (size_t i = 0; i < intern->count; i++) { free(intern->symbols[i]->text); free(intern->symbols[i]); }
     free(intern->symbols);
+    free(intern->buckets);
     intern->symbols = NULL;
     intern->count = 0;
     intern->cap = 0;
     intern->next_id = 1u;
+    intern->buckets = NULL;
+    intern->bucket_count = 0;
 }
 
 IdmSymbol *idm_intern(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
@@ -416,9 +388,38 @@ IdmSymbol *idm_intern(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
     return sym;
 }
 
-static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
+static uint32_t intern_hash(IdmSymbolKind kind, const char *text) {
+    uint32_t h = 2166136261u;
+    h ^= (uint32_t)kind;
+    h *= 16777619u;
+    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static bool intern_rehash(IdmIntern *intern, size_t new_count) {
+    IdmSymbol **buckets = calloc(new_count, sizeof(*buckets));
+    if (!buckets) return false;
     for (size_t i = 0; i < intern->count; i++) {
-        if (intern->symbols[i]->kind == kind && strcmp(intern->symbols[i]->text, text) == 0) return intern->symbols[i];
+        IdmSymbol *s = intern->symbols[i];
+        size_t b = s->hash & (new_count - 1u);
+        s->hnext = buckets[b];
+        buckets[b] = s;
+    }
+    free(intern->buckets);
+    intern->buckets = buckets;
+    intern->bucket_count = new_count;
+    return true;
+}
+
+static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
+    uint32_t h = intern_hash(kind, text);
+    if (intern->bucket_count) {
+        for (IdmSymbol *s = intern->buckets[h & (intern->bucket_count - 1u)]; s; s = s->hnext) {
+            if (s->hash == h && s->kind == kind && strcmp(s->text, text) == 0) return s;
+        }
     }
     if (intern->count == intern->cap) {
         size_t cap = intern->cap ? intern->cap * 2u : 32u;
@@ -426,6 +427,9 @@ static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, con
         if (!next) return NULL;
         intern->symbols = next;
         intern->cap = cap;
+    }
+    if (intern->bucket_count == 0u || intern->count + 1u > intern->bucket_count - (intern->bucket_count >> 2)) {
+        if (!intern_rehash(intern, intern->bucket_count ? intern->bucket_count * 2u : 64u)) return NULL;
     }
     IdmSymbol *sym = malloc(sizeof(*sym));
     if (!sym) return NULL;
@@ -436,7 +440,11 @@ static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, con
     }
     sym->id = intern->next_id++;
     sym->kind = kind;
+    sym->hash = h;
     intern->symbols[intern->count++] = sym;
+    size_t b = h & (intern->bucket_count - 1u);
+    sym->hnext = intern->buckets[b];
+    intern->buckets[b] = sym;
     return sym;
 }
 
@@ -454,8 +462,20 @@ IdmSymbolKind idm_symbol_kind(const IdmSymbol *sym) {
 
 void idm_heap_init(IdmHeap *heap) {
     heap->objects = NULL;
+    heap->grey = NULL;
     heap->object_count = 0;
     heap->bytes_allocated = 0;
+    pthread_mutex_init(&heap->lock, NULL);
+}
+
+static _Thread_local IdmHeap *t_active_heap = NULL;
+
+IdmHeap *idm_active_heap(IdmRuntime *rt) {
+    return t_active_heap ? t_active_heap : &rt->heap;
+}
+
+void idm_set_active_heap(IdmHeap *heap) {
+    t_active_heap = heap;
 }
 
 void idm_heap_destroy(IdmHeap *heap) {
@@ -466,44 +486,72 @@ void idm_heap_destroy(IdmHeap *heap) {
         obj = next;
     }
     heap->objects = NULL;
+    heap->grey = NULL;
     heap->object_count = 0;
     heap->bytes_allocated = 0;
+    pthread_mutex_destroy(&heap->lock);
 }
 
-static void value_mark(IdmValue value) {
-    if (value.tag != IDM_VAL_STRING && value.tag != IDM_VAL_PAIR && value.tag != IDM_VAL_TUPLE && value.tag != IDM_VAL_VECTOR && value.tag != IDM_VAL_DICT && value.tag != IDM_VAL_SYNTAX && value.tag != IDM_VAL_CELL && value.tag != IDM_VAL_CLOSURE && value.tag != IDM_VAL_RECORD) return;
-    IdmObject *obj = value.as.obj;
-    if (!obj || obj->marked) return;
-    obj->marked = true;
+static IdmObject *value_object(IdmValue value) {
+    if (value.tag != IDM_VAL_STRING && value.tag != IDM_VAL_PAIR && value.tag != IDM_VAL_TUPLE && value.tag != IDM_VAL_VECTOR && value.tag != IDM_VAL_DICT && value.tag != IDM_VAL_SYNTAX && value.tag != IDM_VAL_CELL && value.tag != IDM_VAL_CLOSURE && value.tag != IDM_VAL_RECORD && value.tag != IDM_VAL_REGEX && value.tag != IDM_VAL_REGEX_RESULT) return NULL;
+    return value.as.obj;
+}
+
+static void gc_push_grey(IdmHeap *heap, IdmObject *obj) {
+    obj->grey_next = heap->grey;
+    heap->grey = obj;
+}
+
+static void gc_grey_value(IdmHeap *heap, IdmValue value) {
+    IdmObject *obj = value_object(value);
+    if (!obj || obj->heap != heap || obj->color != IDM_GC_WHITE) return;
+    obj->color = IDM_GC_GREY;
+    gc_push_grey(heap, obj);
+}
+
+static void gc_trace_object(IdmHeap *heap, IdmObject *obj) {
+    if (!obj || obj->color != IDM_GC_GREY) return;
+    obj->color = IDM_GC_BLACK;
     if (obj->kind == IDM_OBJ_PAIR) {
-        value_mark(obj->as.pair.car);
-        value_mark(obj->as.pair.cdr);
+        gc_grey_value(heap, obj->as.pair.car);
+        gc_grey_value(heap, obj->as.pair.cdr);
     } else if (obj->kind == IDM_OBJ_TUPLE || obj->kind == IDM_OBJ_VECTOR) {
-        for (size_t i = 0; i < obj->as.sequence.count; i++) value_mark(obj->as.sequence.items[i]);
+        for (size_t i = 0; i < obj->as.sequence.count; i++) gc_grey_value(heap, obj->as.sequence.items[i]);
     } else if (obj->kind == IDM_OBJ_DICT) {
         for (size_t i = 0; i < obj->as.dict.count; i++) {
-            value_mark(obj->as.dict.entries[i].key);
-            value_mark(obj->as.dict.entries[i].value);
+            gc_grey_value(heap, obj->as.dict.entries[i].key);
+            gc_grey_value(heap, obj->as.dict.entries[i].value);
         }
     } else if (obj->kind == IDM_OBJ_CELL) {
-        value_mark(obj->as.cell.value);
+        gc_grey_value(heap, obj->as.cell.value);
     } else if (obj->kind == IDM_OBJ_CLOSURE) {
-        for (size_t i = 0; i < obj->as.closure.capture_count; i++) value_mark(obj->as.closure.captures[i]);
+        for (size_t i = 0; i < obj->as.closure.capture_count; i++) gc_grey_value(heap, obj->as.closure.captures[i]);
     } else if (obj->kind == IDM_OBJ_RECORD) {
-        value_mark(obj->as.record.fields);
+        gc_grey_value(heap, obj->as.record.fields);
     }
 }
 
-void idm_gc_mark_value(IdmValue value) {
-    value_mark(value);
+static void gc_drain_grey(IdmHeap *heap) {
+    while (heap->grey) {
+        IdmObject *obj = heap->grey;
+        heap->grey = obj->grey_next;
+        obj->grey_next = NULL;
+        gc_trace_object(heap, obj);
+    }
+}
+
+void idm_gc_mark_value(IdmHeap *heap, IdmValue value) {
+    gc_grey_value(heap, value);
 }
 
 void idm_heap_sweep(IdmHeap *heap) {
+    gc_drain_grey(heap);
     IdmObject **cursor = &heap->objects;
     while (*cursor) {
         IdmObject *obj = *cursor;
-        if (obj->marked) {
-            obj->marked = false;
+        if (obj->color == IDM_GC_BLACK) {
+            obj->color = IDM_GC_WHITE;
+            obj->grey_next = NULL;
             cursor = &obj->next;
         } else {
             *cursor = obj->next;
@@ -515,15 +563,16 @@ void idm_heap_sweep(IdmHeap *heap) {
 }
 
 size_t idm_heap_bytes(const IdmHeap *heap) {
-    pthread_mutex_lock(&g_alloc_mu);
-    size_t n = heap->bytes_allocated;
-    pthread_mutex_unlock(&g_alloc_mu);
+    IdmHeap *h = (IdmHeap *)heap;
+    pthread_mutex_lock(&h->lock);
+    size_t n = h->bytes_allocated;
+    pthread_mutex_unlock(&h->lock);
     return n;
 }
 
 
 void idm_heap_collect(IdmHeap *heap, const IdmValue *roots, size_t root_count) {
-    for (size_t i = 0; i < root_count; i++) value_mark(roots[i]);
+    for (size_t i = 0; i < root_count; i++) idm_gc_mark_value(heap, roots[i]);
     idm_heap_sweep(heap);
 }
 
@@ -573,8 +622,12 @@ IdmValue idm_atom(IdmRuntime *rt, const char *text) {
     return v;
 }
 
+IdmValue idm_bool(IdmRuntime *rt, bool value) {
+    return value ? rt->cached_true : rt->cached_false;
+}
+
 IdmValue idm_string_n(IdmRuntime *rt, const char *text, size_t len, IdmError *err) {
-    IdmObject *obj = heap_alloc(&rt->heap, IDM_OBJ_STRING);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_STRING);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
@@ -585,7 +638,7 @@ IdmValue idm_string_n(IdmRuntime *rt, const char *text, size_t len, IdmError *er
         return idm_nil();
     }
     obj->as.string.len = len;
-    heap_account(&rt->heap, obj, len + 1u);
+    heap_account(idm_active_heap(rt), obj, len + 1u);
     IdmValue v;
     v.tag = IDM_VAL_STRING;
     v.as.obj = obj;
@@ -597,7 +650,7 @@ IdmValue idm_string(IdmRuntime *rt, const char *text, IdmError *err) {
 }
 
 IdmValue idm_cons(IdmRuntime *rt, IdmValue car, IdmValue cdr, IdmError *err) {
-    IdmObject *obj = heap_alloc(&rt->heap, IDM_OBJ_PAIR);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_PAIR);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
@@ -611,7 +664,7 @@ IdmValue idm_cons(IdmRuntime *rt, IdmValue car, IdmValue cdr, IdmError *err) {
 }
 
 static IdmValue sequence_value(IdmRuntime *rt, const IdmValue *items, size_t count, IdmObjectKind obj_kind, IdmValueTag tag, IdmError *err) {
-    IdmObject *obj = heap_alloc(&rt->heap, obj_kind);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), obj_kind);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
@@ -625,7 +678,7 @@ static IdmValue sequence_value(IdmRuntime *rt, const IdmValue *items, size_t cou
             return idm_nil();
         }
         memcpy(obj->as.sequence.items, items, count * sizeof(*items));
-        heap_account(&rt->heap, obj, count * sizeof(*items));
+        heap_account(idm_active_heap(rt), obj, count * sizeof(*items));
     }
     IdmValue v;
     v.tag = tag;
@@ -642,7 +695,7 @@ IdmValue idm_vector(IdmRuntime *rt, const IdmValue *items, size_t count, IdmErro
 }
 
 IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, IdmError *err) {
-    IdmObject *obj = heap_alloc(&rt->heap, IDM_OBJ_DICT);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_DICT);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
@@ -656,7 +709,7 @@ IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, Idm
             return idm_nil();
         }
         memcpy(obj->as.dict.entries, entries, count * sizeof(*entries));
-        heap_account(&rt->heap, obj, count * sizeof(*entries));
+        heap_account(idm_active_heap(rt), obj, count * sizeof(*entries));
     }
     IdmValue v;
     v.tag = IDM_VAL_DICT;
@@ -665,7 +718,7 @@ IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, Idm
 }
 
 IdmValue idm_syntax_value(IdmRuntime *rt, const IdmSyntax *syntax, IdmError *err) {
-    IdmObject *obj = heap_alloc(&rt->heap, IDM_OBJ_SYNTAX);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_SYNTAX);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
@@ -675,7 +728,7 @@ IdmValue idm_syntax_value(IdmRuntime *rt, const IdmSyntax *syntax, IdmError *err
         idm_error_oom(err, syntax ? syntax->span : idm_span_unknown(NULL));
         return idm_nil();
     }
-    heap_account(&rt->heap, obj, syn_footprint(obj->as.syntax));
+    heap_account(idm_active_heap(rt), obj, syn_footprint(obj->as.syntax));
     IdmValue v;
     v.tag = IDM_VAL_SYNTAX;
     v.as.obj = obj;
@@ -683,7 +736,7 @@ IdmValue idm_syntax_value(IdmRuntime *rt, const IdmSyntax *syntax, IdmError *err
 }
 
 IdmValue idm_cell(IdmRuntime *rt, IdmValue initial, IdmError *err) {
-    IdmObject *obj = heap_alloc(&rt->heap, IDM_OBJ_CELL);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_CELL);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
@@ -700,7 +753,7 @@ IdmValue idm_closure_multi_in_module(IdmRuntime *rt, const IdmBytecodeModule *mo
         idm_error_set(err, idm_span_unknown(NULL), "closure must have at least one function entry");
         return idm_nil();
     }
-    IdmObject *obj = heap_alloc(&rt->heap, IDM_OBJ_CLOSURE);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_CLOSURE);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
@@ -717,7 +770,7 @@ IdmValue idm_closure_multi_in_module(IdmRuntime *rt, const IdmBytecodeModule *mo
             return idm_nil();
         }
         memcpy(obj->as.closure.entries, function_indexes, function_count * sizeof(*function_indexes));
-        heap_account(&rt->heap, obj, function_count * sizeof(*function_indexes));
+        heap_account(idm_active_heap(rt), obj, function_count * sizeof(*function_indexes));
     }
     obj->as.closure.capture_count = capture_count;
     obj->as.closure.captures = NULL;
@@ -728,7 +781,7 @@ IdmValue idm_closure_multi_in_module(IdmRuntime *rt, const IdmBytecodeModule *mo
             return idm_nil();
         }
         memcpy(obj->as.closure.captures, captures, capture_count * sizeof(*captures));
-        heap_account(&rt->heap, obj, capture_count * sizeof(*captures));
+        heap_account(idm_active_heap(rt), obj, capture_count * sizeof(*captures));
     }
     IdmValue v;
     v.tag = IDM_VAL_CLOSURE;
@@ -757,7 +810,7 @@ IdmValue idm_record(IdmRuntime *rt, const char *type, IdmValue fields, IdmError 
         idm_error_set(err, idm_span_unknown(NULL), "record fields must be a dict");
         return idm_nil();
     }
-    IdmObject *obj = heap_alloc(&rt->heap, IDM_OBJ_RECORD);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_RECORD);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
@@ -768,9 +821,47 @@ IdmValue idm_record(IdmRuntime *rt, const char *type, IdmValue fields, IdmError 
         return idm_nil();
     }
     obj->as.record.fields = fields;
-    heap_account(&rt->heap, obj, strlen(obj->as.record.type) + 1u);
+    heap_account(idm_active_heap(rt), obj, strlen(obj->as.record.type) + 1u);
     IdmValue v;
     v.tag = IDM_VAL_RECORD;
+    v.as.obj = obj;
+    return v;
+}
+
+IdmValue idm_regex_value(IdmRuntime *rt, IdmRegex *regex, IdmError *err) {
+    if (!regex) {
+        idm_error_set(err, idm_span_unknown(NULL), "cannot wrap null regex");
+        return idm_nil();
+    }
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_REGEX);
+    if (!obj) {
+        idm_regex_free(regex);
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return idm_nil();
+    }
+    obj->as.regex = regex;
+    heap_account(idm_active_heap(rt), obj, idm_regex_footprint(regex));
+    IdmValue v;
+    v.tag = IDM_VAL_REGEX;
+    v.as.obj = obj;
+    return v;
+}
+
+IdmValue idm_regex_result_value(IdmRuntime *rt, IdmRegexResult *result, IdmError *err) {
+    if (!result) {
+        idm_error_set(err, idm_span_unknown(NULL), "cannot wrap null regex result");
+        return idm_nil();
+    }
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_REGEX_RESULT);
+    if (!obj) {
+        idm_regex_result_free(result);
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return idm_nil();
+    }
+    obj->as.regex_result = result;
+    heap_account(idm_active_heap(rt), obj, idm_regex_result_footprint(result));
+    IdmValue v;
+    v.tag = IDM_VAL_REGEX_RESULT;
     v.as.obj = obj;
     return v;
 }
@@ -828,6 +919,8 @@ const char *idm_value_type_name(IdmValueTag tag) {
         case IDM_VAL_PORT: return "port";
         case IDM_VAL_PRIMITIVE: return "primitive";
         case IDM_VAL_RECORD: return "record";
+        case IDM_VAL_REGEX: return "regex";
+        case IDM_VAL_REGEX_RESULT: return "regex-result";
     }
     return "<bad-type>";
 }
@@ -839,8 +932,9 @@ const char *idm_value_dispatch_type_name(IdmValue value) {
 
 bool idm_value_type_from_name(const char *name, IdmValueTag *out) {
     if (!name) return false;
-    for (int i = (int)IDM_VAL_NIL; i <= (int)IDM_VAL_PRIMITIVE; i++) {
+    for (int i = (int)IDM_VAL_NIL; i <= (int)IDM_VAL_REGEX_RESULT; i++) {
         IdmValueTag tag = (IdmValueTag)i;
+        if (tag == IDM_VAL_RECORD) continue;
         if (strcmp(name, idm_value_type_name(tag)) == 0) {
             if (out) *out = tag;
             return true;
@@ -849,243 +943,346 @@ bool idm_value_type_from_name(const char *name, IdmValueTag *out) {
     return false;
 }
 
-static bool protocol_name_eq(const char *a_protocol, const char *a_method, const char *b_protocol, const char *b_method) {
-    return strcmp(a_protocol, b_protocol) == 0 && strcmp(a_method, b_method) == 0;
+static bool trait_method_key_eq(const char *a_trait, const char *a_method, const char *b_trait, const char *b_method) {
+    return strcmp(a_trait, b_trait) == 0 && strcmp(a_method, b_method) == 0;
 }
 
-static IdmProtocolWorld *protocol_world(IdmRuntime *rt) {
-    return &rt->protocol_worlds[rt->protocol_phase ? 1 : 0];
+static IdmTraitWorld *trait_world(IdmRuntime *rt) {
+    return &rt->trait_worlds[rt->trait_phase ? 1 : 0];
 }
 
-static IdmRuntimeProtocolMethod *runtime_protocol_find_method(IdmRuntime *rt, const char *protocol, const char *method) {
-    IdmProtocolWorld *w = protocol_world(rt);
+static IdmRuntimeTraitContract *runtime_trait_find_contract(IdmRuntime *rt, const char *trait) {
+    IdmTraitWorld *w = trait_world(rt);
+    for (size_t i = 0; i < w->contract_count; i++) {
+        if (strcmp(w->contracts[i].name, trait) == 0) return &w->contracts[i];
+    }
+    return NULL;
+}
+
+static IdmRuntimeTraitMethod *runtime_trait_find_method(IdmRuntime *rt, const char *trait, const char *method) {
+    IdmTraitWorld *w = trait_world(rt);
     for (size_t i = 0; i < w->method_count; i++) {
-        if (protocol_name_eq(w->methods[i].protocol, w->methods[i].method, protocol, method)) return &w->methods[i];
+        if (trait_method_key_eq(w->methods[i].trait, w->methods[i].method, trait, method)) return &w->methods[i];
     }
     return NULL;
 }
 
-static IdmRuntimeProtocolImpl *runtime_protocol_find_impl(IdmRuntime *rt, const char *protocol, const char *method, const char *type) {
-    IdmProtocolWorld *w = protocol_world(rt);
+static IdmRuntimeTraitImpl *runtime_trait_find_impl(IdmRuntime *rt, const char *trait, const char *method, const char *type) {
+    IdmTraitWorld *w = trait_world(rt);
     for (size_t i = 0; i < w->impl_count; i++) {
-        if (strcmp(w->impls[i].type, type) == 0 && protocol_name_eq(w->impls[i].protocol, w->impls[i].method, protocol, method)) return &w->impls[i];
+        if (strcmp(w->impls[i].type, type) == 0 && trait_method_key_eq(w->impls[i].trait, w->impls[i].method, trait, method)) return &w->impls[i];
     }
     return NULL;
 }
 
-static IdmRuntimeProtocolConformance *runtime_protocol_find_conformance(IdmRuntime *rt, const char *protocol, const char *type) {
-    IdmProtocolWorld *w = protocol_world(rt);
+static IdmRuntimeTraitConformance *runtime_trait_find_conformance(IdmRuntime *rt, const char *trait, const char *type) {
+    IdmTraitWorld *w = trait_world(rt);
     for (size_t i = 0; i < w->conformance_count; i++) {
-        if (strcmp(w->conformances[i].type, type) == 0 && strcmp(w->conformances[i].protocol, protocol) == 0) return &w->conformances[i];
+        if (strcmp(w->conformances[i].type, type) == 0 && strcmp(w->conformances[i].trait, trait) == 0) return &w->conformances[i];
     }
     return NULL;
 }
 
-static bool protocol_methods_reserve(IdmProtocolWorld *w, size_t needed, IdmError *err) {
+static bool trait_contracts_reserve(IdmTraitWorld *w, size_t needed, IdmError *err) {
+    if (needed <= w->contract_cap) return true;
+    size_t cap = w->contract_cap ? w->contract_cap * 2u : 8u;
+    while (cap < needed) cap *= 2u;
+    IdmRuntimeTraitContract *next = realloc(w->contracts, cap * sizeof(*next));
+    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+    w->contracts = next;
+    w->contract_cap = cap;
+    return true;
+}
+
+static bool trait_methods_reserve(IdmTraitWorld *w, size_t needed, IdmError *err) {
     if (needed <= w->method_cap) return true;
     size_t cap = w->method_cap ? w->method_cap * 2u : 8u;
     while (cap < needed) cap *= 2u;
-    IdmRuntimeProtocolMethod *next = realloc(w->methods, cap * sizeof(*next));
+    IdmRuntimeTraitMethod *next = realloc(w->methods, cap * sizeof(*next));
     if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
     w->methods = next;
     w->method_cap = cap;
     return true;
 }
 
-static bool protocol_impls_reserve(IdmProtocolWorld *w, size_t needed, IdmError *err) {
+static bool trait_impls_reserve(IdmTraitWorld *w, size_t needed, IdmError *err) {
     if (needed <= w->impl_cap) return true;
     size_t cap = w->impl_cap ? w->impl_cap * 2u : 8u;
     while (cap < needed) cap *= 2u;
-    IdmRuntimeProtocolImpl *next = realloc(w->impls, cap * sizeof(*next));
+    IdmRuntimeTraitImpl *next = realloc(w->impls, cap * sizeof(*next));
     if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
     w->impls = next;
     w->impl_cap = cap;
     return true;
 }
 
-static bool protocol_conformances_reserve(IdmProtocolWorld *w, size_t needed, IdmError *err) {
+static bool trait_conformances_reserve(IdmTraitWorld *w, size_t needed, IdmError *err) {
     if (needed <= w->conformance_cap) return true;
     size_t cap = w->conformance_cap ? w->conformance_cap * 2u : 8u;
     while (cap < needed) cap *= 2u;
-    IdmRuntimeProtocolConformance *next = realloc(w->conformances, cap * sizeof(*next));
+    IdmRuntimeTraitConformance *next = realloc(w->conformances, cap * sizeof(*next));
     if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
     w->conformances = next;
     w->conformance_cap = cap;
     return true;
 }
 
-static size_t runtime_protocol_method_count_for(IdmRuntime *rt, const char *protocol) {
-    IdmProtocolWorld *w = protocol_world(rt);
+static size_t runtime_trait_method_count_for(IdmRuntime *rt, const char *trait) {
+    IdmTraitWorld *w = trait_world(rt);
     size_t count = 0;
-    for (size_t i = 0; i < w->method_count; i++) if (strcmp(w->methods[i].protocol, protocol) == 0) count++;
+    for (size_t i = 0; i < w->method_count; i++) if (strcmp(w->methods[i].trait, trait) == 0) count++;
     return count;
 }
 
-static bool runtime_protocol_contract_compatible(IdmRuntime *rt, const char *protocol, const IdmProtocolMethodSpec *methods, size_t method_count) {
-    if (runtime_protocol_method_count_for(rt, protocol) != method_count) return false;
+static bool requirement_specs_match_contract(const IdmRuntimeTraitContract *contract, const IdmTraitRequirementSpec *requirements, size_t requirement_count) {
+    if (contract->requirement_count != requirement_count) return false;
+    for (size_t i = 0; i < requirement_count; i++) {
+        bool found = false;
+        for (size_t j = 0; j < contract->requirement_count; j++) {
+            if (strcmp(contract->requirements[j], requirements[i].name) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool runtime_trait_contract_compatible(IdmRuntime *rt, const char *trait, const IdmTraitRequirementSpec *requirements, size_t requirement_count, const IdmTraitMethodSpec *methods, size_t method_count) {
+    IdmRuntimeTraitContract *contract = runtime_trait_find_contract(rt, trait);
+    if (!contract || !requirement_specs_match_contract(contract, requirements, requirement_count)) return false;
+    if (runtime_trait_method_count_for(rt, trait) != method_count) return false;
     for (size_t i = 0; i < method_count; i++) {
-        IdmRuntimeProtocolMethod *existing = runtime_protocol_find_method(rt, protocol, methods[i].name);
+        IdmRuntimeTraitMethod *existing = runtime_trait_find_method(rt, trait, methods[i].name);
         if (!existing || existing->arity != methods[i].arity) return false;
     }
     return true;
 }
 
-static void staged_protocol_methods_destroy(IdmRuntimeProtocolMethod *methods, size_t count) {
-    for (size_t i = 0; i < count; i++) runtime_protocol_method_destroy(&methods[i]);
+static bool runtime_trait_requires(IdmRuntime *rt, const char *trait, const char *required) {
+    IdmRuntimeTraitContract *contract = runtime_trait_find_contract(rt, trait);
+    if (!contract) return false;
+    for (size_t i = 0; i < contract->requirement_count; i++) {
+        if (strcmp(contract->requirements[i], required) == 0) return true;
+        if (runtime_trait_requires(rt, contract->requirements[i], required)) return true;
+    }
+    return false;
+}
+
+static void staged_trait_contract_destroy(IdmRuntimeTraitContract *contract) {
+    runtime_trait_contract_destroy(contract);
+}
+
+static void staged_trait_methods_destroy(IdmRuntimeTraitMethod *methods, size_t count) {
+    for (size_t i = 0; i < count; i++) runtime_trait_method_destroy(&methods[i]);
     free(methods);
 }
 
-bool idm_protocol_define(IdmRuntime *rt, const char *protocol, const IdmProtocolMethodSpec *methods, size_t method_count, IdmError *err) {
-    if (!protocol || !*protocol) return idm_error_set(err, idm_span_unknown(NULL), "protocol definition requires a name");
+bool idm_trait_define(IdmRuntime *rt, const char *trait, const IdmTraitRequirementSpec *requirements, size_t requirement_count, const IdmTraitMethodSpec *methods, size_t method_count, IdmError *err) {
+    if (!trait || !*trait) return idm_error_set(err, idm_span_unknown(NULL), "trait definition requires a name");
+    for (size_t i = 0; i < requirement_count; i++) {
+        if (!requirements[i].name || !*requirements[i].name) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' has an unnamed requirement", trait);
+        if (strcmp(requirements[i].name, trait) == 0) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' cannot require itself", trait);
+        if (!runtime_trait_find_contract(rt, requirements[i].name)) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' requires undefined trait '%s'", trait, requirements[i].name);
+        if (runtime_trait_requires(rt, requirements[i].name, trait)) return idm_error_set(err, idm_span_unknown(NULL), "trait requirement cycle involving '%s' and '%s'", trait, requirements[i].name);
+        for (size_t j = i + 1u; j < requirement_count; j++) {
+            if (strcmp(requirements[i].name, requirements[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' requires trait '%s' more than once", trait, requirements[i].name);
+        }
+    }
     for (size_t i = 0; i < method_count; i++) {
-        if (!methods[i].name || !*methods[i].name) return idm_error_set(err, idm_span_unknown(NULL), "protocol '%s' has an unnamed method", protocol);
-        if (methods[i].has_default && !idm_is_closure(methods[i].default_impl)) return idm_error_set(err, idm_span_unknown(NULL), "protocol '%s.%s' default is not a function", protocol, methods[i].name);
+        if (!methods[i].name || !*methods[i].name) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' has an unnamed method", trait);
+        if (methods[i].has_default && !idm_is_closure(methods[i].default_impl)) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s.%s' default is not a function", trait, methods[i].name);
         for (size_t j = i + 1u; j < method_count; j++) {
-            if (strcmp(methods[i].name, methods[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "protocol '%s' declares method '%s' more than once", protocol, methods[i].name);
+            if (strcmp(methods[i].name, methods[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' declares method '%s' more than once", trait, methods[i].name);
         }
     }
 
-    if (runtime_protocol_method_count_for(rt, protocol) != 0) {
-        if (!runtime_protocol_contract_compatible(rt, protocol, methods, method_count)) {
-            idm_error_set(err, idm_span_unknown(NULL), "protocol '%s' is already defined with an incompatible contract", protocol);
-            return idm_error_reason(rt, err, "protocol-redefinition", 1, idm_atom(rt, protocol));
+    if (runtime_trait_find_contract(rt, trait)) {
+        if (!runtime_trait_contract_compatible(rt, trait, requirements, requirement_count, methods, method_count)) {
+            idm_error_set(err, idm_span_unknown(NULL), "trait '%s' is already defined with an incompatible contract", trait);
+            return idm_error_reason(rt, err, "trait-redefinition", 1, idm_atom(rt, trait));
         }
         for (size_t i = 0; i < method_count; i++) {
-            IdmRuntimeProtocolMethod *existing = runtime_protocol_find_method(rt, protocol, methods[i].name);
+            IdmRuntimeTraitMethod *existing = runtime_trait_find_method(rt, trait, methods[i].name);
             existing->has_default = methods[i].has_default;
-            existing->default_impl = methods[i].has_default ? methods[i].default_impl : idm_nil();
+            existing->default_impl = methods[i].has_default ? idm_value_copy(rt, &rt->immortal, methods[i].default_impl, err) : idm_nil();
+            if (err->present) return false;
         }
         return true;
     }
 
-    IdmRuntimeProtocolMethod *staged = method_count == 0 ? NULL : calloc(method_count, sizeof(*staged));
-    if (method_count != 0 && !staged) return idm_error_oom(err, idm_span_unknown(NULL));
+    IdmRuntimeTraitContract staged_contract;
+    memset(&staged_contract, 0, sizeof(staged_contract));
+    staged_contract.name = idm_strdup(trait);
+    staged_contract.requirement_count = requirement_count;
+    if (!staged_contract.name) {
+        staged_trait_contract_destroy(&staged_contract);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    if (requirement_count != 0) {
+        staged_contract.requirements = calloc(requirement_count, sizeof(*staged_contract.requirements));
+        if (!staged_contract.requirements) {
+            staged_trait_contract_destroy(&staged_contract);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        for (size_t i = 0; i < requirement_count; i++) {
+            staged_contract.requirements[i] = idm_strdup(requirements[i].name);
+            if (!staged_contract.requirements[i]) {
+                staged_trait_contract_destroy(&staged_contract);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+        }
+    }
+
+    IdmRuntimeTraitMethod *staged = method_count == 0 ? NULL : calloc(method_count, sizeof(*staged));
+    if (method_count != 0 && !staged) {
+        staged_trait_contract_destroy(&staged_contract);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
     for (size_t i = 0; i < method_count; i++) {
-        staged[i].protocol = idm_strdup(protocol);
+        staged[i].trait = idm_strdup(trait);
         staged[i].method = idm_strdup(methods[i].name);
-        if (!staged[i].protocol || !staged[i].method) {
-            staged_protocol_methods_destroy(staged, method_count);
+        if (!staged[i].trait || !staged[i].method) {
+            staged_trait_contract_destroy(&staged_contract);
+            staged_trait_methods_destroy(staged, method_count);
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
         staged[i].arity = methods[i].arity;
         staged[i].has_default = methods[i].has_default;
-        staged[i].default_impl = methods[i].has_default ? methods[i].default_impl : idm_nil();
+        staged[i].default_impl = methods[i].has_default ? idm_value_copy(rt, &rt->immortal, methods[i].default_impl, err) : idm_nil();
+        if (err->present) {
+            staged_trait_contract_destroy(&staged_contract);
+            staged_trait_methods_destroy(staged, method_count);
+            return false;
+        }
     }
 
-    IdmProtocolWorld *w = protocol_world(rt);
-    if (!protocol_methods_reserve(w, w->method_count + method_count, err)) {
-        staged_protocol_methods_destroy(staged, method_count);
+    IdmTraitWorld *w = trait_world(rt);
+    if (!trait_contracts_reserve(w, w->contract_count + 1u, err)) {
+        staged_trait_contract_destroy(&staged_contract);
+        staged_trait_methods_destroy(staged, method_count);
         return false;
     }
+    if (!trait_methods_reserve(w, w->method_count + method_count, err)) {
+        staged_trait_contract_destroy(&staged_contract);
+        staged_trait_methods_destroy(staged, method_count);
+        return false;
+    }
+    w->contracts[w->contract_count++] = staged_contract;
     for (size_t i = 0; i < method_count; i++) w->methods[w->method_count++] = staged[i];
     free(staged);
     return true;
 }
 
-static void staged_protocol_impls_destroy(IdmRuntimeProtocolImpl *impls, size_t count) {
-    for (size_t i = 0; i < count; i++) runtime_protocol_impl_destroy(&impls[i]);
+static void staged_trait_impls_destroy(IdmRuntimeTraitImpl *impls, size_t count) {
+    for (size_t i = 0; i < count; i++) runtime_trait_impl_destroy(&impls[i]);
     free(impls);
 }
 
-static void runtime_protocol_remove_impls(IdmProtocolWorld *w, const char *protocol, const char *type) {
+static void runtime_trait_remove_impls(IdmTraitWorld *w, const char *trait, const char *type) {
     size_t kept = 0;
     for (size_t i = 0; i < w->impl_count; i++) {
-        if (strcmp(w->impls[i].type, type) == 0 && strcmp(w->impls[i].protocol, protocol) == 0) runtime_protocol_impl_destroy(&w->impls[i]);
+        if (strcmp(w->impls[i].type, type) == 0 && strcmp(w->impls[i].trait, trait) == 0) runtime_trait_impl_destroy(&w->impls[i]);
         else w->impls[kept++] = w->impls[i];
     }
     w->impl_count = kept;
 }
 
-bool idm_protocol_extend(IdmRuntime *rt, const char *protocol, const char *type, const char *provider, const char *provider_key, const IdmProtocolImplSpec *impls, size_t impl_count, IdmError *err) {
-    if (!protocol || !*protocol) return idm_error_set(err, idm_span_unknown(NULL), "extend requires a protocol name");
-    if (!type || !*type) return idm_error_set(err, idm_span_unknown(NULL), "extend requires a value type name");
-    if (!provider || !provider_key) return idm_error_set(err, idm_span_unknown(NULL), "extend requires a provider identity");
-    if (runtime_protocol_method_count_for(rt, protocol) == 0) return idm_error_set(err, idm_span_unknown(NULL), "protocol '%s' is not defined at runtime", protocol);
-    IdmRuntimeProtocolConformance *existing = runtime_protocol_find_conformance(rt, protocol, type);
+bool idm_trait_implement(IdmRuntime *rt, const char *trait, const char *type, const char *provider, const char *provider_key, const IdmTraitImplSpec *impls, size_t impl_count, IdmError *err) {
+    if (!trait || !*trait) return idm_error_set(err, idm_span_unknown(NULL), "implement requires a trait name");
+    if (!type || !*type) return idm_error_set(err, idm_span_unknown(NULL), "implement requires a type name");
+    if (!provider || !provider_key) return idm_error_set(err, idm_span_unknown(NULL), "implement requires a provider identity");
+    IdmRuntimeTraitContract *contract = runtime_trait_find_contract(rt, trait);
+    if (!contract) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' is not defined at runtime", trait);
+    for (size_t i = 0; i < contract->requirement_count; i++) {
+        if (!runtime_trait_find_conformance(rt, contract->requirements[i], type)) {
+            return idm_error_set(err, idm_span_unknown(NULL), "type '%s' cannot implement trait '%s' before it implements required trait '%s'", type, trait, contract->requirements[i]);
+        }
+    }
+    IdmRuntimeTraitConformance *existing = runtime_trait_find_conformance(rt, trait, type);
     if (existing && strcmp(existing->provider_key, provider_key) != 0) {
-        idm_error_set(err, idm_span_unknown(NULL), "type '%s' already extends protocol '%s' via '%s'; the extend in '%s' conflicts", type, protocol, existing->provider, provider);
-        return idm_error_reason(rt, err, "protocol-extend-conflict", 4, idm_atom(rt, protocol), idm_atom(rt, type), idm_atom(rt, existing->provider), idm_atom(rt, provider));
+        idm_error_set(err, idm_span_unknown(NULL), "type '%s' already implements trait '%s' via '%s'; the implement in '%s' conflicts", type, trait, existing->provider, provider);
+        return idm_error_reason(rt, err, "trait-implement-conflict", 4, idm_atom(rt, trait), idm_atom(rt, type), idm_atom(rt, existing->provider), idm_atom(rt, provider));
     }
     for (size_t i = 0; i < impl_count; i++) {
-        if (!impls[i].name || !*impls[i].name) return idm_error_set(err, idm_span_unknown(NULL), "extend for protocol '%s' has an unnamed method", protocol);
-        IdmRuntimeProtocolMethod *method = runtime_protocol_find_method(rt, protocol, impls[i].name);
-        if (!method) return idm_error_set(err, idm_span_unknown(NULL), "protocol '%s' has no method '%s'", protocol, impls[i].name);
-        if (method->arity != impls[i].arity) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %u got %u", protocol, impls[i].name, method->arity, impls[i].arity);
-        if (!idm_is_closure(impls[i].impl)) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' implementation is not a function", protocol, impls[i].name);
+        if (!impls[i].name || !*impls[i].name) return idm_error_set(err, idm_span_unknown(NULL), "implement for trait '%s' has an unnamed method", trait);
+        IdmRuntimeTraitMethod *method = runtime_trait_find_method(rt, trait, impls[i].name);
+        if (!method) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' has no method '%s'", trait, impls[i].name);
+        if (method->arity != impls[i].arity) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %u got %u", trait, impls[i].name, method->arity, impls[i].arity);
+        if (!idm_is_closure(impls[i].impl)) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' implementation is not a function", trait, impls[i].name);
         for (size_t j = i + 1u; j < impl_count; j++) {
-            if (strcmp(impls[i].name, impls[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "extend for '%s' provides method '%s' more than once", protocol, impls[i].name);
+            if (strcmp(impls[i].name, impls[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "implement for '%s' provides method '%s' more than once", trait, impls[i].name);
         }
     }
 
-    IdmRuntimeProtocolImpl *staged = impl_count == 0 ? NULL : calloc(impl_count, sizeof(*staged));
+    IdmRuntimeTraitImpl *staged = impl_count == 0 ? NULL : calloc(impl_count, sizeof(*staged));
     if (impl_count != 0 && !staged) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < impl_count; i++) {
-        staged[i].protocol = idm_strdup(protocol);
+        staged[i].trait = idm_strdup(trait);
         staged[i].method = idm_strdup(impls[i].name);
         staged[i].type = idm_strdup(type);
-        if (!staged[i].protocol || !staged[i].method || !staged[i].type) {
-            staged_protocol_impls_destroy(staged, impl_count);
+        if (!staged[i].trait || !staged[i].method || !staged[i].type) {
+            staged_trait_impls_destroy(staged, impl_count);
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
-        staged[i].impl = impls[i].impl;
+        staged[i].impl = idm_value_copy(rt, &rt->immortal, impls[i].impl, err);
+        if (err->present) {
+            staged_trait_impls_destroy(staged, impl_count);
+            return false;
+        }
     }
-    IdmProtocolWorld *w = protocol_world(rt);
-    if (!protocol_impls_reserve(w, w->impl_count + impl_count, err)) {
-        staged_protocol_impls_destroy(staged, impl_count);
+    IdmTraitWorld *w = trait_world(rt);
+    if (!trait_impls_reserve(w, w->impl_count + impl_count, err)) {
+        staged_trait_impls_destroy(staged, impl_count);
         return false;
     }
-    if (!existing && !protocol_conformances_reserve(w, w->conformance_count + 1u, err)) {
-        staged_protocol_impls_destroy(staged, impl_count);
+    if (!existing && !trait_conformances_reserve(w, w->conformance_count + 1u, err)) {
+        staged_trait_impls_destroy(staged, impl_count);
         return false;
     }
     if (!existing) {
-        IdmRuntimeProtocolConformance conf;
+        IdmRuntimeTraitConformance conf;
         memset(&conf, 0, sizeof(conf));
-        conf.protocol = idm_strdup(protocol);
+        conf.trait = idm_strdup(trait);
         conf.type = idm_strdup(type);
         conf.provider = idm_strdup(provider);
         conf.provider_key = idm_strdup(provider_key);
-        if (!conf.protocol || !conf.type || !conf.provider || !conf.provider_key) {
-            runtime_protocol_conformance_destroy(&conf);
-            staged_protocol_impls_destroy(staged, impl_count);
+        if (!conf.trait || !conf.type || !conf.provider || !conf.provider_key) {
+            runtime_trait_conformance_destroy(&conf);
+            staged_trait_impls_destroy(staged, impl_count);
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
         w->conformances[w->conformance_count++] = conf;
     } else {
-        runtime_protocol_remove_impls(w, protocol, type);
+        runtime_trait_remove_impls(w, trait, type);
     }
     for (size_t i = 0; i < impl_count; i++) w->impls[w->impl_count++] = staged[i];
     free(staged);
     return true;
 }
 
-bool idm_protocol_lookup(IdmRuntime *rt, const char *protocol, const char *method, const char *type, uint32_t argc, IdmValue *out_impl, IdmError *err) {
-    IdmRuntimeProtocolMethod *contract = runtime_protocol_find_method(rt, protocol, method);
-    if (!contract) return idm_error_set(err, idm_span_unknown(NULL), "protocol method '%s.%s' is not defined", protocol, method);
-    if (contract->arity != argc) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %u got %u", protocol, method, contract->arity, argc);
-    IdmRuntimeProtocolImpl *impl = runtime_protocol_find_impl(rt, protocol, method, type);
+bool idm_trait_implements(IdmRuntime *rt, const char *trait, const char *type) {
+    return trait && type && runtime_trait_find_conformance(rt, trait, type) != NULL;
+}
+
+bool idm_trait_lookup(IdmRuntime *rt, const char *trait, const char *method, const char *type, uint32_t argc, IdmValue *out_impl, IdmError *err) {
+    IdmRuntimeTraitMethod *contract = runtime_trait_find_method(rt, trait, method);
+    if (!contract) return idm_error_set(err, idm_span_unknown(NULL), "trait method '%s.%s' is not defined", trait, method);
+    if (contract->arity != argc) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %u got %u", trait, method, contract->arity, argc);
+    IdmRuntimeTraitImpl *impl = runtime_trait_find_impl(rt, trait, method, type);
     if (impl) {
         *out_impl = impl->impl;
         return true;
+    }
+    if (!runtime_trait_find_conformance(rt, trait, type)) {
+        return idm_error_set(err, idm_span_unknown(NULL), "type '%s' does not implement trait '%s'", type, trait);
     }
     if (contract->has_default) {
         *out_impl = contract->default_impl;
         return true;
     }
-    if (!runtime_protocol_find_conformance(rt, protocol, type)) {
-        return idm_error_set(err, idm_span_unknown(NULL), "type '%s' does not extend protocol '%s'", type, protocol);
-    }
-    return idm_error_set(err, idm_span_unknown(NULL), "no implementation for method '%s.%s' on type '%s'", protocol, method, type);
-}
-
-void idm_runtime_mark_protocol_roots(IdmRuntime *rt) {
-    for (size_t p = 0; p < 2u; p++) {
-        IdmProtocolWorld *w = &rt->protocol_worlds[p];
-        for (size_t i = 0; i < w->method_count; i++) {
-            if (w->methods[i].has_default) idm_gc_mark_value(w->methods[i].default_impl);
-        }
-        for (size_t i = 0; i < w->impl_count; i++) idm_gc_mark_value(w->impls[i].impl);
-    }
+    return idm_error_set(err, idm_span_unknown(NULL), "no implementation for method '%s.%s' on type '%s'", trait, method, type);
 }
 
 bool idm_is_nil(IdmValue value) {
@@ -1130,6 +1327,14 @@ bool idm_is_closure(IdmValue value) {
 
 bool idm_is_record(IdmValue value) {
     return value.tag == IDM_VAL_RECORD;
+}
+
+bool idm_is_regex(IdmValue value) {
+    return value.tag == IDM_VAL_REGEX;
+}
+
+bool idm_is_regex_result(IdmValue value) {
+    return value.tag == IDM_VAL_REGEX_RESULT;
 }
 
 static pthread_mutex_t g_cell_mu = PTHREAD_MUTEX_INITIALIZER;
@@ -1236,6 +1441,22 @@ bool idm_record_field(IdmValue value, IdmValue field, IdmValue *out, IdmError *e
     return idm_error_set(err, idm_span_unknown(NULL), "record '%s' has no field '%s'", value.as.obj->as.record.type, name);
 }
 
+IdmRegex *idm_regex_value_get(IdmValue value, IdmError *err) {
+    if (value.tag != IDM_VAL_REGEX) {
+        idm_error_set(err, idm_span_unknown(NULL), "expected regex");
+        return NULL;
+    }
+    return value.as.obj->as.regex;
+}
+
+IdmRegexResult *idm_regex_result_value_get(IdmValue value, IdmError *err) {
+    if (value.tag != IDM_VAL_REGEX_RESULT) {
+        idm_error_set(err, idm_span_unknown(NULL), "expected regex result");
+        return NULL;
+    }
+    return value.as.obj->as.regex_result;
+}
+
 IdmValue idm_car(IdmValue pair, IdmError *err) {
     if (pair.tag != IDM_VAL_PAIR) {
         idm_error_set(err, idm_span_unknown(NULL), "first expects a pair");
@@ -1267,6 +1488,22 @@ IdmValue idm_sequence_item(IdmValue value, size_t index, IdmError *err) {
         return idm_nil();
     }
     return value.as.obj->as.sequence.items[index];
+}
+
+bool idm_value_is_error(IdmValue value) {
+    if (value.tag != IDM_VAL_TUPLE || value.as.obj->as.sequence.count == 0) return false;
+    IdmValue tag = value.as.obj->as.sequence.items[0];
+    return tag.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(tag.as.symbol), "error") == 0;
+}
+
+bool idm_value_ok(IdmValue value) {
+    if (value.tag == IDM_VAL_NIL) return false;
+    if (value.tag == IDM_VAL_ATOM) {
+        const char *text = idm_symbol_text(value.as.symbol);
+        if (strcmp(text, "false") == 0 || strcmp(text, "nil") == 0) return false;
+    }
+    if (idm_value_is_error(value)) return false;
+    return true;
 }
 
 size_t idm_dict_count(IdmValue value) {
@@ -1350,6 +1587,10 @@ bool idm_value_equal(IdmValue a, IdmValue b) {
         case IDM_VAL_RECORD:
             return strcmp(a.as.obj->as.record.type, b.as.obj->as.record.type) == 0 &&
                    idm_value_equal(a.as.obj->as.record.fields, b.as.obj->as.record.fields);
+        case IDM_VAL_REGEX:
+            return a.as.obj == b.as.obj;
+        case IDM_VAL_REGEX_RESULT:
+            return a.as.obj == b.as.obj;
         case IDM_VAL_PID:
         case IDM_VAL_REF:
         case IDM_VAL_PORT:
@@ -1396,6 +1637,13 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
         case IDM_VAL_PORT: return idm_buf_appendf(buf, "#<port:%llu>", (unsigned long long)value.as.id);
         case IDM_VAL_PRIMITIVE: return idm_buf_appendf(buf, "#<primitive:%llu>", (unsigned long long)value.as.id);
         case IDM_VAL_RECORD: return idm_buf_appendf(buf, "#<record:%s>", value.as.obj->as.record.type);
+        case IDM_VAL_REGEX: {
+            size_t len = 0;
+            const char *source = idm_regex_source(value.as.obj->as.regex, &len);
+            return idm_buf_append_char(buf, 'r') && write_escaped(buf, source, len);
+        }
+        case IDM_VAL_REGEX_RESULT:
+            return idm_buf_append(buf, "#<regex-result>");
         case IDM_VAL_TUPLE:
         case IDM_VAL_VECTOR: {
             const char *open = value.tag == IDM_VAL_TUPLE ? "{" : "[";
@@ -1440,6 +1688,213 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
     return false;
 }
 
+typedef struct {
+    IdmObject **keys;
+    IdmObject **vals;
+    size_t count;
+    size_t cap;
+} CopyMap;
+
+static IdmObject *copymap_find(const CopyMap *m, IdmObject *key) {
+    if (m->cap == 0) return NULL;
+    size_t mask = m->cap - 1u;
+    size_t i = ((uintptr_t)key >> 4) & mask;
+    while (m->keys[i]) {
+        if (m->keys[i] == key) return m->vals[i];
+        i = (i + 1u) & mask;
+    }
+    return NULL;
+}
+
+static bool copymap_put(CopyMap *m, IdmObject *key, IdmObject *val) {
+    if (m->cap == 0 || m->count + 1u > m->cap - (m->cap >> 2)) {
+        size_t ncap = m->cap ? m->cap * 2u : 16u;
+        IdmObject **nk = calloc(ncap, sizeof(*nk));
+        IdmObject **nv = calloc(ncap, sizeof(*nv));
+        if (!nk || !nv) { free(nk); free(nv); return false; }
+        for (size_t i = 0; i < m->cap; i++) {
+            if (!m->keys[i]) continue;
+            size_t j = ((uintptr_t)m->keys[i] >> 4) & (ncap - 1u);
+            while (nk[j]) j = (j + 1u) & (ncap - 1u);
+            nk[j] = m->keys[i];
+            nv[j] = m->vals[i];
+        }
+        free(m->keys);
+        free(m->vals);
+        m->keys = nk;
+        m->vals = nv;
+        m->cap = ncap;
+    }
+    size_t mask = m->cap - 1u;
+    size_t i = ((uintptr_t)key >> 4) & mask;
+    while (m->keys[i]) i = (i + 1u) & mask;
+    m->keys[i] = key;
+    m->vals[i] = val;
+    m->count++;
+    return true;
+}
+
+static bool value_is_heap_obj(IdmValueTag tag) {
+    switch (tag) {
+        case IDM_VAL_STRING: case IDM_VAL_PAIR: case IDM_VAL_TUPLE: case IDM_VAL_VECTOR:
+        case IDM_VAL_DICT: case IDM_VAL_SYNTAX: case IDM_VAL_CELL: case IDM_VAL_CLOSURE:
+        case IDM_VAL_RECORD: case IDM_VAL_REGEX: case IDM_VAL_REGEX_RESULT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+typedef struct { IdmObject *src; IdmObject *dst; } CopyWork;
+typedef struct { CopyWork *items; size_t count; size_t cap; } CopyStack;
+
+static bool copystack_push(CopyStack *s, IdmObject *src, IdmObject *dst) {
+    if (s->count == s->cap) {
+        size_t ncap = s->cap ? s->cap * 2u : 64u;
+        CopyWork *next = realloc(s->items, ncap * sizeof(*next));
+        if (!next) return false;
+        s->items = next;
+        s->cap = ncap;
+    }
+    s->items[s->count].src = src;
+    s->items[s->count].dst = dst;
+    s->count++;
+    return true;
+}
+
+static bool copy_intern(IdmRuntime *rt, IdmHeap *target, IdmValue in, IdmValue *out, CopyMap *map, CopyStack *stack, IdmError *err) {
+    if (!value_is_heap_obj(in.tag)) { *out = in; return true; }
+    IdmObject *src = in.as.obj;
+    if (!src || src->heap == &rt->immortal) { *out = in; return true; }
+    IdmObject *existing = copymap_find(map, src);
+    if (existing) { out->tag = in.tag; out->as.obj = existing; return true; }
+    IdmObject *dst = heap_alloc_unlocked(target, src->kind);
+    if (!dst) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!copymap_put(map, src, dst)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!copystack_push(stack, src, dst)) return idm_error_oom(err, idm_span_unknown(NULL));
+    out->tag = in.tag;
+    out->as.obj = dst;
+    return true;
+}
+
+static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject *dst, CopyMap *map, CopyStack *stack, IdmError *err) {
+    switch (src->kind) {
+        case IDM_OBJ_STRING:
+            dst->as.string.bytes = idm_strndup(src->as.string.bytes ? src->as.string.bytes : "", src->as.string.len);
+            if (!dst->as.string.bytes) return idm_error_oom(err, idm_span_unknown(NULL));
+            dst->as.string.len = src->as.string.len;
+            heap_account_unlocked(target, dst, src->as.string.len + 1u);
+            return true;
+        case IDM_OBJ_PAIR:
+            if (!copy_intern(rt, target, src->as.pair.car, &dst->as.pair.car, map, stack, err)) return false;
+            return copy_intern(rt, target, src->as.pair.cdr, &dst->as.pair.cdr, map, stack, err);
+        case IDM_OBJ_TUPLE:
+        case IDM_OBJ_VECTOR: {
+            size_t n = src->as.sequence.count;
+            dst->as.sequence.count = n;
+            dst->as.sequence.items = NULL;
+            if (n != 0) {
+                dst->as.sequence.items = malloc(n * sizeof(IdmValue));
+                if (!dst->as.sequence.items) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (size_t i = 0; i < n; i++) dst->as.sequence.items[i] = idm_nil();
+                heap_account_unlocked(target, dst, n * sizeof(IdmValue));
+                for (size_t i = 0; i < n; i++)
+                    if (!copy_intern(rt, target, src->as.sequence.items[i], &dst->as.sequence.items[i], map, stack, err)) return false;
+            }
+            return true;
+        }
+        case IDM_OBJ_DICT: {
+            size_t n = src->as.dict.count;
+            dst->as.dict.count = n;
+            dst->as.dict.entries = NULL;
+            if (n != 0) {
+                dst->as.dict.entries = malloc(n * sizeof(IdmDictEntry));
+                if (!dst->as.dict.entries) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (size_t i = 0; i < n; i++) { dst->as.dict.entries[i].key = idm_nil(); dst->as.dict.entries[i].value = idm_nil(); }
+                heap_account_unlocked(target, dst, n * sizeof(IdmDictEntry));
+                for (size_t i = 0; i < n; i++) {
+                    if (!copy_intern(rt, target, src->as.dict.entries[i].key, &dst->as.dict.entries[i].key, map, stack, err)) return false;
+                    if (!copy_intern(rt, target, src->as.dict.entries[i].value, &dst->as.dict.entries[i].value, map, stack, err)) return false;
+                }
+            }
+            return true;
+        }
+        case IDM_OBJ_CELL:
+            return copy_intern(rt, target, src->as.cell.value, &dst->as.cell.value, map, stack, err);
+        case IDM_OBJ_CLOSURE: {
+            dst->as.closure.module = src->as.closure.module;
+            dst->as.closure.function_index = src->as.closure.function_index;
+            dst->as.closure.ns = src->as.closure.ns;
+            dst->as.closure.entry_count = src->as.closure.entry_count;
+            dst->as.closure.entries = NULL;
+            if (src->as.closure.entry_count > 1) {
+                dst->as.closure.entries = malloc(src->as.closure.entry_count * sizeof(uint32_t));
+                if (!dst->as.closure.entries) return idm_error_oom(err, idm_span_unknown(NULL));
+                memcpy(dst->as.closure.entries, src->as.closure.entries, src->as.closure.entry_count * sizeof(uint32_t));
+                heap_account_unlocked(target, dst, src->as.closure.entry_count * sizeof(uint32_t));
+            }
+            dst->as.closure.capture_count = src->as.closure.capture_count;
+            dst->as.closure.captures = NULL;
+            if (src->as.closure.capture_count != 0) {
+                dst->as.closure.captures = malloc(src->as.closure.capture_count * sizeof(IdmValue));
+                if (!dst->as.closure.captures) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (size_t i = 0; i < src->as.closure.capture_count; i++) dst->as.closure.captures[i] = idm_nil();
+                heap_account_unlocked(target, dst, src->as.closure.capture_count * sizeof(IdmValue));
+                for (size_t i = 0; i < src->as.closure.capture_count; i++)
+                    if (!copy_intern(rt, target, src->as.closure.captures[i], &dst->as.closure.captures[i], map, stack, err)) return false;
+            }
+            return true;
+        }
+        case IDM_OBJ_RECORD:
+            dst->as.record.type = idm_strdup(src->as.record.type);
+            if (!dst->as.record.type) return idm_error_oom(err, idm_span_unknown(NULL));
+            heap_account_unlocked(target, dst, strlen(dst->as.record.type) + 1u);
+            return copy_intern(rt, target, src->as.record.fields, &dst->as.record.fields, map, stack, err);
+        case IDM_OBJ_SYNTAX:
+            dst->as.syntax = idm_syn_clone(src->as.syntax);
+            if (!dst->as.syntax && src->as.syntax) return idm_error_oom(err, idm_span_unknown(NULL));
+            return true;
+        case IDM_OBJ_REGEX:
+            dst->as.regex = idm_regex_clone(src->as.regex, err);
+            return !(err && err->present);
+        case IDM_OBJ_REGEX_RESULT:
+            dst->as.regex_result = idm_regex_result_clone(src->as.regex_result);
+            if (!dst->as.regex_result && src->as.regex_result) return idm_error_oom(err, idm_span_unknown(NULL));
+            heap_account_unlocked(target, dst, idm_regex_result_footprint(dst->as.regex_result));
+            return true;
+    }
+    return idm_error_set(err, idm_span_unknown(NULL), "value copy: unknown object kind");
+}
+
+IdmValue idm_value_copy_locked(IdmRuntime *rt, IdmHeap *target, IdmValue value, IdmError *err) {
+    CopyMap map = {0};
+    CopyStack stack = {0};
+    IdmValue out = idm_nil();
+    bool ok = copy_intern(rt, target, value, &out, &map, &stack, err);
+    while (ok && stack.count != 0) {
+        CopyWork w = stack.items[--stack.count];
+        ok = copy_fill(rt, target, w.src, w.dst, &map, &stack, err);
+    }
+    free(map.keys);
+    free(map.vals);
+    free(stack.items);
+    return out;
+}
+
+IdmValue idm_value_copy(IdmRuntime *rt, IdmHeap *target, IdmValue value, IdmError *err) {
+    pthread_mutex_lock(&target->lock);
+    IdmValue out = idm_value_copy_locked(rt, target, value, err);
+    pthread_mutex_unlock(&target->lock);
+    return out;
+}
+
+IdmValue idm_error_value(IdmRuntime *rt, IdmValue detail) {
+    IdmValue items[2];
+    items[0] = idm_atom(rt, "error");
+    items[1] = detail;
+    return idm_tuple(rt, items, 2u, NULL);
+}
+
 bool idm_error_reason(IdmRuntime *rt, IdmError *err, const char *kind, size_t count, ...) {
     if (!err) return false;
     IdmValue items[5];
@@ -1474,8 +1929,86 @@ IdmValue idm_error_reason_value(IdmRuntime *rt, IdmError *err) {
         inner[1] = idm_string(rt, (err && err->present && err->message) ? err->message : "error", NULL);
         detail = idm_tuple(rt, inner, 2u, NULL);
     }
-    IdmValue items[2];
-    items[0] = idm_atom(rt, "error");
-    items[1] = detail;
-    return idm_tuple(rt, items, 2u, NULL);
+    return idm_error_value(rt, detail);
+}
+
+static void describe_field(IdmBuffer *out, IdmValue v) {
+    if (v.tag == IDM_VAL_ATOM) idm_buf_append(out, idm_symbol_text(v.as.symbol));
+    else idm_value_write(out, v);
+}
+
+static void describe_tail(IdmBuffer *out, IdmValue tuple, size_t from) {
+    size_t n = idm_is_tuple(tuple) ? idm_sequence_count(tuple) : 0u;
+    for (size_t i = from; i < n; i++) {
+        if (i > from) idm_buf_append(out, " ");
+        idm_value_write(out, idm_sequence_item(tuple, i, NULL));
+    }
+}
+
+void idm_error_describe(IdmRuntime *rt, IdmValue reason, IdmBuffer *out) {
+    (void)rt;
+    if (!idm_value_is_error(reason)) { idm_value_write(out, reason); return; }
+    IdmValue detail = idm_sequence_item(reason, 1, NULL);
+    if (detail.tag == IDM_VAL_STRING) { idm_buf_append(out, idm_string_bytes(detail)); return; }
+    if (!idm_is_tuple(detail) || idm_sequence_count(detail) == 0 ||
+        idm_sequence_item(detail, 0, NULL).tag != IDM_VAL_ATOM) {
+        idm_buf_append(out, "error: ");
+        idm_value_write(out, detail);
+        return;
+    }
+    const char *kind = idm_symbol_text(idm_sequence_item(detail, 0, NULL).as.symbol);
+    size_t n = idm_sequence_count(detail);
+    if (strcmp(kind, "runtime") == 0 && n >= 2 && idm_sequence_item(detail, 1, NULL).tag == IDM_VAL_STRING) {
+        idm_buf_append(out, idm_string_bytes(idm_sequence_item(detail, 1, NULL)));
+        return;
+    }
+    if (strcmp(kind, "no-clause") == 0 && n >= 3) {
+        IdmValue nm = idm_sequence_item(detail, 1, NULL);
+        bool anon = nm.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(nm.as.symbol), "fn") == 0;
+        idm_buf_append(out, "no clause of '");
+        if (anon) idm_buf_append(out, "<fn>"); else describe_field(out, nm);
+        idm_buf_append(out, "' matches (");
+        describe_tail(out, idm_sequence_item(detail, 2, NULL), 0);
+        idm_buf_append(out, ")");
+        return;
+    }
+    if (strcmp(kind, "arity") == 0 && n >= 4) {
+        idm_buf_append(out, "'");
+        describe_field(out, idm_sequence_item(detail, 1, NULL));
+        idm_buf_append(out, "' expects ");
+        idm_value_write(out, idm_sequence_item(detail, 3, NULL));
+        idm_buf_append(out, " argument(s), got ");
+        idm_value_write(out, idm_sequence_item(detail, 2, NULL));
+        return;
+    }
+    if (strcmp(kind, "type-error") == 0 && n >= 2) {
+        idm_buf_append(out, "type error in '");
+        describe_field(out, idm_sequence_item(detail, 1, NULL));
+        idm_buf_append(out, "'");
+        if (n > 2) { idm_buf_append(out, ": "); describe_tail(out, detail, 2); }
+        return;
+    }
+    if (strcmp(kind, "div-by-zero") == 0) { idm_buf_append(out, "division by zero"); return; }
+    if (strcmp(kind, "overflow") == 0) {
+        idm_buf_append(out, "integer overflow");
+        if (n > 1) { idm_buf_append(out, " in '"); describe_field(out, idm_sequence_item(detail, 1, NULL)); idm_buf_append(out, "'"); }
+        return;
+    }
+    if (strcmp(kind, "not-callable") == 0 && n >= 2) {
+        idm_buf_append(out, "value is not callable: ");
+        idm_value_write(out, idm_sequence_item(detail, 1, NULL));
+        return;
+    }
+    if (strcmp(kind, "key-not-found") == 0 && n >= 2) {
+        idm_buf_append(out, "key not found: ");
+        idm_value_write(out, idm_sequence_item(detail, 1, NULL));
+        return;
+    }
+    if ((strcmp(kind, "index-out-of-range") == 0 || strcmp(kind, "slice-out-of-range") == 0) && n >= 2) {
+        idm_buf_append(out, kind[0] == 'i' ? "index out of range: " : "slice out of range: ");
+        describe_tail(out, detail, 1);
+        return;
+    }
+    idm_buf_append(out, kind);
+    if (n > 1) { idm_buf_append(out, ": "); describe_tail(out, detail, 1); }
 }

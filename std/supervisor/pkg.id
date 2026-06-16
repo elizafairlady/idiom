@@ -7,33 +7,29 @@ export defn start do
   specs -> start specs 3 5000
   specs intensity period -> spawn (fn do
     trap-exit :true
-    loop (tuple (start-children (to-list specs) (dict)) '() intensity period)
+    loop {(start-children (specs.to-list) %{}) '() intensity period}
   end)
 end
 
 export defn stop sup do
-  send sup (tuple :stop (self))
+  send sup {:stop (self)}
   receive do
     {:stopped p} when (eq? p sup) -> :ok
   end
 end
 
 export defn count sup do
-  send sup (tuple :count (self))
+  send sup {:count (self)}
   receive do
     {:child-count p n} when (eq? p sup) -> n
   end
 end
 
-defn spawn-child f do
-  pid = spawn f
-  link pid
-  pid
-end
+defn spawn-child f -> spawn-link f
 
 defn start-children do
   '() children -> children
-  (list {id f restart} . rest) children -> start-children rest (put children (spawn-child f) (tuple id f restart))
+  (list {id f restart} . rest) children -> start-children rest (put children (spawn-child f) {id f restart})
 end
 
 defn loop state -> match state do
@@ -41,11 +37,11 @@ defn loop state -> match state do
     {:exit pid reason} -> handle-exit state pid reason
     {:stop from} -> do
       shutdown children
-      send from (tuple :stopped (self))
+      send from {:stopped (self)}
       :ok
     end
     {:count from} -> do
-      send from (tuple :child-count (self) (size children))
+      send from {:child-count (self) (size children)}
       loop state
     end
   end
@@ -55,11 +51,7 @@ defn handle-exit state pid reason -> match state do
   {children restarts intensity period} -> match (get children pid) do
     :nil -> loop state
     {id f restart} ->
-      if (restart? restart reason) do
-        restart-child (tuple (del children pid) restarts intensity period) id f restart
-      else do
-        loop (tuple (del children pid) restarts intensity period)
-      end
+      cond (restart? restart reason) (restart-child {(del children pid) restarts intensity period} id f restart) (loop {(del children pid) restarts intensity period})
   end
 end
 
@@ -72,17 +64,19 @@ end
 defn restart-child state id f restart -> match state do
   {children restarts intensity period} -> do
     now = time-ms
-    recent = filter restarts (fn t -> lt? (sub now t) period)
-    if (gte? (length recent) intensity) do
+    recent = restarts.filter (fn t -> lt? (sub now t) period)
+    if (gte? (recent.length) intensity) do
       shutdown children
-      exit (tuple :shutdown :max-restart-intensity)
+      exit {:shutdown :max-restart-intensity}
     else do
-      loop (tuple (put children (spawn-child f) (tuple id f restart)) (cons now recent) intensity period)
+      loop {(put children (spawn-child f) {id f restart}) (cons now recent) intensity period}
     end
   end
 end
 
-defn shutdown children -> map (keys children) (fn pid do
+defn shutdown children do
+  (keys children).map (fn pid do
   unlink pid
   exit pid :kill
-end)
+  end)
+end

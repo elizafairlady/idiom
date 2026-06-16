@@ -8,11 +8,11 @@ protocol UsesOp do
   end end
 end
 r = do
-  implement OpCarrier
-  implement UsesOp
+  activate OpCarrier
+  activate UsesOp
   squarish 6
 end
-implement OpCarrier
-implement UsesOp
+activate OpCarrier
+activate UsesOp
 println (squarish 7)
 inspect r

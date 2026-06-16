@@ -1,0 +1,21 @@
+trait BoxView do
+  method box-show x
+end
+use tests/pkg/boxa
+implement BoxView on box do
+  method box-show b -> str "boxed:" (unbox b)
+end
+println (box-show (box 7))
+do
+  trait BoxTag do
+    method box-tag x
+  end
+  implement BoxTag on box do
+    method box-tag b -> str "tag:" b.v
+  end
+  println (box-tag (box 9))
+end
+println (try do
+  box-show (make-record "box" %{:v 1})
+  rescue _r -> :no-raw-dispatch
+end)

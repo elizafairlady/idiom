@@ -678,7 +678,7 @@ bool idm_syn_scope_visit_tree(const IdmSyntax *syn, bool (*visit)(void *user, Id
     return true;
 }
 
-IdmSyntax *idm_syn_program_prepend_implement(const IdmSyntax *program, const char *protocol, const char *file) {
+IdmSyntax *idm_syn_program_prepend_activate(const IdmSyntax *program, const char *activation, const char *file) {
     IdmSpan span = idm_span_unknown(file);
     span.line = 1;
     span.column = 1;
@@ -686,8 +686,8 @@ IdmSyntax *idm_syn_program_prepend_implement(const IdmSyntax *program, const cha
     IdmSyntax *expr = idm_syn_list(span);
     bool ok = wrapped && expr;
     ok = ok && idm_syn_append(expr, idm_syn_word("%-expr", span));
-    ok = ok && idm_syn_append(expr, idm_syn_word("implement", span));
-    ok = ok && idm_syn_append(expr, idm_syn_word(protocol, span));
+    ok = ok && idm_syn_append(expr, idm_syn_word("activate", span));
+    ok = ok && idm_syn_append(expr, idm_syn_word(activation, span));
     ok = ok && idm_syn_append(wrapped, idm_syn_word("%-package-begin", span));
     ok = ok && idm_syn_append(wrapped, expr);
     if (ok) expr = NULL;

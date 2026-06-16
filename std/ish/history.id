@@ -6,26 +6,25 @@ end
 
 defn env-or name fallback do
   v = env-get name
-  if (present? v) do v else do fallback end
+  cond (present? v) v fallback
 end
 
 defn hist-path-under do
   :nil -> :nil
-  state -> str state "/idiom/ish_history"
+  state -> "${state}/idiom/ish_history"
 end
 
-defn hist-path _tag do
-  v = env-get "ISH_HISTFILE"
-  if (present? v) do
-    v
-  else do
-    state = env-or "XDG_STATE_HOME" (match (env-get "HOME") do
-      h when (present? h) -> str h "/.local/state"
-      _ -> :nil
-    end)
-    hist-path-under state
+defn hist-path _tag ->
+  match (env-get "ISH_HISTFILE") do
+    v when (present? v) -> v
+    _ -> do
+      state = env-or "XDG_STATE_HOME" (match (env-get "HOME") do
+        h when (present? h) -> "${h}/.local/state"
+        _ -> :nil
+      end)
+      hist-path-under state
+    end
   end
-end
 
 defn hist-cap _tag -> match (parse-int (env-or "ISH_HISTSIZE" "")) do
   {:ok n} when (gt? n 0) -> n
@@ -34,7 +33,8 @@ end
 
 defn last-slash-at do
   _p 0 -> :nil
-  p i -> if (eq? (str-byte p (sub i 1)) 47) do sub i 1 else do last-slash-at p (sub i 1) end
+  p i when (eq? (str-byte p (sub i 1)) 47) -> sub i 1
+  p i -> last-slash-at p (sub i 1)
 end
 
 defn dir-of p -> match (last-slash-at p (str-len p)) do
@@ -55,11 +55,7 @@ defn mkdirs do
 end
 
 defn hist-escape s ->
-  if (or (contains? s "\\") (contains? s "\n")) do
-    s |> replace "\\" "\\\\" |> replace "\n" "\\n"
-  else do
-    s
-  end
+  cond (or (contains? s "\\") (contains? s "\n")) (s |> replace "\\" "\\\\" |> replace "\n" "\\n") s
 
 defn unescape-scan do
   s i acc when (eq? i (str-len s)) -> acc
@@ -67,14 +63,15 @@ defn unescape-scan do
     b = str-byte s i
     if (and (eq? b 92) (lt? (add i 1) (str-len s))) do
       n = str-byte s (add i 1)
-      unescape-scan s (add i 2) (str acc (if (eq? n 110) do "\n" else do byte-str n end))
+      ch = cond (eq? n 110) "\n" (byte-str n)
+      unescape-scan s (add i 2) "${acc}${ch}"
     else do
-      unescape-scan s (add i 1) (str acc (byte-str b))
+      unescape-scan s (add i 1) "${acc}#{byte-str b}"
     end
   end
 end
 
-defn hist-unescape s -> if (contains? s "\\") do unescape-scan s 0 "" else do s end
+defn hist-unescape s -> cond (contains? s "\\") (unescape-scan s 0 "") s
 
 defn parse-rev do
   '() acc -> acc
@@ -96,22 +93,22 @@ end
 
 defn render-oldest-first do
   '() acc -> acc
-  (list h . t) acc -> render-oldest-first t (str acc (hist-escape h) "\n")
+  (list h . t) acc -> render-oldest-first t "${acc}#{hist-escape h}\n"
 end
 
 defn history-load shell do
-  path = if shell do hist-path :go else do :nil end
+  path = cond shell (hist-path :go) :nil
   match path do
-    :nil -> tuple :nil '()
+    :nil -> {:nil '()}
     p -> do
       mkdirs (dir-of p)
       cap = hist-cap :go
       match (file-read p) do
         {:ok data} -> do
           newest-first = parse-rev (split data "\n") '()
-          tuple (tuple p (list-len newest-first) cap) (take-n newest-first cap)
+          {{p (list-len newest-first) cap} (take-n newest-first cap)}
         end
-        _ -> tuple (tuple p 0 cap) '()
+        _ -> {{p 0 cap} '()}
       end
     end
   end
@@ -127,14 +124,14 @@ end
 defn history-append do
   :nil _entries _text -> :nil
   {path count cap} entries text -> do
-    file-append path (str (hist-escape text) "\n")
+    file-append path "#{hist-escape text}\n"
     n = add count 1
     if (gt? n (mul 2 cap)) do
       kept = take-n entries cap
       file-write path (render-oldest-first (rev-app kept '()) "")
-      tuple path (list-len kept) cap
+      {path (list-len kept) cap}
     else do
-      tuple path n cap
+      {path n cap}
     end
   end
 end

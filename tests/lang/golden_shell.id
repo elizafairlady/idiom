@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "shell-cd-relative" do
@@ -24,7 +24,7 @@ suite do
     got = do
       start = pwd
       env-set "HOME" start
-      implement std/shell
+      activate std/shell
       cd tests
       here = pwd
       cd ..
@@ -38,13 +38,13 @@ suite do
       dot = pwd
       cd ../tests
       parent = pwd
-      tuple (eq? here (str start "/tests")) (eq? back start) (eq? home start) (eq? noarg start) (eq? dot (str start "/tests")) (eq? parent (str start "/tests"))
+      {(eq? here "${start}/tests") (eq? back start) (eq? home start) (eq? noarg start) (eq? dot "${start}/tests") (eq? parent "${start}/tests")}
     end
     assert-inspect got "{:true :true :true :true :true :true}"
   end
   test "shell-env-prefix" do
     got = do
-      implement std/shell
+      activate std/shell
       x = ISH_GOLD_PREFIX=hello printenv ISH_GOLD_PREFIX
       x
     end
@@ -52,7 +52,7 @@ suite do
   end
   test "shell-fd-dup" do
     got = do
-      implement std/shell
+      activate std/shell
       x = sh -c "echo oops >&2" 2>&1
       x
     end
@@ -60,7 +60,7 @@ suite do
   end
   test "shell-glob-nomatch" do
     got = do
-      implement std/shell
+      activate std/shell
       x = echo *.zzz-no-match
       x
     end
@@ -68,7 +68,7 @@ suite do
   end
   test "shell-glob-quoted" do
     got = do
-      implement std/shell
+      activate std/shell
       x = echo "*.zzz-no-match"
       x
     end
@@ -76,10 +76,24 @@ suite do
   end
   test "shell-word-join" do
     got = do
-      implement std/shell
+      activate std/shell
       x = echo a"b"c
       x
     end
     assert-inspect got "{:ok 0 \"abc\\n\" \"\"}"
+  end
+  test "shell-command-substitution" do
+    got = do
+      activate std/shell
+      a = echo $(printf hi)
+      b = echo pre$(printf hi)post
+      c = echo $(printf a)$(printf b)
+      d = ISH_GOLD_CS=$(printf env) printenv ISH_GOLD_CS
+      {a b c d}
+    end
+    assert-inspect got "{{:ok 0 \"hi\\n\" \"\"} {:ok 0 \"prehipost\\n\" \"\"} {:ok 0 \"ab\\n\" \"\"} {:ok 0 \"env\\n\" \"\"}}"
+  end
+  test "command-substitution-requires-shell-or-string-context" do
+    assert-expand-error "\$(echo hi)" "command substitution requires shell or string context"
   end
 end

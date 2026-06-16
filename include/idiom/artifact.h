@@ -48,7 +48,11 @@ typedef struct {
     IdmCore *default_fn;
     IdmScopeSet scopes;
     bool exported;
-} IdmProtocolMethodDef;
+} IdmTraitMethodDef;
+
+typedef struct {
+    char *name;
+} IdmTraitRequirementDef;
 
 typedef struct {
     char *name;
@@ -62,11 +66,13 @@ typedef struct {
     char *name;
     uint32_t slot;
     IdmScopeSet scopes;
+    IdmArity arity;
 } IdmPkgGlobal;
 
 typedef struct {
     char *name;
     uint32_t slot;
+    IdmArity arity;
 } IdmPkgExport;
 
 typedef enum {
@@ -92,9 +98,19 @@ struct IdmPhaseReads {
 typedef struct {
     char *name;
     char *identity;
-    IdmProtocolMethodDef *methods;
+    IdmTraitRequirementDef *requirements;
+    size_t requirement_count;
+    IdmTraitMethodDef *methods;
     size_t method_count;
-} IdmPkgProtocol;
+} IdmPkgTrait;
+
+typedef struct {
+    char *name;
+    char *identity;
+    IdmScopeSet scopes;
+    char **fields;
+    size_t field_count;
+} IdmPkgType;
 
 typedef struct {
     IdmBytecodeModule *module;
@@ -112,10 +128,10 @@ typedef struct {
     uint32_t resolver_fn;
     IdmNamespace *resolver_phase_ns;
     IdmPhaseEnv *resolver_phase_env;
-    IdmProtocolMethodDef *methods;
-    size_t method_count;
-    IdmPkgProtocol *protocols;
-    size_t protocol_count;
+    IdmPkgType *types;
+    size_t type_count;
+    IdmPkgTrait *traits;
+    size_t trait_count;
     IdmScopeId scope_base;
     IdmScopeId scope_end;
     IdmPhaseEnv *phase_env;
@@ -132,14 +148,17 @@ IdmNamespace *idm_fresh_phase_namespace(IdmRuntime *rt, IdmError *err);
 IdmPhaseEnv *idm_phase_env_create(IdmRuntime *rt, IdmNamespace *ns);
 IdmPhaseEnv *idm_phase_env_retain(IdmPhaseEnv *env);
 void idm_phase_env_release(IdmPhaseEnv *env);
-bool idm_phase_env_add_module(IdmPhaseEnv *env, IdmBytecodeModule *module, uint32_t main_fn);
+bool idm_phase_env_add_module(IdmPhaseEnv *env, IdmBytecodeModule *module, uint32_t main_fn, IdmError *err);
 
 void idm_operator_def_destroy(IdmOperatorDef *op);
-void idm_protocol_method_def_destroy(IdmProtocolMethodDef *method);
+void idm_trait_method_def_destroy(IdmTraitMethodDef *method);
+void idm_trait_requirement_def_destroy(IdmTraitRequirementDef *requirement);
 void idm_pkg_macro_destroy(IdmPkgMacro *macro);
 void idm_pkg_global_destroy(IdmPkgGlobal *global);
-void idm_pkg_protocol_destroy(IdmPkgProtocol *protocol);
-bool idm_protocol_method_defs_copy(const IdmProtocolMethodDef *src, size_t count, IdmProtocolMethodDef **out);
+void idm_pkg_trait_destroy(IdmPkgTrait *trait);
+void idm_pkg_type_destroy(IdmPkgType *type);
+bool idm_trait_method_defs_copy(const IdmTraitMethodDef *src, size_t count, IdmTraitMethodDef **out);
+bool idm_trait_requirement_defs_copy(const IdmTraitRequirementDef *src, size_t count, IdmTraitRequirementDef **out);
 void idm_artifact_destroy(IdmArtifact *art);
 
 bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_src, const char **out_label, IdmSpan span, IdmError *err);

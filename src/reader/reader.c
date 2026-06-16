@@ -16,6 +16,7 @@ typedef enum {
     TOK_FLOAT,
     TOK_STRING,
     TOK_STRING_INTERP,
+    TOK_REGEX,
     TOK_SHELL_WORD,
     TOK_SHELL_VAR,
     TOK_FN_VALUE,
@@ -36,6 +37,7 @@ typedef enum {
     TOK_PERCENT_QUASIQUOTE,
     TOK_PERCENT_COMMA,
     TOK_PERCENT_COMMA_AT,
+    TOK_DOLLAR_LPAREN,
     TOK_HEREDOC
 } TokenKind;
 
@@ -139,6 +141,7 @@ static bool is_wordish(TokenKind kind) {
         case TOK_FLOAT:
         case TOK_STRING:
         case TOK_STRING_INTERP:
+        case TOK_REGEX:
             return true;
         default:
             return false;
@@ -231,6 +234,48 @@ static bool read_string_token(TokenVec *vec, Lexer *lx, size_t start, unsigned l
     Token tok;
     tok.kind = interpolation_seen ? TOK_STRING_INTERP : TOK_STRING;
     tok.lexeme = idm_buf_take(&decoded);
+    if (!tok.lexeme) return idm_error_oom(err, (IdmSpan){lx->file, start, lx->pos, line, column});
+    tok.span = (IdmSpan){lx->file, start, lx->pos, line, column};
+    tok.leading_space = leading_space;
+    tok.adjacent_previous = start == lx->previous_end;
+    lx->previous_end = lx->pos;
+    if (!tokens_push(vec, tok)) {
+        free(tok.lexeme);
+        return idm_error_oom(err, tok.span);
+    }
+    return true;
+}
+
+static bool read_regex_token(TokenVec *vec, Lexer *lx, size_t start, unsigned line, unsigned column, bool leading_space, IdmError *err) {
+    (void)advance(lx);
+    (void)advance(lx);
+    IdmBuffer body;
+    idm_buf_init(&body);
+    while (peek(lx) != '\0' && peek(lx) != '"') {
+        char ch = peek(lx);
+        if (ch == '\\' && peek_n(lx, 1) == '"') {
+            advance(lx);
+            advance(lx);
+            if (!idm_buf_append_char(&body, '"')) {
+                idm_buf_destroy(&body);
+                return idm_error_oom(err, (IdmSpan){lx->file, start, lx->pos, line, column});
+            }
+            continue;
+        }
+        advance(lx);
+        if (!idm_buf_append_char(&body, ch)) {
+            idm_buf_destroy(&body);
+            return idm_error_oom(err, (IdmSpan){lx->file, start, lx->pos, line, column});
+        }
+    }
+    if (peek(lx) != '"') {
+        idm_buf_destroy(&body);
+        return idm_error_set(err, (IdmSpan){lx->file, start, lx->pos, line, column}, "unterminated regex literal");
+    }
+    advance(lx);
+    Token tok;
+    tok.kind = TOK_REGEX;
+    tok.lexeme = idm_buf_take(&body);
     if (!tok.lexeme) return idm_error_oom(err, (IdmSpan){lx->file, start, lx->pos, line, column});
     tok.span = (IdmSpan){lx->file, start, lx->pos, line, column};
     tok.leading_space = leading_space;
@@ -344,6 +389,11 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
             leading_space = false;
             continue;
         }
+        if (ch == 'r' && peek_n(&lx, 1) == '"') {
+            if (!read_regex_token(out, &lx, start, line, column, leading_space, err)) return false;
+            leading_space = false;
+            continue;
+        }
         if (ch == '\'') { advance(&lx); if (!add_token(out, &lx, TOK_QUOTE, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '`') { advance(&lx); if (!add_token(out, &lx, TOK_QUASIQUOTE, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == ',' && peek_n(&lx, 1) == '@') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_COMMA_AT, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
@@ -353,6 +403,7 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
         if (ch == '%' && peek_n(&lx, 1) == '`') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_QUASIQUOTE, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '%' && peek_n(&lx, 1) == ',' && peek_n(&lx, 2) == '@') { advance(&lx); advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_COMMA_AT, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '%' && peek_n(&lx, 1) == ',') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_COMMA, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
+        if (ch == '$' && peek_n(&lx, 1) == '(') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_DOLLAR_LPAREN, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == ':' && continues_word(&lx, out) && !is_delim(peek_n(&lx, 1))) {
             advance(&lx);
             if (!read_shell_word(out, &lx, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column});
@@ -489,7 +540,7 @@ static bool indented_newline_continues(Parser *p, unsigned expr_column, TokenKin
     return p->tokens[i].span.column > expr_column;
 }
 
-static IdmSyntax *protocol1(const char *head, IdmSyntax *a, IdmSpan span) {
+static IdmSyntax *form1(const char *head, IdmSyntax *a, IdmSpan span) {
     IdmSyntax *list = idm_syn_list(span);
     if (!list || !idm_syn_append(list, idm_syn_word(head, span)) || !idm_syn_append(list, a)) {
         idm_syn_free(list);
@@ -512,7 +563,7 @@ static IdmSyntax *read_interp_inner(const char *file, const char *inner, bool co
     idm_syn_free(pkg);
     if (!form) { idm_error_oom(err, span); return NULL; }
     if (command) {
-        IdmSyntax *wrapped = protocol1("%-command-sub", form, span);
+        IdmSyntax *wrapped = form1("%-command-sub", form, span);
         if (!wrapped) { idm_error_oom(err, span); return NULL; }
         return wrapped;
     }
@@ -676,7 +727,7 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
                 if (!inner) return NULL;
                 if (!at(p, TOK_RPAREN)) { idm_syn_free(inner); idm_error_set(p->err, tok->span, "unterminated process substitution"); return NULL; }
                 take(p);
-                return protocol1(write ? "%-procsub-write" : "%-procsub-read", inner, tok->span);
+                return form1(write ? "%-procsub-write" : "%-procsub-read", inner, tok->span);
             }
             take(p);
             IdmSyntax *syn = idm_syn_word(tok->lexeme, tok->span);
@@ -733,25 +784,31 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
             take(p);
             return parse_string_interp(p, tok->lexeme, tok->span);
         }
+        case TOK_REGEX: {
+            take(p);
+            IdmSyntax *syn = form1("%-regex", idm_syn_string(tok->lexeme, tok->span), tok->span);
+            if (syn) idm_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+            return syn;
+        }
         case TOK_SHELL_WORD: {
             take(p);
-            IdmSyntax *syn = protocol1("%-word", idm_syn_string(tok->lexeme, tok->span), tok->span);
+            IdmSyntax *syn = form1("%-word", idm_syn_string(tok->lexeme, tok->span), tok->span);
             if (syn) idm_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
             return syn;
         }
         case TOK_HEREDOC: {
             take(p);
-            return protocol1("%-heredoc", idm_syn_string(tok->lexeme, tok->span), tok->span);
+            return form1("%-heredoc", idm_syn_string(tok->lexeme, tok->span), tok->span);
         }
         case TOK_SHELL_VAR: {
             take(p);
-            IdmSyntax *syn = protocol1("%-shell-var", idm_syn_word(tok->lexeme + 1, tok->span), tok->span);
+            IdmSyntax *syn = form1("%-shell-var", idm_syn_word(tok->lexeme + 1, tok->span), tok->span);
             if (syn) idm_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
             return syn;
         }
         case TOK_FN_VALUE: {
             take(p);
-            return protocol1("%-expression", idm_syn_word(tok->lexeme, tok->span), tok->span);
+            return form1("%-expression", idm_syn_word(tok->lexeme, tok->span), tok->span);
         }
         case TOK_LPAREN: {
             take(p);
@@ -763,7 +820,7 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
                 return NULL;
             }
             take(p);
-            return protocol1("%-group", inner, tok->span);
+            return form1("%-group", inner, tok->span);
         }
         case TOK_LBRACKET: take(p); return parse_container(p, IDM_SYN_VECTOR, TOK_RBRACKET, tok->span);
         case TOK_LBRACE: take(p); return parse_container(p, IDM_SYN_TUPLE, TOK_RBRACE, tok->span);
@@ -773,17 +830,31 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
             if (at(p, TOK_LPAREN) && p->pos + 1u < p->count && p->tokens[p->pos + 1u].kind == TOK_RPAREN) {
                 take(p);
                 take(p);
-                return protocol1("%-quote", idm_syn_list(tok->span), tok->span);
+                return form1("%-quote", idm_syn_list(tok->span), tok->span);
             }
-            return protocol1("%-quote", parse_primary(p), tok->span);
+            return form1("%-quote", parse_primary(p), tok->span);
         }
-        case TOK_QUASIQUOTE: take(p); return protocol1("%-quasiquote", parse_primary(p), tok->span);
-        case TOK_COMMA: take(p); return protocol1("%-unquote", parse_primary(p), tok->span);
-        case TOK_COMMA_AT: take(p); return protocol1("%-unquote-splicing", parse_primary(p), tok->span);
-        case TOK_PERCENT_QUOTE: take(p); return protocol1("%-syntax", parse_primary(p), tok->span);
-        case TOK_PERCENT_QUASIQUOTE: take(p); return protocol1("%-quasisyntax", parse_primary(p), tok->span);
-        case TOK_PERCENT_COMMA: take(p); return protocol1("%-unsyntax", parse_primary(p), tok->span);
-        case TOK_PERCENT_COMMA_AT: take(p); return protocol1("%-unsyntax-splicing", parse_primary(p), tok->span);
+        case TOK_QUASIQUOTE: take(p); return form1("%-quasiquote", parse_primary(p), tok->span);
+        case TOK_COMMA: take(p); return form1("%-unquote", parse_primary(p), tok->span);
+        case TOK_COMMA_AT: take(p); return form1("%-unquote-splicing", parse_primary(p), tok->span);
+        case TOK_PERCENT_QUOTE: take(p); return form1("%-syntax", parse_primary(p), tok->span);
+        case TOK_PERCENT_QUASIQUOTE: take(p); return form1("%-quasisyntax", parse_primary(p), tok->span);
+        case TOK_PERCENT_COMMA: take(p); return form1("%-unsyntax", parse_primary(p), tok->span);
+        case TOK_PERCENT_COMMA_AT: take(p); return form1("%-unsyntax-splicing", parse_primary(p), tok->span);
+        case TOK_DOLLAR_LPAREN: {
+            take(p);
+            IdmSyntax *inner = parse_expr_delimited(p, TOK_RPAREN, TOK_EOF, TOK_EOF);
+            if (!inner) return NULL;
+            if (!at(p, TOK_RPAREN)) {
+                idm_syn_free(inner);
+                idm_error_set(p->err, tok->span, "unterminated command substitution");
+                return NULL;
+            }
+            take(p);
+            IdmSyntax *syn = form1("%-command-sub", inner, tok->span);
+            if (syn) idm_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+            return syn;
+        }
         default:
             idm_error_set(p->err, tok->span, "expected syntax item");
             return NULL;

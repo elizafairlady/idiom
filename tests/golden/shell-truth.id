@@ -1,4 +1,4 @@
-implement std/shell
+activate std/shell
 r = nonexistent-cmd-h12 2> /dev/null
 println r
 f = sh -c "exit 4"

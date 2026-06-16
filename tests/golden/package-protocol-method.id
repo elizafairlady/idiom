@@ -1,7 +1,0 @@
-implement tests/pkg/protomethod
-extend int with tests/pkg/protomethod do
-  method tag x -> :int
-end
-
-println (describe 42)
-println (tag 42)

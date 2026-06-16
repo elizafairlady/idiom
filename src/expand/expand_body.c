@@ -12,6 +12,8 @@ static DefnGroup *find_or_add_group(DefnGroup **groups, size_t *count, size_t *c
 static bool group_add_index(DefnGroup *group, size_t index);
 static void body_recs_destroy(BodyRec *recs, size_t count);
 static bool body_work_splice(IdmSyntax ***work, size_t *work_count, size_t *work_cap, size_t at, const IdmSyntax *body, IdmError *err);
+static bool defn_clause_arity_from_items(const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, uint32_t *out_arity, IdmError *err);
+static bool defn_group_arity(const DefnGroup *group, IdmSyntax *const *items, IdmArity *out_arity, IdmError *err);
 static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err);
 static bool defn_form_clause_block(const IdmSyntax *def_form, size_t param_start, const IdmSyntax **out_body);
 static IdmCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, IdmSyntax *const *items, IdmError *err);
@@ -134,9 +136,9 @@ static bool pattern_binder_note(ExpandContext *ctx, const IdmSyntax *syn) {
 }
 
 static bool list_pattern_group_items(const IdmSyntax *syn, IdmSyntax *const **out_items, size_t *out_count) {
-    if (!syn_is_protocol(syn, "%-group") || syn->as.seq.count != 2) return false;
+    if (!syn_is_form(syn, "%-group") || syn->as.seq.count != 2) return false;
     const IdmSyntax *expr = syn->as.seq.items[1];
-    if (!syn_is_protocol(expr, "%-expr") || expr->as.seq.count < 2) return false;
+    if (!syn_is_form(expr, "%-expr") || expr->as.seq.count < 2) return false;
     if (!syn_is_word(expr->as.seq.items[1], "list")) return false;
     *out_items = expr->as.seq.items + 2;
     *out_count = expr->as.seq.count - 2u;
@@ -221,7 +223,7 @@ static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax 
         }
         return idm_pat_bind(syn->as.text, syn->span);
     }
-    if (syn_is_protocol(syn, "%-quote") && syn->as.seq.count == 2) {
+    if (syn_is_form(syn, "%-quote") && syn->as.seq.count == 2) {
         IdmValue datum = idm_nil();
         if (!expand_quote_datum(ctx, syn->as.seq.items[1], &datum, err)) return NULL;
         return idm_pat_literal(datum, syn->span);
@@ -382,7 +384,7 @@ static bool copy_pattern_locals(ExpandContext *ctx, size_t table_base, IdmPatter
 }
 
 static bool bind_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_rhs_start) {
-    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (!syn_is_form(form, "%-expr")) return false;
     if (form->as.seq.count < 4) return false;
     if (form->as.seq.items[1]->kind != IDM_SYN_WORD) return false;
     if (!syn_is_word(form->as.seq.items[2], "=")) return false;
@@ -393,11 +395,11 @@ static bool bind_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, s
 }
 
 static bool pattern_bind_form_parts(const IdmSyntax *form, const IdmSyntax **out_pattern, size_t *out_rhs_start) {
-    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (!syn_is_form(form, "%-expr")) return false;
     if (form->as.seq.count < 4) return false;
     const IdmSyntax *lhs = form->as.seq.items[1];
     if (lhs->kind == IDM_SYN_WORD) return false;
-    if (lhs->kind == IDM_SYN_LIST && !syn_is_protocol(lhs, "%-quote")) {
+    if (lhs->kind == IDM_SYN_LIST && !syn_is_form(lhs, "%-quote")) {
         IdmSyntax *const *items = NULL;
         size_t count = 0;
         if (!list_pattern_group_items(lhs, &items, &count)) return false;
@@ -448,7 +450,7 @@ static bool scan_pattern_bind(ExpandContext *ctx, BodyRec *rec, const IdmSyntax 
 }
 
 static bool definition_like_form(const IdmSyntax *form, const char **out_head) {
-    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (!syn_is_form(form, "%-expr")) return false;
     if (form->as.seq.count < 2 || form->as.seq.items[1]->kind != IDM_SYN_WORD) return false;
     size_t base = 1;
     if (syn_is_word(form->as.seq.items[1], "export") && form->as.seq.count >= 3 && (syn_is_word(form->as.seq.items[2], "defn") || syn_is_word(form->as.seq.items[2], "defmacro"))) base = 2;
@@ -459,16 +461,16 @@ static bool definition_like_form(const IdmSyntax *form, const char **out_head) {
 }
 
 static bool for_syntax_form(const IdmSyntax *form, const IdmSyntax **out_body) {
-    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (!syn_is_form(form, "%-expr")) return false;
     if (form->as.seq.count != 3) return false;
     if (!syn_is_word(form->as.seq.items[1], "for-syntax")) return false;
-    if (!syn_is_protocol(form->as.seq.items[2], "%-body")) return false;
+    if (!syn_is_form(form->as.seq.items[2], "%-body")) return false;
     *out_body = form->as.seq.items[2];
     return true;
 }
 
 static bool defn_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_param_start, bool *out_export) {
-    if (!syn_is_protocol(form, "%-expr")) return false;
+    if (!syn_is_form(form, "%-expr")) return false;
     size_t base = 1;
     bool exported = false;
     if (form->as.seq.count > 1 && syn_is_word(form->as.seq.items[1], "export")) { exported = true; base = 2; }
@@ -511,6 +513,7 @@ static DefnGroup *find_or_add_group(DefnGroup **groups, size_t *count, size_t *c
     group->name_syntax = name_syntax;
     if (!syntax_scopes_copy(&group->scopes, name_syntax)) return NULL;
     group->slot = UINT32_MAX;
+    group->arity = idm_arity_unknown();
     group->indices = NULL;
     group->count = 0;
     group->cap = 0;
@@ -530,7 +533,7 @@ static bool group_add_index(DefnGroup *group, size_t index) {
     return true;
 }
 
-bool record_export(ExpandContext *ctx, const char *name, uint32_t global_id) {
+bool record_export(ExpandContext *ctx, const char *name, uint32_t global_id, IdmArity arity) {
     if (ctx->export_count == ctx->export_cap) {
         size_t cap = ctx->export_cap ? ctx->export_cap * 2u : 8u;
         void *next = realloc(ctx->exports, cap * sizeof(*ctx->exports));
@@ -542,11 +545,12 @@ bool record_export(ExpandContext *ctx, const char *name, uint32_t global_id) {
     if (!copy) return false;
     ctx->exports[ctx->export_count].name = copy;
     ctx->exports[ctx->export_count].global_id = global_id;
+    ctx->exports[ctx->export_count].arity = arity;
     ctx->export_count++;
     return true;
 }
 
-bool record_package_global(ExpandContext *ctx, const char *name, uint32_t global_id, const IdmScopeSet *scopes) {
+bool record_package_global(ExpandContext *ctx, const char *name, uint32_t global_id, const IdmScopeSet *scopes, IdmArity arity) {
     if (!ctx->in_package) return true;
     if (ctx->package_global_count == ctx->package_global_cap) {
         size_t cap = ctx->package_global_cap ? ctx->package_global_cap * 2u : 8u;
@@ -559,6 +563,7 @@ bool record_package_global(ExpandContext *ctx, const char *name, uint32_t global
     global->name = idm_strdup(name);
     if (!global->name) return false;
     global->slot = global_id;
+    global->arity = arity;
     if (!idm_scope_set_copy(&global->scopes, scopes)) {
         free(global->name);
         global->name = NULL;
@@ -581,11 +586,22 @@ static void body_recs_destroy(BodyRec *recs, size_t count) {
     free(recs);
 }
 
-static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, uint32_t slot) {
+static IdmArity core_callable_arity(const IdmCore *core) {
+    if (!core) return idm_arity_unknown();
+    if (core->kind == IDM_CORE_FN) return idm_arity_exact(core->as.fn.arity);
+    if (core->kind != IDM_CORE_FN_MULTI) return idm_arity_unknown();
+    IdmArity arity = idm_arity_unknown();
+    for (size_t i = 0; i < core->as.fn_multi.count; i++) {
+        if (!idm_arity_add_exact(&arity, core->as.fn_multi.clauses[i].arity)) return idm_arity_unknown();
+    }
+    return arity;
+}
+
+static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, uint32_t slot, IdmArity arity) {
     bool repl_global = ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP;
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return false;
-    bool ok = idm_binding_table_add(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, repl_global ? IDM_BIND_GLOBAL : IDM_BIND_LOCAL, &scopes, slot, repl_global ? IDM_FRAME_GLOBAL : ctx->frame, NULL);
+    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, repl_global ? IDM_BIND_GLOBAL : IDM_BIND_LOCAL, &scopes, slot, repl_global ? IDM_FRAME_GLOBAL : ctx->frame, arity, NULL);
     idm_scope_set_destroy(&scopes);
     return ok;
 }
@@ -782,7 +798,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
 
     while (i < work_count && !failed && !boundary) {
         const IdmSyntax *form = work[i];
-        if (syn_is_protocol(form, "%-expr") && form->as.seq.count == 3 &&
+        if (syn_is_form(form, "%-expr") && form->as.seq.count == 3 &&
             syn_is_word(form->as.seq.items[1], "package") && form->as.seq.items[2]->kind == IDM_SYN_WORD) {
             const char *declared = form->as.seq.items[2]->as.text;
             if (ctx->package_name && strcmp(ctx->package_name, declared) != 0) {
@@ -796,9 +812,9 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             i++;
             continue;
         }
-        if (syn_is_protocol(form, "%-expr") && form->as.seq.count == 4 &&
+        if (syn_is_form(form, "%-expr") && form->as.seq.count == 4 &&
             syn_is_word(form->as.seq.items[1], "resolver") && form->as.seq.items[2]->kind == IDM_SYN_WORD &&
-            syn_is_protocol(form->as.seq.items[3], "%-body")) {
+            syn_is_form(form->as.seq.items[3], "%-body")) {
             int saved_phase = ctx->phase;
             ctx->phase = 1;
             IdmCore *fn = expand_function_literal(ctx, "%resolver", form->as.seq.items[1], form->as.seq.items, 2u, form->as.seq.count, err);
@@ -843,12 +859,12 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 const char *macro_name = form->as.seq.items[mbase + 1u]->as.text;
                 size_t temp_base = ctx->bindings.count;
                 for (size_t r = 0; r < rec_count && !failed; r++) {
-                    if (recs[r].kind == BODY_REC_BIND && !push_bind_binder(ctx, recs[r].bind_name, recs[r].bind_slot)) {
+                    if (recs[r].kind == BODY_REC_BIND && !push_bind_binder(ctx, recs[r].bind_name, recs[r].bind_slot, recs[r].bind_arity)) {
                         idm_error_oom(err, form->span);
                         failed = true;
                     } else if (recs[r].kind == BODY_REC_BIND_PATTERN) {
                         for (size_t n = 0; n < recs[r].pattern_name_count && !failed; n++) {
-                            if (!push_bind_binder(ctx, recs[r].pattern_names[n], recs[r].pattern_slots[n])) {
+                            if (!push_bind_binder(ctx, recs[r].pattern_names[n], recs[r].pattern_slots[n], idm_arity_unknown())) {
                                 idm_error_oom(err, form->span);
                                 failed = true;
                             }
@@ -915,15 +931,19 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             if (failed) break;
             bool top_level = ctx->frame == IDM_FRAME_TOP;
             for (size_t k = 0; k < group_count && !failed; k++) {
-                bool ok = top_level ? global_push_def_binder(ctx, groups[k].name, groups[k].name_syntax, &groups[k].slot)
-                                    : local_push_def_binder(ctx, groups[k].name, groups[k].name_syntax, &groups[k].slot);
+                if (!defn_group_arity(&groups[k], work, &groups[k].arity, err)) {
+                    failed = true;
+                    break;
+                }
+                bool ok = top_level ? global_push_def_binder_with_arity(ctx, groups[k].name, groups[k].name_syntax, groups[k].arity, &groups[k].slot)
+                                    : local_push_def_binder_with_arity(ctx, groups[k].name, groups[k].name_syntax, groups[k].arity, &groups[k].slot);
                 if (!ok) { idm_error_oom(err, form->span); failed = true; break; }
-                if (top_level && ctx->in_package && !record_package_global(ctx, groups[k].name, groups[k].slot, &groups[k].scopes)) {
+                if (top_level && ctx->in_package && !record_package_global(ctx, groups[k].name, groups[k].slot, &groups[k].scopes, groups[k].arity)) {
                     idm_error_oom(err, form->span);
                     failed = true;
                     break;
                 }
-                if (top_level && ctx->in_package && groups[k].exported && !record_export(ctx, groups[k].name, groups[k].slot)) {
+                if (top_level && ctx->in_package && groups[k].exported && !record_export(ctx, groups[k].name, groups[k].slot, groups[k].arity)) {
                     idm_error_oom(err, form->span);
                     failed = true;
                     break;
@@ -946,14 +966,14 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             i = j;
             continue;
         }
-        if (syn_is_protocol(form, "%-expr") && form->as.seq.count >= 2 && form->as.seq.items[1]->kind == IDM_SYN_WORD &&
+        if (syn_is_form(form, "%-expr") && form->as.seq.count >= 2 && form->as.seq.items[1]->kind == IDM_SYN_WORD &&
             !bind_form_parts(form, &(const IdmSyntax *){NULL}, &(size_t){0})) {
             bool is_boundary_word =
-                syn_is_word(form->as.seq.items[1], "implement") || syn_is_word(form->as.seq.items[1], "extend") ||
+                syn_is_word(form->as.seq.items[1], "activate") || syn_is_word(form->as.seq.items[1], "implement") ||
                 syn_is_word(form->as.seq.items[1], "record") || syn_is_word(form->as.seq.items[1], "use") ||
                 syn_is_word(form->as.seq.items[1], "import") || syn_is_word(form->as.seq.items[1], "method") ||
-                syn_is_word(form->as.seq.items[1], "protocol") ||
-                (syn_is_word(form->as.seq.items[1], "export") && form->as.seq.count >= 3 && syn_is_word(form->as.seq.items[2], "record"));
+                syn_is_word(form->as.seq.items[1], "protocol") || syn_is_word(form->as.seq.items[1], "trait") ||
+                (syn_is_word(form->as.seq.items[1], "export") && form->as.seq.count >= 3 && (syn_is_word(form->as.seq.items[2], "record") || syn_is_word(form->as.seq.items[2], "trait")));
             if (!is_boundary_word) {
                 uint32_t payload = 0;
                 const IdmSyntax *head_word = form->as.seq.items[1];
@@ -988,11 +1008,11 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     }
                     owned[owned_count++] = expanded;
                     const IdmSyntax *splice_body = NULL;
-                    if (syn_is_protocol(expanded, "%-body")) {
+                    if (syn_is_form(expanded, "%-body")) {
                         splice_body = expanded;
-                    } else if (syn_is_protocol(expanded, "%-group") && expanded->as.seq.count == 2 &&
-                               syn_is_protocol(expanded->as.seq.items[1], "%-expr") && expanded->as.seq.items[1]->as.seq.count == 2 &&
-                               syn_is_protocol(expanded->as.seq.items[1]->as.seq.items[1], "%-body")) {
+                    } else if (syn_is_form(expanded, "%-group") && expanded->as.seq.count == 2 &&
+                               syn_is_form(expanded->as.seq.items[1], "%-expr") && expanded->as.seq.items[1]->as.seq.count == 2 &&
+                               syn_is_form(expanded->as.seq.items[1]->as.seq.items[1], "%-body")) {
                         splice_body = expanded->as.seq.items[1]->as.seq.items[1];
                     }
                     if (splice_body) {
@@ -1025,6 +1045,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             recs[rec_count].bind_name = bind_name;
             recs[rec_count].rhs_start = rhs_start;
             recs[rec_count].bind_slot = (ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP) ? ctx->global_seq++ : ctx->next_slot++;
+            recs[rec_count].bind_arity = idm_arity_unknown();
         } else if (pattern_bind_form_parts(form, &bind_pattern, &rhs_start)) {
             if (!scan_pattern_bind(ctx, &recs[rec_count], bind_pattern, rhs_start, err)) {
                 failed = true;
@@ -1053,7 +1074,8 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             rec->core = expand_parts(ctx, rec->form->as.seq.items, rec->rhs_start, rec->form->as.seq.count, err);
             ctx->value_context = saved_vc;
             if (!rec->core) { failed = true; break; }
-            if (!push_bind_binder(ctx, rec->bind_name, rec->bind_slot)) {
+            rec->bind_arity = core_callable_arity(rec->core);
+            if (!push_bind_binder(ctx, rec->bind_name, rec->bind_slot, rec->bind_arity)) {
                 idm_error_oom(err, rec->form->span);
                 failed = true;
                 break;
@@ -1067,7 +1089,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             rec->core = pattern_bind_app(rec, rhs, err);
             if (!rec->core) { failed = true; break; }
             for (size_t n = 0; n < rec->pattern_name_count; n++) {
-                if (!push_bind_binder(ctx, rec->pattern_names[n], rec->pattern_slots[n])) {
+                if (!push_bind_binder(ctx, rec->pattern_names[n], rec->pattern_slots[n], idm_arity_unknown())) {
                     idm_error_oom(err, rec->form->span);
                     failed = true;
                     break;
@@ -1093,7 +1115,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             }
             rec->core = letrec;
         } else if (!rec->core) {
-            rec->core = syn_is_protocol(rec->form, "%-expr")
+            rec->core = syn_is_form(rec->form, "%-expr")
                 ? expand_parts(ctx, rec->form->as.seq.items, 1, rec->form->as.seq.count, err)
                 : expand_syntax(ctx, rec->form, err);
             if (!rec->core) { failed = true; break; }
@@ -1105,15 +1127,16 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         if (boundary) {
             const IdmSyntax *bform = work[boundary_index];
             if (syn_is_word(bform->as.seq.items[1], "protocol") && bform->as.seq.count == 4 &&
-                bform->as.seq.items[2]->kind == IDM_SYN_WORD && syn_is_protocol(bform->as.seq.items[3], "%-body")) {
+                bform->as.seq.items[2]->kind == IDM_SYN_WORD && syn_is_form(bform->as.seq.items[3], "%-body")) {
                 core = expand_protocol_decl(ctx, bform, work, boundary_index, work_count, err);
-            } else if (syn_is_word(bform->as.seq.items[1], "implement") && bform->as.seq.count == 3 && bform->as.seq.items[2]->kind == IDM_SYN_WORD) {
-                core = expand_implement(ctx, bform->as.seq.items[2], work, boundary_index, work_count, bform->span, err);
-            } else if (syn_is_word(bform->as.seq.items[1], "implement") && bform->as.seq.count == 5 && syn_is_word(bform->as.seq.items[2], "protocol") &&
-                       bform->as.seq.items[3]->kind == IDM_SYN_WORD && syn_is_protocol(bform->as.seq.items[4], "%-body")) {
-                core = expand_implement_protocol(ctx, bform, work, boundary_index, work_count, err);
-            } else if (syn_is_word(bform->as.seq.items[1], "extend")) {
-                core = expand_extend_decl(ctx, bform, work, boundary_index, work_count, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "trait") ||
+                       (syn_is_word(bform->as.seq.items[1], "export") && bform->as.seq.count >= 3 && syn_is_word(bform->as.seq.items[2], "trait"))) {
+                core = expand_trait_decl(ctx, bform, work, boundary_index, work_count, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "activate") && bform->as.seq.count == 3 && bform->as.seq.items[2]->kind == IDM_SYN_WORD) {
+                core = expand_activate(ctx, bform->as.seq.items[2], work, boundary_index, work_count, bform->span, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "implement") && bform->as.seq.count >= 2) {
+                if (bform->as.seq.count == 3) core = expand_error(err, bform->span, "implement expects 'implement TRAIT on TYPE' or 'implement TRAIT on TYPE do ... end'; use 'activate NAME' for language surfaces");
+                else core = expand_implement_trait_decl(ctx, bform, work, boundary_index, work_count, err);
             } else if (syn_is_word(bform->as.seq.items[1], "record") ||
                        (syn_is_word(bform->as.seq.items[1], "export") && bform->as.seq.count >= 3 && syn_is_word(bform->as.seq.items[2], "record"))) {
                 core = expand_record_decl(ctx, bform, work, boundary_index, work_count, err);
@@ -1139,7 +1162,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 memset(&tail, 0, sizeof(tail));
                 tail.kind = BODY_REC_EXPR;
                 tail.form = bform;
-                core = syn_is_protocol(bform, "%-expr")
+                core = syn_is_form(bform, "%-expr")
                     ? expand_parts(ctx, bform->as.seq.items, 1, bform->as.seq.count, err)
                     : expand_syntax(ctx, bform, err);
                 if (core && boundary_index + 1u < work_count) {
@@ -1323,7 +1346,7 @@ IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, con
             cursor++;
             break;
         }
-        if (syn_is_protocol(items[cursor], "%-body")) {
+        if (syn_is_form(items[cursor], "%-body")) {
             body_index = cursor;
             break;
         }
@@ -1340,7 +1363,7 @@ IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, con
                     arrow = cursor;
                     break;
                 }
-                if (syn_is_protocol(items[cursor], "%-body")) {
+                if (syn_is_form(items[cursor], "%-body")) {
                     body_index = cursor;
                     break;
                 }
@@ -1437,7 +1460,7 @@ static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, c
             cursor++;
             break;
         }
-        if (syn_is_protocol(items[cursor], "%-body")) {
+        if (syn_is_form(items[cursor], "%-body")) {
             body_index = cursor;
             break;
         }
@@ -1456,7 +1479,7 @@ static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, c
                     arrow = cursor;
                     break;
                 }
-                if (syn_is_protocol(items[cursor], "%-body")) {
+                if (syn_is_form(items[cursor], "%-body")) {
                     body_index = cursor;
                     break;
                 }
@@ -1541,6 +1564,47 @@ static bool defn_form_clause_block(const IdmSyntax *def_form, size_t param_start
     const IdmSyntax *body = def_form->as.seq.items[param_start];
     if (!body_is_clauses(body)) return false;
     *out_body = body;
+    return true;
+}
+
+static bool defn_clause_arity_from_items(const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, uint32_t *out_arity, IdmError *err) {
+    size_t count = 0;
+    for (size_t cursor = param_start; cursor < end; cursor++) {
+        if (items[cursor]->kind == IDM_SYN_WORD && strcmp(items[cursor]->as.text, "->") == 0) break;
+        if (syn_is_form(items[cursor], "%-body")) break;
+        if (items[cursor]->kind == IDM_SYN_WORD && strcmp(items[cursor]->as.text, "when") == 0) break;
+        count++;
+    }
+    if (count > UINT32_MAX) {
+        expand_error(err, head->span, "defn clause has too many parameters");
+        return false;
+    }
+    *out_arity = (uint32_t)count;
+    return true;
+}
+
+static bool defn_group_arity(const DefnGroup *group, IdmSyntax *const *items, IdmArity *out_arity, IdmError *err) {
+    IdmArity arity = idm_arity_unknown();
+    for (size_t i = 0; i < group->count; i++) {
+        const IdmSyntax *def_form = items[group->indices[i]];
+        const IdmSyntax *def_name = NULL;
+        size_t param_start = 0;
+        (void)defn_form_parts(def_form, &def_name, &param_start, NULL);
+        const IdmSyntax *clause_body = NULL;
+        if (defn_form_clause_block(def_form, param_start, &clause_body)) {
+            for (size_t c = 1; c < clause_body->as.seq.count; c++) {
+                const IdmSyntax *clause = clause_body->as.seq.items[c];
+                uint32_t clause_arity = 0;
+                if (!defn_clause_arity_from_items(clause->as.seq.count > 1 ? clause->as.seq.items[1] : clause, clause->as.seq.items, 1, clause->as.seq.count, &clause_arity, err)) return false;
+                if (!idm_arity_add_exact(&arity, clause_arity)) return false;
+            }
+        } else {
+            uint32_t clause_arity = 0;
+            if (!defn_clause_arity_from_items(def_form->as.seq.items[1], def_form->as.seq.items, param_start, def_form->as.seq.count, &clause_arity, err)) return false;
+            if (!idm_arity_add_exact(&arity, clause_arity)) return false;
+        }
+    }
+    *out_arity = arity;
     return true;
 }
 
@@ -1675,7 +1739,7 @@ static IdmCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, Id
 }
 
 static IdmCore *expand_match_clause(ExpandContext *ctx, const IdmSyntax *clause, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err) {
-    if (!syn_is_protocol(clause, "%-expr")) return expand_error(err, clause->span, "match clause must be an expression");
+    if (!syn_is_form(clause, "%-expr")) return expand_error(err, clause->span, "match clause must be an expression");
     size_t arrow = SIZE_MAX;
     for (size_t i = 1; i < clause->as.seq.count; i++) {
         if (clause->as.seq.items[i]->kind == IDM_SYN_WORD && strcmp(clause->as.seq.items[i]->as.text, "->") == 0) {
@@ -1736,9 +1800,9 @@ static IdmCore *expand_match_clause(ExpandContext *ctx, const IdmSyntax *clause,
 }
 
 static bool body_is_clauses(const IdmSyntax *body) {
-    if (!syn_is_protocol(body, "%-body") || body->as.seq.count < 2) return false;
+    if (!syn_is_form(body, "%-body") || body->as.seq.count < 2) return false;
     const IdmSyntax *first = body->as.seq.items[1];
-    if (!syn_is_protocol(first, "%-expr")) return false;
+    if (!syn_is_form(first, "%-expr")) return false;
     for (size_t i = 1; i < first->as.seq.count; i++) {
         const IdmSyntax *tok = first->as.seq.items[i];
         if (syn_is_word(tok, "->")) return i > 1u;
@@ -1749,7 +1813,7 @@ static bool body_is_clauses(const IdmSyntax *body) {
 }
 
 static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body, size_t clause_end, const char *debug_name, bool defn_style, IdmError *err) {
-    if (!syn_is_protocol(body, "%-body") || clause_end < 2u || body->as.seq.count < clause_end) return expand_error(err, body->span, "clause body requires at least one clause");
+    if (!syn_is_form(body, "%-body") || clause_end < 2u || body->as.seq.count < clause_end) return expand_error(err, body->span, "clause body requires at least one clause");
     SavedFunctionContext saved;
     begin_function_context(ctx, &saved);
     IdmCore *multi = idm_core_fn_multi(debug_name, body->span);
@@ -1803,7 +1867,7 @@ static IdmCore *build_clause_fn(ExpandContext *ctx, const IdmSyntax *body, size_
 IdmCore *expand_receive_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
     size_t body_index = SIZE_MAX;
     for (size_t i = start + 1u; i < end; i++) {
-        if (syn_is_protocol(items[i], "%-body")) {
+        if (syn_is_form(items[i], "%-body")) {
             body_index = i;
             break;
         }
@@ -1817,7 +1881,7 @@ IdmCore *expand_receive_parts(ExpandContext *ctx, IdmSyntax *const *items, size_
     size_t message_end = clause_total;
     for (size_t i = 1; i < clause_total; i++) {
         const IdmSyntax *clause = body->as.seq.items[i];
-        if (syn_is_protocol(clause, "%-expr") && clause->as.seq.count >= 2 && syn_is_word(clause->as.seq.items[1], "after")) {
+        if (syn_is_form(clause, "%-expr") && clause->as.seq.count >= 2 && syn_is_word(clause->as.seq.items[1], "after")) {
             if (i + 1u != clause_total) return expand_error(err, clause->span, "receive 'after' clause must be last");
             after_clause = clause;
             message_end = i;

@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 use std/path
 
 suite do

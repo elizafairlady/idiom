@@ -1,12 +1,12 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "use imports runtime names with later-wins rebind" do
     got = do
       use tests/pkg/exporter
       use tests/pkg/exporter2
-      tuple (who 0) (dbl 4)
+      {(who 0) (dbl 4)}
     end
     assert-inspect got "{:second 8}"
   end
@@ -16,21 +16,28 @@ suite do
   test "use does not activate operators" do
     assert-expand-error "use tests/pkg/exporter\n3 <+> 4" "unbound identifier"
   end
-  test "use does not activate method surface" do
-    assert-expand-error "use tests/pkg/protomethod\ndescribe 1" "unbound identifier 'describe'"
+  test "use imports trait method surface but not conformance" do
+    got = try do
+      use tests/pkg/protomethod
+      describe 1
+      rescue r -> r
+    end
+    match got do
+      {:error {:runtime msg}} -> assert (str-contains? msg "does not implement trait")
+    end
   end
   test "implement activates macros and operators" do
     got = do
-      implement tests/pkg/exporter
-      tuple (answer x) (3 <+> 4)
+      activate tests/pkg/exporter
+      {(answer x) (3 <+> 4)}
     end
     assert-inspect got "{99 7}"
   end
   test "implement surface is scoped to its context" do
-    assert-expand-error "do\n  implement tests/pkg/exporter\n  answer x\nend\nanswer x" "unbound identifier 'answer'"
-    assert-expand-error "do\n  implement tests/pkg/exporter\nend\n3 <+> 4" "unbound identifier"
+    assert-expand-error "do\n  activate tests/pkg/exporter\n  answer x\nend\nanswer x" "unbound identifier 'answer'"
+    assert-expand-error "do\n  activate tests/pkg/exporter\nend\n3 <+> 4" "unbound identifier"
     got = do
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
       do
         answer q
       end
@@ -38,27 +45,27 @@ suite do
     assert-inspect got "99"
   end
   test "inner activation shadows outer by scope" do
-    implement tests/pkg/exporter
+    activate tests/pkg/exporter
     inner = do
-      implement tests/pkg/exporter2
-      tuple (answer x) (3 <+> 4)
+      activate tests/pkg/exporter2
+      {(answer x) (3 <+> 4)}
     end
-    assert-inspect (tuple inner (answer x) (3 <+> 4)) "{{7 -1} 99 7}"
+    assert-inspect {inner (answer x) (3 <+> 4)} "{{7 -1} 99 7}"
   end
   test "re-activating the same package is idempotent" do
     got = do
-      implement tests/pkg/exporter
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
+      activate tests/pkg/exporter
       answer x
     end
     assert-inspect got "99"
   end
   test "two providers of one surface name in one context error" do
-    assert-expand-error "implement tests/pkg/exporter\nimplement tests/pkg/exporter2\nanswer x" "already active in this context"
+    assert-expand-error "activate tests/pkg/exporter\nactivate tests/pkg/exporter2\nanswer x" "already active in this context"
   end
   test "provider-private helper beats consumer same-name binder" do
     got = do
-      implement tests/pkg/macropriv
+      activate tests/pkg/macropriv
       defn hidden x -> 1000
       inc-private 41
     end

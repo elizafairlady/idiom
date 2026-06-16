@@ -67,4 +67,4 @@ defn width-runes do
   (list cp . t) acc -> width-runes t (add acc (char-width cp))
 end
 
-export defn width s -> width-runes (to-list s) 0
+export defn width s -> width-runes (str-to-list s) 0

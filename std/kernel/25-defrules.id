@@ -3,7 +3,7 @@ export defmacro defrules stx do
     s when (and (syntax-word? (syntax-nth s 1)) (eq? (syntax-word-text (syntax-nth s 1)) "export")) -> :true
     _ -> :false
   end
-  base = if (exported? stx) do 2 else do 1 end
+  base = cond (exported? stx) 2 1
   if (neq? (syntax-length stx) (add base 3)) do
     syntax-error stx "defrules expects: defrules NAME do (pattern) -> template ... end"
   end

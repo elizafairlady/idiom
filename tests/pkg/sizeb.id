@@ -1,3 +1,5 @@
 package sizeb
 
-method size x -> 222
+export trait Size do
+  method size x -> 222
+end

@@ -24,7 +24,9 @@ typedef enum {
     IDM_BIND_SPACE_OPERATOR,
     IDM_BIND_SPACE_SHELL,
     IDM_BIND_SPACE_LABEL,
-    IDM_BIND_SPACE_PROTOCOL
+    IDM_BIND_SPACE_PROTOCOL,
+    IDM_BIND_SPACE_TRAIT,
+    IDM_BIND_SPACE_TYPE
 } IdmBindingSpace;
 
 typedef enum {
@@ -38,8 +40,23 @@ typedef enum {
     IDM_BIND_ARG,
     IDM_BIND_GLOBAL,
     IDM_BIND_PROTOCOL,
+    IDM_BIND_TRAIT,
+    IDM_BIND_TYPE,
     IDM_BIND_METHOD
 } IdmBindingKind;
+
+typedef enum {
+    IDM_ARITY_UNKNOWN,
+    IDM_ARITY_RANGE,
+    IDM_ARITY_SET
+} IdmArityKind;
+
+typedef struct {
+    IdmArityKind kind;
+    uint32_t min;
+    uint32_t max;
+    uint64_t mask;
+} IdmArity;
 
 typedef struct {
     char *name;
@@ -50,6 +67,7 @@ typedef struct {
     IdmBindingId id;
     uint32_t payload;
     uint32_t frame_id;
+    IdmArity arity;
 } IdmBinding;
 
 typedef struct {
@@ -83,8 +101,15 @@ void idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta);
 void idm_binding_table_init(IdmBindingTable *table);
 void idm_binding_table_destroy(IdmBindingTable *table);
 bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id);
+bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id);
 void idm_binding_table_truncate(IdmBindingTable *table, size_t count);
 IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding);
+
+IdmArity idm_arity_unknown(void);
+IdmArity idm_arity_range(uint32_t min, uint32_t max);
+IdmArity idm_arity_exact(uint32_t arity);
+bool idm_arity_add_exact(IdmArity *arity, uint32_t exact);
+bool idm_arity_accepts(const IdmArity *arity, uint32_t argc);
 
 const char *idm_binding_space_name(IdmBindingSpace space);
 const char *idm_binding_kind_name(IdmBindingKind kind);

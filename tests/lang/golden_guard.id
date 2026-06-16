@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "guard-defn-eq" do
@@ -25,5 +25,13 @@ suite do
       send self 5; receive do n when n > 10 -> 0; n -> add n 37 end
     end
     assert-inspect got "42"
+  end
+  test "guard-reads-captured-local-and-pattern-var" do
+    got = do
+      expected = 7
+      send self {:v 7}
+      receive do {:v n} when (eq? n expected) -> :match; {:v _} -> :mismatch; after 200 -> :timeout end
+    end
+    assert-inspect got ":match"
   end
 end

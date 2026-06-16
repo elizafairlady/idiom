@@ -12,7 +12,7 @@ touch release[J~ % [4C[J~ % t[5C[J~ % to[6C[J~ % tou[7C[J~ % t
 0
 [J~ % [4C[J~ % j[5C[J~ % jo[6C[J~ % job[7C[J~ % jobs[8C
 [J~ % [4C[J~ % f[5C[J~ % fg[6C[J~ % fg [7C[J~ % fg 9[8C
-<unknown>: error: main actor exited with reason {:error {:no-such-job 9}}
+<unknown>: error: main actor exited with reason no-such-job: 9
 [J~ [error] % [12C[J~ [error] % s[13C[J~ [error] % sl[14C[J~ [error] % sle[15C[J~ [error] % slee[16C[J~ [error] % sleep[17C[J~ [error] % sleep [18C[J~ [error] % sleep 0[19C[J~ [error] % sleep 0.[20C[J~ [error] % sleep 0.1[21C[J~ [error] % sleep 0.1 [22C[J~ [error] % sleep 0.1 &[23C
 [1] sleep 0.1 &
 [J~ % [4C[J~ % e[5C[J~ % ex[6C[J~ % exi[7C[J~ % exit[8C[J~ % exit [9C[J~ % exit 0[10C

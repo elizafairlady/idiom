@@ -1,9 +1,11 @@
 package recptb
 
+use tests/pkg/labelproto
+
 export record point do
   field x
 end
 
-extend point with tests/pkg/labelproto do
-  method point-label p -> str "B:" (p.x)
+implement Label on point do
+  method point-label p -> str "B:" p.x
 end

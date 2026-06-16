@@ -1,5 +1,7 @@
 package string
 
+use std/enum
+
 export defn length s -> str-len s
 
 export defn slice s a b -> str-slice s a b
@@ -26,12 +28,12 @@ end
 
 defn scan-left do
   s i n when (eq? i n) -> i
-  s i n -> if (space? (str-byte s i)) do scan-left s (add i 1) n else do i end
+  s i n -> cond (space? (str-byte s i)) (scan-left s (add i 1) n) i
 end
 
 defn scan-right do
   s i when (eq? i 0) -> 0
-  s i -> if (space? (str-byte s (sub i 1))) do scan-right s (sub i 1) else do i end
+  s i -> cond (space? (str-byte s (sub i 1))) (scan-right s (sub i 1)) i
 end
 
 export defn trim-left s -> str-slice s (scan-left s 0 (str-len s)) (str-len s)
@@ -51,11 +53,11 @@ defn rev do
 end
 
 export defn split do
-  s sep when (eq? (str-len sep) 0) -> error (tuple :split :empty-separator)
+  s sep when (eq? (str-len sep) 0) -> error {:split :empty-separator}
   s sep -> rev (split-from s sep 0 '()) '()
 end
 
-export defn join xs sep -> join-list (to-list xs) sep
+export defn join xs sep -> join-list (xs.to-list) sep
 
 defn join-list do
   '() _sep -> ""
@@ -64,7 +66,7 @@ end
 
 defn join-from do
   '() _sep acc -> acc
-  (list h . t) sep acc -> join-from t sep (str acc sep h)
+  (list h . t) sep acc -> join-from t sep "${acc}${sep}${h}"
 end
 
 export defn replace s old new ->
@@ -72,7 +74,7 @@ export defn replace s old new ->
 
 export defn repeat do
   _s 0 -> ""
-  s n -> str s (repeat s (sub n 1))
+  s n -> "${s}#{repeat s (sub n 1)}"
 end
 
 defn pad do
@@ -82,7 +84,7 @@ defn pad do
       s
     else do
       padding = repeat ch gap
-      if left? do str padding s else do str s padding end
+      cond left? "${padding}${s}" "${s}${padding}"
     end
   end
 end
@@ -92,11 +94,11 @@ export defn pad-right s n ch -> pad s n ch :false
 
 defn map-bytes do
   s i n f acc when (eq? i n) -> acc
-  s i n f acc -> map-bytes s (add i 1) n f (str acc (byte-str (f (str-byte s i))))
+  s i n f acc -> map-bytes s (add i 1) n f "${acc}#{byte-str (f (str-byte s i))}"
 end
 
-defn upbyte b -> if (and (gte? b 97) (lte? b 122)) do sub b 32 else do b end
-defn downbyte b -> if (and (gte? b 65) (lte? b 90)) do add b 32 else do b end
+defn upbyte b -> cond (and (gte? b 97) (lte? b 122)) (sub b 32) b
+defn downbyte b -> cond (and (gte? b 65) (lte? b 90)) (add b 32) b
 
 export defn upcase s -> map-bytes s 0 (str-len s) &upbyte ""
 export defn downcase s -> map-bytes s 0 (str-len s) &downbyte ""

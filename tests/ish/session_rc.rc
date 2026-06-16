@@ -1,5 +1,5 @@
 defn greet name -> str "hi-" name
 println "rc-loaded"
-extend dict with std/ish do
+implement Prompt on dict do
   method prompt st -> str "P" (inspect (dict-get st :status :nil)) "> "
 end

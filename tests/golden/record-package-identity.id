@@ -1,6 +1,6 @@
 import tests/pkg/recpta as A
 import tests/pkg/recptb as B
-implement tests/pkg/labelproto
+use tests/pkg/labelproto
 
 a = A.point 1
 b = B.point 2

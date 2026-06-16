@@ -31,11 +31,13 @@ bool idm_actor_mailbox_peek(const IdmActor *actor, size_t index, IdmValue *out);
 bool idm_actor_mailbox_remove(IdmActor *actor, size_t index, IdmValue *out);
 
 bool idm_actor_recv_no_match(IdmActor *actor, IdmValue timeout, IdmRecvDecision *out, IdmError *err);
-void idm_actor_recv_reset(IdmActor *actor);
-size_t idm_actor_recv_cursor(const IdmActor *actor);
 void idm_actor_recv_set_cursor(IdmActor *actor, size_t cursor);
+size_t idm_actor_recv_start(IdmActor *actor, const void *module, size_t site);
+void idm_actor_recv_matched(IdmActor *actor, size_t cursor);
 
 bool idm_sched_spawn(IdmScheduler *sched, IdmValue thunk, const IdmExec *parent, IdmValue *out_pid, IdmError *err);
+bool idm_sched_spawn_link(IdmScheduler *sched, IdmValue thunk, const IdmExec *parent, IdmActor *self, IdmValue *out_pid, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
+bool idm_sched_spawn_monitor(IdmScheduler *sched, IdmValue thunk, const IdmExec *parent, IdmActor *self, IdmValue *out_pid, IdmValue *out_ref, IdmError *err);
 void idm_sched_send(IdmScheduler *sched, uint64_t target_pid, IdmValue msg);
 bool idm_sched_link(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
 bool idm_sched_exit_signal(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, IdmValue reason, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);

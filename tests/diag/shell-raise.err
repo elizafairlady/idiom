@@ -1,1 +1,1 @@
-<unknown>: error: main actor exited with reason {:error {:command "false" 1}}
+<unknown>: error: main actor exited with reason command: "false" 1

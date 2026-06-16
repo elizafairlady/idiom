@@ -42,7 +42,7 @@ void check_pkg_value(const char *source, const char *expect);
 void run_substrate_suite(void);
 void run_surface_suite(void);
 void run_macro_suite(void);
-void run_protocol_suite(void);
+void run_traits_suite(void);
 void run_runtime_suite(void);
 void run_package_suite(void);
 void run_diagnostics_suite(void);

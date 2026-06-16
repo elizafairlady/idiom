@@ -1,48 +1,67 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
-  test "inline implement protocol matches the two-statement form" do
-    a = do
-      implement protocol Q do
-        defn qmul a b -> mul a b
-        method qsize x
-        operator <*!> precedence: 50 assoc: left fixity: infix -> qmul
-      end
-      extend int with Q do
-        method qsize n -> 11
-      end
-      tuple (qsize 3) (3 <*!> 4)
-    end
-    b = do
-      protocol Q do
-        defn qmul a b -> mul a b
-        method qsize x
-        operator <*!> precedence: 50 assoc: left fixity: infix -> qmul
-      end
-      implement Q
-      extend int with Q do
-        method qsize n -> 11
-      end
-      tuple (qsize 3) (3 <*!> 4)
-    end
-    assert-eq a b
-    assert-inspect a "{11 12}"
-  end
-  test "extend works against an inline-declared protocol" do
+  test "protocol activation and trait implementation compose" do
     got = do
-      implement protocol R do
+      protocol QOps do
+        defn qmul a b -> mul a b
+        operator <*!> precedence: 50 assoc: left fixity: infix -> qmul
+      end
+      trait QSize do
+        method qsize x
+      end
+      activate QOps
+      implement QSize on int do
+        method qsize n -> 11
+      end
+      {(qsize 3) (3 <*!> 4)}
+    end
+    assert-inspect got "{11 12}"
+  end
+  test "implement works against a declared trait" do
+    got = do
+      trait R do
         method tagit x
       end
-      extend string with R do
+      before = implements? R "x"
+      implement R on string do
         method tagit s -> :str
       end
-      tagit "x"
+      {before (implements? R "x") (tagit "x")}
     end
-    assert-inspect got ":str"
+    assert-inspect got "{:false :true :str}"
   end
-  test "inline implement rolls back outside its block" do
-    assert-expand-error "do\n  implement protocol S do\n    method sz x\n  end\n  :ok\nend\nsz 1" "unbound identifier 'sz'"
-    assert-expand-error "do\n  implement protocol S do\n    defn shelp a -> a\n    operator <!!> precedence: 50 assoc: left fixity: infix -> shelp\n  end\n  :ok\nend\n1 <!!> 2" "unbound identifier"
+  test "implements? resolves trait names hygienically" do
+    got = do
+      trait R do
+        method marker x -> :outer
+      end
+      outer-before = implements? R 1
+      implement R on int
+      outer-after = implements? R 1
+      inner = do
+        trait R do
+          method marker x -> :inner
+        end
+        implements? R 1
+      end
+      {outer-before outer-after inner (marker 1)}
+    end
+    assert-inspect got "{:false :true :false :outer}"
+  end
+  test "trait and protocol declarations roll back outside their block" do
+    assert-expand-error "do\n  trait S do\n    method sz x\n  end\n  :ok\nend\nsz 1" "unbound identifier 'sz'"
+    assert-expand-error "do\n  protocol Shellp do\n    defn shelp a -> a\n    operator <!!> precedence: 50 assoc: left fixity: infix -> shelp\n  end\n  :ok\nend\n1 <!!> 2" "unbound identifier"
+  end
+  test "dispatch-cache-does-not-misserve-across-types" do
+    trait Tag do method tag x end
+    implement Tag on int do method tag x -> :int end
+    implement Tag on string do method tag x -> :str end
+    defn at x -> x.tag
+    assert-eq (at 1) :int
+    assert-eq (at "a") :str
+    assert-eq (at 2) :int
+    assert-eq (at "b") :str
   end
 end

@@ -1,12 +1,12 @@
 use std/test
-implement std/test
+activate std/test
 use std/enum
 
 suite do
   test "fan-out-fan-in" do
     got = do
       parent = self
-      map (range 0 50) (fn i -> spawn (fn -> send parent (tuple :res (i * i))))
+      (range 0 50).map (fn i -> spawn (fn -> send parent {:res (i * i)}))
       defn gather do
         0 acc -> acc
         n acc -> receive do {:res sq} -> gather (n - 1) (acc + sq) end
@@ -18,9 +18,9 @@ suite do
   test "pairwise-fifo" do
     got = do
       parent = self
-      spawn (fn -> map (range 0 20) (fn k -> send parent (tuple :seq k)))
+      spawn (fn do (range 0 20).map (fn k -> send parent {:seq k}) end)
       defn drain do
-        0 acc -> reverse acc
+        0 acc -> acc.reverse
         n acc -> receive do {:seq k} -> drain (n - 1) (cons k acc) end
       end
       eq? (inspect (drain 20 '())) (inspect (range 0 20))
@@ -33,7 +33,7 @@ suite do
       ponger = spawn (fn do
         defn serve served -> receive do
           {:ping from k} -> do
-            send from (tuple :pong k)
+            send from {:pong k}
             serve (served + 1)
           end
         end
@@ -42,7 +42,7 @@ suite do
       defn rally do
         0 -> :done
         n -> do
-          send ponger (tuple :ping parent n)
+          send ponger {:ping parent n}
           receive do {:pong k} -> rally (n - 1) end
         end
       end
@@ -57,7 +57,7 @@ suite do
         0 acc -> acc
         n acc -> build (n - 1) (cons n acc)
       end
-      map (range 0 8) (fn _i -> spawn (fn -> send parent (tuple :sum (sum (build 5000 '())))))
+      (range 0 8).map (fn _i -> spawn (fn -> send parent {:sum (build 5000 '()).sum}))
       defn gather do
         0 acc -> acc
         n acc -> receive do {:sum s} -> gather (n - 1) (acc + s) end
@@ -83,8 +83,8 @@ suite do
       defn hammer do
         0 -> :done
         n -> do
-          r = try do raise (tuple :v n (build 200 '())); rescue e -> e end
-          match r do {:v k (list h . _)} -> if (and (eq? k n) (eq? h 1)) do hammer (n - 1) else do :corrupt end end
+          r = try do raise {:v n (build 200 '())}; rescue e -> e end
+          match r do {:v k (list h . _)} -> cond (and (eq? k n) (eq? h 1)) (hammer (n - 1)) :corrupt end
         end
       end
       hammer 5000
@@ -93,7 +93,7 @@ suite do
   end
   test "receive-after-fires-under-load" do
     got = do
-      map (range 0 8) (fn _i -> spawn (fn do
+      (range 0 8).map (fn _i -> spawn (fn do
         defn spin k -> spin (k + 1)
         spin 0
       end))
@@ -124,12 +124,12 @@ suite do
   end
   test "kill-spinning-actors" do
     got = do
-      victims = map (range 0 8) (fn _i -> spawn (fn do
+      victims = (range 0 8).map (fn _i -> spawn (fn do
         defn spin n -> spin (n + 1)
         spin 0
       end))
-      map victims (fn v -> monitor v)
-      map victims (fn v -> exit v :kill)
+      victims.map (fn v -> monitor v)
+      victims.map (fn v -> exit v :kill)
       defn gather do
         0 -> :done
         n -> receive do {:down _ _ :killed} -> gather (n - 1) end
@@ -143,13 +143,13 @@ suite do
       parent = self
       defn chain do
         0 -> do
-          send parent (tuple :node (self))
+          send parent {:node (self)}
           receive do {:never x} -> x end
         end
         k -> do
           c = spawn (fn -> chain (k - 1))
           link c
-          send parent (tuple :node (self))
+          send parent {:node (self)}
           receive do {:never x} -> x end
         end
       end
@@ -159,7 +159,7 @@ suite do
         n acc -> receive do {:node p} -> collect (n - 1) (cons p acc) end
       end
       pids = collect 6 '()
-      map pids (fn p -> monitor p)
+      pids.map (fn p -> monitor p)
       exit root :kill
       defn gather do
         0 -> :done
@@ -175,15 +175,15 @@ suite do
         0 acc -> acc
         n acc -> build (n - 1) (cons n acc)
       end
-      victims = map (range 0 8) (fn _i -> spawn (fn do
+      victims = (range 0 8).map (fn _i -> spawn (fn do
         defn churn k do
           build 500 :nil
           churn (k + 1)
         end
         churn 0
       end))
-      map victims (fn v -> monitor v)
-      map victims (fn v -> exit v :kill)
+      victims.map (fn v -> monitor v)
+      victims.map (fn v -> exit v :kill)
       defn gather do
         0 -> :done
         n -> receive do {:down _ _ :killed} -> gather (n - 1) end

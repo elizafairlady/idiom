@@ -1,29 +1,26 @@
 mk-a = fn _ig do
-  protocol P do
+  trait P do
     method size x
   end
-  implement P
-  extend int with P do
+  implement P on int do
     method size n -> 111
   end
   size 5
 end
 mk-b = fn _ig do
-  protocol P do
+  trait P do
     method size x
   end
-  implement P
-  extend string with P do
+  implement P on string do
     method size s -> 222
   end
   size "hello"
 end
 mk-c = fn _ig do
-  protocol P do
+  trait P do
     method size x
   end
-  implement P
-  extend string with P do
+  implement P on string do
     method size s -> 222
   end
   size 5

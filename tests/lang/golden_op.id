@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "op-div" do
@@ -49,7 +49,7 @@ suite do
   end
   test "op-neq" do
     got = do
-      if (3 != 4) do 42 else do 0 end
+      cond (3 != 4) 42 0
     end
     assert-inspect got "42"
   end

@@ -1,0 +1,91 @@
+use std/test
+activate std/test
+use std/enum
+use std/regex
+
+defn texts do
+  '() -> '()
+  (list h . t) -> cons (text-of h) (texts t)
+end
+
+suite do
+  test "regex-literal-and-captures" do
+    rx = r"a(b+)c"
+    m = scan rx "xxabbbc"
+    assert (result? m)
+    assert-eq (text-of m) "abbbc"
+    assert-eq m.text-of "abbbc"
+    assert-eq (start-of m) 2
+    assert-eq (end-of m) 7
+    assert-eq (capture m 0) "abbbc"
+    assert-eq (capture m 1) "bbb"
+    assert-eq (capture-range m 0) {2 7}
+    assert-eq (source-of rx) "a(b+)c"
+    assert-eq (group-count rx) 1
+    assert-inspect (group-names rx) "(:nil)"
+    assert-inspect (captures m) "(\"bbb\")"
+    assert-inspect m.captures "(\"bbb\")"
+  end
+
+  test "regex-ere-classes-alt-and-repetition" do
+    m = scan r"([[:alpha:]]+|_+)[0-9]{2,3}" "--ab123--"
+    assert-eq (text-of m) "ab123"
+    assert-eq (r"([[:alpha:]]+|_+)[0-9]{2,3}".scan "--ab123--").text-of "ab123"
+    assert-eq (capture m 1) "ab"
+    assert-eq (text-of (scan r"\d+" "a12b")) "12"
+    assert-eq (text-of (scan r"\w+" "++a_9")) "a_9"
+  end
+
+  test "regex-full-and-test" do
+    assert (result? (scan-full r"a+" "aaa"))
+    assert (result? (r"a+".scan-full "aaa"))
+    assert-eq (scan-full r"a+" "aaab") :nil
+    assert-eq (test? r"[0-9]+" "abc123") :true
+    assert-eq (r"[0-9]+".test? "abc123") :true
+    assert-eq ("[0-9]+".test? "abc123") :true
+    assert-eq (test? r"[0-9]+" "abc") :false
+  end
+
+  test "regex-lookaround" do
+    assert-eq (text-of (scan r"foo(?=bar)" "xxfoobar")) "foo"
+    assert-eq (scan r"foo(?!bar)" "xxfoobar") :nil
+    assert-eq (text-of (scan r"foo(?!bar)" "xxfoobaz")) "foo"
+    assert-eq (text-of (scan r"(?<=foo)bar" "xxfoobar")) "bar"
+    assert-eq (scan r"(?<!foo)bar" "xxfoobar") :nil
+    assert-eq (text-of (scan r"(?<!foo)bar" "xxbar")) "bar"
+  end
+
+  test "regex-named-captures" do
+    rx = r"(?<word>[a-z]+)-(?<num>[0-9]+)"
+    m = scan rx "abc-123"
+    assert-eq (capture-named m "word") "abc"
+    assert-eq (capture-named m :num) "123"
+    assert-inspect (group-names rx) "(\"word\" \"num\")"
+    assert-inspect (captures m) "(\"abc\" \"123\")"
+  end
+
+  test "regex-compile-and-options" do
+    assert-eq (source-of (compile! "\\d+")) "\\d+"
+    match (compile "[") do
+      {:error {:regex :compile _ _}} -> :ok
+      other -> error {:expected-compile-error other}
+    end
+    assert-eq (test? (compile! "abc" '(:caseless)) "ABC") :true
+    assert-eq (scan r"^b" "a\nb") :nil
+    assert-eq (text-of (scan (compile! "^b" '(:multiline)) "a\nb")) "b"
+    assert-inspect (options-of (compile! "x" '(:caseless :multiline :dotall))) "(:caseless :multiline :dotall)"
+  end
+
+  test "regex-scan-all-replace-split-escape" do
+    assert-inspect (texts (scan-all r"[0-9]+" "a12b3")) "(\"12\" \"3\")"
+    assert-inspect (texts (r"[0-9]+".scan-all "a12b3")) "(\"12\" \"3\")"
+    assert-eq (sub r"[0-9]+" "a12b3" "#") "a#b3"
+    assert-eq (r"[0-9]+".sub "a12b3" "#") "a#b3"
+    assert-eq (sub-all r"[0-9]+" "a12b3" "#") "a#b#"
+    assert-eq (sub r"([a-z]+)([0-9]+)" "ab12" "$2-$1") "12-ab"
+    assert-eq (sub r"(?<word>[a-z]+)" "abc" "\\k<word>!") "abc!"
+    assert-inspect (split-on r"," "a,b,,c") "(\"a\" \"b\" \"\" \"c\")"
+    assert-inspect (r",".split-on "a,b,,c") "(\"a\" \"b\" \"\" \"c\")"
+    assert-eq (text-of (scan (compile! (escape "a+b")) "xxa+b")) "a+b"
+  end
+end

@@ -1,7 +1,7 @@
 use std/test
 use std/string
 use std/ish
-implement std/test
+activate std/test
 
 defn fresh tag -> initial-state "> "
 
@@ -14,12 +14,12 @@ defn feed do
   end
 end
 
-defn esc-seq text -> str (byte-str 27) "[" text
+defn esc-seq text -> "#{byte-str 27}[${text}"
 
 suite do
   test "insert-and-motion" do
-    s = feed (fresh :go) (list (tuple :char "a") (tuple :char "b") (tuple :char "c") :left :left (tuple :char "X"))
-    assert-eq (tuple (dict-get s :buffer :nil) (dict-get s :cursor :nil)) (tuple "aXbc" 2)
+    s = feed (fresh :go) (list {:char "a"} {:char "b"} {:char "c"} :left :left {:char "X"})
+    assert-eq {(dict-get s :buffer :nil) (dict-get s :cursor :nil)} {"aXbc" 2}
   end
   test "home-end-line-bound" do
     s = feed (with-buffer (fresh :go) "one\ntwo" 5) (list :c-a)
@@ -39,17 +39,17 @@ suite do
   end
   test "kill-to-line-end-and-yank" do
     s = feed (with-buffer (fresh :go) "hello world" 5) (list :c-k)
-    assert-eq (tuple (dict-get s :buffer :nil) (dict-get s :kill :nil)) (tuple "hello" " world")
+    assert-eq {(dict-get s :buffer :nil) (dict-get s :kill :nil)} {"hello" " world"}
     s2 = feed s (list :c-y :c-y)
     assert-eq (dict-get s2 :buffer :nil) "hello world world"
   end
   test "kill-to-line-start" do
     s = feed (with-buffer (fresh :go) "hello world" 6) (list :c-u)
-    assert-eq (tuple (dict-get s :buffer :nil) (dict-get s :kill :nil) (dict-get s :cursor :nil)) (tuple "world" "hello " 0)
+    assert-eq {(dict-get s :buffer :nil) (dict-get s :kill :nil) (dict-get s :cursor :nil)} {"world" "hello " 0}
   end
   test "kill-word-back" do
     s = feed (with-buffer (fresh :go) "git commit  " 12) (list :c-w)
-    assert-eq (tuple (dict-get s :buffer :nil) (dict-get s :kill :nil)) (tuple "git " "commit  ")
+    assert-eq {(dict-get s :buffer :nil) (dict-get s :kill :nil)} {"git " "commit  "}
   end
   test "kill-newline-at-line-end" do
     s = feed (with-buffer (fresh :go) "ab\ncd" 2) (list :c-k)
@@ -65,7 +65,7 @@ suite do
     {t1 _} = step (with-buffer (fresh :go) "x" 1) :enter
     {t2 _} = step (with-buffer (fresh :go) "x" 1) :c-c
     {t3 s3} = step (with-buffer (fresh :go) "x" 1) :tab
-    assert-eq (tuple t1 t2 t3 (dict-get s3 :buffer :nil)) (tuple :submit :cancel :render "x")
+    assert-eq {t1 t2 t3 (dict-get s3 :buffer :nil)} {:submit :cancel :render "x"}
   end
   test "history-walk-preserves-pending-line" do
     s = push-history (push-history (fresh :go) "first") "second"
@@ -77,44 +77,44 @@ suite do
   test "history-dedup-and-empty-skip" do
     s = push-history (push-history (push-history (fresh :go) "a") "a") ""
     s1 = feed s (list :up :up)
-    assert-eq (tuple (dict-get s1 :buffer :nil) (dict-get s1 :hist-pos :nil)) (tuple "a" 0)
+    assert-eq {(dict-get s1 :buffer :nil) (dict-get s1 :hist-pos :nil)} {"a" 0}
   end
   test "reverse-search-incremental" do
     s = push-history (push-history (push-history (fresh :go) "echo alpha") "ls beta") "pwd"
-    s1 = feed s (list :c-r (tuple :char "a"))
-    assert-eq (tuple (dict-get s1 :mode :nil) (dict-get s1 :buffer :nil)) (tuple :search "ls beta")
+    s1 = feed s (list :c-r {:char "a"})
+    assert-eq {(dict-get s1 :mode :nil) (dict-get s1 :buffer :nil)} {:search "ls beta"}
     s2 = feed s1 (list :c-r)
     assert-eq (dict-get s2 :buffer :nil) "echo alpha"
     {tag s3} = step s2 :enter
-    assert-eq (tuple tag (dict-get s3 :mode :nil) (dict-get s3 :buffer :nil)) (tuple :submit :edit "echo alpha")
+    assert-eq {tag (dict-get s3 :mode :nil) (dict-get s3 :buffer :nil)} {:submit :edit "echo alpha"}
   end
   test "reverse-search-cancel-restores" do
     s = push-history (fresh :go) "history-line"
-    s1 = feed (with-buffer s "typed" 5) (list :c-r (tuple :char "h") :c-c)
-    assert-eq (tuple (dict-get s1 :mode :nil) (dict-get s1 :buffer :nil) (dict-get s1 :cursor :nil)) (tuple :edit "typed" 5)
+    s1 = feed (with-buffer s "typed" 5) (list :c-r {:char "h"} :c-c)
+    assert-eq {(dict-get s1 :mode :nil) (dict-get s1 :buffer :nil) (dict-get s1 :cursor :nil)} {:edit "typed" 5}
   end
   test "multiline-continuation-edits-as-one-unit" do
     {tag s1} = step (with-buffer (fresh :go) "do" 2) :enter
     assert-eq tag :submit
     s2 = continue s1
-    assert-eq (tuple (dict-get s2 :buffer :nil) (dict-get s2 :cursor :nil)) (tuple "do\n" 3)
-    s3 = feed s2 (list (tuple :char "x") :c-a)
-    assert-eq (tuple (dict-get s3 :buffer :nil) (dict-get s3 :cursor :nil)) (tuple "do\nx" 3)
+    assert-eq {(dict-get s2 :buffer :nil) (dict-get s2 :cursor :nil)} {"do\n" 3}
+    s3 = feed s2 (list {:char "x"} :c-a)
+    assert-eq {(dict-get s3 :buffer :nil) (dict-get s3 :cursor :nil)} {"do\nx" 3}
   end
   test "redraw-simple-line" do
     {st out} = redraw (with-buffer (fresh :go) "ab" 2)
-    assert-eq out (str "\r" (esc-seq "J") "> ab" "\r" (esc-seq "4C"))
+    assert-eq out "\r#{esc-seq "J"}> ab\r#{esc-seq "4C"}"
     assert-eq (dict-get st :row :nil) 0
   end
   test "redraw-multiline-continuation-prompt" do
     {st out} = redraw (with-buffer (fresh :go) "ab\ncd" 1)
-    assert-eq out (str "\r" (esc-seq "J") "> ab" "\r\n" "...> cd" (esc-seq "1A") "\r" (esc-seq "3C"))
-    assert-eq (tuple (dict-get st :row :nil) (dict-get st :below :nil)) (tuple 0 1)
+    assert-eq out "\r#{esc-seq "J"}> ab\r\n...> cd#{esc-seq "1A"}\r#{esc-seq "3C"}"
+    assert-eq {(dict-get st :row :nil) (dict-get st :below :nil)} {0 1}
   end
   test "redraw-moves-up-from-previous-row" do
     s = dict-put (with-buffer (fresh :go) "ab" 2) :row 2
     {_ out} = redraw s
-    assert (starts-with? out (str "\r" (esc-seq "2A") (esc-seq "J")))
+    assert (starts-with? out "\r#{esc-seq "2A"}#{esc-seq "J"}")
   end
   test "redraw-wraps-by-byte-columns" do
     s = dict-put (with-buffer (fresh :go) "abcdef" 6) :cols 4
@@ -122,30 +122,30 @@ suite do
     assert-eq (dict-get st :row :nil) 1
   end
   test "redraw-strips-csi-from-prompt-width" do
-    colored = str (byte-str 27) "[1;32m" "> " (byte-str 27) "[0m"
+    colored = "#{byte-str 27}[1;32m> #{byte-str 27}[0m"
     s = with-buffer (initial-state colored) "ab" 2
     {st out} = redraw s
     assert-eq (dict-get st :row :nil) 0
     assert (contains? out (esc-seq "4C"))
   end
   test "keymap-is-a-dict-rebind-tab" do
-    s = bind-key (fresh :go) :tab (fn st -> step st (tuple :char " "))
+    s = bind-key (fresh :go) :tab (fn st -> step st {:char " "})
     {tag s1} = step s :tab
-    assert-eq (tuple tag (dict-get s1 :buffer :nil)) (tuple :render " ")
+    assert-eq {tag (dict-get s1 :buffer :nil)} {:render " "}
   end
   test "keymap-rebind-printable-key" do
-    s = bind-key (fresh :go) (tuple :char "q") (fn st -> tuple :submit st)
-    {tag _} = step s (tuple :char "q")
+    s = bind-key (fresh :go) {:char "q"} (fn st -> {:submit st})
+    {tag _} = step s {:char "q"}
     assert-eq tag :submit
-    {t2 s2} = step (fresh :go) (tuple :char "q")
-    assert-eq (tuple t2 (dict-get s2 :buffer :nil)) (tuple :render "q")
+    {t2 s2} = step (fresh :go) {:char "q"}
+    assert-eq {t2 (dict-get s2 :buffer :nil)} {:render "q"}
   end
   test "decode-byte-table" do
     assert-eq (decode-byte 1) :c-a
     assert-eq (decode-byte 13) :enter
     assert-eq (decode-byte 127) :backspace
     assert-eq (decode-byte 18) :c-r
-    assert-eq (decode-byte 65) (tuple :char "A")
+    assert-eq (decode-byte 65) {:char "A"}
     assert-eq (decode-byte 7) :unknown
   end
   test "csi-key-table" do
@@ -157,13 +157,13 @@ suite do
   test "reset-clears-line-state-keeps-history" do
     s = push-history (fresh :go) "kept"
     s1 = reset (feed (with-buffer s "junk" 4) (list :up))
-    assert-eq (tuple (dict-get s1 :buffer :nil) (dict-get s1 :cursor :nil) (dict-get s1 :hist-pos :nil)) (tuple "" 0 (sub 0 1))
+    assert-eq {(dict-get s1 :buffer :nil) (dict-get s1 :cursor :nil) (dict-get s1 :hist-pos :nil)} {"" 0 (sub 0 1)}
     s2 = feed s1 (list :up)
     assert-eq (dict-get s2 :buffer :nil) "kept"
   end
   test "rune-motion-crosses-whole-codepoint" do
     zhong = from-runes (list 20013)
-    s = with-buffer (fresh :go) (str zhong "x") 4
+    s = with-buffer (fresh :go) "${zhong}x" 4
     s1 = feed s (list :left)
     assert-eq (dict-get s1 :cursor :nil) 3
     s2 = feed s1 (list :left)
@@ -171,18 +171,18 @@ suite do
   end
   test "rune-backspace-deletes-whole-codepoint" do
     zhong = from-runes (list 20013)
-    s = feed (with-buffer (fresh :go) (str "a" zhong) 4) (list :backspace)
+    s = feed (with-buffer (fresh :go) "a${zhong}" 4) (list :backspace)
     assert-eq (dict-get s :buffer :nil) "a"
   end
   test "redraw-wraps-by-display-width-not-bytes" do
     zhong = from-runes (list 20013)
-    s = dict-put (dict-put (with-buffer (fresh :go) (str zhong zhong) 6) :prompt "") :cols 5
+    s = dict-put (dict-put (with-buffer (fresh :go) "${zhong}${zhong}" 6) :prompt "") :cols 5
     {st _} = redraw s
-    assert-eq (tuple (dict-get st :row :nil) (dict-get st :below :nil)) (tuple 0 0)
+    assert-eq {(dict-get st :row :nil) (dict-get st :below :nil)} {0 0}
   end
   test "redraw-cursor-forward-uses-display-columns" do
     zhong = from-runes (list 20013)
-    {_ out} = redraw (with-buffer (fresh :go) (str zhong zhong) 6)
+    {_ out} = redraw (with-buffer (fresh :go) "${zhong}${zhong}" 6)
     assert (contains? out (esc-seq "6C"))
   end
 end

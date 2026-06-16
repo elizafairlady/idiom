@@ -24,7 +24,7 @@ static void test_transformer_failure_context(void) {
     expect_expand_error_note_rt(&rt, "<transformer-raise>",
         "defmacro boomer stx -> error :kaboom\n"
         "boomer x\n",
-        "exited with reason {:error :kaboom}",
+        "exited with reason error: :kaboom",
         "in expansion of 'boomer'");
     idm_runtime_destroy(&rt);
 }
@@ -62,7 +62,7 @@ static void test_for_syntax_context(void) {
         "  error :phase-boom\n"
         "end\n"
         "1\n",
-        "exited with reason {:error :phase-boom}",
+        "exited with reason error: :phase-boom",
         "during for-syntax evaluation");
     idm_runtime_destroy(&rt);
 }
@@ -115,7 +115,7 @@ static void test_expander_surface_introspection(void) {
         "gt? (probe x) 8\n",
         ":true");
     check_value_written(&rt,
-        "implement std/shell\n"
+        "activate std/shell\n"
         "defmacro probe2 stx do\n"
         "  defn count do\n"
         "    '() n -> n\n"
@@ -141,6 +141,24 @@ static void test_surface_outside_expansion(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_minus_reader_diagnostics(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    expect_expand_error_note_rt(&rt, "<glued-minus-word>",
+        "x-1\n",
+        "unbound identifier 'x-1'",
+        "was read as one word");
+    expect_expand_error_note_rt(&rt, "<negative-literal-application>",
+        "3 -1\n",
+        "literal cannot be used as a function",
+        "use spaces around '-' for subtraction");
+    expect_expand_error_note_rt(&rt, "<glued-minus-idents>",
+        "a = 1\nb = 2\na-b\n",
+        "unbound identifier 'a-b'",
+        "use spaces around '-' for subtraction");
+    idm_runtime_destroy(&rt);
+}
+
 void run_diagnostics_suite(void) {
     test_macro_origin_chain();
     test_transformer_failure_context();
@@ -151,4 +169,5 @@ void run_diagnostics_suite(void) {
     test_runtime_call_trace();
     test_expander_surface_introspection();
     test_surface_outside_expansion();
+    test_minus_reader_diagnostics();
 }

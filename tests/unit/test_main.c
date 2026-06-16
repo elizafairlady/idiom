@@ -5,7 +5,7 @@ int main(void) {
     run_runtime_suite();
     run_surface_suite();
     run_macro_suite();
-    run_protocol_suite();
+    run_traits_suite();
     run_package_suite();
     run_diagnostics_suite();
     run_session_suite();

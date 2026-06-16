@@ -1,2 +1,2 @@
-implement std/shell
+activate std/shell
 echo a & echo b

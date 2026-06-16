@@ -4,7 +4,7 @@ record Point do
 end
 
 p = Point 3 4
-println (p.x)
+println p.x
 println (y p)
 println (Point? p)
 println (Point? 12)

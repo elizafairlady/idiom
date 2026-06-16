@@ -1,146 +1,178 @@
 #include "test_util.h"
 
-static void test_protocol_methods_runtime_dispatch(void) {
+static void test_trait_methods_runtime_dispatch(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     check_value_written(&rt,
-        "protocol ShowDefault do\n"
+        "trait ShowDefault do\n"
         "  method show x -> str \"default:\" x\n"
         "end\n"
-        "implement ShowDefault\n"
+        "implement ShowDefault on int\n"
         "show 42\n",
         "\"default:42\"");
     check_value_written(&rt,
-        "protocol ShowOverride do\n"
+        "trait ShowOverride do\n"
         "  method show x -> str \"default:\" x\n"
         "end\n"
-        "implement ShowOverride\n"
-        "extend int with ShowOverride do\n"
+        "implement ShowOverride on int do\n"
         "  method show x -> str \"int:\" x\n"
         "end\n"
         "show 42\n",
         "\"int:42\"");
     check_value_written(&rt,
-        "protocol ShowDot do\n"
+        "trait ShowDot do\n"
         "  method show x\n"
         "end\n"
-        "implement ShowDot\n"
-        "extend int with ShowDot do\n"
+        "implement ShowDot on int do\n"
         "  method show x -> str \"dot:\" x\n"
         "end\n"
         "42.show\n",
         "\"dot:42\"");
     check_value_written(&rt,
-        "protocol Eqish do\n"
+        "trait Eqish do\n"
         "  method same a b -> eq? a b\n"
         "end\n"
-        "implement Eqish\n"
+        "implement Eqish on int\n"
         "same 4 4\n",
         ":true");
     check_value_written(&rt,
-        "protocol Pair do\n"
+        "trait Pair do\n"
         "  method label x -> \"label\"\n"
         "  method describe x -> str (label x) \":\" x\n"
         "end\n"
-        "implement Pair\n"
-        "extend int with Pair do\n"
+        "implement Pair on int do\n"
         "  method label _n -> \"int\"\n"
         "end\n"
+        "implement Pair on string\n"
         "{(describe 3) (describe \"s\")}\n",
         "{\"int:3\" \"label:s\"}");
     check_value_written(&rt,
-        "implement tests/pkg/protomethod\n"
-        "extend int with tests/pkg/protomethod do\n"
+        "use tests/pkg/protomethod\n"
+        "implement ProtoMethod on int do\n"
         "  method tag x -> :int\n"
         "end\n"
         "{(describe 7) (tag 7)}\n",
         "{\"pkg:7\" :int}");
+    expect_runtime_error_contains(&rt, "<used-trait-method-needs-conformance>",
+        "use tests/pkg/protomethod\n"
+        "describe \"s\"\n",
+        "does not implement trait 'ProtoMethod#");
 
-    expect_runtime_error_contains(&rt, "<signature-only-requires-extend>",
-        "protocol NeedsExtend do\n"
-        "  method show x\n"
+    expect_runtime_error_contains(&rt, "<signature-only-requires-implement>",
+        "trait NeedsConformance do\n"
+        "  method show x -> :default\n"
         "end\n"
-        "implement NeedsExtend\n"
+        "implement NeedsConformance on string\n"
         "show 42\n",
-        "does not extend protocol 'NeedsExtend#");
+        "does not implement trait 'NeedsConformance#");
     check_value_written(&rt,
-        "protocol Rebind do\n"
+        "trait Rebind do\n"
         "  method show x\n"
         "end\n"
-        "implement Rebind\n"
-        "extend int with Rebind do\n"
+        "implement Rebind on int do\n"
         "  method show x -> :first\n"
         "end\n"
-        "extend int with Rebind do\n"
+        "implement Rebind on int do\n"
         "  method show x -> :second\n"
         "end\n"
         "show 1\n",
         ":second");
-    expect_runtime_error_contains(&rt, "<cross-provider-extend-conflict>",
+    expect_runtime_error_contains(&rt, "<cross-provider-implement-conflict>",
         "use tests/pkg/labelext\n"
-        "implement tests/pkg/labelproto\n"
-        "extend int with tests/pkg/labelproto do\n"
+        "use tests/pkg/labelproto\n"
+        "implement Label on int do\n"
         "  method point-label n -> :mine\n"
         "end\n",
-        "already extends protocol 'tests/pkg/labelproto'");
-    expect_runtime_error_contains(&rt, "<cross-provider-extend-names-units>",
+        "already implements trait 'Label#");
+    expect_runtime_error_contains(&rt, "<cross-provider-implement-names-units>",
         "use tests/pkg/labelext\n"
-        "implement tests/pkg/labelproto\n"
-        "extend int with tests/pkg/labelproto do\n"
+        "use tests/pkg/labelproto\n"
+        "implement Label on int do\n"
         "  method point-label n -> :mine\n"
         "end\n",
         "via 'tests/pkg/labelext'");
     idm_runtime_destroy(&rt);
 }
 
-static void test_protocol_method_expansion_boundaries(void) {
-    expect_expand_result("<protocol-missing-required-method>",
-        "protocol NeedsImpl do\n"
+static void test_trait_method_expansion_boundaries(void) {
+    expect_expand_result("<trait-missing-required-method>",
+        "trait NeedsImpl do\n"
         "  method show x\n"
         "end\n"
-        "extend int with NeedsImpl do\n"
+        "implement NeedsImpl on int do\n"
         "end\n",
         false);
-    expect_expand_result("<protocol-unknown-method-impl>",
-        "protocol KnownOnly do\n"
+    expect_expand_result("<trait-unknown-method-impl>",
+        "trait KnownOnly do\n"
         "  method show x -> str x\n"
         "end\n"
-        "extend int with KnownOnly do\n"
+        "implement KnownOnly on int do\n"
         "  method nope x -> x\n"
         "end\n",
         false);
-    expect_expand_result("<protocol-duplicate-method-decl>",
-        "protocol Dups do\n"
+    expect_expand_result("<trait-duplicate-method-decl>",
+        "trait Dups do\n"
         "  method show x -> x\n"
         "  method show x -> x\n"
         "end\n",
         false);
-    expect_expand_result("<protocol-method-activation-scoped>",
-        "protocol ScopedShow do\n"
-        "  method show x -> str x\n"
-        "end\n"
+    expect_expand_result("<trait-declaration-scoped>",
         "do\n"
-        "  implement ScopedShow\n"
+        "  trait ScopedShow do\n"
+        "    method show x -> str x\n"
+        "  end\n"
         "  show 1\n"
         "end\n"
         "show 1\n",
         false);
     expect_expand_result("<import-does-not-activate-methods>",
         "import tests/pkg/protomethod as P\n"
-        "extend int with tests/pkg/protomethod do\n"
-        "  method tag x -> :int\n"
-        "end\n"
         "describe 1\n",
         false);
 }
 
-static void test_protocol_bytecode_roundtrip(void) {
+static void test_trait_requirements(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    check_value_written(&rt,
+        "trait BaseReq do\n"
+        "  method base x\n"
+        "end\n"
+        "trait ChildReq do\n"
+        "  require BaseReq\n"
+        "  method child x -> str x.base \":child\"\n"
+        "end\n"
+        "implement BaseReq on int do\n"
+        "  method base x -> :base\n"
+        "end\n"
+        "implement ChildReq on int\n"
+        "5.child\n",
+        "\"base:child\"");
+    expect_runtime_error_contains(&rt, "<trait-requirement-before-implement>",
+        "trait LowReq do\n"
+        "  method low x -> :low\n"
+        "end\n"
+        "trait HighReq do\n"
+        "  require LowReq\n"
+        "  method high x -> :high\n"
+        "end\n"
+        "implement HighReq on int\n",
+        "required trait 'LowReq#");
+    expect_expand_result("<trait-requirement-unknown>",
+        "trait MissingReq do\n"
+        "  require NopeReq\n"
+        "  method missing x -> x\n"
+        "end\n",
+        false);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_trait_bytecode_roundtrip(void) {
     const char *src =
-        "protocol RoundShow do\n"
+        "trait RoundShow do\n"
         "  method show x -> str \"default:\" x\n"
         "end\n"
-        "implement RoundShow\n"
-        "extend int with RoundShow do\n"
+        "implement RoundShow on int do\n"
         "  method show x -> str \"round:\" x\n"
         "end\n"
         "show 5\n";
@@ -149,7 +181,7 @@ static void test_protocol_bytecode_roundtrip(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt1, "<protocol-ishc>", src, &core, &err));
+    CHECK(idm_expand_string(&rt1, "<trait-ishc>", src, &core, &err));
     CHECK(!err.present);
     IdmBytecodeModule m1;
     idm_bc_init(&m1);
@@ -159,8 +191,8 @@ static void test_protocol_bytecode_roundtrip(void) {
     IdmBuffer dis;
     idm_buf_init(&dis);
     CHECK(idm_bc_disassemble(&dis, &m1));
-    CHECK(strstr(dis.data, "DEFINE_PROTOCOL") != NULL);
-    CHECK(strstr(dis.data, "EXTEND_PROTOCOL") != NULL);
+    CHECK(strstr(dis.data, "DEFINE_TRAIT") != NULL);
+    CHECK(strstr(dis.data, "IMPLEMENT_TRAIT") != NULL);
     CHECK(strstr(dis.data, "CALL_METHOD") != NULL);
     idm_buf_destroy(&dis);
     IdmValue out1 = idm_nil();
@@ -199,7 +231,7 @@ static void test_protocol_bytecode_roundtrip(void) {
     idm_runtime_destroy(&rt1);
 }
 
-static void test_records_on_protocol_dispatch(void) {
+static void test_records_on_trait_dispatch(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     check_value_written(&rt,
@@ -208,10 +240,10 @@ static void test_records_on_protocol_dispatch(void) {
         "  field y\n"
         "end\n"
         "p = Point 3 4\n"
-        "{(p.x) (y p) (Point? p) (Point? 12)}\n",
+        "{p.x (y p) (Point? p) (Point? 12)}\n",
         "{3 4 :true :false}");
     check_value_written(&rt,
-        "protocol LabelFor do\n"
+        "trait LabelFor do\n"
         "  method label-of x\n"
         "end\n"
         "record PointLabel do\n"
@@ -220,31 +252,30 @@ static void test_records_on_protocol_dispatch(void) {
         "record UserLabel do\n"
         "  field name\n"
         "end\n"
-        "extend PointLabel with LabelFor do\n"
-        "  method label-of p -> str \"point:\" (p.x)\n"
+        "implement LabelFor on PointLabel do\n"
+        "  method label-of p -> str \"point:\" p.x\n"
         "end\n"
-        "extend UserLabel with LabelFor do\n"
-        "  method label-of u -> str \"user:\" (u.name)\n"
+        "implement LabelFor on UserLabel do\n"
+        "  method label-of u -> str \"user:\" u.name\n"
         "end\n"
-        "implement LabelFor\n"
         "{(label-of (PointLabel 7)) (label-of (UserLabel \"ada\"))}\n",
         "{\"point:7\" \"user:ada\"}");
     check_value_written(&rt,
         "use tests/pkg/recordbox\n"
-        "implement tests/pkg/recordbox\n"
+        "activate tests/pkg/recordbox\n"
         "b = Box 42 \"answer\"\n"
-        "{(b.value) (label b) (Box? b)}\n",
+        "{b.value (label b) (Box? b)}\n",
         "{42 \"answer\" :true}");
-    expect_runtime_error_contains(&rt, "<record-unextended-generic-protocol>",
-        "protocol NeedsRecordExtend do\n"
-        "  method label x\n"
+    expect_runtime_error_contains(&rt, "<record-unimplemented-generic-trait>",
+        "trait NeedsRecordTrait do\n"
+        "  method label x -> :default\n"
         "end\n"
         "record NeedsRecord do\n"
         "  field x\n"
         "end\n"
-        "implement NeedsRecordExtend\n"
+        "implement NeedsRecordTrait on int\n"
         "label (NeedsRecord 1)\n",
-        "does not extend protocol 'NeedsRecordExtend#");
+        "does not implement trait 'NeedsRecordTrait#");
     idm_runtime_destroy(&rt);
 }
 
@@ -326,81 +357,78 @@ static void test_record_ishc_roundtrip(void) {
     idm_runtime_destroy(&rt);
 }
 
-static void test_protocol_identity_semantics(void) {
+static void test_trait_identity_semantics(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    expect_runtime_error_contains(&rt, "<local-protocols-do-not-share-dispatch>",
+    expect_runtime_error_contains(&rt, "<local-traits-do-not-share-dispatch>",
         "mk-a = fn _ig do\n"
-        "  protocol P do\n"
+        "  trait P do\n"
         "    method size x\n"
         "  end\n"
-        "  implement P\n"
-        "  extend int with P do\n"
+        "  implement P on int do\n"
         "    method size n -> 111\n"
         "  end\n"
         "  size 5\n"
         "end\n"
         "mk-b = fn _ig do\n"
-        "  protocol P do\n"
+        "  trait P do\n"
         "    method size x\n"
         "  end\n"
-        "  implement P\n"
-        "  extend string with P do\n"
+        "  implement P on string do\n"
         "    method size s -> 222\n"
         "  end\n"
         "  add (size \"hello\") (size 5)\n"
         "end\n"
         "add (mk-a 0) (mk-b 0)\n",
-        "type 'int' does not extend protocol 'P#");
+        "type 'int' does not implement trait 'P#");
     check_value_written(&rt,
-        "protocol Q do\n"
+        "trait Q do\n"
         "  method qa x\n"
         "end\n"
-        "implement Q\n"
-        "extend int with Q do\n"
+        "implement Q on int do\n"
         "  method qa x -> 7\n"
         "end\n"
         "qa 1\n",
         "7");
-    expect_runtime_error_contains(&rt, "<changed-contract-is-a-distinct-protocol>",
-        "protocol Q do\n"
-        "  method qa x y\n"
+    expect_runtime_error_contains(&rt, "<changed-contract-is-a-distinct-trait>",
+        "trait Q do\n"
+        "  method qa x y -> :default\n"
         "end\n"
-        "implement Q\n"
+        "implement Q on string\n"
         "qa 1 2\n",
-        "type 'int' does not extend protocol 'Q#");
+        "type 'int' does not implement trait 'Q#");
     check_value_written(&rt,
-        "implement tests/pkg/protomethod\n"
-        "implement tests/pkg/protomethod\n"
-        "extend int with tests/pkg/protomethod do\n"
+        "use tests/pkg/protomethod\n"
+        "use tests/pkg/protomethod\n"
+        "implement ProtoMethod on int do\n"
         "  method tag x -> :int\n"
         "end\n"
         "describe 7\n",
         "\"pkg:7\"");
     IdmError err;
     idm_error_init(&err);
-    IdmProtocolMethodSpec contract_v1 = {"m", 1u, false, idm_nil()};
-    IdmProtocolMethodSpec contract_v2 = {"m", 2u, false, idm_nil()};
-    CHECK(idm_protocol_define(&rt, "redef/X#1", &contract_v1, 1u, &err));
+    IdmTraitMethodSpec contract_v1 = {"m", 1u, false, idm_nil()};
+    IdmTraitMethodSpec contract_v2 = {"m", 2u, false, idm_nil()};
+    CHECK(idm_trait_define(&rt, "redef/X#1", NULL, 0, &contract_v1, 1u, &err));
     CHECK(!err.present);
-    CHECK(!idm_protocol_define(&rt, "redef/X#1", &contract_v2, 1u, &err));
+    CHECK(!idm_trait_define(&rt, "redef/X#1", NULL, 0, &contract_v2, 1u, &err));
     IdmBuffer reason;
     idm_buf_init(&reason);
     CHECK(idm_value_write(&reason, idm_error_reason_value(&rt, &err)));
-    CHECK_STR(reason.data, "{:error {:protocol-redefinition :redef/X#1}}");
+    CHECK_STR(reason.data, "{:error {:trait-redefinition :redef/X#1}}");
     idm_buf_destroy(&reason);
     idm_error_clear(&err);
-    expect_expand_error_rt(&rt, "<shadowed-protocol-activation-collides>",
-        "protocol G do\n"
+    check_value_written(&rt,
+        "trait G do\n"
         "  method gee x -> 1\n"
         "end\n"
-        "implement G\n"
-        "protocol G do\n"
+        "implement G on int\n"
+        "trait G do\n"
         "  method gee x -> 2\n"
         "end\n"
-        "implement G\n"
+        "implement G on int\n"
         "gee 1\n",
-        "' is already active in this context; activating 'G#");
+        "2");
     expect_runtime_error_contains(&rt, "<make-record-rejects-reserved-hash>",
         "make-record \"x#1\" (dict)\n",
         "make-record type must not contain '#'");
@@ -422,25 +450,26 @@ static void test_dsl_protocol_scoping(void) {
         "unbound identifier 'h1'");
     expect_expand_error_rt(&rt, "<html-scoped-deactivation>",
         "x = do\n"
-        "  implement tests/pkg/htmldsl\n"
+        "  activate tests/pkg/htmldsl\n"
         "  h1 \"inside\"\n"
         "end\n"
         "h1 \"outside\"\n",
         "unbound identifier 'h1'");
     check_value_written(&rt,
-        "implement tests/pkg/htmldsl\n"
+        "activate tests/pkg/htmldsl\n"
         "div 10 2\n",
         "5");
     idm_runtime_destroy(&rt);
 }
 
-void run_protocol_suite(void) {
-    test_protocol_methods_runtime_dispatch();
-    test_protocol_method_expansion_boundaries();
-    test_protocol_bytecode_roundtrip();
-    test_records_on_protocol_dispatch();
+void run_traits_suite(void) {
+    test_trait_methods_runtime_dispatch();
+    test_trait_method_expansion_boundaries();
+    test_trait_requirements();
+    test_trait_bytecode_roundtrip();
+    test_records_on_trait_dispatch();
     test_record_expansion_boundaries();
     test_record_ishc_roundtrip();
-    test_protocol_identity_semantics();
+    test_trait_identity_semantics();
     test_dsl_protocol_scoping();
 }

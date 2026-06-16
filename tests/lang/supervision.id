@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 use std/enum
 use std/supervisor
 
@@ -31,7 +31,7 @@ suite do
       trap-exit :true
       c = spawn (fn -> raise :crashed)
       link c
-      receive do {:exit p reason} -> tuple (eq? p c) reason end
+      receive do {:exit p reason} -> {(eq? p c) reason} end
     end
     assert-inspect got "{:true :crashed}"
   end
@@ -40,7 +40,7 @@ suite do
       trap-exit :true
       me = self
       exit me :wave
-      receive do {:exit p reason} -> tuple (eq? p me) reason end
+      receive do {:exit p reason} -> {(eq? p me) reason} end
     end
     assert-inspect got "{:true :wave}"
   end
@@ -83,7 +83,7 @@ suite do
       monitor c3
       exit c3 :kill
       r3 = receive do {:down _ p reason} when (eq? p c3) -> reason end
-      tuple r1 r2 r3
+      {r1 r2 r3}
     end
     assert-inspect got "{:bad :normal :killed}"
   end
@@ -93,7 +93,7 @@ suite do
       monitor d
       receive do {:down _ _ r} -> r end
       ref = monitor d
-      receive do {:down r p reason} -> tuple (eq? r ref) (eq? p d) reason end
+      receive do {:down r p reason} -> {(eq? r ref) (eq? p d) reason} end
     end
     assert-inspect got "{:true :true :noproc}"
   end
@@ -106,7 +106,7 @@ suite do
       exit v :kill
       a = receive do {:down r _ :killed} -> r end
       b = receive do {:down r _ :killed} -> r end
-      tuple both (neq? a b)
+      {both (neq? a b)}
     end
     assert-inspect got "{:true :true}"
   end
@@ -125,14 +125,14 @@ suite do
       parent = self
       v = spawn (fn do
         receive do :go -> :ok end
-        map (range 0 10) (fn k -> send parent (tuple :seq k))
+        (range 0 10).map (fn k -> send parent {:seq k})
         :done
       end)
       monitor v
       send v :go
       defn drain acc -> receive do
         {:seq k} -> drain (cons k acc)
-        {:down _ _ :normal} -> reverse acc
+        {:down _ _ :normal} -> acc.reverse
       end
       eq? (inspect (drain '())) (inspect (range 0 10))
     end
@@ -141,32 +141,32 @@ suite do
   test "supervisor-restarts-crashing-child" do
     got = do
       parent = self
-      sup = start (list (tuple :w (fn do
-        send parent (tuple :started (self))
+      sup = start (list {:w (fn do
+        send parent {:started (self)}
         receive do :crash -> raise :boom; {:never x} -> x end
-      end) :permanent))
+      end) :permanent})
       p1 = receive do {:started pid} -> pid end
       send p1 :crash
       p2 = receive do {:started pid} -> pid end
       n = count sup
       stop sup
-      tuple (neq? p1 p2) n
+      {(neq? p1 p2) n}
     end
     assert-inspect got "{:true 1}"
   end
   test "supervisor-transient-not-restarted-on-normal-exit" do
     got = do
       parent = self
-      sup = start (list (tuple :w (fn do
-        send parent (tuple :started (self))
+      sup = start (list {:w (fn do
+        send parent {:started (self)}
         receive do :finish -> :ok end
-      end) :transient))
+      end) :transient})
       p1 = receive do {:started pid} -> pid end
       send p1 :finish
       outcome = receive do {:started _} -> :restarted; after 200 -> :not-restarted end
       n = count sup
       stop sup
-      tuple outcome n
+      {outcome n}
     end
     assert-inspect got "{:not-restarted 0}"
   end
@@ -174,10 +174,10 @@ suite do
     got = do
       parent = self
       mk = fn tag -> fn do
-        send parent (tuple :up tag (self))
+        send parent {:up tag (self)}
         receive do :crash -> raise :boom; {:never x} -> x end
       end
-      sup = start (list (tuple :a (mk :a) :permanent) (tuple :b (mk :b) :permanent))
+      sup = start (list {:a (mk :a) :permanent} {:b (mk :b) :permanent})
       defn grab tag -> receive do {:up t p} when (eq? t tag) -> p end
       a1 = grab :a
       b1 = grab :b
@@ -186,13 +186,13 @@ suite do
       b-state = receive do {:up t _} when (eq? t :b) -> :b-restarted; after 100 -> :b-stable end
       n = count sup
       stop sup
-      tuple (neq? a1 a2) (neq? b1 a2) b-state n
+      {(neq? a1 a2) (neq? b1 a2) b-state n}
     end
     assert-inspect got "{:true :true :b-stable 2}"
   end
   test "supervisor-intensity-limit-trips" do
     got = do
-      sup = start (list (tuple :w (fn -> raise :always) :permanent)) 3 60000
+      sup = start (list {:w (fn -> raise :always) :permanent}) 3 60000
       monitor sup
       receive do {:down _ p reason} when (eq? p sup) -> reason end
     end
@@ -201,10 +201,10 @@ suite do
   test "supervisor-stop-kills-children" do
     got = do
       parent = self
-      sup = start (list (tuple :w (fn do
-        send parent (tuple :started (self))
+      sup = start (list {:w (fn do
+        send parent {:started (self)}
         receive do {:never x} -> x end
-      end) :permanent))
+      end) :permanent})
       p1 = receive do {:started pid} -> pid end
       monitor p1
       stop sup

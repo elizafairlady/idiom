@@ -1,8 +1,8 @@
 package phx
 
-implement tests/pkg/labelproto
+use tests/pkg/labelproto
 
-extend int with tests/pkg/labelproto do
+implement Label on int do
   method point-label n -> :int-label
 end
 

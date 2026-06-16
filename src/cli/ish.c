@@ -71,7 +71,7 @@ static int run_shell_source(const char *file, const char *source, bool print_res
     idm_bc_init(&module);
     IdmScheduler *sched = NULL;
     if (!idm_reader_read_string(file, source, &program, &err)) goto done;
-    wrapped = idm_syn_program_prepend_implement(program, "std/shell", file);
+    wrapped = idm_syn_program_prepend_activate(program, "std/shell", file);
     if (!wrapped) {
         idm_error_oom(&err, idm_span_unknown(file));
         goto done;

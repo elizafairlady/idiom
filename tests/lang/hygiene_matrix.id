@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 defn kadd2 a b -> add a b
 defmacro twice2 stx do syntax-case stx do (_ e) -> %`(kadd2 %,e %,e) end end
@@ -7,7 +7,7 @@ defmacro twice2 stx do syntax-case stx do (_ e) -> %`(kadd2 %,e %,e) end end
 defmacro my-or stx do syntax-case stx do
   (_ a b) -> %`(do
     tmp = %,a
-    if tmp do tmp else do %,b end
+    cond tmp tmp %,b
   end)
 end end
 
@@ -21,13 +21,13 @@ end end
 defmacro destr-list stx do syntax-case stx do
   (_ e) -> %`(do
     (list lha . lht) = %,e
-    tuple lha lht
+    {lha lht}
   end)
 end end
 
 defmacro destr-vec stx do syntax-case stx do
   (_ e) -> %`(do
-    (list lva lvb) = to-list %,e
+    (list lva lvb) = vector-to-list %,e
     add lva lvb
   end)
 end end
@@ -68,10 +68,12 @@ end end
 defmacro ping2 stx do syntax-case stx do
   (_ n) -> do
     v = syntax-int-value n
-    if (eq? v 0) do %`:done else do
+    if (eq? v 0) do
+      %`:done
+    else do
       %`(do
         p = :ping
-        tuple p (pong2 %,(make-syntax-int n (sub v 1)))
+        {p (pong2 %,(make-syntax-int n (sub v 1)))}
       end)
     end
   end
@@ -79,10 +81,12 @@ end end
 defmacro pong2 stx do syntax-case stx do
   (_ n) -> do
     v = syntax-int-value n
-    if (eq? v 0) do %`:done else do
+    if (eq? v 0) do
+      %`:done
+    else do
       %`(do
         p = :pong
-        tuple p (ping2 %,(make-syntax-int n (sub v 1)))
+        {p (ping2 %,(make-syntax-int n (sub v 1)))}
       end)
     end
   end
@@ -99,17 +103,20 @@ defmacro with-it2 stx do syntax-case stx do
 end end
 
 defrules swapif do
-  (_ c a b) when (syntax-int? c) -> %`(if (gt? %,c 0) do %,a else do %,b end)
-  (_ c a b) -> %`(if %,c do %,a else do %,b end)
+  (_ c a b) when (syntax-int? c) -> %`(cond (gt? %,c 0) %,a %,b)
+  (_ c a b) -> %`(cond %,c %,a %,b)
 end
 
 defmacro defproto2 stx do syntax-case stx do (_ n b) -> %`do
   protocol %,n %,b
 end end end
+defmacro deftrait2 stx do syntax-case stx do (_ n b) -> %`do
+  trait %,n %,b
+end end end
 defproto2 Greets2 do
   export defmacro answer2 s -> (make-syntax-int s 99)
 end
-defproto2 Sized2 do
+deftrait2 Sized2 do
   method size-of2 x -> mul x 10
 end
 
@@ -122,8 +129,8 @@ end
 
 defmacro bring stx do syntax-case stx do
   (_ v) -> %`(do
-    implement tests/pkg/exporter
-    tuple (answer q) (%,v <+> 1)
+    activate tests/pkg/exporter
+    {(answer q) (%,v <+> 1)}
   end)
 end end
 
@@ -137,7 +144,7 @@ end end
 
 defmacro defsz stx do syntax-case stx do
   (_ p m) -> %`do
-    protocol %,p do
+    trait %,p do
       method %,m x -> mul x 10
     end
   end
@@ -146,15 +153,14 @@ defsz Sz3 szof3
 
 defmacro defext stx do syntax-case stx do
   (_ t p m) -> %`do
-    extend %,t with %,p do
+    implement %,p on %,t do
       method %,m x -> :spliced-impl
     end
   end
 end end
-protocol Zp do
+trait Zp do
   method zz x
 end
-implement Zp
 defext int Zp zz
 
 for-syntax do
@@ -175,7 +181,7 @@ suite do
   test "or/tmp swap does not capture caller tmp" do
     got = do
       tmp = :user
-      tuple (my-or :nil tmp) (my-or tmp 99)
+      {(my-or :nil tmp) (my-or tmp 99)}
     end
     assert-inspect got "{:user :user}"
   end
@@ -185,14 +191,14 @@ suite do
   test "recursive macro introducing a binder each round" do
     got = do
       x = 1000
-      tuple (nest3 4) x
+      {(nest3 4) x}
     end
     assert-inspect got "{10 1000}"
   end
   test "mutually recursive macros leave caller p untouched" do
     got = do
       p = :user
-      tuple (ping2 3) p
+      {(ping2 3) p}
     end
     assert-inspect got "{{:ping {:pong {:ping :done}}} :user}"
   end
@@ -237,26 +243,25 @@ suite do
     got = do
       it = :outer
       r = with-it2 10 (add it 5)
-      tuple r it
+      {r it}
     end
     assert-inspect got "{15 :outer}"
   end
   test "package macro template uses sibling exported macro" do
     got = do
-      implement tests/pkg/sibmac
+      activate tests/pkg/sibmac
       doubled q
     end
     assert-eq got 42
   end
-  test "import alias resolves record identity in extend" do
+  test "import alias resolves record identity in implement" do
     got = do
-      protocol AliasView2 do
+      trait AliasView2 do
         method ashow2 x
       end
-      implement AliasView2
       import tests/pkg/boxa as Q
       b = Q.box 7
-      extend Q.box with AliasView2 do
+      implement AliasView2 on Q.box do
         method ashow2 v -> Q.unbox v
       end
       ashow2 b
@@ -282,15 +287,14 @@ suite do
   end
   test "macro-spliced protocol exports a macro" do
     got = do
-      implement Greets2
+      activate Greets2
       answer2 foo
     end
     assert-eq got 99
   end
-  test "macro-spliced protocol method with default body" do
+  test "macro-spliced trait method with default body" do
     got = do
-      implement Sized2
-      extend int with Sized2 do
+      implement Sized2 on int do
         method size-of2 x -> 100
       end
       size-of2 5
@@ -300,7 +304,7 @@ suite do
   test "macro-spliced record" do
     got = do
       p = Pt2 7
-      tuple (p.x) (Pt2? p)
+      {p.x (Pt2? p)}
     end
     assert-inspect got "{7 :true}"
   end
@@ -309,31 +313,30 @@ suite do
   end
   test "sibling diamond activations stay independent" do
     got = do
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
       a = do
-        implement tests/pkg/exporter2
-        tuple (answer x) (3 <+> 4)
+        activate tests/pkg/exporter2
+        {(answer x) (3 <+> 4)}
       end
       b = do
-        implement tests/pkg/exporter2
-        tuple (answer x) (3 <+> 4)
+        activate tests/pkg/exporter2
+        {(answer x) (3 <+> 4)}
       end
-      tuple a b (answer x) (3 <+> 4)
+      {a b (answer x) (3 <+> 4)}
     end
     assert-inspect got "{{7 -1} {7 -1} 99 7}"
   end
   test "user binders threaded through a macro body" do
     assert-eq (letpair p q (add p q)) 30
   end
-  test "macro-defined protocol with literal method default" do
+  test "macro-defined trait with literal method default" do
     got = do
-      implement Sz3
-      extend int with Sz3 do end
+      implement Sz3 on int
       szof3 4
     end
     assert-eq got 40
   end
-  test "spliced extend installs a method" do
+  test "spliced implement installs a method" do
     assert-eq (zz 5) :spliced-impl
   end
   test "expander-register-macro pair from one for-syntax block" do
@@ -351,7 +354,7 @@ suite do
   end
   test "provider operator target unaffected by caller shadow" do
     got = do
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
       defn add a b -> :nope
       3 <+> 4
     end
@@ -359,7 +362,7 @@ suite do
   end
   test "package defrules expands ignoring caller mul shadow" do
     got = do
-      implement tests/pkg/rulespkg
+      activate tests/pkg/rulespkg
       defn mul a b -> :shadow
       twice-of 21
     end
@@ -367,7 +370,7 @@ suite do
   end
   test "package resolver macro ignores caller str/append shadows" do
     got = do
-      implement tests/pkg/htmldsl
+      activate tests/pkg/htmldsl
       defn str a -> :shadow
       defn append a b -> :shadow
       span :class "x" "hi"
@@ -384,7 +387,7 @@ suite do
   test "implement inside fn body active for its runtime extent" do
     got = do
       mk = fn _ig do
-        implement tests/pkg/exporter
+        activate tests/pkg/exporter
         fn x -> x <+> (answer q)
       end
       f = mk 0
@@ -394,8 +397,8 @@ suite do
   end
   test "re-implement is idempotent" do
     got = do
-      implement tests/pkg/exporter
-      implement tests/pkg/exporter
+      activate tests/pkg/exporter
+      activate tests/pkg/exporter
       answer x
     end
     assert-eq got 99
@@ -410,10 +413,10 @@ suite do
     assert-expand-error "defmacro m stx -> %`(do\n    defn hidden-fn v -> v\n  end)\nm x\nhidden-fn 1\n" "unbound identifier 'hidden-fn'"
   end
   test "two providers of one surface in one context collide" do
-    assert-expand-error "implement tests/pkg/exporter\nimplement tests/pkg/exporter2\nanswer x" "already active in this context"
+    assert-expand-error "activate tests/pkg/exporter\nactivate tests/pkg/exporter2\nanswer x" "already active in this context"
   end
-  test "two same-named protocols extending same type collide on activation" do
-    assert-expand-error "implement tests/pkg/sizea\nimplement tests/pkg/sizeb\nsize 5" "already active in this context"
+  test "two same-named traits from packages collide on use" do
+    assert-expand-error "use tests/pkg/sizea\nuse tests/pkg/sizeb\nsize 5" "already active in this context"
   end
   test "use does not activate macros" do
     assert-expand-error "use tests/pkg/exporter\nanswer 1" "unbound identifier 'answer'"
@@ -427,13 +430,12 @@ suite do
   test "transformer lexical fn-capture still rejected cleanly" do
     assert-expand-error "outerv = 10\ndefmacro m stx -> make-syntax-int stx outerv\nm 5" "unbound identifier 'outerv'"
   end
-  test "dispatch error names qualified protocol identity" do
+  test "dispatch error names qualified trait identity" do
     got = do
-      protocol Qx do
+      trait Qx do
         method probe-q x
       end
-      implement Qx
-      extend string with Qx do
+      implement Qx on string do
         method probe-q s -> :str
       end
       try do
@@ -447,23 +449,23 @@ suite do
   end
   test "macro-introduced pattern bind does not capture" do
     hxa = 50
-    got = destr-pair (tuple hxa 2)
+    got = destr-pair {hxa 2}
     assert-eq got 52
     assert-eq hxa 50
-    hxb = my-or :nil (destr-pair (tuple hxa hxa))
+    hxb = my-or :nil (destr-pair {hxa hxa})
     assert-eq hxb 100
   end
   test "macro-introduced list and vector patterns are hygienic" do
     lha = 70
     lht = 71
     got = destr-list '(1 2 3)
-    assert-eq got (tuple 1 '(2 3))
-    assert-eq (tuple lha lht) (tuple 70 71)
+    assert-eq got {1 '(2 3)}
+    assert-eq {lha lht} {70 71}
     got2 = destr-vec [40 2]
     assert-eq got2 42
   end
   test "list pattern head is recognized by name even when shadowed" do
-    list = fn a b -> vector a b
+    list = fn a b -> [a b]
     (list pa pb) = '(8 9)
     assert-eq (add pa pb) 17
     assert-eq (list 1 2) [1 2]

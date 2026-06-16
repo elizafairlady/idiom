@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "qq-splice" do
@@ -41,7 +41,7 @@ suite do
   end
   test "splice-import" do
     got = do
-      implement tests/pkg/splicemak
+      activate tests/pkg/splicemak
       defdouble dbl
       dbl 21
     end
@@ -56,7 +56,7 @@ suite do
       end
       defconst a 1
       defconst b 2
-      tuple (a 0) (b 0)
+      {(a 0) (b 0)}
     end
     assert-inspect got "{1 2}"
   end

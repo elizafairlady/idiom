@@ -4,15 +4,15 @@ use std/string
 
 export defn join do
   a b when (eq? a "") -> b
-  a b when (ends-with? a "/") -> str a b
-  a b -> str a "/" b
+  a b when (ends-with? a "/") -> "${a}${b}"
+  a b -> "${a}/${b}"
 end
 
 defn last-slash p -> scan-slash p (str-len p)
 
 defn scan-slash do
   _p 0 -> :nil
-  p i -> if (eq? (str-byte p (sub i 1)) 47) do sub i 1 else do scan-slash p (sub i 1) end
+  p i -> cond (eq? (str-byte p (sub i 1)) 47) (sub i 1) (scan-slash p (sub i 1))
 end
 
 export defn dirname do

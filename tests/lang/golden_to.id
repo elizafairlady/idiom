@@ -1,28 +1,29 @@
 use std/test
-implement std/test
+activate std/test
+use std/enum
 
 suite do
   test "to-list-dict" do
     got = do
-      to-list %{:a 1 :b 2}
+      %{:a 1 :b 2}.to-list
     end
     assert-inspect got "({:a 1} {:b 2})"
   end
   test "to-list-list" do
     got = do
-      to-list [7 8 9]
+      [7 8 9].to-list
     end
     assert-inspect got "(7 8 9)"
   end
   test "to-list-tuple" do
     got = do
-      to-list {10 20 30}
+      {10 20 30}.to-list
     end
     assert-inspect got "(10 20 30)"
   end
   test "to-list-vector" do
     got = do
-      to-list [1 2 3]
+      [1 2 3].to-list
     end
     assert-inspect got "(1 2 3)"
   end

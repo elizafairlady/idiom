@@ -1,5 +1,5 @@
 use std/test
-implement std/test
+activate std/test
 
 suite do
   test "arithmetic" do
@@ -9,11 +9,11 @@ suite do
   test "clauses and patterns" do
     f = fn do
       0 -> :zero
-      (list h . _) -> tuple :head h
+      (list h . _) -> {:head h}
       _ -> :other
     end
     assert-eq (f 0) :zero
-    assert-eq (f (list 9)) (tuple :head 9)
+    assert-eq (f (list 9)) {:head 9}
     assert-eq (f "x") :other
   end
   test "expansion errors" do

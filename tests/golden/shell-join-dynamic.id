@@ -1,4 +1,4 @@
-implement std/shell
+activate std/shell
 env-set "SG" "mid"
 r = echo pre$SG.post --flag=$SG $SG/leaf
 println r
