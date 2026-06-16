@@ -898,26 +898,14 @@ static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_nam
 }
 
 static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *identity, const char *predicate_name, IdmSpan span, IdmError *err) {
-    IdmCore *pred = make_prim_app(IDM_PRIM_RECORD_PRED, span, err);
-    if (!pred) return NULL;
-    if (!core_app_add_or_oom(pred, idm_core_arg_ref(0u, span), err, span)) { idm_core_free(pred); return NULL; }
-    IdmCore *type = make_prim_app(IDM_PRIM_RECORD_TYPE, span, err);
-    if (!type) { idm_core_free(pred); return NULL; }
-    if (!core_app_add_or_oom(type, idm_core_arg_ref(0u, span), err, span)) { idm_core_free(pred); idm_core_free(type); return NULL; }
-    IdmCore *eq = make_prim_app(IDM_PRIM_EQ, span, err);
-    if (!eq) { idm_core_free(pred); idm_core_free(type); return NULL; }
-    if (!core_app_add_or_oom(eq, type, err, span) || !core_app_add_or_oom(eq, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span)) {
-        idm_core_free(pred);
-        idm_core_free(eq);
+    IdmCore *app = make_prim_app(IDM_PRIM_IS_A_P, span, err);
+    if (!app) return NULL;
+    if (!core_app_add_or_oom(app, idm_core_arg_ref(0u, span), err, span) ||
+        !core_app_add_or_oom(app, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span)) {
+        idm_core_free(app);
         return NULL;
     }
-    IdmCore *cond = idm_core_cond(pred, eq, idm_core_literal(idm_atom(ctx->rt, "false"), span), span);
-    if (!cond) {
-        idm_core_free(pred);
-        idm_core_free(eq);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    }
-    return idm_core_fn(predicate_name, 1u, cond, span);
+    return idm_core_fn(predicate_name, 1u, app, span);
 }
 
 static char *record_predicate_name(const char *record_name) {

@@ -255,31 +255,14 @@ IdmCore *idm_core_receive(IdmCore *receiver, IdmCore *timeout, IdmCore *timeout_
     return core;
 }
 
-IdmCore *idm_core_raise(IdmCore *value, IdmSpan span) {
-    IdmCore *core = core_alloc(IDM_CORE_RAISE, span);
+IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, IdmCore *cleanup, uint32_t ensure_slot, IdmSpan span) {
+    IdmCore *core = core_alloc(IDM_CORE_GUARD, span);
     if (!core) return NULL;
-    core->as.raise.value = value;
-    return core;
-}
-
-IdmCore *idm_core_raised(IdmSpan span) {
-    return core_alloc(IDM_CORE_RAISED, span);
-}
-
-IdmCore *idm_core_rescue(IdmCore *body, IdmCore *handler, IdmSpan span) {
-    IdmCore *core = core_alloc(IDM_CORE_RESCUE, span);
-    if (!core) return NULL;
-    core->as.rescue.body = body;
-    core->as.rescue.handler = handler;
-    return core;
-}
-
-IdmCore *idm_core_ensure(IdmCore *body, IdmCore *cleanup, uint32_t tmp_slot, IdmSpan span) {
-    IdmCore *core = core_alloc(IDM_CORE_ENSURE, span);
-    if (!core) return NULL;
-    core->as.ensure.body = body;
-    core->as.ensure.cleanup = cleanup;
-    core->as.ensure.tmp_slot = tmp_slot;
+    core->as.guard.body = body;
+    core->as.guard.handler = handler;
+    core->as.guard.cleanup = cleanup;
+    core->as.guard.rescue_slot = rescue_slot;
+    core->as.guard.ensure_slot = ensure_slot;
     return core;
 }
 
@@ -383,18 +366,10 @@ bool idm_core_method_call_add_arg(IdmCore *core, IdmCore *arg) {
 void idm_core_free(IdmCore *core) {
     if (!core) return;
     switch (core->kind) {
-        case IDM_CORE_RAISE:
-            idm_core_free(core->as.raise.value);
-            break;
-        case IDM_CORE_RAISED:
-            break;
-        case IDM_CORE_RESCUE:
-            idm_core_free(core->as.rescue.body);
-            idm_core_free(core->as.rescue.handler);
-            break;
-        case IDM_CORE_ENSURE:
-            idm_core_free(core->as.ensure.body);
-            idm_core_free(core->as.ensure.cleanup);
+        case IDM_CORE_GUARD:
+            idm_core_free(core->as.guard.body);
+            idm_core_free(core->as.guard.handler);
+            idm_core_free(core->as.guard.cleanup);
             break;
         case IDM_CORE_USE_PACKAGE:
             idm_core_free(core->as.use_package.cont);
@@ -559,22 +534,20 @@ static uint32_t core_max_local_plus_one(IdmCore *core) {
             if (b > max) max = b;
             return max;
         }
-        case IDM_CORE_RAISE:
-            return core_max_local_plus_one(core->as.raise.value);
-        case IDM_CORE_RAISED:
-            return 0;
-        case IDM_CORE_RESCUE: {
-            uint32_t max = core_max_local_plus_one(core->as.rescue.body);
-            uint32_t h = core_max_local_plus_one(core->as.rescue.handler);
-            if (h > max) max = h;
-            return max;
-        }
-        case IDM_CORE_ENSURE: {
-            uint32_t max = core->as.ensure.tmp_slot + 1u;
-            uint32_t b = core_max_local_plus_one(core->as.ensure.body);
-            uint32_t c = core_max_local_plus_one(core->as.ensure.cleanup);
-            if (b > max) max = b;
-            if (c > max) max = c;
+        case IDM_CORE_GUARD: {
+            uint32_t max = core_max_local_plus_one(core->as.guard.body);
+            if (core->as.guard.handler) {
+                uint32_t h = core_max_local_plus_one(core->as.guard.handler);
+                uint32_t s = core->as.guard.rescue_slot + 1u;
+                if (h > max) max = h;
+                if (s > max) max = s;
+            }
+            if (core->as.guard.cleanup) {
+                uint32_t c = core_max_local_plus_one(core->as.guard.cleanup);
+                uint32_t s = core->as.guard.ensure_slot + 1u;
+                if (c > max) max = c;
+                if (s > max) max = s;
+            }
             return max;
         }
         case IDM_CORE_USE_PACKAGE:
@@ -772,17 +745,12 @@ static void collect_celled_slots(IdmCore *core, bool *celled, uint32_t lc) {
             collect_celled_slots(core->as.receive.timeout, celled, lc);
             collect_celled_slots(core->as.receive.timeout_body, celled, lc);
             return;
-        case IDM_CORE_RAISE:
-            collect_celled_slots(core->as.raise.value, celled, lc);
-            return;
-        case IDM_CORE_RESCUE:
-            collect_celled_slots(core->as.rescue.body, celled, lc);
-            collect_celled_slots(core->as.rescue.handler, celled, lc);
-            return;
-        case IDM_CORE_ENSURE:
-            if (core->as.ensure.tmp_slot < lc) celled[core->as.ensure.tmp_slot] = true;
-            collect_celled_slots(core->as.ensure.body, celled, lc);
-            collect_celled_slots(core->as.ensure.cleanup, celled, lc);
+        case IDM_CORE_GUARD:
+            if (core->as.guard.handler && core->as.guard.rescue_slot < lc) celled[core->as.guard.rescue_slot] = true;
+            if (core->as.guard.cleanup && core->as.guard.ensure_slot < lc) celled[core->as.guard.ensure_slot] = true;
+            collect_celled_slots(core->as.guard.body, celled, lc);
+            collect_celled_slots(core->as.guard.handler, celled, lc);
+            collect_celled_slots(core->as.guard.cleanup, celled, lc);
             return;
         case IDM_CORE_USE_PACKAGE:
             collect_celled_slots(core->as.use_package.cont, celled, lc);
@@ -802,7 +770,6 @@ static void collect_celled_slots(IdmCore *core, bool *celled, uint32_t lc) {
         case IDM_CORE_GLOBAL_REF:
         case IDM_CORE_LITERAL:
         case IDM_CORE_PRIMITIVE:
-        case IDM_CORE_RAISED:
             return;
     }
 }
@@ -858,16 +825,10 @@ static void mark_celled(IdmCore *core, const bool *celled, uint32_t lc, const Id
             mark_celled(core->as.receive.timeout, celled, lc, caps, ncaps);
             mark_celled(core->as.receive.timeout_body, celled, lc, caps, ncaps);
             return;
-        case IDM_CORE_RAISE:
-            mark_celled(core->as.raise.value, celled, lc, caps, ncaps);
-            return;
-        case IDM_CORE_RESCUE:
-            mark_celled(core->as.rescue.body, celled, lc, caps, ncaps);
-            mark_celled(core->as.rescue.handler, celled, lc, caps, ncaps);
-            return;
-        case IDM_CORE_ENSURE:
-            mark_celled(core->as.ensure.body, celled, lc, caps, ncaps);
-            mark_celled(core->as.ensure.cleanup, celled, lc, caps, ncaps);
+        case IDM_CORE_GUARD:
+            mark_celled(core->as.guard.body, celled, lc, caps, ncaps);
+            mark_celled(core->as.guard.handler, celled, lc, caps, ncaps);
+            mark_celled(core->as.guard.cleanup, celled, lc, caps, ncaps);
             return;
         case IDM_CORE_USE_PACKAGE:
             mark_celled(core->as.use_package.cont, celled, lc, caps, ncaps);
@@ -885,7 +846,6 @@ static void mark_celled(IdmCore *core, const bool *celled, uint32_t lc, const Id
         case IDM_CORE_GLOBAL_REF:
         case IDM_CORE_LITERAL:
         case IDM_CORE_PRIMITIVE:
-        case IDM_CORE_RAISED:
             return;
     }
 }
@@ -1083,6 +1043,29 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_PORT_READ] = {"port-read", 3, 3},
     [IDM_PRIM_PORT_WRITE] = {"port-write", 2, 2},
     [IDM_PRIM_PORT_CLOSE_INPUT] = {"port-close-input", 1, 1},
+    [IDM_PRIM_RAISE] = {"raise", 1, 1},
+    [IDM_PRIM_IS_A_P] = {"is-a?", 2, 2},
+    [IDM_PRIM_NIL_P] = {"nil?", 1, 1},
+    [IDM_PRIM_ATOM_P] = {"atom?", 1, 1},
+    [IDM_PRIM_WORD_P] = {"word?", 1, 1},
+    [IDM_PRIM_INT_P] = {"int?", 1, 1},
+    [IDM_PRIM_FLOAT_P] = {"float?", 1, 1},
+    [IDM_PRIM_STRING_P] = {"string?", 1, 1},
+    [IDM_PRIM_PAIR_P] = {"pair?", 1, 1},
+    [IDM_PRIM_EMPTY_LIST_P] = {"empty-list?", 1, 1},
+    [IDM_PRIM_LIST_P] = {"list?", 1, 1},
+    [IDM_PRIM_TUPLE_P] = {"tuple?", 1, 1},
+    [IDM_PRIM_VECTOR_P] = {"vector?", 1, 1},
+    [IDM_PRIM_DICT_P] = {"dict?", 1, 1},
+    [IDM_PRIM_SYNTAX_P] = {"syntax?", 1, 1},
+    [IDM_PRIM_CELL_P] = {"cell?", 1, 1},
+    [IDM_PRIM_CLOSURE_P] = {"closure?", 1, 1},
+    [IDM_PRIM_PID_P] = {"pid?", 1, 1},
+    [IDM_PRIM_REF_P] = {"ref?", 1, 1},
+    [IDM_PRIM_PORT_P] = {"port?", 1, 1},
+    [IDM_PRIM_PRIMITIVE_P] = {"primitive?", 1, 1},
+    [IDM_PRIM_REGEX_P] = {"regex?", 1, 1},
+    [IDM_PRIM_REGEX_RESULT_P] = {"regex-result?", 1, 1},
 };
 
 size_t idm_primitive_count(void) {
@@ -1129,6 +1112,92 @@ static bool add_const_value(IdmBytecodeModule *module, IdmValue value, uint32_t 
     return true;
 }
 
+static bool patch_here(IdmBytecodeModule *module, size_t operand_index, IdmError *err, IdmSpan span, const char *what) {
+    if (module->code_count > UINT32_MAX) return idm_error_set(err, span, "bytecode too large");
+    if (!idm_bc_patch_u32(module, operand_index, (uint32_t)module->code_count)) return idm_error_set(err, span, "failed to patch %s", what);
+    return true;
+}
+
+static bool emit_store_raised_cell(IdmBytecodeModule *module, uint32_t slot, IdmError *err, IdmSpan span) {
+    if (!idm_bc_emit_op(module, IDM_OP_LOAD_RAISED, NULL)) return idm_error_oom(err, span);
+    if (!idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, span);
+    if (!idm_bc_emit_u32(module, IDM_OP_STORE_LOCAL, slot, NULL)) return idm_error_oom(err, span);
+    return true;
+}
+
+static bool emit_load_celled_local(IdmBytecodeModule *module, uint32_t slot, IdmError *err, IdmSpan span) {
+    if (!idm_bc_emit_u32(module, IDM_OP_LOAD_LOCAL, slot, NULL)) return idm_error_oom(err, span);
+    if (!idm_bc_emit_op(module, IDM_OP_LOAD_CELL, NULL)) return idm_error_oom(err, span);
+    return true;
+}
+
+static bool compile_guard_rescue_only(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+    size_t push_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.body, module, false, err)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
+    size_t jump_done_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
+    if (!patch_here(module, push_op + 1u, err, core->span, "guard rescue catch target")) return false;
+    if (!emit_store_raised_cell(module, core->as.guard.rescue_slot, err, core->span)) return false;
+    if (!compile_expr(core->as.guard.handler, module, false, err)) return false;
+    return patch_here(module, jump_done_op + 1u, err, core->span, "guard rescue done jump");
+}
+
+static bool compile_guard_ensure_only(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+    size_t push_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.body, module, false, err)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.cleanup, module, false, err)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+    size_t jump_done_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
+    if (!patch_here(module, push_op + 1u, err, core->span, "guard ensure catch target")) return false;
+    if (!emit_store_raised_cell(module, core->as.guard.ensure_slot, err, core->span)) return false;
+    if (!compile_expr(core->as.guard.cleanup, module, false, err)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!emit_load_celled_local(module, core->as.guard.ensure_slot, err, core->span)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
+    return patch_here(module, jump_done_op + 1u, err, core->span, "guard ensure done jump");
+}
+
+static bool compile_guard_rescue_ensure(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+    size_t outer_push_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &outer_push_op)) return idm_error_oom(err, core->span);
+    size_t inner_push_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &inner_push_op)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.body, module, false, err)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
+    size_t jump_after_rescue_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_after_rescue_op)) return idm_error_oom(err, core->span);
+    if (!patch_here(module, inner_push_op + 1u, err, core->span, "guard rescue catch target")) return false;
+    if (!emit_store_raised_cell(module, core->as.guard.rescue_slot, err, core->span)) return false;
+    if (!compile_expr(core->as.guard.handler, module, false, err)) return false;
+    if (!patch_here(module, jump_after_rescue_op + 1u, err, core->span, "guard rescue done jump")) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.cleanup, module, false, err)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+    size_t jump_done_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
+    if (!patch_here(module, outer_push_op + 1u, err, core->span, "guard ensure catch target")) return false;
+    if (!emit_store_raised_cell(module, core->as.guard.ensure_slot, err, core->span)) return false;
+    if (!compile_expr(core->as.guard.cleanup, module, false, err)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!emit_load_celled_local(module, core->as.guard.ensure_slot, err, core->span)) return false;
+    if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
+    return patch_here(module, jump_done_op + 1u, err, core->span, "guard ensure done jump");
+}
+
+static bool compile_guard(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+    bool has_handler = core->as.guard.handler != NULL;
+    bool has_cleanup = core->as.guard.cleanup != NULL;
+    if (!core->as.guard.body || (!has_handler && !has_cleanup)) return idm_error_set(err, core->span, "guard requires a body and handler or cleanup");
+    if (has_handler && has_cleanup) return compile_guard_rescue_ensure(core, module, err);
+    if (has_handler) return compile_guard_rescue_only(core, module, err);
+    return compile_guard_ensure_only(core, module, err);
+}
+
 static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err) {
     if (!idm_bc_note_span(module, core->span)) return idm_error_oom(err, core->span);
     if (!core) return idm_error_set(err, idm_span_unknown(NULL), "cannot compile null core expression");
@@ -1166,6 +1235,11 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
                     if (!add_const_value(module, idm_int(0), &zero_const, err, core->span)) return false;
                     if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, zero_const, NULL)) return idm_error_oom(err, core->span);
                     if (!idm_bc_emit_op(module, IDM_OP_EXIT, NULL)) return idm_error_oom(err, core->span);
+                    return true;
+                }
+                if (core->as.app.callee->as.primitive == IDM_PRIM_RAISE) {
+                    if (core->as.app.arg_count != 1u) return idm_error_set(err, core->span, "primitive 'raise' expects 1 argument(s)");
+                    if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
                     return true;
                 }
                 IdmOpcode actor_op = IDM_OP_HALT;
@@ -1336,50 +1410,8 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             if (!idm_bc_patch_u32(module, jump_done_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch receive done jump");
             return true;
         }
-        case IDM_CORE_RAISE:
-            if (!compile_expr(core->as.raise.value, module, false, err)) return false;
-            if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
-            return true;
-        case IDM_CORE_RAISED:
-            if (!idm_bc_emit_op(module, IDM_OP_LOAD_RAISED, NULL)) return idm_error_oom(err, core->span);
-            return true;
-        case IDM_CORE_RESCUE: {
-            size_t push_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.rescue.body, module, false, err)) return false;
-            if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
-            size_t jump_done_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, push_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch rescue catch target");
-            if (!compile_expr(core->as.rescue.handler, module, false, err)) return false;
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, jump_done_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch rescue done jump");
-            return true;
-        }
-        case IDM_CORE_ENSURE: {
-            size_t push_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.ensure.body, module, false, err)) return false;
-            if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.ensure.cleanup, module, false, err)) return false;
-            if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
-            size_t jump_done_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, push_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch ensure catch target");
-            if (!idm_bc_emit_op(module, IDM_OP_LOAD_RAISED, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_u32(module, IDM_OP_STORE_LOCAL, core->as.ensure.tmp_slot, NULL)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.ensure.cleanup, module, false, err)) return false;
-            if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_u32(module, IDM_OP_LOAD_LOCAL, core->as.ensure.tmp_slot, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_op(module, IDM_OP_LOAD_CELL, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, jump_done_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch ensure done jump");
-            return true;
-        }
+        case IDM_CORE_GUARD:
+            return compile_guard(core, module, err);
         case IDM_CORE_USE_PACKAGE: {
             uint32_t fn_off = 0;
             if (core->as.use_package.module) {
@@ -1616,24 +1648,18 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
                    idm_buf_append_char(buf, ' ') &&
                    idm_core_dump(buf, core->as.receive.timeout_body) &&
                    idm_buf_append_char(buf, ')');
-        case IDM_CORE_RAISE:
-            return idm_buf_append(buf, "(raise ") && idm_core_dump(buf, core->as.raise.value) && idm_buf_append_char(buf, ')');
-        case IDM_CORE_RAISED:
-            return idm_buf_append(buf, "raised");
+        case IDM_CORE_GUARD: {
+            if (!idm_buf_append(buf, "(guard ") || !idm_core_dump(buf, core->as.guard.body)) return false;
+            if (core->as.guard.handler) {
+                if (!idm_buf_appendf(buf, " rescue#%u ", core->as.guard.rescue_slot) || !idm_core_dump(buf, core->as.guard.handler)) return false;
+            }
+            if (core->as.guard.cleanup) {
+                if (!idm_buf_appendf(buf, " ensure#%u ", core->as.guard.ensure_slot) || !idm_core_dump(buf, core->as.guard.cleanup)) return false;
+            }
+            return idm_buf_append_char(buf, ')');
+        }
         case IDM_CORE_GLOBAL_REF:
             return idm_buf_appendf(buf, "(global %u)", core->as.local_slot);
-        case IDM_CORE_RESCUE:
-            return idm_buf_append(buf, "(rescue ") &&
-                   idm_core_dump(buf, core->as.rescue.body) &&
-                   idm_buf_append_char(buf, ' ') &&
-                   idm_core_dump(buf, core->as.rescue.handler) &&
-                   idm_buf_append_char(buf, ')');
-        case IDM_CORE_ENSURE:
-            return idm_buf_append(buf, "(ensure ") &&
-                   idm_core_dump(buf, core->as.ensure.body) &&
-                   idm_buf_append_char(buf, ' ') &&
-                   idm_core_dump(buf, core->as.ensure.cleanup) &&
-                   idm_buf_append_char(buf, ')');
         case IDM_CORE_USE_PACKAGE:
             return idm_buf_append(buf, "(use-package ") &&
                    dump_value(buf, core->as.use_package.name) &&

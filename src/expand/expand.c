@@ -14,7 +14,7 @@ static IdmCore *expand_word_callee(ExpandContext *ctx, const IdmSyntax *word, Id
 static bool head_is_bound(ExpandContext *ctx, const IdmSyntax *word);
 static IdmCore *expand_raise_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static const IdmSyntax *try_section_head(const IdmSyntax *stmt);
-static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, IdmError *err);
+static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, uint32_t *out_slot, IdmError *err);
 static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static bool syn_is_dot(const IdmSyntax *s);
@@ -243,9 +243,19 @@ static IdmCore *expand_raise_parts(ExpandContext *ctx, IdmSyntax *const *items, 
     if (start + 1u >= end) return expand_error(err, items[start]->span, "raise requires a value");
     IdmCore *value = expand_parts(ctx, items, start + 1u, end, err);
     if (!value) return NULL;
-    IdmCore *raise = idm_core_raise(value, items[start]->span);
-    if (!raise) { idm_core_free(value); return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span); }
-    return raise;
+    IdmCore *callee = idm_core_primitive(IDM_PRIM_RAISE, items[start]->span);
+    IdmCore *app = callee ? idm_core_app(callee, items[start]->span) : NULL;
+    if (!app) {
+        idm_core_free(callee);
+        idm_core_free(value);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+    }
+    if (!idm_core_app_add_arg(app, value)) {
+        idm_core_free(value);
+        idm_core_free(app);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+    }
+    return app;
 }
 
 static const IdmSyntax *try_section_head(const IdmSyntax *stmt) {
@@ -254,7 +264,7 @@ static const IdmSyntax *try_section_head(const IdmSyntax *stmt) {
     return head && head->kind == IDM_SYN_WORD ? head : NULL;
 }
 
-static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, IdmError *err) {
+static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, uint32_t *out_slot, IdmError *err) {
     IdmSyntax *const *ritems = stmt->as.seq.items;
     size_t rcount = stmt->as.seq.count;
     if (rcount < 5) return expand_error(err, stmt->span, "rescue requires the form: rescue NAME -> HANDLER");
@@ -271,11 +281,8 @@ static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, Id
     IdmCore *handler_body = expand_parts(ctx, ritems, arrow + 1u, rcount, err);
     local_pop_to(ctx, saved_count, ctx->next_slot);
     if (!handler_body) return NULL;
-    IdmCore *raised = idm_core_raised(stmt->span);
-    if (!raised) { idm_core_free(handler_body); return (IdmCore *)(uintptr_t)idm_error_oom(err, stmt->span); }
-    IdmCore *bind = idm_core_bind_local(r_slot, raised, handler_body, stmt->span);
-    if (!bind) { idm_core_free(raised); idm_core_free(handler_body); return (IdmCore *)(uintptr_t)idm_error_oom(err, stmt->span); }
-    return bind;
+    if (out_slot) *out_slot = r_slot;
+    return handler_body;
 }
 
 static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
@@ -302,22 +309,35 @@ static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, si
     IdmCore *body_core = expand_body_items(ctx, stmts, 1, boundary, true, err);
     if (!body_core) return NULL;
 
-    IdmCore *guarded = body_core;
+    IdmCore *handler = NULL;
+    uint32_t rescue_slot = 0;
     if (has_rescue) {
-        IdmCore *handler = expand_try_handler(ctx, stmts[rescue_pos], err);
+        handler = expand_try_handler(ctx, stmts[rescue_pos], &rescue_slot, err);
         if (!handler) { idm_core_free(body_core); return NULL; }
-        guarded = idm_core_rescue(body_core, handler, items[start]->span);
-        if (!guarded) { idm_core_free(body_core); idm_core_free(handler); return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span); }
     }
+    IdmCore *cleanup = NULL;
+    uint32_t ensure_slot = 0;
     if (has_ensure) {
         const IdmSyntax *estmt = stmts[ensure_pos];
-        if (estmt->as.seq.count < 3) { idm_core_free(guarded); return expand_error(err, estmt->span, "ensure requires a cleanup expression"); }
-        IdmCore *cleanup = expand_parts(ctx, estmt->as.seq.items, 2, estmt->as.seq.count, err);
-        if (!cleanup) { idm_core_free(guarded); return NULL; }
-        uint32_t tmp_slot = ctx->next_slot++;
-        IdmCore *ensure = idm_core_ensure(guarded, cleanup, tmp_slot, items[start]->span);
-        if (!ensure) { idm_core_free(guarded); idm_core_free(cleanup); return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span); }
-        guarded = ensure;
+        if (estmt->as.seq.count < 3) {
+            idm_core_free(body_core);
+            idm_core_free(handler);
+            return expand_error(err, estmt->span, "ensure requires a cleanup expression");
+        }
+        cleanup = expand_parts(ctx, estmt->as.seq.items, 2, estmt->as.seq.count, err);
+        if (!cleanup) {
+            idm_core_free(body_core);
+            idm_core_free(handler);
+            return NULL;
+        }
+        ensure_slot = ctx->next_slot++;
+    }
+    IdmCore *guarded = idm_core_guard(body_core, handler, rescue_slot, cleanup, ensure_slot, items[start]->span);
+    if (!guarded) {
+        idm_core_free(body_core);
+        idm_core_free(handler);
+        idm_core_free(cleanup);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
     }
     return guarded;
 }
@@ -1098,6 +1118,21 @@ static bool repl_track_module(IdmRepl *repl, IdmBytecodeModule *module) {
     return true;
 }
 
+static bool repl_make_thunk(IdmRuntime *rt, IdmBytecodeModule *module, uint32_t main_fn, IdmNamespace *ns, IdmValue *out, IdmError *err) {
+    if (main_fn >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "REPL main function index out of bounds");
+    IdmPatternSelectorClause clause;
+    memset(&clause, 0, sizeof(clause));
+    clause.function_index = main_fn;
+    clause.arity = module->functions[main_fn].arity;
+    clause.patterns = module->functions[main_fn].param_patterns;
+    clause.pattern_count = module->functions[main_fn].pattern_count;
+    IdmPatternSelector *selector = NULL;
+    if (!idm_pattern_selector_build(&clause, 1u, &selector, err)) return false;
+    *out = idm_closure_multi_selectable_in_module(rt, module, &main_fn, 1u, selector, NULL, 0, ns, err);
+    idm_pattern_selector_free(selector);
+    return !(err && err->present);
+}
+
 static IdmReplStatus repl_compile_fail(IdmRepl *repl, IdmError *err) {
     if (err && !err->present) idm_error_oom(err, idm_span_unknown(NULL));
     surface_rollback(&repl->ctx, &repl->checkpoint);
@@ -1155,8 +1190,8 @@ IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_
         return repl_compile_fail(repl, err);
     }
     if (!idm_bc_intern_literals(repl->rt, module, err)) return repl_compile_fail(repl, err);
-    IdmValue thunk = idm_closure_in_module(repl->rt, module, main_fn, NULL, 0, repl->rt->main_ns, err);
-    if (err->present) return repl_compile_fail(repl, err);
+    IdmValue thunk = idm_nil();
+    if (!repl_make_thunk(repl->rt, module, main_fn, repl->rt->main_ns, &thunk, err)) return repl_compile_fail(repl, err);
     repl->token = ++repl->next_token;
     *out_token = repl->token;
     *out_thunk = thunk;
@@ -1211,8 +1246,7 @@ bool idm_repl_loop_thunk(IdmRepl *repl, const char *source, IdmValue *out_thunk,
     if (!idm_bc_intern_literals(repl->rt, module, err)) return false;
     IdmNamespace *ns = idm_namespace_get_or_create(repl->rt, "ish-loop");
     if (!ns) return idm_error_oom(err, idm_span_unknown(NULL));
-    *out_thunk = idm_closure_in_module(repl->rt, module, main_fn, NULL, 0, ns, err);
-    return !(err && err->present);
+    return repl_make_thunk(repl->rt, module, main_fn, ns, out_thunk, err);
 }
 
 void idm_repl_destroy(IdmRepl *repl) {

@@ -18,10 +18,7 @@ typedef enum {
     IDM_CORE_FN_MULTI,
     IDM_CORE_LETREC,
     IDM_CORE_RECEIVE,
-    IDM_CORE_RAISE,
-    IDM_CORE_RAISED,
-    IDM_CORE_RESCUE,
-    IDM_CORE_ENSURE,
+    IDM_CORE_GUARD,
     IDM_CORE_GLOBAL_REF,
     IDM_CORE_USE_PACKAGE,
     IDM_CORE_DEFINE_TRAIT,
@@ -205,7 +202,30 @@ typedef enum {
     IDM_PRIM_SPAWN_MONITOR,
     IDM_PRIM_PORT_READ,
     IDM_PRIM_PORT_WRITE,
-    IDM_PRIM_PORT_CLOSE_INPUT
+    IDM_PRIM_PORT_CLOSE_INPUT,
+    IDM_PRIM_RAISE,
+    IDM_PRIM_IS_A_P,
+    IDM_PRIM_NIL_P,
+    IDM_PRIM_ATOM_P,
+    IDM_PRIM_WORD_P,
+    IDM_PRIM_INT_P,
+    IDM_PRIM_FLOAT_P,
+    IDM_PRIM_STRING_P,
+    IDM_PRIM_PAIR_P,
+    IDM_PRIM_EMPTY_LIST_P,
+    IDM_PRIM_LIST_P,
+    IDM_PRIM_TUPLE_P,
+    IDM_PRIM_VECTOR_P,
+    IDM_PRIM_DICT_P,
+    IDM_PRIM_SYNTAX_P,
+    IDM_PRIM_CELL_P,
+    IDM_PRIM_CLOSURE_P,
+    IDM_PRIM_PID_P,
+    IDM_PRIM_REF_P,
+    IDM_PRIM_PORT_P,
+    IDM_PRIM_PRIMITIVE_P,
+    IDM_PRIM_REGEX_P,
+    IDM_PRIM_REGEX_RESULT_P
 } IdmPrimitive;
 
 typedef struct {
@@ -326,17 +346,12 @@ struct IdmCore {
             IdmCore *timeout_body;
         } receive;
         struct {
-            IdmCore *value;
-        } raise;
-        struct {
             IdmCore *body;
             IdmCore *handler;
-        } rescue;
-        struct {
-            IdmCore *body;
             IdmCore *cleanup;
-            uint32_t tmp_slot;
-        } ensure;
+            uint32_t rescue_slot;
+            uint32_t ensure_slot;
+        } guard;
         struct {
             IdmValue name;
             IdmBytecodeModule *module;
@@ -400,10 +415,7 @@ void idm_core_letrec_set_global(IdmCore *letrec);
 void idm_core_letrec_set_fill_only(IdmCore *letrec);
 IdmCore *idm_core_global_ref(uint32_t id, IdmSpan span);
 IdmCore *idm_core_receive(IdmCore *receiver, IdmCore *timeout, IdmCore *timeout_body, IdmSpan span);
-IdmCore *idm_core_raise(IdmCore *value, IdmSpan span);
-IdmCore *idm_core_raised(IdmSpan span);
-IdmCore *idm_core_rescue(IdmCore *body, IdmCore *handler, IdmSpan span);
-IdmCore *idm_core_ensure(IdmCore *body, IdmCore *cleanup, uint32_t tmp_slot, IdmSpan span);
+IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, IdmCore *cleanup, uint32_t ensure_slot, IdmSpan span);
 IdmCore *idm_core_use_package(IdmValue name, IdmBytecodeModule *module, uint32_t init_fn, uint32_t *export_src, uint32_t *export_dst, size_t export_count, IdmCore *cont, IdmSpan span);
 IdmCore *idm_core_define_trait(IdmValue name, IdmSpan span);
 bool idm_core_define_trait_add_requirement(IdmCore *core, IdmValue requirement);

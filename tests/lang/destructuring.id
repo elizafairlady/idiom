@@ -42,6 +42,30 @@ suite do
     %{:k kv} = %{:k 9 :other 0}
     assert-eq kv 9
   end
+  test "maranget-selector-fallthrough-and-arity" do
+    f = fn do
+      '(1 2) when :false -> :literal-guard
+      (list a b) -> {:list a b}
+      x y -> {:two x y}
+      x -> {:one x}
+    end
+    assert-eq (f '(1 2)) {:list 1 2}
+    assert-eq (f :a :b) {:two :a :b}
+    assert-eq (f :z) {:one :z}
+    same = fn do
+      {x x} -> :same
+      {x y} -> {:diff x y}
+    end
+    assert-eq (same {1 1}) :same
+    assert-eq (same {1 2}) {:diff 1 2}
+    d = fn do
+      %{:a 1} when :false -> :a
+      %{:b x} -> {:b x}
+      _ -> :none
+    end
+    assert-eq (d %{:b 9}) {:b 9}
+    assert-eq (d %{:c 0}) :none
+  end
   test "bracket-patterns-match-vectors-only" do
     g = fn do
       [a b] -> {:vec a b}

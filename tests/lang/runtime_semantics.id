@@ -68,6 +68,41 @@ suite do
     end
     assert-eq got {7 :extra}
   end
+  test "guard-raise-and-ensure-semantics" do
+    assert-eq (try do
+      41
+      ensure 99
+    end) 41
+    captured = try do
+      raise :boom
+      rescue r -> (fn _go -> r) :go
+    end
+    assert-eq captured :boom
+    assert-eq (try do
+      apply &raise (list :applied)
+      rescue r -> r
+    end) :applied
+    assert-eq (try do
+      try do
+        raise :body
+        rescue r -> raise {:handler r}
+        ensure raise :cleanup
+      end
+      rescue r -> r
+    end) :cleanup
+  end
+  test "type-predicates-and-is-a" do
+    record Box do
+      field v
+    end
+    b = Box 7
+    raw = make-record "Box" (dict :v 8)
+    word_value = syntax->datum %'word
+    assert-eq {(nil? :nil) (atom? :a) (word? word_value) (int? 1) (float? 1.0) (string? "x") (pair? '(1)) (empty-list? '()) (list? '(1 2)) (tuple? {1}) (vector? [1]) (dict? %{:a 1}) (syntax? %'word) (closure? (fn x -> x)) (primitive? &add) (record? b)} {:true :true :true :true :true :true :true :true :true :true :true :true :true :true :true :true}
+    assert-eq {(cell? :x) (pid? self) (ref? :x) (port? :x) (regex? :x) (regex-result? :x)} {:false :true :false :false :false :false}
+    assert-eq {(is-a? 1 :int) (is-a? 1 "int") (is-a? '(1 2) :list) (is-a? (cons 1 2) :list) (is-a? '(1 2) :pair) (is-a? '() :empty-list)} {:true :true :true :false :true :true}
+    assert-eq {(is-a? b :record) (is-a? b (record-type b)) (is-a? raw (record-type raw)) (is-a? raw (record-type b)) (Box? b) (Box? raw)} {:true :true :true :false :true :false}
+  end
   test "zero-arity-defn-reference-calls" do
     defn answer -> 42
     assert-eq answer 42

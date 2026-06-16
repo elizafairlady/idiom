@@ -1,5 +1,6 @@
 #include "idiom/value.h"
 
+#include "idiom/pattern.h"
 #include "idiom/regex.h"
 #include "idiom/syntax.h"
 
@@ -55,6 +56,7 @@ typedef struct {
     IdmValue *captures;
     size_t capture_count;
     IdmNamespace *ns;
+    IdmPatternSelector *selector;
 } IdmClosureObj;
 
 typedef struct {
@@ -167,6 +169,7 @@ static void object_free(IdmObject *obj) {
     if (obj->kind == IDM_OBJ_CLOSURE) {
         free(obj->as.closure.entries);
         free(obj->as.closure.captures);
+        idm_pattern_selector_free(obj->as.closure.selector);
     }
     if (obj->kind == IDM_OBJ_RECORD) free(obj->as.record.type);
     if (obj->kind == IDM_OBJ_REGEX) idm_regex_free(obj->as.regex);
@@ -748,7 +751,7 @@ IdmValue idm_cell(IdmRuntime *rt, IdmValue initial, IdmError *err) {
     return v;
 }
 
-IdmValue idm_closure_multi_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *function_indexes, size_t function_count, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
+IdmValue idm_closure_multi_selectable_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *function_indexes, size_t function_count, IdmPatternSelector *selector, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
     if (function_count == 0) {
         idm_error_set(err, idm_span_unknown(NULL), "closure must have at least one function entry");
         return idm_nil();
@@ -760,6 +763,8 @@ IdmValue idm_closure_multi_in_module(IdmRuntime *rt, const IdmBytecodeModule *mo
     }
     obj->as.closure.module = module;
     obj->as.closure.ns = ns;
+    obj->as.closure.selector = selector;
+    idm_pattern_selector_retain(selector);
     obj->as.closure.function_index = function_indexes[0];
     obj->as.closure.entry_count = function_count;
     obj->as.closure.entries = NULL;
@@ -787,6 +792,10 @@ IdmValue idm_closure_multi_in_module(IdmRuntime *rt, const IdmBytecodeModule *mo
     v.tag = IDM_VAL_CLOSURE;
     v.as.obj = obj;
     return v;
+}
+
+IdmValue idm_closure_multi_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *function_indexes, size_t function_count, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
+    return idm_closure_multi_selectable_in_module(rt, module, function_indexes, function_count, NULL, captures, capture_count, ns, err);
 }
 
 IdmValue idm_closure_multi(IdmRuntime *rt, const uint32_t *function_indexes, size_t function_count, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
@@ -1399,6 +1408,10 @@ IdmNamespace *idm_closure_namespace(IdmValue value) {
     return value.tag == IDM_VAL_CLOSURE ? value.as.obj->as.closure.ns : NULL;
 }
 
+IdmPatternSelector *idm_closure_selector(IdmValue value) {
+    return value.tag == IDM_VAL_CLOSURE ? value.as.obj->as.closure.selector : NULL;
+}
+
 IdmValue idm_closure_capture(IdmValue value, size_t index, IdmError *err) {
     if (value.tag != IDM_VAL_CLOSURE) {
         idm_error_set(err, idm_span_unknown(NULL), "expected closure");
@@ -1825,6 +1838,8 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
             dst->as.closure.module = src->as.closure.module;
             dst->as.closure.function_index = src->as.closure.function_index;
             dst->as.closure.ns = src->as.closure.ns;
+            dst->as.closure.selector = src->as.closure.selector;
+            idm_pattern_selector_retain(dst->as.closure.selector);
             dst->as.closure.entry_count = src->as.closure.entry_count;
             dst->as.closure.entries = NULL;
             if (src->as.closure.entry_count > 1) {

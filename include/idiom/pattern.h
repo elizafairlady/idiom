@@ -18,6 +18,7 @@ typedef enum {
 } IdmPatternKind;
 
 typedef struct IdmPattern IdmPattern;
+typedef struct IdmPatternSelector IdmPatternSelector;
 
 typedef struct {
     IdmValue key;
@@ -30,6 +31,15 @@ typedef struct {
     size_t count;
     size_t cap;
 } IdmPatternBindings;
+
+typedef struct {
+    uint32_t function_index;
+    uint32_t arity;
+    IdmPattern *const *patterns;
+    uint32_t pattern_count;
+} IdmPatternSelectorClause;
+
+typedef bool (*IdmPatternGuardFn)(void *user, uint32_t function_index, const IdmPatternBindings *bindings, bool *out_pass, IdmError *err);
 
 struct IdmPattern {
     IdmPatternKind kind;
@@ -60,5 +70,10 @@ void idm_pattern_bindings_destroy(IdmPatternBindings *bindings);
 const IdmValue *idm_pattern_bindings_get(const IdmPatternBindings *bindings, const char *name);
 bool idm_pattern_bindings_add(IdmPatternBindings *bindings, const char *name, IdmValue value);
 bool idm_pattern_match(IdmRuntime *rt, IdmPattern *pat, IdmValue value, IdmPatternBindings *bindings, IdmError *err);
+
+bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t clause_count, IdmPatternSelector **out, IdmError *err);
+void idm_pattern_selector_retain(IdmPatternSelector *selector);
+void idm_pattern_selector_free(IdmPatternSelector *selector);
+bool idm_pattern_selector_select(IdmRuntime *rt, const IdmPatternSelector *selector, const IdmValue *args, uint32_t argc, IdmPatternGuardFn guard, void *guard_user, uint32_t *out_function_index, IdmPatternBindings *out_bindings, bool *out_has_bindings, bool *out_matched, IdmError *err);
 
 #endif

@@ -687,6 +687,74 @@ static bool prim_ok(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err
     return true;
 }
 
+static const char *type_name_text(IdmValue value) {
+    if (value.tag == IDM_VAL_ATOM || value.tag == IDM_VAL_WORD) return idm_symbol_text(value.as.symbol);
+    if (value.tag == IDM_VAL_STRING) return idm_string_bytes(value);
+    return NULL;
+}
+
+static bool value_is_proper_list(IdmValue value) {
+    while (idm_is_pair(value)) value = idm_cdr(value, NULL);
+    return idm_is_empty_list(value);
+}
+
+static bool value_is_a_name(IdmValue value, const char *name) {
+    if (!name) return false;
+    if (value.tag == IDM_VAL_RECORD) {
+        const char *type = idm_record_type(value, NULL);
+        return (type && strcmp(type, name) == 0) || strcmp(name, "record") == 0;
+    }
+    if (strcmp(name, "list") == 0) return value_is_proper_list(value);
+    if (strcmp(name, "record") == 0) return false;
+    IdmValueTag tag = IDM_VAL_NIL;
+    return idm_value_type_from_name(name, &tag) && value.tag == tag;
+}
+
+static bool prim_is_a(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *name = type_name_text(args[1]);
+    if (!name) return type_error(rt, err, "is-a?", args[1], "a type name atom, word, or string");
+    *out = idm_bool(rt, value_is_a_name(args[0], name));
+    return true;
+}
+
+static bool prim_type_pred(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)err;
+    bool result = false;
+    switch (prim) {
+        case IDM_PRIM_NIL_P: result = args[0].tag == IDM_VAL_NIL; break;
+        case IDM_PRIM_ATOM_P: result = args[0].tag == IDM_VAL_ATOM; break;
+        case IDM_PRIM_WORD_P: result = args[0].tag == IDM_VAL_WORD; break;
+        case IDM_PRIM_INT_P: result = args[0].tag == IDM_VAL_INT; break;
+        case IDM_PRIM_FLOAT_P: result = args[0].tag == IDM_VAL_FLOAT; break;
+        case IDM_PRIM_STRING_P: result = args[0].tag == IDM_VAL_STRING; break;
+        case IDM_PRIM_PAIR_P: result = args[0].tag == IDM_VAL_PAIR; break;
+        case IDM_PRIM_EMPTY_LIST_P: result = args[0].tag == IDM_VAL_EMPTY_LIST; break;
+        case IDM_PRIM_LIST_P: result = value_is_proper_list(args[0]); break;
+        case IDM_PRIM_TUPLE_P: result = args[0].tag == IDM_VAL_TUPLE; break;
+        case IDM_PRIM_VECTOR_P: result = args[0].tag == IDM_VAL_VECTOR; break;
+        case IDM_PRIM_DICT_P: result = args[0].tag == IDM_VAL_DICT; break;
+        case IDM_PRIM_SYNTAX_P: result = args[0].tag == IDM_VAL_SYNTAX; break;
+        case IDM_PRIM_CELL_P: result = args[0].tag == IDM_VAL_CELL; break;
+        case IDM_PRIM_CLOSURE_P: result = args[0].tag == IDM_VAL_CLOSURE; break;
+        case IDM_PRIM_PID_P: result = args[0].tag == IDM_VAL_PID; break;
+        case IDM_PRIM_REF_P: result = args[0].tag == IDM_VAL_REF; break;
+        case IDM_PRIM_PORT_P: result = args[0].tag == IDM_VAL_PORT; break;
+        case IDM_PRIM_PRIMITIVE_P: result = args[0].tag == IDM_VAL_PRIMITIVE; break;
+        case IDM_PRIM_REGEX_P: result = args[0].tag == IDM_VAL_REGEX; break;
+        case IDM_PRIM_REGEX_RESULT_P: result = args[0].tag == IDM_VAL_REGEX_RESULT; break;
+        default: break;
+    }
+    *out = idm_bool(rt, result);
+    return true;
+}
+
+static bool prim_raise_fallback(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt;
+    (void)args;
+    (void)out;
+    return idm_error_set(err, idm_span_unknown(NULL), "primitive 'raise' must be executed by the VM");
+}
+
 static bool prim_error_message(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     IdmBuffer buf;
     idm_buf_init(&buf);
@@ -2315,7 +2383,31 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_GT:
         case IDM_PRIM_LTE:
         case IDM_PRIM_GTE: return prim_compare(rt, prim, args, out, err);
+        case IDM_PRIM_RAISE: return prim_raise_fallback(rt, args, out, err);
         case IDM_PRIM_OK: return prim_ok(rt, args, out, err);
+        case IDM_PRIM_IS_A_P: return prim_is_a(rt, args, out, err);
+        case IDM_PRIM_NIL_P:
+        case IDM_PRIM_ATOM_P:
+        case IDM_PRIM_WORD_P:
+        case IDM_PRIM_INT_P:
+        case IDM_PRIM_FLOAT_P:
+        case IDM_PRIM_STRING_P:
+        case IDM_PRIM_PAIR_P:
+        case IDM_PRIM_EMPTY_LIST_P:
+        case IDM_PRIM_LIST_P:
+        case IDM_PRIM_TUPLE_P:
+        case IDM_PRIM_VECTOR_P:
+        case IDM_PRIM_DICT_P:
+        case IDM_PRIM_SYNTAX_P:
+        case IDM_PRIM_CELL_P:
+        case IDM_PRIM_CLOSURE_P:
+        case IDM_PRIM_PID_P:
+        case IDM_PRIM_REF_P:
+        case IDM_PRIM_PORT_P:
+        case IDM_PRIM_PRIMITIVE_P:
+        case IDM_PRIM_REGEX_P:
+        case IDM_PRIM_REGEX_RESULT_P:
+            return prim_type_pred(rt, prim, args, out, err);
         case IDM_PRIM_ERROR_MESSAGE: return prim_error_message(rt, args, out, err);
         case IDM_PRIM_MAKE_ERROR: return prim_make_error(rt, args, out, err);
         case IDM_PRIM_TRAIT_IMPLEMENTED_P: return prim_trait_implements(rt, args, out, err);
