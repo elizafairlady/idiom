@@ -38,6 +38,17 @@ if [ "$MODE" != "san" ]; then
     "$IDIOMC" test tests/lang || fail=1
     IDIOMMAXPROCS=1 "$IDIOMC" test tests/lang >/dev/null 2>build/lang-n1.err || { echo "LANG FAIL (IDIOMMAXPROCS=1)"; cat build/lang-n1.err; fail=1; }
     echo "lang suites passed (IDIOMMAXPROCS=1)"
+    # actor-reap floor: 1,000,000 spawn+join must stay flat (corpses-not-reaped would be ~590MB).
+    "$IDIOMC" tests/perf/actor-reap.id >/dev/null 2>&1 &
+    reap_pid=$!; reap_peak=0
+    while kill -0 "$reap_pid" 2>/dev/null; do
+        r=$(awk '/VmRSS/{print $2}' "/proc/$reap_pid/status" 2>/dev/null)
+        [ -n "$r" ] && [ "$r" -gt "$reap_peak" ] && reap_peak=$r
+        sleep 0.02
+    done
+    if ! wait "$reap_pid"; then echo "ACTOR-REAP FAIL: nonzero exit"; fail=1
+    elif [ "$reap_peak" -gt 102400 ]; then echo "ACTOR-REAP FAIL: peak RSS $((reap_peak/1024))MB > 100MB ceiling (leak returned)"; fail=1
+    else echo "actor-reap floor passed (peak $((reap_peak/1024))MB over 1,000,000 spawn+join)"; fi
 else
     "$IDIOMC" test tests/lang >/dev/null 2>build/san-lang.err || true
     san_check build/san-lang.err "lang suites"

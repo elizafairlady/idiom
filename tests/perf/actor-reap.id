@@ -1,0 +1,7 @@
+defn loop k parent -> if (lt? k 1) do :ok else do
+  spawn (fn -> send parent {:done})
+  receive do {:done} -> loop (sub k 1) parent end
+end
+me = self
+loop 1000000 me
+:done
