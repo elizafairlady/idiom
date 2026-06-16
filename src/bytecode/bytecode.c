@@ -195,6 +195,7 @@ bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t a
     module->functions[index].pattern_count = 0;
     module->functions[index].pattern_locals = NULL;
     module->functions[index].pattern_local_count = 0;
+    module->functions[index].trivial_match = false;
     module->function_count++;
     if (out_index) *out_index = index;
     return true;
@@ -213,6 +214,11 @@ bool idm_bc_set_function_patterns_take(IdmBytecodeModule *module, uint32_t funct
     free(fn->param_patterns);
     fn->param_patterns = patterns;
     fn->pattern_count = pattern_count;
+    fn->trivial_match = true;
+    for (uint32_t i = 0; i < pattern_count; i++) {
+        IdmPatternKind k = patterns[i]->kind;
+        if (k != IDM_PAT_WILDCARD && k != IDM_PAT_BIND) { fn->trivial_match = false; break; }
+    }
     return true;
 }
 

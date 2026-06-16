@@ -71,10 +71,10 @@ sanitize: build/unit_tests_san build/san/idiomc build/san/ish build/pty_driver
 	ASAN_OPTIONS=detect_leaks=1 ./build/unit_tests_san
 	@ASAN_OPTIONS=detect_leaks=1 sh tools/run_tests.sh ./build/san/idiomc ./build/san/ish san
 
-release: 
+release:
 	mkdir -p build/release
-	$(CC) -std=c11 -O2 -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude -o build/release/idiomc $(LIB_SRCS) src/cli/main.c $(LDFLAGS)
-	$(CC) -std=c11 -O2 -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude -o build/release/ish $(LIB_SRCS) src/cli/ish.c $(LDFLAGS)
+	$(CC) -std=c11 -O2 -flto -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude -o build/release/idiomc $(LIB_SRCS) src/cli/main.c $(LDFLAGS)
+	$(CC) -std=c11 -O2 -flto -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude -o build/release/ish $(LIB_SRCS) src/cli/ish.c $(LDFLAGS)
 	strip build/release/idiomc build/release/ish
 
 build/tsan/idiomc: $(LIB_SRCS) src/cli/main.c

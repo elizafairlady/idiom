@@ -198,7 +198,6 @@ void idm_pattern_bindings_init(IdmPatternBindings *bindings) {
 
 void idm_pattern_bindings_destroy(IdmPatternBindings *bindings) {
     if (!bindings) return;
-    for (size_t i = 0; i < bindings->count; i++) free(bindings->names[i]);
     free(bindings->names);
     free(bindings->values);
     bindings->names = NULL;
@@ -227,15 +226,14 @@ bool idm_pattern_bindings_add(IdmPatternBindings *bindings, const char *name, Id
         bindings->values = values;
         bindings->cap = cap;
     }
-    bindings->names[bindings->count] = idm_strdup(name);
-    if (!bindings->names[bindings->count]) return false;
+    bindings->names[bindings->count] = (char *)name;
     bindings->values[bindings->count] = value;
     bindings->count++;
     return true;
 }
 
 static void bindings_truncate(IdmPatternBindings *bindings, size_t count) {
-    while (bindings->count > count) free(bindings->names[--bindings->count]);
+    bindings->count = count;
 }
 
 bool idm_pattern_match(IdmRuntime *rt, IdmPattern *pat, IdmValue value, IdmPatternBindings *bindings, IdmError *err) {

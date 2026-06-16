@@ -122,6 +122,7 @@ bool idm_core_fn_add_capture(IdmCore *fn, IdmCaptureKind kind, uint32_t index) {
     }
     fn->as.fn.captures[fn->as.fn.capture_count].kind = kind;
     fn->as.fn.captures[fn->as.fn.capture_count].index = index;
+    fn->as.fn.captures[fn->as.fn.capture_count].celled = false;
     fn->as.fn.capture_count++;
     return true;
 }
@@ -177,6 +178,7 @@ bool idm_core_fn_multi_add_capture(IdmCore *multi, IdmCaptureKind kind, uint32_t
     }
     multi->as.fn_multi.captures[multi->as.fn_multi.capture_count].kind = kind;
     multi->as.fn_multi.captures[multi->as.fn_multi.capture_count].index = index;
+    multi->as.fn_multi.captures[multi->as.fn_multi.capture_count].celled = false;
     multi->as.fn_multi.capture_count++;
     return true;
 }
@@ -756,12 +758,7 @@ static void collect_celled_slots(IdmCore *core, bool *celled, uint32_t lc) {
             collect_celled_slots(core->as.bind_local.body, celled, lc);
             return;
         case IDM_CORE_FN:
-            for (size_t i = 0; i < core->as.fn.capture_count; i++)
-                if (core->as.fn.captures[i].kind == IDM_CAP_LOCAL && core->as.fn.captures[i].index < lc) celled[core->as.fn.captures[i].index] = true;
-            return;
         case IDM_CORE_FN_MULTI:
-            for (size_t i = 0; i < core->as.fn_multi.capture_count; i++)
-                if (core->as.fn_multi.captures[i].kind == IDM_CAP_LOCAL && core->as.fn_multi.captures[i].index < lc) celled[core->as.fn_multi.captures[i].index] = true;
             return;
         case IDM_CORE_LETREC:
             collect_celled_slots(core->as.letrec.body, celled, lc);
@@ -810,61 +807,81 @@ static void collect_celled_slots(IdmCore *core, bool *celled, uint32_t lc) {
     }
 }
 
-static void mark_celled(IdmCore *core, const bool *celled, uint32_t lc) {
+static void mark_capture_cells(IdmCapture *child, size_t n, const bool *celled, uint32_t lc, const IdmCapture *outer, size_t outer_n) {
+    for (size_t i = 0; i < n; i++) {
+        switch (child[i].kind) {
+            case IDM_CAP_LOCAL: child[i].celled = child[i].index < lc ? celled[child[i].index] : false; break;
+            case IDM_CAP_ARG: child[i].celled = false; break;
+            case IDM_CAP_UPVALUE: child[i].celled = child[i].index < outer_n ? outer[child[i].index].celled : false; break;
+        }
+    }
+}
+
+static void mark_celled(IdmCore *core, const bool *celled, uint32_t lc, const IdmCapture *caps, size_t ncaps) {
     if (!core) return;
     switch (core->kind) {
         case IDM_CORE_LOCAL_REF:
             core->local_celled = core->as.local_slot < lc ? celled[core->as.local_slot] : true;
             return;
+        case IDM_CORE_CAPTURE_REF:
+            core->local_celled = core->as.local_slot < ncaps ? caps[core->as.local_slot].celled : true;
+            return;
         case IDM_CORE_BIND_LOCAL:
             core->local_celled = core->as.bind_local.slot < lc ? celled[core->as.bind_local.slot] : true;
-            mark_celled(core->as.bind_local.value, celled, lc);
-            mark_celled(core->as.bind_local.body, celled, lc);
-            return;
-        case IDM_CORE_APP:
-            mark_celled(core->as.app.callee, celled, lc);
-            for (size_t i = 0; i < core->as.app.arg_count; i++) mark_celled(core->as.app.args[i], celled, lc);
-            return;
-        case IDM_CORE_COND:
-            mark_celled(core->as.cond_expr.cond, celled, lc);
-            mark_celled(core->as.cond_expr.then_branch, celled, lc);
-            mark_celled(core->as.cond_expr.else_branch, celled, lc);
-            return;
-        case IDM_CORE_DO:
-            for (size_t i = 0; i < core->as.do_expr.count; i++) mark_celled(core->as.do_expr.items[i], celled, lc);
-            return;
-        case IDM_CORE_LETREC:
-            mark_celled(core->as.letrec.body, celled, lc);
-            for (size_t i = 0; i < core->as.letrec.count; i++) mark_celled(core->as.letrec.bindings[i].value, celled, lc);
-            return;
-        case IDM_CORE_RECEIVE:
-            mark_celled(core->as.receive.receiver, celled, lc);
-            mark_celled(core->as.receive.timeout, celled, lc);
-            mark_celled(core->as.receive.timeout_body, celled, lc);
-            return;
-        case IDM_CORE_RAISE:
-            mark_celled(core->as.raise.value, celled, lc);
-            return;
-        case IDM_CORE_RESCUE:
-            mark_celled(core->as.rescue.body, celled, lc);
-            mark_celled(core->as.rescue.handler, celled, lc);
-            return;
-        case IDM_CORE_ENSURE:
-            mark_celled(core->as.ensure.body, celled, lc);
-            mark_celled(core->as.ensure.cleanup, celled, lc);
-            return;
-        case IDM_CORE_USE_PACKAGE:
-            mark_celled(core->as.use_package.cont, celled, lc);
-            return;
-        case IDM_CORE_METHOD_CALL:
-            for (size_t i = 0; i < core->as.method_call.arg_count; i++) mark_celled(core->as.method_call.args[i], celled, lc);
+            mark_celled(core->as.bind_local.value, celled, lc, caps, ncaps);
+            mark_celled(core->as.bind_local.body, celled, lc, caps, ncaps);
             return;
         case IDM_CORE_FN:
+            mark_capture_cells(core->as.fn.captures, core->as.fn.capture_count, celled, lc, caps, ncaps);
+            return;
         case IDM_CORE_FN_MULTI:
+            mark_capture_cells(core->as.fn_multi.captures, core->as.fn_multi.capture_count, celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_APP:
+            mark_celled(core->as.app.callee, celled, lc, caps, ncaps);
+            for (size_t i = 0; i < core->as.app.arg_count; i++) mark_celled(core->as.app.args[i], celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_COND:
+            mark_celled(core->as.cond_expr.cond, celled, lc, caps, ncaps);
+            mark_celled(core->as.cond_expr.then_branch, celled, lc, caps, ncaps);
+            mark_celled(core->as.cond_expr.else_branch, celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_DO:
+            for (size_t i = 0; i < core->as.do_expr.count; i++) mark_celled(core->as.do_expr.items[i], celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_LETREC:
+            mark_celled(core->as.letrec.body, celled, lc, caps, ncaps);
+            for (size_t i = 0; i < core->as.letrec.count; i++) mark_celled(core->as.letrec.bindings[i].value, celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_RECEIVE:
+            mark_celled(core->as.receive.receiver, celled, lc, caps, ncaps);
+            mark_celled(core->as.receive.timeout, celled, lc, caps, ncaps);
+            mark_celled(core->as.receive.timeout_body, celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_RAISE:
+            mark_celled(core->as.raise.value, celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_RESCUE:
+            mark_celled(core->as.rescue.body, celled, lc, caps, ncaps);
+            mark_celled(core->as.rescue.handler, celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_ENSURE:
+            mark_celled(core->as.ensure.body, celled, lc, caps, ncaps);
+            mark_celled(core->as.ensure.cleanup, celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_USE_PACKAGE:
+            mark_celled(core->as.use_package.cont, celled, lc, caps, ncaps);
+            return;
         case IDM_CORE_DEFINE_TRAIT:
+            for (size_t i = 0; i < core->as.define_trait.count; i++) mark_celled(core->as.define_trait.methods[i].default_fn, celled, lc, caps, ncaps);
+            return;
         case IDM_CORE_IMPLEMENT_TRAIT:
+            for (size_t i = 0; i < core->as.implement_trait.count; i++) mark_celled(core->as.implement_trait.impls[i].impl_fn, celled, lc, caps, ncaps);
+            return;
+        case IDM_CORE_METHOD_CALL:
+            for (size_t i = 0; i < core->as.method_call.arg_count; i++) mark_celled(core->as.method_call.args[i], celled, lc, caps, ncaps);
+            return;
         case IDM_CORE_ARG_REF:
-        case IDM_CORE_CAPTURE_REF:
         case IDM_CORE_GLOBAL_REF:
         case IDM_CORE_LITERAL:
         case IDM_CORE_PRIMITIVE:
@@ -873,11 +890,12 @@ static void mark_celled(IdmCore *core, const bool *celled, uint32_t lc) {
     }
 }
 
-static bool compile_function_code(IdmBytecodeModule *module, uint32_t function_index, IdmCore *body, IdmError *err, IdmSpan span, const IdmPatternLocal *extra_pat, uint32_t extra_pat_count) {
+static bool compile_function_code(IdmBytecodeModule *module, uint32_t function_index, IdmCore *body, IdmError *err, IdmSpan span, const IdmPatternLocal *extra_pat, uint32_t extra_pat_count, const IdmCapture *captures, size_t capture_count) {
     if (!idm_bc_set_function_entry(module, function_index, module->code_count)) return idm_error_set(err, span, "failed to set function entry");
     uint32_t lc = module->functions[function_index].local_count;
+    bool *celled = NULL;
     if (lc > 0) {
-        bool *celled = calloc(lc, sizeof(*celled));
+        celled = calloc(lc, sizeof(*celled));
         if (!celled) return idm_error_oom(err, span);
         for (uint32_t i = 0; i < module->functions[function_index].pattern_local_count; i++) {
             uint32_t slot = module->functions[function_index].pattern_locals[i].slot;
@@ -887,9 +905,9 @@ static bool compile_function_code(IdmBytecodeModule *module, uint32_t function_i
             if (extra_pat[i].slot < lc) celled[extra_pat[i].slot] = true;
         }
         collect_celled_slots(body, celled, lc);
-        mark_celled(body, celled, lc);
-        free(celled);
     }
+    mark_celled(body, celled, lc, captures, capture_count);
+    free(celled);
     if (!compile_expr(body, module, true, err)) return false;
     if (!idm_bc_emit_op(module, IDM_OP_RETURN, NULL)) return idm_error_oom(err, span);
     return true;
@@ -1097,7 +1115,7 @@ static bool emit_capture_load(IdmBytecodeModule *module, IdmCapture cap, IdmErro
             return true;
         case IDM_CAP_ARG:
             if (!idm_bc_emit_u32(module, IDM_OP_LOAD_ARG, cap.index, NULL)) return idm_error_oom(err, span);
-            if (!idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, span);
+            if (cap.celled && !idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, span);
             return true;
         case IDM_CAP_UPVALUE:
             if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CAPTURE, cap.index, NULL)) return idm_error_oom(err, span);
@@ -1134,7 +1152,7 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             return true;
         case IDM_CORE_CAPTURE_REF:
             if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CAPTURE, core->as.local_slot, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_op(module, IDM_OP_LOAD_CELL, NULL)) return idm_error_oom(err, core->span);
+            if (core->local_celled && !idm_bc_emit_op(module, IDM_OP_LOAD_CELL, NULL)) return idm_error_oom(err, core->span);
             return true;
         case IDM_CORE_GLOBAL_REF:
             if (!idm_bc_emit_u32(module, IDM_OP_LOAD_GLOBAL, core->as.local_slot, NULL)) return idm_error_oom(err, core->span);
@@ -1230,8 +1248,8 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             }
             size_t jump_over_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_over_op)) return idm_error_oom(err, core->span);
-            if (core->as.fn.guard && !compile_function_code(module, guard_index, core->as.fn.guard, err, core->span, core->as.fn.pattern_locals, core->as.fn.pattern_local_count)) return false;
-            if (!compile_function_code(module, fn_index, core->as.fn.body, err, core->span, NULL, 0)) return false;
+            if (core->as.fn.guard && !compile_function_code(module, guard_index, core->as.fn.guard, err, core->span, core->as.fn.pattern_locals, core->as.fn.pattern_local_count, core->as.fn.captures, core->as.fn.capture_count)) return false;
+            if (!compile_function_code(module, fn_index, core->as.fn.body, err, core->span, NULL, 0, core->as.fn.captures, core->as.fn.capture_count)) return false;
             if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
             if (!idm_bc_patch_u32(module, jump_over_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch function literal jump");
             return true;
@@ -1277,8 +1295,8 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             size_t jump_over_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_over_op)) { free(guard_entries); free(entries); return idm_error_oom(err, core->span); }
             for (size_t i = 0; i < core->as.fn_multi.count; i++) {
-                if (core->as.fn_multi.clauses[i].guard && !compile_function_code(module, guard_entries[i], core->as.fn_multi.clauses[i].guard, err, core->span, core->as.fn_multi.clauses[i].pattern_locals, core->as.fn_multi.clauses[i].pattern_local_count)) { free(guard_entries); free(entries); return false; }
-                if (!compile_function_code(module, entries[i], core->as.fn_multi.clauses[i].body, err, core->span, NULL, 0)) { free(guard_entries); free(entries); return false; }
+                if (core->as.fn_multi.clauses[i].guard && !compile_function_code(module, guard_entries[i], core->as.fn_multi.clauses[i].guard, err, core->span, core->as.fn_multi.clauses[i].pattern_locals, core->as.fn_multi.clauses[i].pattern_local_count, core->as.fn_multi.captures, core->as.fn_multi.capture_count)) { free(guard_entries); free(entries); return false; }
+                if (!compile_function_code(module, entries[i], core->as.fn_multi.clauses[i].body, err, core->span, NULL, 0, core->as.fn_multi.captures, core->as.fn_multi.capture_count)) { free(guard_entries); free(entries); return false; }
             }
             free(guard_entries);
             free(entries);
@@ -1481,7 +1499,7 @@ bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t ar
     uint32_t fn = 0;
     uint32_t locals = core_max_local_plus_one(body);
     if (!idm_bc_add_function(module, name ? name : "<function>", arity, locals, 0, &fn)) return idm_error_oom(err, body->span);
-    if (!compile_function_code(module, fn, body, err, body->span, NULL, 0)) return false;
+    if (!compile_function_code(module, fn, body, err, body->span, NULL, 0, NULL, 0)) return false;
     if (out_function) *out_function = fn;
     return true;
 }
@@ -1490,9 +1508,7 @@ bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *o
     uint32_t fn = 0;
     uint32_t locals = core_max_local_plus_one(core);
     if (!idm_bc_add_function(module, "main", 0, locals, 0, &fn)) return idm_error_oom(err, idm_span_unknown(NULL));
-    if (!idm_bc_set_function_entry(module, fn, module->code_count)) return idm_error_set(err, idm_span_unknown(NULL), "failed to set main entry");
-    if (!compile_expr(core, module, true, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_RETURN, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!compile_function_code(module, fn, core, err, idm_span_unknown(NULL), NULL, 0, NULL, 0)) return false;
     if (out_function) *out_function = fn;
     return true;
 }

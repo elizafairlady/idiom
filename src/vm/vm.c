@@ -13,7 +13,7 @@ typedef struct {
     size_t ip;
     size_t base;
     size_t result_base;
-    IdmValue *locals;
+    size_t locals_base;
     uint32_t local_count;
     IdmValue closure;
     IdmNamespace *ns;
@@ -83,7 +83,6 @@ IdmVmLimits idm_vm_default_limits(void) {
 }
 
 static void vm_reset(Vm *vm) {
-    for (size_t i = 0; i < vm->frame_count; i++) free(vm->frames[i].locals);
     free(vm->frames);
     free(vm->stack);
     free(vm->handlers);
@@ -159,19 +158,20 @@ static bool push_frame(Vm *vm, const IdmBytecodeModule *module, uint32_t functio
     Frame *caller = current_frame(vm);
     IdmNamespace *ns = idm_is_closure(closure) ? idm_closure_namespace(closure) : (caller ? caller->ns : vm->rt->main_ns);
     if (!ns) ns = vm->rt->main_ns;
-    Frame frame;
-    frame.module = module;
-    frame.function_index = function_index;
-    frame.ip = fn->entry;
-    frame.base = base;
-    frame.result_base = result_base;
-    frame.local_count = fn->local_count;
-    frame.closure = closure;
-    frame.ns = ns;
-    frame.locals = fn->local_count == 0 ? NULL : calloc(fn->local_count, sizeof(*frame.locals));
-    if (fn->local_count != 0 && !frame.locals) return idm_error_oom(err, idm_span_unknown(NULL));
-    for (uint32_t i = 0; i < fn->local_count; i++) frame.locals[i] = idm_nil();
-    vm->frames[vm->frame_count++] = frame;
+    Frame *frame = &vm->frames[vm->frame_count];
+    frame->module = module;
+    frame->function_index = function_index;
+    frame->ip = fn->entry;
+    frame->base = base;
+    frame->result_base = result_base;
+    frame->local_count = fn->local_count;
+    frame->locals_base = base + fn->arity;
+    frame->closure = closure;
+    frame->ns = ns;
+    if (!stack_reserve(vm, frame->locals_base + fn->local_count, err)) return false;
+    if (fn->local_count != 0) memset(&vm->stack[frame->locals_base], 0, fn->local_count * sizeof(IdmValue));
+    vm->sp = frame->locals_base + fn->local_count;
+    vm->frame_count++;
     return true;
 }
 
@@ -306,7 +306,7 @@ static bool init_pattern_locals(Vm *vm, Frame *frame, const IdmBcFunction *fn, c
         if (fn->pattern_locals[i].slot >= frame->local_count) return idm_error_set(err, idm_span_unknown(NULL), "pattern local slot out of bounds");
         const IdmValue *bound = bindings ? idm_pattern_bindings_get(bindings, fn->pattern_locals[i].name) : NULL;
         if (!bound) return idm_error_set(err, idm_span_unknown(NULL), "pattern binding '%s' missing", fn->pattern_locals[i].name);
-        frame->locals[fn->pattern_locals[i].slot] = idm_cell(vm->rt, *bound, err);
+        vm->stack[frame->locals_base + fn->pattern_locals[i].slot] = idm_cell(vm->rt, *bound, err);
         if (err && err->present) return false;
     }
     return true;
@@ -358,10 +358,11 @@ static bool vm_select_clause(Vm *vm, IdmValue callee, size_t arg_base, uint32_t 
         if (candidate_index >= callee_module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "closure references invalid function %u", candidate_index);
         const IdmBcFunction *candidate = &callee_module->functions[candidate_index];
         if (candidate->arity != argc) continue;
+        bool trivial = candidate->trivial_match && candidate->pattern_local_count == 0;
         bool patterns_ok = true;
         IdmPatternBindings bindings;
         idm_pattern_bindings_init(&bindings);
-        if (candidate->pattern_count != 0) {
+        if (!trivial && candidate->pattern_count != 0) {
             if (candidate->pattern_count != argc) return idm_error_set(err, idm_span_unknown(NULL), "function pattern metadata arity mismatch");
             for (uint32_t p = 0; p < argc; p++) {
                 if (!idm_pattern_match(vm->rt, candidate->param_patterns[p], vm->stack[arg_base + p], &bindings, err)) {
@@ -389,7 +390,7 @@ static bool vm_select_clause(Vm *vm, IdmValue callee, size_t arg_base, uint32_t 
             continue;
         }
         *out_bindings = bindings;
-        *out_has_bindings = true;
+        *out_has_bindings = !trivial;
         *out_index = candidate_index;
         *out_matched = true;
         return true;
@@ -407,26 +408,21 @@ static bool enter_clause(Vm *vm, IdmValue callee, uint32_t function_index, size_
     Frame *frame = current_frame(vm);
     if (!frame) return idm_error_set(err, idm_span_unknown(NULL), "tail clause entry without frame");
     size_t result_base = frame->result_base;
-    uint32_t old_local_count = frame->local_count;
     frame->function_index = function_index;
     frame->module = callee_module;
     frame->ip = fn->entry;
     frame->base = result_base;
     frame->result_base = result_base;
     frame->local_count = fn->local_count;
+    frame->locals_base = result_base + fn->arity;
     frame->closure = callee;
     frame->ns = idm_is_closure(callee) ? idm_closure_namespace(callee) : frame->ns;
     if (!frame->ns) frame->ns = vm->rt->main_ns;
-    if (fn->local_count != old_local_count) {
-        free(frame->locals);
-        frame->locals = fn->local_count == 0 ? NULL : calloc(fn->local_count, sizeof(*frame->locals));
-        if (fn->local_count != 0 && !frame->locals) return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    for (uint32_t i = 0; i < fn->local_count; i++) frame->locals[i] = idm_nil();
-    if (!init_pattern_locals(vm, frame, fn, bindings, err)) return false;
-    if (!stack_reserve(vm, result_base + argc, err)) return false;
+    if (!stack_reserve(vm, frame->locals_base + fn->local_count, err)) return false;
     for (uint32_t i = 0; i < argc; i++) vm->stack[result_base + i] = vm->stack[closure_index + 1u + i];
-    vm->sp = result_base + argc;
+    if (fn->local_count != 0) memset(&vm->stack[frame->locals_base], 0, fn->local_count * sizeof(IdmValue));
+    vm->sp = frame->locals_base + fn->local_count;
+    if (!init_pattern_locals(vm, frame, fn, bindings, err)) return false;
     return true;
 }
 
@@ -735,7 +731,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
     for (;;) {
         Frame *frame = current_frame(vm);
         if (!frame) break;
-        const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
+        const IdmBytecodeModule *module = frame->module;
         if (*budget >= 0) {
             if (*budget == 0) { *status = IDM_EXEC_YIELD; return true; }
             (*budget)--;
@@ -765,14 +761,14 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
             case IDM_OP_LOAD_LOCAL:
                 operand = module->code[frame->ip++];
                 if (operand >= frame->local_count) return idm_error_set(err, idm_span_unknown(NULL), "local index %u out of bounds", operand);
-                if (!push(vm, frame->locals[operand], err)) return false;
+                if (!push(vm, vm->stack[frame->locals_base + operand], err)) return false;
                 break;
             case IDM_OP_STORE_LOCAL: {
                 operand = module->code[frame->ip++];
                 if (operand >= frame->local_count) return idm_error_set(err, idm_span_unknown(NULL), "local index %u out of bounds", operand);
                 IdmValue value;
                 if (!pop(vm, &value, err)) return false;
-                frame->locals[operand] = value;
+                vm->stack[frame->locals_base + operand] = value;
                 break;
             }
             case IDM_OP_LOAD_CAPTURE:
@@ -855,7 +851,6 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 Frame returning;
                 pop_frame(vm, &returning);
                 size_t result_base = returning.result_base;
-                free(returning.locals);
                 if (vm->frame_count == 0) {
                     *status = IDM_EXEC_DONE;
                     *out_result = value;
@@ -1236,7 +1231,6 @@ static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue 
         while (vm->frame_count > handler.frame_count) {
             Frame discarded;
             pop_frame(vm, &discarded);
-            free(discarded.locals);
         }
         Frame *frame = current_frame(vm);
         if (!frame) return false;
@@ -1530,7 +1524,6 @@ void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user)
     for (size_t f = 0; f < exec->frame_count; f++) {
         const Frame *frame = &exec->frames[f];
         visit(user, frame->closure);
-        for (uint32_t l = 0; l < frame->local_count; l++) visit(user, frame->locals[l]);
     }
     visit(user, exec->raised);
     if (exec->has_pending_raise) visit(user, exec->pending_raise);

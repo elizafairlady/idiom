@@ -71,6 +71,7 @@ typedef struct {
     uint32_t pattern_count;
     IdmPatternLocal *pattern_locals;
     uint32_t pattern_local_count;
+    bool trivial_match;
 } IdmBcFunction;
 
 typedef struct IdmBytecodeModule {

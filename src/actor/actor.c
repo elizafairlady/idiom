@@ -446,11 +446,6 @@ static void drain_reap(IdmScheduler *sched) {
 }
 
 static bool ready_push(IdmScheduler *sched, uint64_t pid, IdmError *err) {
-    pthread_cond_signal(&sched->work_cv);
-    if (sched->nworkers > 1u && sched->wake_pipe[1] >= 0) {
-        ssize_t ignored = write(sched->wake_pipe[1], "w", 1u);
-        (void)ignored;
-    }
     if (sched->ready_head + sched->ready_count == sched->ready_cap) {
         if (sched->ready_head > 0) {
             memmove(sched->ready, sched->ready + sched->ready_head, sched->ready_count * sizeof(*sched->ready));
@@ -465,6 +460,13 @@ static bool ready_push(IdmScheduler *sched, uint64_t pid, IdmError *err) {
     }
     sched->ready[sched->ready_head + sched->ready_count] = pid;
     sched->ready_count++;
+    if (sched->nworkers > 1u && sched->ready_count > 1u) {
+        pthread_cond_signal(&sched->work_cv);
+        if (sched->wake_pipe[1] >= 0) {
+            ssize_t ignored = write(sched->wake_pipe[1], "w", 1u);
+            (void)ignored;
+        }
+    }
     return true;
 }
 
@@ -1632,7 +1634,6 @@ static void *worker_main(void *argp) {
             sched->poller_active = true;
             bool ok = sched_poll(sched, true, true, &err);
             sched->poller_active = false;
-            pthread_cond_broadcast(&sched->work_cv);
             if (!ok || err.present) {
                 worker_fatal(sched, &err);
                 break;
@@ -1640,14 +1641,7 @@ static void *worker_main(void *argp) {
             continue;
         }
         sched->parked++;
-        struct timespec until;
-        clock_gettime(CLOCK_REALTIME, &until);
-        until.tv_nsec += 50 * 1000000L;
-        if (until.tv_nsec >= 1000000000L) {
-            until.tv_sec += 1;
-            until.tv_nsec -= 1000000000L;
-        }
-        pthread_cond_timedwait(&sched->work_cv, &sched->mu, &until);
+        pthread_cond_wait(&sched->work_cv, &sched->mu);
         sched->parked--;
     }
     pthread_cond_broadcast(&sched->work_cv);

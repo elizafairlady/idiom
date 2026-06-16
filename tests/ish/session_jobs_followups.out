@@ -7,9 +7,9 @@
 [J~ % [4C[J~ % f[5C[J~ % fg[6C[J~ % fg [7C[J~ % fg 2[8C
 sh -c "kill -TSTP 0; echo two > two"
 touch release[J~ % [4C[J~ % t[5C[J~ % to[6C[J~ % tou[7C[J~ % touc[8C[J~ % touch[9C[J~ % touch [10C[J~ % touch r[11C[J~ % touch re[12C[J~ % touch rel[13C[J~ % touch rele[14C[J~ % touch relea[15C[J~ % touch releas[16C[J~ % touch release[17C
-[1]+  Done  sh -c "kill -TSTP 0; while ! test -f release; do sleep 0.05; done; echo one > one"
 [J~ % [4C[J~ % a[5C[J~ % ad[6C[J~ % add[7C[J~ % add [8C[J~ % add 0[9C[J~ % add 0 [10C[J~ % add 0 0[11C
 0
+[1]+  Done  sh -c "kill -TSTP 0; while ! test -f release; do sleep 0.05; done; echo one > one"
 [J~ % [4C[J~ % j[5C[J~ % jo[6C[J~ % job[7C[J~ % jobs[8C
 [J~ % [4C[J~ % f[5C[J~ % fg[6C[J~ % fg [7C[J~ % fg 9[8C
 <unknown>: error: main actor exited with reason no-such-job: 9

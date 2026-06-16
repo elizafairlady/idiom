@@ -242,6 +242,7 @@ typedef enum {
 typedef struct {
     IdmCaptureKind kind;
     uint32_t index;
+    bool celled;
 } IdmCapture;
 
 typedef struct {

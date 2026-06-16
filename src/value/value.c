@@ -1867,6 +1867,7 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
 }
 
 IdmValue idm_value_copy_locked(IdmRuntime *rt, IdmHeap *target, IdmValue value, IdmError *err) {
+    if (!value_is_heap_obj(value.tag) || !value.as.obj || value.as.obj->heap == &rt->immortal) return value;
     CopyMap map = {0};
     CopyStack stack = {0};
     IdmValue out = idm_nil();
