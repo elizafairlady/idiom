@@ -61,11 +61,60 @@ typedef struct {
     size_t end;
 } RxCapture;
 
+typedef struct RxProg RxProg;
+
+typedef enum {
+    RXI_MATCH,
+    RXI_CHAR,
+    RXI_DOT,
+    RXI_CLASS,
+    RXI_ASSERT_START,
+    RXI_ASSERT_END,
+    RXI_JUMP,
+    RXI_SPLIT,
+    RXI_SAVE,
+    RXI_LOOK
+} RxInstKind;
+
+typedef enum {
+    RX_LOOK_AHEAD_POS,
+    RX_LOOK_AHEAD_NEG,
+    RX_LOOK_BEHIND_POS,
+    RX_LOOK_BEHIND_NEG
+} RxLookKind;
+
+typedef struct {
+    RxInstKind kind;
+    union {
+        unsigned char literal;
+        RxClass cls;
+        size_t target;
+        struct {
+            size_t first;
+            size_t second;
+        } split;
+        size_t save_slot;
+        struct {
+            RxLookKind kind;
+            RxProg *prog;
+        } look;
+    } as;
+} RxInst;
+
+struct RxProg {
+    RxInst *insts;
+    size_t count;
+    size_t cap;
+    size_t capture_count;
+    uint32_t flags;
+};
+
 struct IdmRegex {
     char *source;
     size_t source_len;
     uint32_t flags;
     RxNode *root;
+    RxProg *prog;
     char **group_names;
     size_t group_count;
 };
@@ -89,20 +138,27 @@ typedef struct {
 } RxParser;
 
 typedef struct {
+    size_t pc;
     size_t pos;
     RxCapture *captures;
-} RxState;
+} RxVmState;
 
 typedef struct {
-    RxState *items;
+    RxVmState *items;
     size_t count;
     size_t cap;
     size_t capture_count;
-} RxStateVec;
+} RxVmStateVec;
+
+typedef struct {
+    bool matched;
+    size_t end;
+    RxCapture *captures;
+} RxMatch;
 
 static void node_free(RxNode *node);
 static bool parse_alt(RxParser *p, RxNode **out);
-static bool match_node(const IdmRegex *rx, const RxNode *node, const char *s, size_t len, const RxState *state, RxStateVec *out, IdmError *err);
+static void prog_free(RxProg *prog);
 
 static bool require_string_arg(IdmRuntime *rt, const char *name, IdmValue v, const char **out, size_t *out_len, IdmError *err) {
     if (v.tag != IDM_VAL_STRING) {
@@ -759,12 +815,230 @@ static bool parse_alt(RxParser *p, RxNode **out) {
     return true;
 }
 
-static void state_destroy(RxState *state) {
+#define RX_REPEAT_COMPILE_LIMIT 100000u
+
+static RxProg *prog_new(size_t capture_count, uint32_t flags, IdmError *err) {
+    RxProg *prog = calloc(1u, sizeof(*prog));
+    if (!prog) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return NULL;
+    }
+    prog->capture_count = capture_count;
+    prog->flags = flags;
+    return prog;
+}
+
+static bool prog_emit(RxProg *prog, RxInst inst, size_t *out_index, IdmError *err) {
+    if (prog->count == prog->cap) {
+        size_t cap = prog->cap ? prog->cap * 2u : 32u;
+        RxInst *insts = realloc(prog->insts, cap * sizeof(*insts));
+        if (!insts) return idm_error_oom(err, idm_span_unknown(NULL));
+        prog->insts = insts;
+        prog->cap = cap;
+    }
+    if (out_index) *out_index = prog->count;
+    prog->insts[prog->count++] = inst;
+    return true;
+}
+
+static bool prog_emit_simple(RxProg *prog, RxInstKind kind, size_t *out_index, IdmError *err) {
+    RxInst inst;
+    memset(&inst, 0, sizeof(inst));
+    inst.kind = kind;
+    return prog_emit(prog, inst, out_index, err);
+}
+
+static bool prog_patch_target(RxProg *prog, size_t inst_index, size_t target, IdmError *err) {
+    if (inst_index >= prog->count) return idm_error_set(err, idm_span_unknown(NULL), "regex compiler patch index out of bounds");
+    if (target > prog->count) return idm_error_set(err, idm_span_unknown(NULL), "regex compiler patch target out of bounds");
+    prog->insts[inst_index].as.target = target;
+    return true;
+}
+
+static bool prog_patch_split(RxProg *prog, size_t inst_index, size_t first, size_t second, IdmError *err) {
+    if (inst_index >= prog->count) return idm_error_set(err, idm_span_unknown(NULL), "regex compiler split patch index out of bounds");
+    if (first > prog->count || second > prog->count) return idm_error_set(err, idm_span_unknown(NULL), "regex compiler split patch target out of bounds");
+    prog->insts[inst_index].as.split.first = first;
+    prog->insts[inst_index].as.split.second = second;
+    return true;
+}
+
+static bool compile_node(RxProg *prog, const RxNode *node, IdmError *err);
+
+static bool compile_alt_from(RxProg *prog, RxNode **items, size_t index, size_t count, IdmError *err) {
+    if (index >= count) return true;
+    if (index + 1u == count) return compile_node(prog, items[index], err);
+
+    RxInst split;
+    memset(&split, 0, sizeof(split));
+    split.kind = RXI_SPLIT;
+    size_t split_index = 0;
+    if (!prog_emit(prog, split, &split_index, err)) return false;
+
+    size_t first = prog->count;
+    if (!compile_node(prog, items[index], err)) return false;
+
+    RxInst jump;
+    memset(&jump, 0, sizeof(jump));
+    jump.kind = RXI_JUMP;
+    size_t jump_index = 0;
+    if (!prog_emit(prog, jump, &jump_index, err)) return false;
+
+    size_t second = prog->count;
+    if (!prog_patch_split(prog, split_index, first, second, err)) return false;
+    if (!compile_alt_from(prog, items, index + 1u, count, err)) return false;
+
+    return prog_patch_target(prog, jump_index, prog->count, err);
+}
+
+static bool compile_star(RxProg *prog, const RxNode *child, IdmError *err) {
+    RxInst split;
+    memset(&split, 0, sizeof(split));
+    split.kind = RXI_SPLIT;
+    size_t split_index = 0;
+    if (!prog_emit(prog, split, &split_index, err)) return false;
+    size_t body = prog->count;
+    if (!compile_node(prog, child, err)) return false;
+    RxInst jump;
+    memset(&jump, 0, sizeof(jump));
+    jump.kind = RXI_JUMP;
+    jump.as.target = split_index;
+    if (!prog_emit(prog, jump, NULL, err)) return false;
+    return prog_patch_split(prog, split_index, body, prog->count, err);
+}
+
+static bool compile_optional(RxProg *prog, const RxNode *child, IdmError *err) {
+    RxInst split;
+    memset(&split, 0, sizeof(split));
+    split.kind = RXI_SPLIT;
+    size_t split_index = 0;
+    if (!prog_emit(prog, split, &split_index, err)) return false;
+    size_t body = prog->count;
+    if (!compile_node(prog, child, err)) return false;
+    return prog_patch_split(prog, split_index, body, prog->count, err);
+}
+
+static bool compile_repeat(RxProg *prog, const RxNode *child, size_t min, size_t max, bool unbounded, IdmError *err) {
+    if (min > RX_REPEAT_COMPILE_LIMIT || (!unbounded && max > RX_REPEAT_COMPILE_LIMIT)) {
+        return idm_error_set(err, idm_span_unknown(NULL), "regex counted repeat expands past %u NFA copies", (unsigned)RX_REPEAT_COMPILE_LIMIT);
+    }
+    for (size_t i = 0; i < min; i++) {
+        if (!compile_node(prog, child, err)) return false;
+    }
+    if (unbounded) return compile_star(prog, child, err);
+    for (size_t i = min; i < max; i++) {
+        if (!compile_optional(prog, child, err)) return false;
+    }
+    return true;
+}
+
+static bool compile_child_prog(const RxProg *parent, const RxNode *node, RxProg **out, IdmError *err) {
+    *out = NULL;
+    RxProg *child = prog_new(parent->capture_count, parent->flags, err);
+    if (!child) return false;
+    if (!compile_node(child, node, err) || !prog_emit_simple(child, RXI_MATCH, NULL, err)) {
+        prog_free(child);
+        return false;
+    }
+    *out = child;
+    return true;
+}
+
+static bool compile_node(RxProg *prog, const RxNode *node, IdmError *err) {
+    if (!node) return true;
+    RxInst inst;
+    memset(&inst, 0, sizeof(inst));
+    switch (node->kind) {
+        case RX_EMPTY:
+            return true;
+        case RX_LITERAL:
+            inst.kind = RXI_CHAR;
+            inst.as.literal = node->as.literal;
+            return prog_emit(prog, inst, NULL, err);
+        case RX_DOT:
+            return prog_emit_simple(prog, RXI_DOT, NULL, err);
+        case RX_CLASS:
+            inst.kind = RXI_CLASS;
+            inst.as.cls = node->as.cls;
+            return prog_emit(prog, inst, NULL, err);
+        case RX_ANCHOR_START:
+            return prog_emit_simple(prog, RXI_ASSERT_START, NULL, err);
+        case RX_ANCHOR_END:
+            return prog_emit_simple(prog, RXI_ASSERT_END, NULL, err);
+        case RX_CONCAT:
+            for (size_t i = 0; i < node->as.seq.count; i++) {
+                if (!compile_node(prog, node->as.seq.items[i], err)) return false;
+            }
+            return true;
+        case RX_ALT:
+            return compile_alt_from(prog, node->as.seq.items, 0, node->as.seq.count, err);
+        case RX_REPEAT:
+            return compile_repeat(prog, node->as.repeat.child, node->as.repeat.min, node->as.repeat.max, node->as.repeat.unbounded, err);
+        case RX_CAPTURE: {
+            inst.kind = RXI_SAVE;
+            inst.as.save_slot = node->as.capture.index * 2u;
+            if (!prog_emit(prog, inst, NULL, err)) return false;
+            if (!compile_node(prog, node->as.capture.child, err)) return false;
+            inst.as.save_slot = node->as.capture.index * 2u + 1u;
+            return prog_emit(prog, inst, NULL, err);
+        }
+        case RX_LOOK_POS:
+        case RX_LOOK_NEG:
+        case RX_LOOKBEHIND_POS:
+        case RX_LOOKBEHIND_NEG: {
+            RxProg *child = NULL;
+            if (!compile_child_prog(prog, node->as.child, &child, err)) return false;
+            inst.kind = RXI_LOOK;
+            if (node->kind == RX_LOOK_POS) inst.as.look.kind = RX_LOOK_AHEAD_POS;
+            else if (node->kind == RX_LOOK_NEG) inst.as.look.kind = RX_LOOK_AHEAD_NEG;
+            else if (node->kind == RX_LOOKBEHIND_POS) inst.as.look.kind = RX_LOOK_BEHIND_POS;
+            else inst.as.look.kind = RX_LOOK_BEHIND_NEG;
+            inst.as.look.prog = child;
+            if (!prog_emit(prog, inst, NULL, err)) {
+                prog_free(child);
+                return false;
+            }
+            return true;
+        }
+    }
+    return true;
+}
+
+static bool compile_regex_program(IdmRegex *rx, IdmError *err) {
+    RxProg *prog = prog_new(rx->group_count + 1u, rx->flags, err);
+    if (!prog) return false;
+    if (!compile_node(prog, rx->root, err) || !prog_emit_simple(prog, RXI_MATCH, NULL, err)) {
+        prog_free(prog);
+        return false;
+    }
+    rx->prog = prog;
+    return true;
+}
+
+static void prog_free(RxProg *prog) {
+    if (!prog) return;
+    for (size_t i = 0; i < prog->count; i++) {
+        if (prog->insts[i].kind == RXI_LOOK) prog_free(prog->insts[i].as.look.prog);
+    }
+    free(prog->insts);
+    free(prog);
+}
+
+static size_t prog_footprint(const RxProg *prog) {
+    if (!prog) return 0;
+    size_t total = sizeof(*prog) + prog->cap * sizeof(*prog->insts);
+    for (size_t i = 0; i < prog->count; i++) {
+        if (prog->insts[i].kind == RXI_LOOK) total += prog_footprint(prog->insts[i].as.look.prog);
+    }
+    return total;
+}
+
+static void state_destroy(RxVmState *state) {
     free(state->captures);
     state->captures = NULL;
 }
 
-static void state_vec_destroy(RxStateVec *vec) {
+static void state_vec_destroy(RxVmStateVec *vec) {
     for (size_t i = 0; i < vec->count; i++) state_destroy(&vec->items[i]);
     free(vec->items);
     vec->items = NULL;
@@ -772,21 +1046,22 @@ static void state_vec_destroy(RxStateVec *vec) {
     vec->cap = 0;
 }
 
-static bool state_vec_push_copy(RxStateVec *vec, const RxState *state, IdmError *err) {
+static bool state_vec_push_copy(RxVmStateVec *vec, size_t pc, size_t pos, const RxCapture *captures, IdmError *err) {
     if (vec->count == vec->cap) {
         size_t cap = vec->cap ? vec->cap * 2u : 8u;
-        RxState *items = realloc(vec->items, cap * sizeof(*items));
+        RxVmState *items = realloc(vec->items, cap * sizeof(*items));
         if (!items) return idm_error_oom(err, idm_span_unknown(NULL));
         vec->items = items;
         vec->cap = cap;
     }
-    RxState *dst = &vec->items[vec->count];
-    dst->pos = state->pos;
+    RxVmState *dst = &vec->items[vec->count];
+    dst->pc = pc;
+    dst->pos = pos;
     dst->captures = NULL;
     if (vec->capture_count != 0) {
         dst->captures = malloc(vec->capture_count * sizeof(*dst->captures));
         if (!dst->captures) return idm_error_oom(err, idm_span_unknown(NULL));
-        memcpy(dst->captures, state->captures, vec->capture_count * sizeof(*dst->captures));
+        memcpy(dst->captures, captures, vec->capture_count * sizeof(*dst->captures));
     }
     vec->count++;
     return true;
@@ -805,178 +1080,177 @@ static bool at_line_end(const char *s, size_t len, size_t pos) {
     return pos == len || s[pos] == '\n';
 }
 
-static bool look_matches(const IdmRegex *rx, const RxNode *child, const char *s, size_t len, size_t pos, IdmError *err) {
-    RxCapture *caps = calloc(rx->group_count + 1u, sizeof(*caps));
-    if (!caps) return idm_error_oom(err, idm_span_unknown(NULL));
-    RxState state = { pos, caps };
-    RxStateVec out = { .capture_count = rx->group_count + 1u };
-    bool ok = match_node(rx, child, s, len, &state, &out, err);
-    free(caps);
-    bool matched = ok && out.count != 0;
-    state_vec_destroy(&out);
+static void match_destroy(RxMatch *match) {
+    free(match->captures);
+    match->captures = NULL;
+    match->matched = false;
+    match->end = 0;
+}
+
+static bool match_take_best(RxMatch *match, size_t end, const RxCapture *captures, size_t capture_count, IdmError *err) {
+    if (match->matched && end <= match->end) return true;
+    RxCapture *copy = capture_count == 0 ? NULL : malloc(capture_count * sizeof(*copy));
+    if (capture_count != 0 && !copy) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (capture_count != 0) memcpy(copy, captures, capture_count * sizeof(*copy));
+    free(match->captures);
+    match->captures = copy;
+    match->matched = true;
+    match->end = end;
+    return true;
+}
+
+static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, RxMatch *out, IdmError *err);
+
+static bool look_matches(const RxProg *prog, const char *s, size_t len, size_t pos, IdmError *err) {
+    RxMatch match = {0};
+    bool ok = nfa_run(prog, s, len, pos, false, 0, &match, err);
+    bool matched = ok && match.matched;
+    match_destroy(&match);
     return ok && matched;
 }
 
-static bool lookbehind_matches(const IdmRegex *rx, const RxNode *child, const char *s, size_t len, size_t pos, IdmError *err) {
+static bool lookbehind_matches(const RxProg *prog, const char *s, size_t len, size_t pos, IdmError *err) {
     for (size_t start = 0; start <= pos; start++) {
-        RxCapture *caps = calloc(rx->group_count + 1u, sizeof(*caps));
-        if (!caps) return idm_error_oom(err, idm_span_unknown(NULL));
-        RxState state = { start, caps };
-        RxStateVec out = { .capture_count = rx->group_count + 1u };
-        bool ok = match_node(rx, child, s, len, &state, &out, err);
-        free(caps);
-        if (!ok) {
-            state_vec_destroy(&out);
-            return false;
-        }
-        for (size_t i = 0; i < out.count; i++) {
-            if (out.items[i].pos == pos) {
-                state_vec_destroy(&out);
-                return true;
-            }
-        }
-        state_vec_destroy(&out);
+        RxMatch match = {0};
+        bool ok = nfa_run(prog, s, len, start, true, pos, &match, err);
+        bool matched = ok && match.matched;
+        match_destroy(&match);
+        if (!ok) return false;
+        if (matched) return true;
     }
     return false;
 }
 
-static bool match_repeat_collect(const IdmRegex *rx, const RxNode *child, size_t min, size_t max, bool unbounded, size_t count, const char *s, size_t len, const RxState *state, RxStateVec *out, IdmError *err) {
-    bool pushed = false;
-    bool can_more = unbounded || count < max;
-    if (can_more) {
-        RxStateVec next = { .capture_count = out->capture_count };
-        if (!match_node(rx, child, s, len, state, &next, err)) {
-            state_vec_destroy(&next);
-            return false;
-        }
-        for (size_t i = 0; i < next.count; i++) {
-            if (next.items[i].pos == state->pos) {
-                if (count + 1u >= min && !state_vec_push_copy(out, &next.items[i], err)) {
-                    state_vec_destroy(&next);
-                    return false;
-                }
-                pushed = true;
-                continue;
-            }
-            if (!match_repeat_collect(rx, child, min, max, unbounded, count + 1u, s, len, &next.items[i], out, err)) {
-                state_vec_destroy(&next);
-                return false;
-            }
-        }
-        state_vec_destroy(&next);
-    }
-    if (count >= min && !pushed) return state_vec_push_copy(out, state, err);
-    if (count >= min && pushed) return state_vec_push_copy(out, state, err);
+static bool nfa_seen_key(const RxProg *prog, size_t len, size_t pc, size_t pos, size_t *out, IdmError *err) {
+    if (pc >= prog->count || pos > len) return idm_error_set(err, idm_span_unknown(NULL), "regex VM state out of bounds");
+    size_t rows = len + 1u;
+    if (prog->count != 0 && rows > SIZE_MAX / prog->count) return idm_error_set(err, idm_span_unknown(NULL), "regex VM state set too large");
+    *out = pos * prog->count + pc;
     return true;
 }
 
-static bool match_node(const IdmRegex *rx, const RxNode *node, const char *s, size_t len, const RxState *state, RxStateVec *out, IdmError *err) {
-    switch (node->kind) {
-        case RX_EMPTY:
-            return state_vec_push_copy(out, state, err);
-        case RX_LITERAL:
-            if (state->pos < len && char_eq((unsigned char)s[state->pos], node->as.literal, rx->flags)) {
-                RxState next = *state;
-                next.pos++;
-                return state_vec_push_copy(out, &next, err);
-            }
-            return true;
-        case RX_DOT:
-            if (state->pos < len && ((rx->flags & IDM_REGEX_DOTALL) != 0 || s[state->pos] != '\n')) {
-                RxState next = *state;
-                next.pos++;
-                return state_vec_push_copy(out, &next, err);
-            }
-            return true;
-        case RX_CLASS:
-            if (state->pos < len && cls_has(&node->as.cls, (unsigned char)s[state->pos])) {
-                RxState next = *state;
-                next.pos++;
-                return state_vec_push_copy(out, &next, err);
-            }
-            return true;
-        case RX_ANCHOR_START:
-            if (state->pos == 0 || ((rx->flags & IDM_REGEX_MULTILINE) != 0 && at_line_start(s, state->pos))) return state_vec_push_copy(out, state, err);
-            return true;
-        case RX_ANCHOR_END:
-            if (state->pos == len || ((rx->flags & IDM_REGEX_MULTILINE) != 0 && at_line_end(s, len, state->pos))) return state_vec_push_copy(out, state, err);
-            return true;
-        case RX_ALT:
-            for (size_t i = 0; i < node->as.seq.count; i++) {
-                if (!match_node(rx, node->as.seq.items[i], s, len, state, out, err)) return false;
-            }
-            return true;
-        case RX_CONCAT: {
-            RxStateVec cur = { .capture_count = out->capture_count };
-            if (!state_vec_push_copy(&cur, state, err)) return false;
-            for (size_t i = 0; i < node->as.seq.count; i++) {
-                RxStateVec next = { .capture_count = out->capture_count };
-                for (size_t j = 0; j < cur.count; j++) {
-                    if (!match_node(rx, node->as.seq.items[i], s, len, &cur.items[j], &next, err)) {
-                        state_vec_destroy(&cur);
-                        state_vec_destroy(&next);
-                        return false;
-                    }
+static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char *seen, const char *s, size_t len, size_t pc, size_t pos, const RxCapture *captures, IdmError *err) {
+    size_t key = 0;
+    if (!nfa_seen_key(prog, len, pc, pos, &key, err)) return false;
+    if (seen[key]) return true;
+    seen[key] = 1u;
+
+    const RxInst *inst = &prog->insts[pc];
+    switch (inst->kind) {
+        case RXI_JUMP:
+            return nfa_add_closure(prog, vec, seen, s, len, inst->as.target, pos, captures, err);
+        case RXI_SPLIT:
+            return nfa_add_closure(prog, vec, seen, s, len, inst->as.split.first, pos, captures, err)
+                && nfa_add_closure(prog, vec, seen, s, len, inst->as.split.second, pos, captures, err);
+        case RXI_SAVE: {
+            RxCapture *next = malloc(prog->capture_count * sizeof(*next));
+            if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+            memcpy(next, captures, prog->capture_count * sizeof(*next));
+            size_t capture = inst->as.save_slot / 2u;
+            if (capture < prog->capture_count) {
+                next[capture].set = true;
+                if ((inst->as.save_slot & 1u) == 0) {
+                    next[capture].start = pos;
+                    next[capture].end = pos;
+                } else {
+                    next[capture].end = pos;
                 }
-                state_vec_destroy(&cur);
-                cur = next;
-                if (cur.count == 0) break;
             }
-            bool ok = true;
-            for (size_t i = 0; ok && i < cur.count; i++) ok = state_vec_push_copy(out, &cur.items[i], err);
-            state_vec_destroy(&cur);
+            bool ok = nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, next, err);
+            free(next);
             return ok;
         }
-        case RX_REPEAT:
-            return match_repeat_collect(rx, node->as.repeat.child, node->as.repeat.min, node->as.repeat.max, node->as.repeat.unbounded, 0, s, len, state, out, err);
-        case RX_CAPTURE: {
-            RxState start = *state;
-            bool owns_start_captures = false;
-            if (node->as.capture.index < out->capture_count) {
-                start.captures = malloc(out->capture_count * sizeof(*start.captures));
-                if (!start.captures) return idm_error_oom(err, idm_span_unknown(NULL));
-                owns_start_captures = true;
-                memcpy(start.captures, state->captures, out->capture_count * sizeof(*start.captures));
-                start.captures[node->as.capture.index].set = true;
-                start.captures[node->as.capture.index].start = state->pos;
-                start.captures[node->as.capture.index].end = state->pos;
-            }
-            RxStateVec inner = { .capture_count = out->capture_count };
-            bool ok = match_node(rx, node->as.capture.child, s, len, &start, &inner, err);
-            if (owns_start_captures) free(start.captures);
-            if (!ok) {
-                state_vec_destroy(&inner);
-                return false;
-            }
-            for (size_t i = 0; i < inner.count; i++) {
-                if (node->as.capture.index < out->capture_count) inner.items[i].captures[node->as.capture.index].end = inner.items[i].pos;
-                if (!state_vec_push_copy(out, &inner.items[i], err)) {
-                    state_vec_destroy(&inner);
-                    return false;
-                }
-            }
-            state_vec_destroy(&inner);
+        case RXI_ASSERT_START:
+            if (pos == 0 || ((prog->flags & IDM_REGEX_MULTILINE) != 0 && at_line_start(s, pos)))
+                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, err);
             return true;
-        }
-        case RX_LOOK_POS:
-        case RX_LOOK_NEG: {
-            bool matched = look_matches(rx, node->as.child, s, len, state->pos, err);
+        case RXI_ASSERT_END:
+            if (pos == len || ((prog->flags & IDM_REGEX_MULTILINE) != 0 && at_line_end(s, len, pos)))
+                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, err);
+            return true;
+        case RXI_LOOK: {
+            bool matched = false;
+            switch (inst->as.look.kind) {
+                case RX_LOOK_AHEAD_POS:
+                case RX_LOOK_AHEAD_NEG:
+                    matched = look_matches(inst->as.look.prog, s, len, pos, err);
+                    break;
+                case RX_LOOK_BEHIND_POS:
+                case RX_LOOK_BEHIND_NEG:
+                    matched = lookbehind_matches(inst->as.look.prog, s, len, pos, err);
+                    break;
+            }
             if (err && err->present) return false;
-            if ((node->kind == RX_LOOK_POS && matched) || (node->kind == RX_LOOK_NEG && !matched)) return state_vec_push_copy(out, state, err);
+            bool pass = (inst->as.look.kind == RX_LOOK_AHEAD_POS || inst->as.look.kind == RX_LOOK_BEHIND_POS) ? matched : !matched;
+            if (pass) return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, err);
             return true;
         }
-        case RX_LOOKBEHIND_POS:
-        case RX_LOOKBEHIND_NEG: {
-            bool matched = lookbehind_matches(rx, node->as.child, s, len, state->pos, err);
-            if (err && err->present) return false;
-            if ((node->kind == RX_LOOKBEHIND_POS && matched) || (node->kind == RX_LOOKBEHIND_NEG && !matched)) return state_vec_push_copy(out, state, err);
-            return true;
-        }
+        case RXI_MATCH:
+        case RXI_CHAR:
+        case RXI_DOT:
+        case RXI_CLASS:
+            return state_vec_push_copy(vec, pc, pos, captures, err);
     }
     return true;
 }
 
-static IdmRegexResult *result_new(const IdmRegex *rx, const char *s, size_t len, size_t start, const RxState *state, IdmError *err) {
+static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, RxMatch *out, IdmError *err) {
+    memset(out, 0, sizeof(*out));
+    if (!prog || offset > len || (exact_end && end_pos > len)) return true;
+    if (prog->count == 0) return true;
+    size_t rows = len + 1u;
+    if (rows > SIZE_MAX / prog->count) return idm_error_set(err, idm_span_unknown(NULL), "regex VM state set too large");
+    unsigned char *seen = calloc(rows * prog->count, sizeof(*seen));
+    if (!seen) return idm_error_oom(err, idm_span_unknown(NULL));
+    RxCapture *initial = calloc(prog->capture_count, sizeof(*initial));
+    if (!initial) {
+        free(seen);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+
+    RxVmStateVec active = { .capture_count = prog->capture_count };
+    bool ok = nfa_add_closure(prog, &active, seen, s, len, 0, offset, initial, err);
+    free(initial);
+    while (ok && active.count != 0) {
+        RxVmStateVec next = { .capture_count = prog->capture_count };
+        for (size_t i = 0; ok && i < active.count; i++) {
+            RxVmState *state = &active.items[i];
+            const RxInst *inst = &prog->insts[state->pc];
+            switch (inst->kind) {
+                case RXI_MATCH:
+                    if ((!exact_end || state->pos == end_pos) && !match_take_best(out, state->pos, state->captures, prog->capture_count, err)) ok = false;
+                    break;
+                case RXI_CHAR:
+                    if (state->pos < len && char_eq((unsigned char)s[state->pos], inst->as.literal, prog->flags))
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, state->captures, err);
+                    break;
+                case RXI_DOT:
+                    if (state->pos < len && ((prog->flags & IDM_REGEX_DOTALL) != 0 || s[state->pos] != '\n'))
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, state->captures, err);
+                    break;
+                case RXI_CLASS:
+                    if (state->pos < len && cls_has(&inst->as.cls, (unsigned char)s[state->pos]))
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, state->captures, err);
+                    break;
+                case RXI_JUMP:
+                case RXI_SPLIT:
+                case RXI_SAVE:
+                case RXI_ASSERT_START:
+                case RXI_ASSERT_END:
+                case RXI_LOOK:
+                    break;
+            }
+        }
+        state_vec_destroy(&active);
+        active = next;
+    }
+    state_vec_destroy(&active);
+    free(seen);
+    if (!ok) match_destroy(out);
+    return ok;
+}
+
+static IdmRegexResult *result_new(const IdmRegex *rx, const char *s, size_t len, size_t start, const RxMatch *match, IdmError *err) {
     IdmRegexResult *result = calloc(1u, sizeof(*result));
     if (!result) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
     result->subject = idm_strndup(s, len);
@@ -989,10 +1263,10 @@ static IdmRegexResult *result_new(const IdmRegex *rx, const char *s, size_t len,
         idm_error_oom(err, idm_span_unknown(NULL));
         return NULL;
     }
-    memcpy(result->captures, state->captures, result->capture_count * sizeof(*result->captures));
+    memcpy(result->captures, match->captures, result->capture_count * sizeof(*result->captures));
     result->captures[0].set = true;
     result->captures[0].start = start;
-    result->captures[0].end = state->pos;
+    result->captures[0].end = match->end;
     for (size_t i = 1; i < result->capture_count; i++) {
         if (rx->group_names[i]) {
             result->group_names[i] = idm_strdup(rx->group_names[i]);
@@ -1009,23 +1283,11 @@ static IdmRegexResult *result_new(const IdmRegex *rx, const char *s, size_t len,
 static bool scan_at_raw(const IdmRegex *rx, const char *s, size_t len, size_t offset, bool full, IdmRegexResult **out, IdmError *err) {
     *out = NULL;
     if (offset > len) return true;
-    RxCapture *caps = calloc(rx->group_count + 1u, sizeof(*caps));
-    if (!caps) return idm_error_oom(err, idm_span_unknown(NULL));
-    RxState state = { offset, caps };
-    RxStateVec states = { .capture_count = rx->group_count + 1u };
-    bool ok = match_node(rx, rx->root, s, len, &state, &states, err);
-    free(caps);
-    if (!ok) {
-        state_vec_destroy(&states);
-        return false;
-    }
-    RxState *best = NULL;
-    for (size_t i = 0; i < states.count; i++) {
-        if (full && states.items[i].pos != len) continue;
-        if (!best || states.items[i].pos > best->pos) best = &states.items[i];
-    }
-    if (best) *out = result_new(rx, s, len, offset, best, err);
-    state_vec_destroy(&states);
+    RxMatch match = {0};
+    bool ok = nfa_run(rx->prog, s, len, offset, full, len, &match, err);
+    if (!ok) return false;
+    if (match.matched) *out = result_new(rx, s, len, offset, &match, err);
+    match_destroy(&match);
     return !(err && err->present);
 }
 
@@ -1072,6 +1334,12 @@ bool idm_regex_compile(const char *source, size_t source_len, uint32_t flags, Id
     }
     rx->group_names = p.group_names;
     rx->group_count = p.group_count;
+    if (!compile_regex_program(rx, err)) {
+        idm_regex_free(rx);
+        return false;
+    }
+    node_free(rx->root);
+    rx->root = NULL;
     *out = rx;
     return true;
 }
@@ -1087,6 +1355,7 @@ void idm_regex_free(IdmRegex *rx) {
     if (!rx) return;
     free(rx->source);
     node_free(rx->root);
+    prog_free(rx->prog);
     if (rx->group_names) {
         for (size_t i = 0; i <= rx->group_count; i++) free(rx->group_names[i]);
         free(rx->group_names);
@@ -1096,7 +1365,7 @@ void idm_regex_free(IdmRegex *rx) {
 
 size_t idm_regex_footprint(const IdmRegex *rx) {
     if (!rx) return 0;
-    size_t total = sizeof(*rx) + rx->source_len + 1u + node_footprint(rx->root) + (rx->group_count + 1u) * sizeof(*rx->group_names);
+    size_t total = sizeof(*rx) + rx->source_len + 1u + node_footprint(rx->root) + prog_footprint(rx->prog) + (rx->group_count + 1u) * sizeof(*rx->group_names);
     for (size_t i = 0; i <= rx->group_count; i++) if (rx->group_names[i]) total += strlen(rx->group_names[i]) + 1u;
     return total;
 }

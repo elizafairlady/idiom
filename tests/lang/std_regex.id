@@ -88,4 +88,12 @@ suite do
     assert-inspect (r",".split-on "a,b,,c") "(\"a\" \"b\" \"\" \"c\")"
     assert-eq (text-of (scan (compile! (escape "a+b")) "xxa+b")) "a+b"
   end
+
+  test "regex-thompson-lowering-ambiguous-ere" do
+    assert-eq (text-of (scan-full r"(a|aa)*" "aaaaaaaaaaaaaaaa")) "aaaaaaaaaaaaaaaa"
+    assert-eq (text-of (scan r"(ab|a)b" "zab")) "ab"
+    assert-eq (capture (scan r"(a|aa)+" "aaaa") 1) "a"
+    assert-eq (text-of (scan r"(?<=a|ba)c" "xxbac")) "c"
+    assert-eq (scan r"(?<!a|ba)c" "xxbac") :nil
+  end
 end
