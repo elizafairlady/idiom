@@ -890,20 +890,13 @@ static void mark_celled(IdmCore *core, const bool *celled, uint32_t lc, const Id
     }
 }
 
-static bool compile_function_code(IdmBytecodeModule *module, uint32_t function_index, IdmCore *body, IdmError *err, IdmSpan span, const IdmPatternLocal *extra_pat, uint32_t extra_pat_count, const IdmCapture *captures, size_t capture_count) {
+static bool compile_function_code(IdmBytecodeModule *module, uint32_t function_index, IdmCore *body, IdmError *err, IdmSpan span, const IdmCapture *captures, size_t capture_count) {
     if (!idm_bc_set_function_entry(module, function_index, module->code_count)) return idm_error_set(err, span, "failed to set function entry");
     uint32_t lc = module->functions[function_index].local_count;
     bool *celled = NULL;
     if (lc > 0) {
         celled = calloc(lc, sizeof(*celled));
         if (!celled) return idm_error_oom(err, span);
-        for (uint32_t i = 0; i < module->functions[function_index].pattern_local_count; i++) {
-            uint32_t slot = module->functions[function_index].pattern_locals[i].slot;
-            if (slot < lc) celled[slot] = true;
-        }
-        for (uint32_t i = 0; i < extra_pat_count; i++) {
-            if (extra_pat[i].slot < lc) celled[extra_pat[i].slot] = true;
-        }
         collect_celled_slots(body, celled, lc);
     }
     mark_celled(body, celled, lc, captures, capture_count);
@@ -1248,8 +1241,8 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             }
             size_t jump_over_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_over_op)) return idm_error_oom(err, core->span);
-            if (core->as.fn.guard && !compile_function_code(module, guard_index, core->as.fn.guard, err, core->span, core->as.fn.pattern_locals, core->as.fn.pattern_local_count, core->as.fn.captures, core->as.fn.capture_count)) return false;
-            if (!compile_function_code(module, fn_index, core->as.fn.body, err, core->span, NULL, 0, core->as.fn.captures, core->as.fn.capture_count)) return false;
+            if (core->as.fn.guard && !compile_function_code(module, guard_index, core->as.fn.guard, err, core->span, core->as.fn.captures, core->as.fn.capture_count)) return false;
+            if (!compile_function_code(module, fn_index, core->as.fn.body, err, core->span, core->as.fn.captures, core->as.fn.capture_count)) return false;
             if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
             if (!idm_bc_patch_u32(module, jump_over_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch function literal jump");
             return true;
@@ -1295,8 +1288,8 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
             size_t jump_over_op = 0;
             if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_over_op)) { free(guard_entries); free(entries); return idm_error_oom(err, core->span); }
             for (size_t i = 0; i < core->as.fn_multi.count; i++) {
-                if (core->as.fn_multi.clauses[i].guard && !compile_function_code(module, guard_entries[i], core->as.fn_multi.clauses[i].guard, err, core->span, core->as.fn_multi.clauses[i].pattern_locals, core->as.fn_multi.clauses[i].pattern_local_count, core->as.fn_multi.captures, core->as.fn_multi.capture_count)) { free(guard_entries); free(entries); return false; }
-                if (!compile_function_code(module, entries[i], core->as.fn_multi.clauses[i].body, err, core->span, NULL, 0, core->as.fn_multi.captures, core->as.fn_multi.capture_count)) { free(guard_entries); free(entries); return false; }
+                if (core->as.fn_multi.clauses[i].guard && !compile_function_code(module, guard_entries[i], core->as.fn_multi.clauses[i].guard, err, core->span, core->as.fn_multi.captures, core->as.fn_multi.capture_count)) { free(guard_entries); free(entries); return false; }
+                if (!compile_function_code(module, entries[i], core->as.fn_multi.clauses[i].body, err, core->span, core->as.fn_multi.captures, core->as.fn_multi.capture_count)) { free(guard_entries); free(entries); return false; }
             }
             free(guard_entries);
             free(entries);
@@ -1499,7 +1492,7 @@ bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t ar
     uint32_t fn = 0;
     uint32_t locals = core_max_local_plus_one(body);
     if (!idm_bc_add_function(module, name ? name : "<function>", arity, locals, 0, &fn)) return idm_error_oom(err, body->span);
-    if (!compile_function_code(module, fn, body, err, body->span, NULL, 0, NULL, 0)) return false;
+    if (!compile_function_code(module, fn, body, err, body->span, NULL, 0)) return false;
     if (out_function) *out_function = fn;
     return true;
 }
@@ -1508,7 +1501,7 @@ bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *o
     uint32_t fn = 0;
     uint32_t locals = core_max_local_plus_one(core);
     if (!idm_bc_add_function(module, "main", 0, locals, 0, &fn)) return idm_error_oom(err, idm_span_unknown(NULL));
-    if (!compile_function_code(module, fn, core, err, idm_span_unknown(NULL), NULL, 0, NULL, 0)) return false;
+    if (!compile_function_code(module, fn, core, err, idm_span_unknown(NULL), NULL, 0)) return false;
     if (out_function) *out_function = fn;
     return true;
 }

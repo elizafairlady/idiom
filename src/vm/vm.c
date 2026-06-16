@@ -306,8 +306,7 @@ static bool init_pattern_locals(Vm *vm, Frame *frame, const IdmBcFunction *fn, c
         if (fn->pattern_locals[i].slot >= frame->local_count) return idm_error_set(err, idm_span_unknown(NULL), "pattern local slot out of bounds");
         const IdmValue *bound = bindings ? idm_pattern_bindings_get(bindings, fn->pattern_locals[i].name) : NULL;
         if (!bound) return idm_error_set(err, idm_span_unknown(NULL), "pattern binding '%s' missing", fn->pattern_locals[i].name);
-        vm->stack[frame->locals_base + fn->pattern_locals[i].slot] = idm_cell(vm->rt, *bound, err);
-        if (err && err->present) return false;
+        vm->stack[frame->locals_base + fn->pattern_locals[i].slot] = *bound;
     }
     return true;
 }

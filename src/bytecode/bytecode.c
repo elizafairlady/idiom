@@ -698,7 +698,7 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned de
 }
 
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err) {
-    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, 9u)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, 10u)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u32(out, (uint32_t)module->const_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->const_count; i++) if (!serialize_value(out, module->constants[i], 0u, err)) return false;
     if (!idm_buf_put_u32(out, (uint32_t)module->function_count)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -874,7 +874,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     if (len < 8u || memcmp(data, "IDMC", 4u) != 0) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "not an .ic module"); }
     r.pos = 4u;
     uint32_t version = idm_rd_u32(&r);
-    if (version != 9u) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
+    if (version != 10u) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
     uint32_t const_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < const_count && r.ok; i++) {
         IdmValue v;
