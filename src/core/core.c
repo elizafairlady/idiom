@@ -566,7 +566,6 @@ static bool normalize_cond(IdmRuntime *rt, IdmCore **slot, IdmError *err) {
     if (core->as.cond_expr.cond && core->as.cond_expr.cond->kind == IDM_CORE_LITERAL) {
         bool take_then = idm_value_ok(core->as.cond_expr.cond->as.literal);
         IdmCore *replacement = take_then ? core->as.cond_expr.then_branch : core->as.cond_expr.else_branch;
-        core->as.cond_expr.cond = NULL;
         if (take_then) core->as.cond_expr.then_branch = NULL;
         else core->as.cond_expr.else_branch = NULL;
         return replace_core(slot, replacement, err, core->span);

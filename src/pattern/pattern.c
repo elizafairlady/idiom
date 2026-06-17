@@ -344,6 +344,26 @@ void idm_pattern_bindings_init(IdmPatternBindings *bindings) {
     bindings->heap = false;
 }
 
+void idm_pattern_bindings_move(IdmPatternBindings *dst, IdmPatternBindings *src) {
+    if (src->heap) {
+        dst->names = src->names;
+        dst->values = src->values;
+        dst->slots = src->slots;
+        dst->count = src->count;
+        dst->cap = src->cap;
+        dst->heap = true;
+    } else {
+        idm_pattern_bindings_init(dst);
+        for (size_t i = 0; i < src->count; i++) {
+            dst->inline_names[i] = src->inline_names[i];
+            dst->inline_values[i] = src->inline_values[i];
+            dst->inline_slots[i] = src->inline_slots[i];
+        }
+        dst->count = src->count;
+    }
+    idm_pattern_bindings_init(src);
+}
+
 void idm_pattern_bindings_destroy(IdmPatternBindings *bindings) {
     if (!bindings) return;
     if (bindings->heap) {

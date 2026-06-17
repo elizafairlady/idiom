@@ -458,7 +458,7 @@ bool install_artifact_traits(ExpandContext *ctx, const IdmPkgTrait *traits, size
         ctx->trait_count++;
         if (!qualifier) {
             for (size_t m = 0; m < entry->method_count; m++) {
-                if (!install_method_surface(ctx, entry->identity, entry->methods[m].name, entry->methods[m].arity, scopes, provider, provider_key, err)) {
+                if (!install_method_surface(ctx, entry->identity, entry->methods[m].name, entry->methods[m].arity, false, scopes, provider, provider_key, err)) {
                     surface_rollback(ctx, &checkpoint);
                     free(qualified);
                     return false;
@@ -547,7 +547,7 @@ bool install_artifact_types(ExpandContext *ctx, const IdmPkgType *types, size_t 
         ctx->type_count++;
         if (!qualifier) {
             for (size_t f = 0; f < entry->field_count; f++) {
-                if (!install_method_surface(ctx, entry->identity, entry->fields[f], 1u, scopes, provider, provider_key, err)) {
+                if (!install_method_surface(ctx, entry->identity, entry->fields[f], 1u, true, scopes, provider, provider_key, err)) {
                     surface_rollback(ctx, &checkpoint);
                     free(qualified);
                     return false;

@@ -755,7 +755,7 @@ static bool vm_select_clause(Vm *vm, IdmValue callee, size_t arg_base, uint32_t 
             idm_pattern_bindings_destroy(&bindings);
             continue;
         }
-        *out_bindings = bindings;
+        idm_pattern_bindings_move(out_bindings, &bindings);
         *out_has_bindings = !trivial;
         *out_index = candidate_index;
         *out_matched = true;
@@ -1055,7 +1055,7 @@ static bool op_recv(Vm *vm, Frame *frame, size_t instr_ip, bool tail, IdmExecSta
             matched = true;
             matched_index = i;
             matched_fn = idx;
-            matched_bindings = b;
+            idm_pattern_bindings_move(&matched_bindings, &b);
             matched_has = has;
             break;
         }

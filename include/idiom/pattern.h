@@ -83,6 +83,7 @@ void idm_pat_free(IdmPattern *pat);
 
 void idm_pattern_bindings_init(IdmPatternBindings *bindings);
 void idm_pattern_bindings_destroy(IdmPatternBindings *bindings);
+void idm_pattern_bindings_move(IdmPatternBindings *dst, IdmPatternBindings *src);
 const IdmValue *idm_pattern_bindings_get(const IdmPatternBindings *bindings, const char *name);
 const IdmValue *idm_pattern_bindings_get_slot(const IdmPatternBindings *bindings, uint32_t slot);
 bool idm_pattern_bindings_add(IdmPatternBindings *bindings, const char *name, IdmValue value);

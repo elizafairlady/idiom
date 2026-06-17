@@ -125,6 +125,66 @@ CASES = [
             "elixir": "actor_spawn.exs",
         },
     },
+    {
+        "name": "editor_keys",
+        "summary": "layered editor keymap lookup and command dispatch",
+        "base_ref_default": False,
+        "base_ref_skip": "editor substrate benchmark; requires current std/runtime surface",
+        "files": {
+            "idiom": "editor_keys.id",
+            "elisp": "editor_keys.el",
+        },
+    },
+    {
+        "name": "editor_line",
+        "summary": "TEA-style line editor state updates over a bounded input trace",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current std/ish editor package",
+        "files": {
+            "idiom": "editor_line.id",
+            "elisp": "editor_line.el",
+        },
+    },
+    {
+        "name": "editor_buffer",
+        "summary": "point-oriented text buffer edits over a realistic mixed trace",
+        "base_ref_default": False,
+        "base_ref_skip": "editor substrate benchmark; requires current runtime surface",
+        "files": {
+            "idiom": "editor_buffer.id",
+            "elisp": "editor_buffer.el",
+        },
+    },
+    {
+        "name": "editor_markers",
+        "summary": "marker/span adjustment across insert and delete edits",
+        "base_ref_default": False,
+        "base_ref_skip": "editor substrate benchmark; requires current runtime surface",
+        "files": {
+            "idiom": "editor_markers.id",
+            "elisp": "editor_markers.el",
+        },
+    },
+    {
+        "name": "editor_syntax",
+        "summary": "regex-driven syntax span extraction over source-like text",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current std/regex package",
+        "files": {
+            "idiom": "editor_syntax.id",
+            "elisp": "editor_syntax.el",
+        },
+    },
+    {
+        "name": "editor_render",
+        "summary": "window state updates plus visible-region render checksum",
+        "base_ref_default": False,
+        "base_ref_skip": "editor substrate benchmark; requires current runtime surface",
+        "files": {
+            "idiom": "editor_render.id",
+            "elisp": "editor_render.el",
+        },
+    },
 ]
 
 

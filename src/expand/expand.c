@@ -202,7 +202,6 @@ static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, 
             IdmCore *ref = idm_core_global_ref(word->as.text, binding->payload, word->span);
             return zero_arity_call_if_known(ref, &binding->arity, callee_position, word->span, err);
         }
-        if (binding->kind == IDM_BIND_METHOD) return expand_error(err, word->span, "method '%s' requires a receiver", word->as.text);
         if (binding->kind == IDM_BIND_VALUE) {
             IdmPrimitive prim = primitive_from_binding(binding);
             IdmCore *ref = idm_core_primitive(prim, word->span);
@@ -223,6 +222,8 @@ static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, 
         for (size_t i = 0; i < word->origins.count; i++) idm_error_note(err, "in expansion of '%s'", word->origins.items[i]);
         return NULL;
     }
+    IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
+    if (resolve_method_surface(ctx, word, &method_status)) return expand_error(err, word->span, "method '%s' requires a receiver", word->as.text);
     expand_error(err, word->span, "unbound identifier '%s'", word->as.text);
     note_unbound_context(ctx, word, err);
     return NULL;
@@ -504,6 +505,12 @@ static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size
             idm_core_free(receiver);
             return expand_error(err, items[dot + 1u]->span, "unbound method '%s'", items[dot + 1u]->as.text);
         }
+        if (method->is_field) {
+            *pos = dot + 2u;
+            receiver = expand_record_field_core(ctx, receiver, method->name, items[dot + 1u]->span, err);
+            if (!receiver) return NULL;
+            continue;
+        }
         if (method->arity == 0) {
             idm_core_free(receiver);
             return expand_error(err, items[dot + 1u]->span, "method '%s.%s' cannot be used with dot dispatch because it takes no receiver", method->trait, method->name);
@@ -613,7 +620,7 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
         if (resolve_transformer(ctx, items[start], &payload, err)) return expand_macro_use_from_parts(ctx, items, start, end, payload, err);
         if (err && err->present) return NULL;
     }
-    if (items[start]->kind == IDM_SYN_WORD) {
+    if (items[start]->kind == IDM_SYN_WORD && !head_is_bound(ctx, items[start])) {
         IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
         const MethodSurfaceDef *method = resolve_method_surface(ctx, items[start], &method_status);
         if (method_status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, items[start]->span, "ambiguous method '%s'", items[start]->as.text);
@@ -631,7 +638,12 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
                 }
                 arg_count++;
             }
-            IdmCore *call = expand_method_surface_call_cores(ctx, method, NULL, args, arg_count, items[start]->span, err);
+            IdmCore *call;
+            if (method->is_field && arg_count == 1u) {
+                call = expand_record_field_core(ctx, args[0], method->name, items[start]->span, err);
+            } else {
+                call = expand_method_surface_call_cores(ctx, method, NULL, args, arg_count, items[start]->span, err);
+            }
             free(args);
             return call;
         }

@@ -1,6 +1,7 @@
 use std/test
 use std/string
 use std/ish
+use std/term
 activate std/test
 
 defn fresh -> initial-state "> "

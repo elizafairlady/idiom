@@ -1,5 +1,5 @@
 CC ?= cc
-VERSION := 0.31.0-dev
+VERSION := 0.34.0-dev
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -g -D_POSIX_C_SOURCE=200809L -Iinclude -DIDM_VERSION=\"$(VERSION)\"
 DEPFLAGS ?= -MMD -MP
 LDFLAGS ?= -lpthread -lm
@@ -30,7 +30,7 @@ TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(patsubst %.c,build/%.o,$(TEST_SRCS))
 DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) build/src/cli/ish.d $(TEST_OBJS:.o=.d)
 
-.PHONY: all test sanitize tsan conformance release clean snapshots perf perf-compare perf-profile
+.PHONY: all test sanitize tsan conformance release clean snapshots perf perf-compare perf-profile perf-editor
 
 SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -93,6 +93,9 @@ perf-compare: release
 
 perf-profile: release
 	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --with-sealed --dump-dir build/perf-dumps --callgrind-dir build/perf-callgrind --json-out build/perf-profile.json $(PERF_ARGS)
+
+perf-editor: release
+	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --cases editor_keys,editor_line,editor_buffer,editor_markers,editor_syntax,editor_render --runtimes idiom-current,elisp $(PERF_ARGS)
 
 build/tsan/idiomc: $(LIB_SRCS) src/cli/main.c
 	mkdir -p build/tsan

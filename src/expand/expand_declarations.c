@@ -21,7 +21,6 @@ static bool record_field_seen(char **fields, size_t count, const char *name);
 static bool parse_record_fields(const IdmSyntax *body, char ***out_fields, size_t *out_count, IdmError *err);
 static IdmCore *make_prim_call(IdmPrimitive primitive, IdmSpan span, IdmError *err);
 static bool core_call_add_or_oom(IdmCore *call, IdmCore *arg, IdmError *err, IdmSpan span);
-static IdmCore *record_field_default_fn(ExpandContext *ctx, const char *field, IdmSpan span, IdmError *err);
 static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, const char *identity, char **fields, size_t field_count, IdmSpan span, IdmError *err);
 static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *identity, const char *predicate_name, IdmSpan span, IdmError *err);
 static char *record_predicate_name(const char *record_name);
@@ -110,7 +109,7 @@ static bool install_required_trait_methods(ExpandContext *ctx, const TraitDef *r
     if (!binder_scopes_pruned(ctx, name_syntax, &method_scopes)) return idm_error_oom(err, name_syntax->span);
     bool ok = true;
     for (size_t i = 0; i < required->method_count && ok; i++) {
-        ok = install_method_surface(ctx, required->name, required->methods[i].name, required->methods[i].arity, &method_scopes, ctx->unit, ctx->unit_key, err);
+        ok = install_method_surface(ctx, required->name, required->methods[i].name, required->methods[i].arity, false, &method_scopes, ctx->unit, ctx->unit_key, err);
     }
     idm_scope_set_destroy(&method_scopes);
     return ok;
@@ -157,7 +156,7 @@ static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, ui
         return idm_error_oom(err, name_syntax->span);
     }
     ctx->decl_method_count++;
-    return install_method_surface(ctx, ctx->trait_name ? ctx->trait_name : "<anonymous>", method->name, arity, &method->scopes, ctx->unit, ctx->unit_key, err);
+    return install_method_surface(ctx, ctx->trait_name ? ctx->trait_name : "<anonymous>", method->name, arity, false, &method->scopes, ctx->unit, ctx->unit_key, err);
 }
 
 bool predeclare_trait_methods(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmError *err) {
@@ -243,7 +242,7 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, const char *trait
     SurfaceCheckpoint checkpoint;
     surface_checkpoint(ctx, &checkpoint);
     bool surface_ok = true;
-    for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, trait, methods[i].name, methods[i].arity, &ctx->empty_scopes, ctx->unit, ctx->unit_key, err);
+    for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, trait, methods[i].name, methods[i].arity, false, &ctx->empty_scopes, ctx->unit, ctx->unit_key, err);
     if (!surface_ok) {
         surface_rollback(ctx, &checkpoint);
         return NULL;
@@ -592,7 +591,7 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
     for (size_t i = 0; i < method_count; i++) {
-        if (!install_method_surface(ctx, identity, methods[i].name, methods[i].arity, &trait_scopes, ctx->unit, ctx->unit_key, err)) {
+        if (!install_method_surface(ctx, identity, methods[i].name, methods[i].arity, false, &trait_scopes, ctx->unit, ctx->unit_key, err)) {
             idm_scope_set_destroy(&trait_scopes);
             surface_rollback(ctx, &install_checkpoint);
             idm_core_free(define);
@@ -778,7 +777,7 @@ static IdmCore *implement_trait_decl_core(ExpandContext *ctx, const IdmSyntax *f
     }
     bool methods_active = true;
     for (size_t i = 0; i < method_count && methods_active; i++) {
-        methods_active = install_method_surface(ctx, trait_name, methods[i].name, methods[i].arity, &method_scopes, ctx->unit, ctx->unit_key, err);
+        methods_active = install_method_surface(ctx, trait_name, methods[i].name, methods[i].arity, false, &method_scopes, ctx->unit, ctx->unit_key, err);
     }
     idm_scope_set_destroy(&method_scopes);
     if (!methods_active) {
@@ -904,15 +903,15 @@ static bool core_call_add_or_oom(IdmCore *call, IdmCore *arg, IdmError *err, Idm
     return true;
 }
 
-static IdmCore *record_field_default_fn(ExpandContext *ctx, const char *field, IdmSpan span, IdmError *err) {
+IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const char *field, IdmSpan span, IdmError *err) {
     IdmCore *call = make_prim_call(IDM_PRIM_RECORD_FIELD, span, err);
-    if (!call) return NULL;
-    if (!core_call_add_or_oom(call, idm_core_arg_ref("record", 0u, span), err, span) ||
+    if (!call) { idm_core_free(receiver); return NULL; }
+    if (!core_call_add_or_oom(call, receiver, err, span) ||
         !core_call_add_or_oom(call, idm_core_literal(idm_atom(ctx->rt, field), span), err, span)) {
         idm_core_free(call);
         return NULL;
     }
-    return idm_core_fn(field, 1u, call, span);
+    return call;
 }
 
 static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, const char *identity, char **fields, size_t field_count, IdmSpan span, IdmError *err) {
@@ -995,16 +994,7 @@ static bool register_record_type_surface(ExpandContext *ctx, const IdmSyntax *na
             type_def_destroy(type);
             return idm_error_oom(err, span);
         }
-        IdmCore *default_fn = record_field_default_fn(ctx, fields[i], span, err);
-        if (!default_fn || !idm_core_define_trait_add_method(define, idm_atom(ctx->rt, fields[i]), 1u, default_fn)) {
-            idm_core_free(default_fn);
-            idm_core_free(define);
-            idm_core_free(implement);
-            idm_scope_set_destroy(&method_scopes);
-            type_def_destroy(type);
-            return false;
-        }
-        if (!install_method_surface(ctx, identity, fields[i], 1u, &method_scopes, ctx->unit, ctx->unit_key, err)) {
+        if (!install_method_surface(ctx, identity, fields[i], 1u, true, &method_scopes, ctx->unit, ctx->unit_key, err)) {
             idm_core_free(define);
             idm_core_free(implement);
             idm_scope_set_destroy(&method_scopes);

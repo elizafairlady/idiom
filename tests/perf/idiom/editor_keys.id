@@ -1,0 +1,80 @@
+defn imin do
+  a b when (lt? a b) -> a
+  _ b -> b
+end
+
+defn imax do
+  a b when (gt? a b) -> a
+  _ b -> b
+end
+
+defn get st key -> dict-get st key 0
+defn put st key value -> dict-put st key value
+
+defn cmd-left st -> put st :point (imax 0 (sub (get st :point) 1))
+defn cmd-right st -> put st :point (imin (get st :size) (add (get st :point) 1))
+defn cmd-home st -> put st :point 0
+defn cmd-end st -> put st :point (get st :size)
+
+defn cmd-insert st ->
+  st |> put :size (add (get st :size) 1) |> put :point (add (get st :point) 1) |> put :dirty (add (get st :dirty) 1)
+
+defn cmd-insert-fast st ->
+  st |> put :size (add (get st :size) 2) |> put :point (add (get st :point) 2) |> put :dirty (add (get st :dirty) 1)
+
+defn cmd-delete st do
+  p = get st :point
+  n = get st :size
+  cond (lt? p n) (st |> put :size (sub n 1) |> put :dirty (add (get st :dirty) 1)) st
+end
+
+defn cmd-mark st -> put st :marks (add (get st :marks) (get st :point))
+defn cmd-recenter st -> put st :dirty (add (get st :dirty) (mod (get st :point) 7))
+defn cmd-indent st -> st |> put :point (imin (get st :size) (add (get st :point) 2)) |> put :dirty (add (get st :dirty) 1)
+
+base-map = %{:left &cmd-left :right &cmd-right :insert &cmd-insert :delete &cmd-delete :mark &cmd-mark}
+mode-map = %{:c-a &cmd-home :c-e &cmd-end :tab &cmd-indent}
+minor-map = %{:insert &cmd-insert-fast :c-l &cmd-recenter}
+maps = (list minor-map mode-map base-map)
+
+defn lookup do
+  '() _key -> :nil
+  (list m . rest) key -> match (dict-get m key :nil) do
+    :nil -> lookup rest key
+    handler -> handler
+  end
+end
+
+defn key-for do
+  0 -> :insert
+  1 -> :right
+  2 -> :insert
+  3 -> :left
+  4 -> :mark
+  5 -> :c-e
+  6 -> :delete
+  7 -> :c-a
+  8 -> :insert
+  9 -> :c-l
+  10 -> :right
+  11 -> :tab
+  12 -> :delete
+  13 -> :mark
+  14 -> :left
+  _ -> :insert
+end
+
+defn step st key -> match (lookup maps key) do
+  :nil -> st
+  handler -> handler st
+end
+
+defn loop i n st -> if (gte? i n) do
+  st
+else do
+  loop (add i 1) n (step st (key-for (mod i 16)))
+end
+
+st = loop 0 120000 %{:point 0 :size 0 :marks 0 :dirty 0}
+out = mod (add (add (get st :point) (mul (get st :size) 3)) (add (mod (get st :marks) 1000000007) (mul (get st :dirty) 11))) 1000000007
+println out

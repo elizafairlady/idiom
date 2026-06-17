@@ -441,8 +441,15 @@ bool register_operator(ExpandContext *ctx, const char *name, uint8_t precedence,
     return true;
 }
 
-bool install_method_surface(ExpandContext *ctx, const char *trait, const char *name, uint32_t arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err) {
-    int guard = surface_install_guard(ctx, provider, provider_key, name, name, IDM_BIND_SPACE_DEFAULT, scopes ? scopes : &ctx->empty_scopes, err);
+bool install_method_surface(ExpandContext *ctx, const char *trait, const char *name, uint32_t arity, bool is_field, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err) {
+    const IdmScopeSet *check_scopes = scopes ? scopes : &ctx->empty_scopes;
+    for (size_t i = 0; i < ctx->method_surface_count; i++) {
+        const MethodSurfaceDef *e = &ctx->method_surfaces[i];
+        if (e->is_field != is_field && strcmp(e->name, name) == 0 && idm_scope_set_equal(&e->scopes, check_scopes)) {
+            return idm_error_set(err, idm_span_unknown(NULL), "'%s' is declared as both a record field and a trait method in the same scope; dot access would be ambiguous — rename one", name);
+        }
+    }
+    int guard = surface_install_guard(ctx, provider, provider_key, name, name, IDM_BIND_SPACE_METHOD, check_scopes, err);
     if (guard <= 0) return guard == 0;
     if (ctx->method_surface_count == ctx->method_surface_cap) {
         size_t cap = ctx->method_surface_cap ? ctx->method_surface_cap * 2u : 8u;
@@ -456,12 +463,13 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *n
     method->trait = idm_strdup(trait);
     method->name = idm_strdup(name);
     method->arity = arity;
+    method->is_field = is_field;
     if (!method->trait || !method->name || !idm_scope_set_copy(&method->scopes, scopes ? scopes : &ctx->empty_scopes)) {
         method_surface_def_destroy(method);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
     uint32_t payload = (uint32_t)ctx->method_surface_count;
-    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_METHOD, &method->scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_METHOD, IDM_BIND_METHOD, &method->scopes, payload, ctx->frame, NULL)) {
         method_surface_def_destroy(method);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
@@ -479,7 +487,7 @@ const MethodSurfaceDef *resolve_method_surface(ExpandContext *ctx, const IdmSynt
     idm_scope_set_init(&empty);
     const IdmScopeSet *lookup = scopes ? scopes : &empty;
     const IdmBinding *binding = NULL;
-    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, word->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, lookup, &binding);
+    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, word->as.text, ctx->phase, IDM_BIND_SPACE_METHOD, lookup, &binding);
     idm_scope_set_destroy(&empty);
     if (out_status) *out_status = status;
     if (status != IDM_RESOLVE_OK || !binding || binding->kind != IDM_BIND_METHOD || binding->payload >= ctx->method_surface_count) return NULL;

@@ -1,9 +1,9 @@
 package ish
 
+import std/tea as Tea
 use std/string
 use std/string/runes
-
-defn csi text -> "#{byte-str 27}[${text}"
+use std/term
 
 defn sget state k -> dict-get state k :nil
 defn sput state k v -> dict-put state k v
@@ -30,82 +30,7 @@ defn insert-text state text do
   edited (state |> sput :buffer b2 |> sput :cursor (add c (str-len text)))
 end
 
-defn line-start do
-  _b 0 -> 0
-  b i when (eq? (str-byte b (sub i 1)) 10) -> i
-  b i -> line-start b (sub i 1)
-end
-
-defn line-stop do
-  b i when (eq? i (str-len b)) -> i
-  b i when (eq? (str-byte b i) 10) -> i
-  b i -> line-stop b (add i 1)
-end
-
-defn word-byte? do
-  :nil -> :false
-  b when (and (gte? b 48) (lte? b 57)) -> :true
-  b when (and (gte? b 65) (lte? b 90)) -> :true
-  b when (and (gte? b 97) (lte? b 122)) -> :true
-  b when (gte? b 128) -> :true
-  _ -> :false
-end
-
-defn plain-byte? do
-  :nil -> :false
-  b -> cond (word-byte? b) :false :true
-end
-
-defn space-byte? do
-  32 -> :true
-  9 -> :true
-  10 -> :true
-  _ -> :false
-end
-
-defn filled-byte? do
-  :nil -> :false
-  b -> cond (space-byte? b) :false :true
-end
-
-defn skip-back do
-  b i pred when (and (gt? i 0) (pred (str-byte b (sub i 1)))) -> skip-back b (sub i 1) pred
-  _b i _pred -> i
-end
-
-defn skip-fwd do
-  b i pred when (and (lt? i (str-len b)) (pred (str-byte b i))) -> skip-fwd b (add i 1) pred
-  _b i _pred -> i
-end
-
-defn word-back b i -> skip-back b (skip-back b i &plain-byte?) &word-byte?
-defn word-fwd b i -> skip-fwd b (skip-fwd b i &plain-byte?) &word-byte?
-
 defn move-to state c -> edited (sput state :cursor c)
-
-defn cont-byte? b -> and (gte? b 128) (lt? b 192)
-
-defn rune-back-lead do
-  _b 0 -> 0
-  b j when (cont-byte? (str-byte b j)) -> rune-back-lead b (sub j 1)
-  _b j -> j
-end
-
-defn rune-back do
-  _b 0 -> 0
-  b i -> rune-back-lead b (sub i 1)
-end
-
-defn rune-fwd-next do
-  b i when (gte? i (str-len b)) -> i
-  b i when (cont-byte? (str-byte b i)) -> rune-fwd-next b (add i 1)
-  _b i -> i
-end
-
-defn rune-fwd do
-  b i when (gte? i (str-len b)) -> str-len b
-  b i -> rune-fwd-next b (add i 1)
-end
 
 defn key-left state -> move-to state (rune-back (buffer-of state) (cursor-of state))
 defn key-right state -> move-to state (rune-fwd (buffer-of state) (cursor-of state))
@@ -253,7 +178,7 @@ export defn bind-key state key handler -> sput state :keymap (dict-put (sget sta
 export defn initial-state prompt ->
   %{:buffer "" :cursor 0 :history '() :hist-pos (sub 0 1) :saved "" :kill "" :mode :edit :search "" :search-idx (sub 0 1) :saved-buffer "" :saved-cursor 0 :prompt prompt :cont-prompt "...> " :cols 80 :row 0 :below 0 :dumb :false :keymap %{:c-a &key-home :home &key-home :c-e &key-line-end :end &key-line-end :c-b &key-left :left &key-left :c-f &key-right :right &key-right :m-b &key-word-back :m-f &key-word-fwd :backspace &key-backspace :delete &key-delete :c-d &key-eof-or-delete :c-k &key-kill-line-end :c-u &key-kill-line-start :c-w &key-kill-word :c-y &key-yank :c-l &key-clear :up &key-history-back :c-p &key-history-back :down &key-history-fwd :c-n &key-history-fwd :c-r &key-search :enter &key-enter :c-c &key-cancel :tab &key-tab}}
 
-export defn step state key ->
+defn step-state state key ->
   if (eq? (sget state :mode) :search) do
     search-step state key
   else do
@@ -265,6 +190,37 @@ export defn step state key ->
       handler -> handler state
     end
   end
+
+record EditorModel do
+  field state
+end
+
+defn model-result tag state -> EditorModel (sput state :tea-result tag)
+
+implement Tea.Model on EditorModel do
+  method init _model -> (Tea.none)
+  method update model msg -> match msg do
+    {:editor-key key} -> match (step-state (model.state) key) do
+      {tag st} -> {(model-result tag st) (Tea.none)}
+    end
+    _ -> {model (Tea.none)}
+  end
+  method view model -> buffer-of (model.state)
+end
+
+defn clear-tea-result state -> dict-del state :tea-result
+
+defn apply-editor-key model key do
+  {next _cmd} = Tea.step model {:editor-key key}
+  st = next.state
+  tag = sget st :tea-result
+  {tag (EditorModel (clear-tea-result st))}
+end
+
+export defn step state key do
+  {tag model} = apply-editor-key (EditorModel state) key
+  {tag model.state}
+end
 
 export defn reset state ->
   state |> sput :buffer "" |> sput :cursor 0 |> sput :mode :edit |> sput :hist-pos (sub 0 1) |> sput :row 0 |> sput :below 0
@@ -280,27 +236,6 @@ export defn push-history do
     (list h . _) when (eq? h line) -> sput state :hist-pos (sub 0 1)
     _ -> state |> sput :history (cons line (sget state :history)) |> sput :hist-pos (sub 0 1)
   end
-end
-
-defn skip-csi-bytes do
-  s i when (eq? i (str-len s)) -> i
-  s i when (and (gte? (str-byte s i) 64) (lte? (str-byte s i) 126)) -> add i 1
-  s i -> skip-csi-bytes s (add i 1)
-end
-
-defn strip-csi do
-  s i acc when (eq? i (str-len s)) -> acc
-  s i acc when (and (eq? (str-byte s i) 27) (eq? (str-byte s (add i 1)) 91)) -> strip-csi s (skip-csi-bytes s (add i 2)) acc
-  s i acc -> strip-csi s (add i 1) "${acc}#{byte-str (str-byte s i)}"
-end
-
-defn visible-len s -> width (strip-csi s 0 "")
-
-defn end-pos off cols ->
-  cond (and (gt? off 0) (eq? (mod off cols) 0)) {(sub (div off cols) 1) cols} {(div off cols) (mod off cols)}
-
-defn line-rows len cols -> match (end-pos len cols) do
-  {r _} -> add r 1
 end
 
 defn locate do
@@ -353,79 +288,6 @@ export defn redraw state do
   {(state |> sput :row cursor-row |> sput :below (sub end-row cursor-row)) out}
 end
 
-export defn decode-byte do
-  1 -> :c-a
-  2 -> :c-b
-  3 -> :c-c
-  4 -> :c-d
-  5 -> :c-e
-  6 -> :c-f
-  9 -> :tab
-  10 -> :enter
-  11 -> :c-k
-  12 -> :c-l
-  13 -> :enter
-  14 -> :c-n
-  16 -> :c-p
-  18 -> :c-r
-  21 -> :c-u
-  23 -> :c-w
-  25 -> :c-y
-  8 -> :backspace
-  127 -> :backspace
-  b when (gte? b 32) -> {:char (byte-str b)}
-  _ -> :unknown
-end
-
-export defn csi-key do
-  65 _ -> :up
-  66 _ -> :down
-  67 _ -> :right
-  68 _ -> :left
-  72 _ -> :home
-  70 _ -> :end
-  126 "3" -> :delete
-  126 "1" -> :home
-  126 "7" -> :home
-  126 "4" -> :end
-  126 "8" -> :end
-  _ _ -> :unknown
-end
-
-defn read-csi-seq acc -> match (tty-read 50) do
-  {:byte b} when (and (gte? b 64) (lte? b 126)) -> csi-key b acc
-  {:byte b} -> read-csi-seq "${acc}#{byte-str b}"
-  _ -> :unknown
-end
-
-defn read-ss3 -> match (tty-read 50) do
-  {:byte b} -> csi-key b ""
-  _ -> :unknown
-end
-
-defn read-escape -> match (tty-read 50) do
-  :timeout -> :esc
-  :eof -> :eof
-  {:byte 91} -> read-csi-seq ""
-  {:byte 79} -> read-ss3
-  {:byte 98} -> :m-b
-  {:byte 102} -> :m-f
-  {:byte _} -> :unknown
-  other -> other
-end
-
-defn read-key -> match (tty-read :nil) do
-  :eof -> :eof
-  {:signal s} -> {:signal s}
-  {:byte 27} -> read-escape
-  {:byte b} -> decode-byte b
-  _ -> :unknown
-end
-
-defn term-cols -> match tty-size do
-  {c _r} -> c
-end
-
 defn paint state do
   {st out} = redraw state
   tty-write out
@@ -445,29 +307,29 @@ defn finish-cancel state do
   {:cancel (reset state)}
 end
 
-defn edit-loop state -> match read-key do
-  :eof -> {:eof state}
-  {:signal :resize} -> edit-loop (paint (sput state :cols term-cols))
-  {:signal _} -> finish-cancel state
-  :unknown -> edit-loop state
-  :esc -> edit-loop state
-  key -> match (step state key) do
-    {:render st} -> edit-loop (paint st)
+defn edit-loop model -> match read-key do
+  :eof -> {:eof model.state}
+  {:signal :resize} -> sput model.state :cols term-cols |> paint |> EditorModel |> edit-loop
+  {:signal _} -> finish-cancel model.state
+  :unknown -> edit-loop model
+  :esc -> edit-loop model
+  key -> match (apply-editor-key model key) do
+    {:render next} -> next.state |> paint |> EditorModel |> edit-loop
     {:clear st} -> do
       home = csi "H"
       clear = csi "2J"
       tty-write "${home}${clear}"
-      edit-loop (paint (sput st :row 0))
+      sput st.state :row 0 |> paint |> EditorModel |> edit-loop
     end
-    {:submit st} -> finish-line st
-    {:cancel st} -> finish-cancel st
-    {:eof st} -> {:eof st}
+    {:submit next} -> finish-line next.state
+    {:cancel next} -> finish-cancel next.state
+    {:eof next} -> {:eof next.state}
   end
 end
 
 defn raw-read state do
   tty-raw!
-  edit-loop (paint state)
+  edit-loop (EditorModel (paint state))
 end
 
 defn cooked-line state -> match tty-read-line do

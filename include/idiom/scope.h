@@ -27,7 +27,8 @@ typedef enum {
     IDM_BIND_SPACE_PROTOCOL,
     IDM_BIND_SPACE_TRAIT,
     IDM_BIND_SPACE_TYPE,
-    IDM_BIND_SPACE_RESOLVER
+    IDM_BIND_SPACE_RESOLVER,
+    IDM_BIND_SPACE_METHOD
 } IdmBindingSpace;
 
 typedef enum {

@@ -1,0 +1,70 @@
+defn imin do
+  a b when (lt? a b) -> a
+  _ b -> b
+end
+
+defn imax do
+  a b when (gt? a b) -> a
+  _ b -> b
+end
+
+defn make-spans i n acc -> if (gte? i n) do
+  acc
+else do
+  start = mul i 13
+  stop = add start (add 5 (mod i 7))
+  make-spans (add i 1) n (cons {start stop (mod i 5)} acc)
+end
+
+defn adjust-pos x pos del ins do
+  del-end = add pos del
+  after-del = cond (lte? x pos) x (cond (gte? x del-end) (sub x del) pos)
+  cond (gte? after-del pos) (add after-del ins) after-del
+end
+
+defn adjust-span span pos del ins do
+  a = tuple-get span 0
+  b = tuple-get span 1
+  k = tuple-get span 2
+  {(adjust-pos a pos del ins) (adjust-pos b pos del ins) k}
+end
+
+defn adjust-spans do
+  '() _pos _del _ins -> '()
+  (list span . rest) pos del ins -> cons (adjust-span span pos del ins) (adjust-spans rest pos del ins)
+end
+
+defn score-spans do
+  '() acc -> acc
+  (list span . rest) acc -> do
+    a = tuple-get span 0
+    b = tuple-get span 1
+    k = tuple-get span 2
+    score-spans rest (mod (add acc (add (mul a 3) (add (mul b 5) (mul k 7)))) 1000000007)
+  end
+end
+
+defn step i state do
+  spans = tuple-get state 0
+  doclen = tuple-get state 1
+  pos = mod (add (mul i 97) (div doclen 3)) doclen
+  want-del = cond (eq? (mod i 4) 0) 3 1
+  del = imin want-del (sub doclen pos)
+  ins = match (mod i 5) do
+    0 -> 0
+    1 -> 1
+    2 -> 4
+    3 -> 2
+    _ -> 0
+  end
+  {(adjust-spans spans pos del ins) (imax 1 (add (sub doclen del) ins))}
+end
+
+defn loop i n state -> if (gte? i n) do
+  state
+else do
+  loop (add i 1) n (step i state)
+end
+
+result = loop 0 2500 {(make-spans 0 80 '()) 5000}
+println (mod (add (score-spans (tuple-get result 0) 0) (mul (tuple-get result 1) 11)) 1000000007)

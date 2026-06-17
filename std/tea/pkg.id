@@ -1,0 +1,157 @@
+package tea
+
+export defn none -> :tea-none
+
+export defn key msg -> {:tea-key msg}
+export defn window-size width height -> {:tea-window-size width height}
+export defn focus -> {:tea-focus}
+export defn blur -> {:tea-blur}
+export defn quit-msg -> {:tea-quit}
+export defn interrupt-msg -> {:tea-interrupt}
+export defn suspend-msg -> {:tea-suspend}
+export defn resume-msg -> {:tea-resume}
+
+export trait Model do
+  method init model -> none
+  method update model msg -> {model none}
+  method view model -> ""
+end
+
+export trait Command do
+  method run-command cmd
+end
+
+export record Emit do
+  field msg
+end
+
+export record Batch do
+  field commands
+end
+
+export record Sequence do
+  field commands
+end
+
+export record Program do
+  field model
+  field status
+  field pending
+end
+
+export defn emit msg -> Emit msg
+
+defn reverse-list do
+  '() acc -> acc
+  (list h . t) acc -> reverse-list t (cons &h acc)
+end
+
+defn command-list do
+  '() acc -> reverse-list acc '()
+  (list h . t) acc when (eq? h none) -> command-list t acc
+  (list h . t) acc -> command-list t (cons &h acc)
+end
+
+defn compact-command commands ctor -> match (command-list commands '()) do
+  '() -> none
+  (list only) -> &only
+  many -> ctor many
+end
+
+export defn batch commands -> compact-command commands &Batch
+export defn sequence commands -> compact-command commands &Sequence
+
+export defn quit -> emit quit-msg
+export defn interrupt -> emit interrupt-msg
+export defn suspend -> emit suspend-msg
+export defn resume -> emit resume-msg
+
+implement Command on Emit do
+  method run-command cmd -> cmd.msg
+end
+
+implement Command on Batch do
+  method run-command cmd -> {:tea-batch cmd.commands}
+end
+
+implement Command on Sequence do
+  method run-command cmd -> {:tea-sequence cmd.commands}
+end
+
+implement Command on closure do
+  method run-command cmd -> cmd
+end
+
+defn append-list xs ys -> reverse-list (reverse-list xs '()) ys
+
+defn messages-from-list do
+  '() acc -> reverse-list acc '()
+  (list h . t) acc -> messages-from-list t (append-list (command-messages h) acc)
+end
+
+defn command-result-messages do
+  {:tea-batch commands} -> messages-from-list commands '()
+  {:tea-sequence commands} -> messages-from-list commands '()
+  msg -> list msg
+end
+
+export defn command-messages do
+  cmd when (eq? cmd none) -> '()
+  cmd when (implements? Command cmd) -> command-result-messages (run-command cmd)
+  cmd -> error {:tea :not-command cmd}
+end
+
+export defn step model msg do
+  if (eq? (implements? Model model) :false) do
+    error {:tea :not-model model}
+  else do
+    update model msg
+  end
+end
+
+export defn start model do
+  if (eq? (implements? Model model) :false) do
+    error {:tea :not-model model}
+  else do
+    Program model :running (command-messages (init model))
+  end
+end
+
+defn halted? status -> cond (eq? status :running) :false :true
+
+defn status-for msg -> match msg do
+  {:tea-quit} -> :quit
+  {:tea-interrupt} -> :interrupt
+  {:tea-suspend} -> :suspend
+  _ -> :running
+end
+
+export defn advance program msg do
+  if (halted? program.status) do
+    program
+  else do
+    status = status-for msg
+    if (eq? status :running) do
+      {next cmd} = step program.model msg
+      Program next :running (command-messages cmd)
+    else do
+      Program program.model status '()
+    end
+  end
+end
+
+defn run-pending-list do
+  program '() -> program
+  program (list msg . rest) -> do
+    next = advance program &msg
+    all = append-list next.pending rest
+    run-pending-list (Program next.model next.status '()) all
+  end
+end
+
+export defn drain program -> run-pending-list program program.pending
+
+export defn run-messages do
+  program '() -> drain program
+  program (list msg . rest) -> run-messages (drain (advance program &msg)) rest
+end
