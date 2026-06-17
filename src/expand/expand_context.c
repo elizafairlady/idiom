@@ -654,19 +654,6 @@ void local_pop_to(ExpandContext *ctx, size_t table_base, uint32_t next_slot) {
     ctx->next_slot = next_slot;
 }
 
-bool arg_push(ExpandContext *ctx, const IdmSyntax *word, uint32_t *out_slot) {
-    const IdmBinding *existing = resolve_default(ctx, word, NULL);
-    if (existing && existing->kind == IDM_BIND_ARG && existing->frame_id == ctx->frame) return false;
-    IdmScopeSet scopes;
-    if (!syntax_scopes_copy(&scopes, word)) return false;
-    uint32_t slot = ctx->arg_slots++;
-    bool ok = idm_binding_table_add(&ctx->bindings, word->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ARG, &scopes, slot, ctx->frame, NULL);
-    idm_scope_set_destroy(&scopes);
-    if (!ok) return false;
-    if (out_slot) *out_slot = slot;
-    return true;
-}
-
 bool arg_push_slot(ExpandContext *ctx, const IdmSyntax *word, uint32_t slot) {
     const IdmBinding *existing = resolve_default(ctx, word, NULL);
     if (existing && existing->kind == IDM_BIND_ARG && existing->frame_id == ctx->frame) return true;

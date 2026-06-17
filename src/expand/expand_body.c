@@ -16,7 +16,7 @@ static bool body_scope_add_range(ExpandContext *ctx, IdmSyntax **work, size_t st
 static bool body_definition_scope_add(ExpandContext *ctx, IdmSyntax **work, size_t start, size_t count, IdmScopeId scope, IdmSpan span, IdmError *err);
 static bool defn_clause_arity_from_items(const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, uint32_t *out_arity, IdmError *err);
 static bool defn_group_arity(const DefnGroup *group, IdmSyntax *const *items, IdmArity *out_arity, IdmError *err);
-static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err);
+static IdmCore *expand_function_clause(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err);
 static bool defn_form_clause_block(const IdmSyntax *def_form, size_t param_start, const IdmSyntax **out_body);
 static IdmCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, IdmSyntax *const *items, IdmError *err);
 static IdmCore *expand_match_clause(ExpandContext *ctx, const IdmSyntax *clause, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err);
@@ -229,6 +229,14 @@ static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax 
         IdmValue datum = idm_nil();
         if (!expand_quote_datum(ctx, syn->as.seq.items[1], &datum, err)) return NULL;
         return idm_pat_literal(datum, syn->span);
+    }
+    if (syn_is_form(syn, "%-pin") && syn->as.seq.count == 2) {
+        const IdmSyntax *target = syn->as.seq.items[1];
+        if (target->kind != IDM_SYN_WORD) {
+            idm_error_set(err, syn->span, "pin pattern currently supports only a variable: ^name");
+            return NULL;
+        }
+        return idm_pat_pin(target->as.text, syn->span);
     }
     IdmSyntax *const *list_items = NULL;
     size_t list_count = 0;
@@ -1361,118 +1369,48 @@ IdmCore *expand_fn_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t sta
 }
 
 IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmError *err) {
-    size_t cursor = param_start;
-    size_t arrow = SIZE_MAX;
-    size_t body_index = SIZE_MAX;
-    IdmCore *guard = NULL;
-
     SavedFunctionContext saved;
     begin_function_context(ctx, &saved);
-    bool params_ok = true;
-    while (cursor < end) {
-        if (items[cursor]->kind == IDM_SYN_WORD && strcmp(items[cursor]->as.text, "->") == 0) {
-            arrow = cursor;
-            cursor++;
-            break;
-        }
-        if (syn_is_form(items[cursor], "%-body")) {
-            body_index = cursor;
-            break;
-        }
-        if (items[cursor]->kind == IDM_SYN_WORD && strcmp(items[cursor]->as.text, "when") == 0) {
-            if (guard) {
-                expand_error(err, items[cursor]->span, "fn clause may have only one guard");
-                params_ok = false;
-                break;
-            }
-            size_t guard_start = cursor + 1u;
-            cursor++;
-            while (cursor < end) {
-                if (items[cursor]->kind == IDM_SYN_WORD && strcmp(items[cursor]->as.text, "->") == 0) {
-                    arrow = cursor;
-                    break;
-                }
-                if (syn_is_form(items[cursor], "%-body")) {
-                    body_index = cursor;
-                    break;
-                }
-                cursor++;
-            }
-            if (guard_start == cursor) {
-                expand_error(err, items[guard_start - 1u]->span, "fn guard requires an expression before the body");
-                params_ok = false;
-                break;
-            }
-            guard = expand_parts(ctx, items, guard_start, cursor, err);
-            if (!guard) {
-                params_ok = false;
-                break;
-            }
-            if (arrow != SIZE_MAX) cursor++;
-            break;
-        }
-        if (items[cursor]->kind != IDM_SYN_WORD) {
-            expand_error(err, items[cursor]->span, "fn parameter must be an identifier");
-            params_ok = false;
-            break;
-        }
-        if (!arg_push(ctx, items[cursor], NULL)) {
-            expand_error(err, items[cursor]->span, "duplicate fn parameter or out of memory: %s", items[cursor]->as.text);
-            params_ok = false;
-            break;
-        }
-        cursor++;
-    }
-    if (!params_ok) {
-        idm_core_free(guard);
-        end_function_context(ctx, &saved);
-        return NULL;
-    }
 
-    IdmCore *body = NULL;
-    if (arrow != SIZE_MAX) {
-        if (cursor >= end) {
-            expand_error(err, head->span, "fn arrow requires a body");
-        } else {
-            body = expand_parts(ctx, items, cursor, end, err);
-        }
-    } else if (body_index != SIZE_MAX) {
-        if (body_index + 1u != end) {
-            expand_error(err, items[body_index]->span, "fn do/end body must be the final fn component");
-        } else {
-            body = expand_syntax(ctx, items[body_index], err);
-        }
-    } else {
-        expand_error(err, head->span, "fn literal requires -> or do/end body");
-    }
-
-    uint32_t arity = (uint32_t)ctx->arg_slots;
+    IdmPattern **patterns = NULL;
+    uint32_t pattern_count = 0;
+    IdmPatternLocal *pattern_locals = NULL;
+    uint32_t pattern_local_count = 0;
+    IdmCore *guard = NULL;
+    uint32_t arity = 0;
+    IdmCore *body = expand_function_clause(ctx, debug_name, head, items, param_start, end, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
     if (!body) {
-        idm_core_free(guard);
         end_function_context(ctx, &saved);
         return NULL;
     }
+
     IdmCore *fn = idm_core_fn(debug_name, arity, body, head->span);
-    if (!fn || (guard && !idm_core_fn_set_guard_take(fn, guard))) {
-        idm_core_free(body);
+    if (!fn
+        || !idm_core_fn_set_param_patterns_take(fn, patterns, pattern_count)
+        || !idm_core_fn_set_pattern_locals_take(fn, pattern_locals, pattern_local_count)
+        || (guard && !idm_core_fn_set_guard_take(fn, guard))) {
+        for (uint32_t p = 0; p < pattern_count; p++) idm_pat_free(patterns[p]);
+        free(patterns);
+        for (uint32_t p = 0; p < pattern_local_count; p++) free(pattern_locals[p].name);
+        free(pattern_locals);
         idm_core_free(guard);
+        idm_core_free(body);
+        idm_core_free(fn);
         end_function_context(ctx, &saved);
-        idm_error_oom(err, head->span);
-        return NULL;
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, head->span);
     }
     for (size_t i = 0; i < ctx->capture_count; i++) {
         if (!idm_core_fn_add_capture(fn, ctx->captures[i].kind, ctx->captures[i].name, ctx->captures[i].source_index)) {
             idm_core_free(fn);
             end_function_context(ctx, &saved);
-            idm_error_oom(err, head->span);
-            return NULL;
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, head->span);
         }
     }
     end_function_context(ctx, &saved);
     return fn;
 }
 
-static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err) {
+static IdmCore *expand_function_clause(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err) {
     size_t cursor = param_start;
     size_t arrow = SIZE_MAX;
     size_t body_index = SIZE_MAX;
@@ -1495,7 +1433,7 @@ static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, c
         }
         if (items[cursor]->kind == IDM_SYN_WORD && strcmp(items[cursor]->as.text, "when") == 0) {
             if (guard) {
-                expand_error(err, items[cursor]->span, "defn clause may have only one guard");
+                expand_error(err, items[cursor]->span, "function clause may have only one guard");
                 for (size_t i = 0; i < pattern_count; i++) idm_pat_free(patterns[i]);
                 free(patterns);
                 end_clause_context(ctx, &saved);
@@ -1515,7 +1453,7 @@ static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, c
                 cursor++;
             }
             if (guard_start == cursor) {
-                expand_error(err, items[guard_start - 1u]->span, "defn guard requires an expression before the body");
+                expand_error(err, items[guard_start - 1u]->span, "guard requires an expression before the body");
                 for (size_t i = 0; i < pattern_count; i++) idm_pat_free(patterns[i]);
                 free(patterns);
                 end_clause_context(ctx, &saved);
@@ -1556,13 +1494,13 @@ static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, c
 
     IdmCore *body = NULL;
     if (arrow != SIZE_MAX) {
-        if (cursor >= end) expand_error(err, head->span, "defn arrow requires a body");
+        if (cursor >= end) expand_error(err, head->span, "function clause arrow requires a body");
         else body = expand_parts(ctx, items, cursor, end, err);
     } else if (body_index != SIZE_MAX) {
-        if (body_index + 1u != end) expand_error(err, items[body_index]->span, "defn do/end body must be final");
+        if (body_index + 1u != end) expand_error(err, items[body_index]->span, "function clause do/end body must be final");
         else body = expand_syntax(ctx, items[body_index], err);
     } else {
-        expand_error(err, head->span, "defn requires -> or do/end body");
+        expand_error(err, head->span, "function clause requires -> or do/end body");
     }
     if (!body) {
         idm_core_free(guard);
@@ -1679,7 +1617,7 @@ static IdmCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, Id
                 uint32_t pattern_local_count = 0;
                 IdmCore *guard = NULL;
                 uint32_t arity = 0;
-                IdmCore *body = expand_defn_clause(ctx, def_name ? def_name->as.text : group->name, clause->as.seq.count > 1 ? clause->as.seq.items[1] : clause, clause->as.seq.items, 1, clause->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
+                IdmCore *body = expand_function_clause(ctx, def_name ? def_name->as.text : group->name, clause->as.seq.count > 1 ? clause->as.seq.items[1] : clause, clause->as.seq.items, 1, clause->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
                 if (!body) { block_ok = false; break; }
                 if (single) {
                     single_body = body;
@@ -1713,7 +1651,7 @@ static IdmCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, Id
         uint32_t pattern_local_count = 0;
         IdmCore *guard = NULL;
         uint32_t arity = 0;
-        IdmCore *body = expand_defn_clause(ctx, def_name ? def_name->as.text : group->name, def_form->as.seq.items[1], def_form->as.seq.items, param_start, def_form->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
+        IdmCore *body = expand_function_clause(ctx, def_name ? def_name->as.text : group->name, def_form->as.seq.items[1], def_form->as.seq.items, param_start, def_form->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
         if (!body) {
             idm_core_free(result);
             end_function_context(ctx, &saved);
@@ -1859,7 +1797,7 @@ static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body
         uint32_t arity = 0;
         const IdmSyntax *clause = body->as.seq.items[i];
         IdmCore *clause_body = defn_style
-            ? expand_defn_clause(ctx, debug_name, clause->as.seq.count > 1 ? clause->as.seq.items[1] : clause, clause->as.seq.items, 1, clause->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err)
+            ? expand_function_clause(ctx, debug_name, clause->as.seq.count > 1 ? clause->as.seq.items[1] : clause, clause->as.seq.items, 1, clause->as.seq.count, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err)
             : expand_match_clause(ctx, clause, &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
         if (!clause_body || !idm_core_fn_multi_add_clause_take(multi, arity, patterns, pattern_count, pattern_locals, pattern_local_count, guard, clause_body)) {
             if (clause_body) idm_core_free(clause_body);

@@ -253,9 +253,17 @@ bool idm_bc_set_function_patterns_take(IdmBytecodeModule *module, uint32_t funct
     fn->param_patterns = patterns;
     fn->pattern_count = pattern_count;
     fn->trivial_match = true;
-    for (uint32_t i = 0; i < pattern_count; i++) {
+    for (uint32_t i = 0; i < pattern_count && fn->trivial_match; i++) {
         IdmPatternKind k = patterns[i]->kind;
         if (k != IDM_PAT_WILDCARD && k != IDM_PAT_BIND) { fn->trivial_match = false; break; }
+        if (k == IDM_PAT_BIND) {
+            for (uint32_t j = 0; j < i; j++) {
+                if (patterns[j]->kind == IDM_PAT_BIND && strcmp(patterns[j]->as.name, patterns[i]->as.name) == 0) {
+                    fn->trivial_match = false;
+                    break;
+                }
+            }
+        }
     }
     return true;
 }

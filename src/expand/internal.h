@@ -276,7 +276,6 @@ typedef struct {
 } BodyRec;
 
 bool activate_artifact(ExpandContext *ctx, const char *activation_name, const IdmArtifact *art, IdmScopeId base, const IdmScopeSet *act_scopes, IdmSpan span, IdmError *err);
-bool arg_push(ExpandContext *ctx, const IdmSyntax *word, uint32_t *out_slot);
 bool arg_push_slot(ExpandContext *ctx, const IdmSyntax *word, uint32_t slot);
 bool artifact_base(ExpandContext *ctx, const IdmArtifact *art, IdmScopeId *out_base, IdmError *err);
 bool artifact_init_pending(ExpandContext *ctx, const IdmArtifact *art);

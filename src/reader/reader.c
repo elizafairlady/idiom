@@ -20,6 +20,7 @@ typedef enum {
     TOK_SHELL_WORD,
     TOK_SHELL_VAR,
     TOK_FN_VALUE,
+    TOK_PIN,
     TOK_OP,
     TOK_DOT,
     TOK_LPAREN,
@@ -166,6 +167,7 @@ static bool previous_token_allows_negative_literal(const TokenVec *out) {
         case TOK_PERCENT_COMMA:
         case TOK_PERCENT_COMMA_AT:
         case TOK_DOLLAR_LPAREN:
+        case TOK_PIN:
             return true;
         default:
             return false;
@@ -428,6 +430,7 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
         if (ch == '%' && peek_n(&lx, 1) == ',' && peek_n(&lx, 2) == '@') { advance(&lx); advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_COMMA_AT, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '%' && peek_n(&lx, 1) == ',') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_PERCENT_COMMA, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == '$' && peek_n(&lx, 1) == '(') { advance(&lx); advance(&lx); if (!add_token(out, &lx, TOK_DOLLAR_LPAREN, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
+        if (ch == '^') { advance(&lx); if (!add_token(out, &lx, TOK_PIN, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column}); leading_space = false; continue; }
         if (ch == ':' && continues_word(&lx, out) && !is_delim(peek_n(&lx, 1))) {
             advance(&lx);
             if (!read_shell_word(out, &lx, start, line, column, leading_space)) return idm_error_oom(err, (IdmSpan){file, start, lx.pos, line, column});
@@ -834,6 +837,10 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
         case TOK_FN_VALUE: {
             take(p);
             return form1("%-expression", idm_syn_word(tok->lexeme, tok->span), tok->span);
+        }
+        case TOK_PIN: {
+            take(p);
+            return form1("%-pin", parse_primary(p), tok->span);
         }
         case TOK_LPAREN: {
             take(p);

@@ -183,8 +183,24 @@ static void test_source_fn(void) {
     idm_bc_destroy(&module);
     idm_core_free(core);
 
-    CHECK(!idm_expand_string(&rt, "<fn-expand-test>", "bad = fn x x -> x\nbad 1\n", &core, &err));
+    core = NULL;
+    CHECK(idm_expand_string(&rt, "<fn-expand-test>", "f = fn x x -> x\nf 3 3\n", &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 3);
+    CHECK(!err.present);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+
+    core = NULL;
+    CHECK(idm_expand_string(&rt, "<fn-expand-test>", "f = fn x x -> x\nf 3 4\n", &core, &err));
+    idm_bc_init(&module);
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(!idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(err.present);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
     idm_error_clear(&err);
     idm_runtime_destroy(&rt);
 }

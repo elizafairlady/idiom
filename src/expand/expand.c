@@ -1064,6 +1064,9 @@ IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) 
     if (syn_is_form(syn, "%-word") || syn_is_form(syn, "%-shell-var") || syn_is_form(syn, "%-redirect")) {
         return expand_error(err, syn->span, "shell syntax requires command graph expansion");
     }
+    if (syn_is_form(syn, "%-pin")) {
+        return expand_error(err, syn->span, "pin '^name' is only valid in pattern position");
+    }
     if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT)
         return expand_container(ctx, syn, err);
     return expand_error(err, syn->span, "unsupported syntax for the current expansion phase");
