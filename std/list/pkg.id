@@ -1,8 +1,8 @@
 package list
 
 defn rev-into do
-  '() acc -> acc
-  (list h . t) acc -> rev-into t (cons h acc)
+  '() acc -> &acc
+  (list h . t) acc -> rev-into t (cons &h acc)
 end
 
 export defn empty? do
@@ -20,86 +20,86 @@ end
 export defn reverse xs -> xs |> rev-into '()
 
 export defn append do
-  '() ys -> ys
-  (list h . t) ys -> cons h (append t ys)
+  '() ys -> &ys
+  (list h . t) ys -> cons &h (append t ys)
 end
 
 export defn concat xs ys -> xs |> append ys
 
 export defn concat-all do
   '() -> '()
-  (list h . t) -> append h (concat-all t)
+  (list h . t) -> append &h (concat-all t)
 end
 
 export defn map do
   '() _ -> '()
-  (list h . t) f -> cons (f h) (map t f)
+  (list h . t) f -> cons (f &h) (map t f)
 end
 
 export defn filter do
   '() _ -> '()
-  (list h . t) f -> cond (f h) (cons h (filter t f)) (filter t f)
+  (list h . t) f -> cond (f &h) (cons &h (filter t f)) (filter t f)
 end
 
-export defn reject xs f -> xs |> filter (fn x -> cond (f x) :false :true)
+export defn reject xs f -> xs |> filter (fn x -> cond (f &x) :false :true)
 
 export defn each do
   '() _ -> :ok
   (list h . t) f -> do
-    f h
+    f &h
     each t f
   end
 end
 
 export defn foldl do
-  '() acc _ -> acc
-  (list h . t) acc f -> foldl t (f h acc) f
+  '() acc _ -> &acc
+  (list h . t) acc f -> foldl t (f &h &acc) f
 end
 
 export defn foldr do
-  '() acc _ -> acc
-  (list h . t) acc f -> f h (foldr t acc f)
+  '() acc _ -> &acc
+  (list h . t) acc f -> f &h (foldr t acc f)
 end
 
 export defn member? do
   '() _ -> :false
-  (list h . _) x when (eq? h x) -> :true
+  (list h . _) x when (eq? &h &x) -> :true
   (list _ . t) x -> member? t x
 end
 
 export defn any? do
   '() _ -> :false
-  (list h . t) f -> cond (f h) :true (any? t f)
+  (list h . t) f -> cond (f &h) :true (any? t f)
 end
 
 export defn all? do
   '() _ -> :true
-  (list h . t) f -> cond (f h) (all? t f) :false
+  (list h . t) f -> cond (f &h) (all? t f) :false
 end
 
 export defn find do
   '() _ -> :nil
-  (list h . t) f -> cond (f h) h (find t f)
+  (list h . t) f -> cond (f &h) &h (find t f)
 end
 
 export defn find-or do
-  '() _ default -> default
-  (list h . t) f default -> cond (f h) h (find-or t f default)
+  '() _ default -> &default
+  (list h . t) f default -> cond (f &h) &h (find-or t f default)
 end
 
 defn nth-from do
-  '() _ default -> default
-  (list h . _) 0 _ -> h
+  '() _ default -> &default
+  (list h . _) 0 _ -> &h
   (list _ . t) i default -> nth-from t (sub i 1) default
 end
 
 export defn nth xs i -> cond (lt? i 0) :nil (xs |> nth-from i :nil)
 
-export defn nth-or xs i default -> cond (lt? i 0) default (xs |> nth-from i default)
+export defn nth-or xs i default -> cond (lt? i 0) &default (xs |> nth-from i default)
 
 defn nth-bang-from do
-  '() original -> error {:index-out-of-range original}
-  (list h . _) 0 _ -> h
+  '() _ original -> error {:index-out-of-range original}
+  (list h . _) 0 _ -> &h
   (list _ . t) i original -> nth-bang-from t (sub i 1) original
 end
 
@@ -108,37 +108,37 @@ export defn nth! xs i -> cond (lt? i 0) (error {:index-out-of-range i}) (xs |> n
 export defn take do
   _ n when (lte? n 0) -> '()
   '() _ -> '()
-  (list h . t) n -> cons h (take t (sub n 1))
+  (list h . t) n -> cons &h (take t (sub n 1))
 end
 
 export defn drop do
-  xs n when (lte? n 0) -> xs
+  xs n when (lte? n 0) -> &xs
   '() _ -> '()
   (list _ . t) n -> drop t (sub n 1)
 end
 
 export defn take-while do
   '() _ -> '()
-  (list h . t) f -> cond (f h) (cons h (take-while t f)) '()
+  (list h . t) f -> cond (f &h) (cons &h (take-while t f)) '()
 end
 
 export defn drop-while do
   '() _ -> '()
-  (list h . t) f -> cond (f h) (drop-while t f) (cons h t)
+  (list h . t) f -> cond (f &h) (drop-while t f) (cons &h &t)
 end
 
 export defn split-at xs n -> {(xs |> take n) (xs |> drop n)}
 
 defn split-with-acc do
   '() _ acc -> {(rev-into acc '()) '()}
-  (list h . t) f acc -> cond (f h) (split-with-acc t f (cons h acc)) {(rev-into acc '()) (cons h t)}
+  (list h . t) f acc -> cond (f &h) (split-with-acc t f (cons &h acc)) {(rev-into acc '()) (cons &h &t)}
 end
 
 export defn split-with xs f -> xs |> split-with-acc f '()
 
 defn partition-acc do
   '() _ yes no -> {(rev-into yes '()) (rev-into no '())}
-  (list h . t) f yes no -> cond (f h) (partition-acc t f (cons h yes) no) (partition-acc t f yes (cons h no))
+  (list h . t) f yes no -> cond (f &h) (partition-acc t f (cons &h yes) no) (partition-acc t f yes (cons &h no))
 end
 
 export defn partition xs f -> xs |> partition-acc f '() '()
@@ -146,49 +146,49 @@ export defn partition xs f -> xs |> partition-acc f '() '()
 export defn zip do
   '() _ -> '()
   _ '() -> '()
-  (list a . at) (list b . bt) -> cons {a b} (zip at bt)
+  (list a . at) (list b . bt) -> cons {&a &b} (zip at bt)
 end
 
 export defn zip-with do
   '() _ _ -> '()
   _ '() _ -> '()
-  (list a . at) (list b . bt) f -> cons (f a b) (zip-with at bt f)
+  (list a . at) (list b . bt) f -> cons (f &a &b) (zip-with at bt f)
 end
 
 defn intersperse-from do
   '() _ -> '()
-  (list h . t) sep -> cons sep (cons h (intersperse-from t sep))
+  (list h . t) sep -> cons &sep (cons &h (intersperse-from t sep))
 end
 
 export defn intersperse do
   '() _ -> '()
-  (list h . t) sep -> cons h (intersperse-from t sep)
+  (list h . t) sep -> cons &h (intersperse-from t sep)
 end
 
 export defn flatten do
   '() -> '()
-  (list h . t) when (list? h) -> h |> flatten |> append (flatten t)
-  (list h . t) -> cons h (flatten t)
+  (list h . t) when (list? &h) -> &h |> flatten |> append (flatten t)
+  (list h . t) -> cons &h (flatten t)
 end
 
 export defn first do
   '() -> :nil
-  (list h . _) -> h
+  (list h . _) -> &h
 end
 
 export defn first! do
   '() -> error {:empty-list}
-  (list h . _) -> h
+  (list h . _) -> &h
 end
 
 export defn rest do
   '() -> '()
-  (list _ . t) -> t
+  (list _ . t) -> &t
 end
 
 defn last-from do
-  x '() -> x
-  _ (list h . t) -> last-from h t
+  x '() -> &x
+  _ (list h . t) -> last-from &h t
 end
 
 export defn last do
@@ -203,7 +203,7 @@ end
 
 defn init-from do
   _ '() -> '()
-  h (list nh . nt) -> cons h (init-from nh nt)
+  h (list nh . nt) -> cons &h (init-from &nh nt)
 end
 
 export defn init do
@@ -213,47 +213,47 @@ end
 
 export defn delete do
   '() _ -> '()
-  (list h . t) x when (eq? h x) -> t
-  (list h . t) x -> cons h (delete t x)
+  (list h . t) x when (eq? &h &x) -> &t
+  (list h . t) x -> cons &h (delete t x)
 end
 
 export defn delete-all do
   '() _ -> '()
-  (list h . t) x when (eq? h x) -> delete-all t x
-  (list h . t) x -> cons h (delete-all t x)
+  (list h . t) x when (eq? &h &x) -> delete-all t x
+  (list h . t) x -> cons &h (delete-all t x)
 end
 
 export defn delete-at do
-  xs i when (lt? i 0) -> xs
+  xs i when (lt? i 0) -> &xs
   '() _ -> '()
-  (list _ . t) 0 -> t
-  (list h . t) i -> cons h (delete-at t (sub i 1))
+  (list _ . t) 0 -> &t
+  (list h . t) i -> cons &h (delete-at t (sub i 1))
 end
 
 export defn insert-at do
-  xs i x when (lte? i 0) -> cons x xs
-  '() _ x -> cons x '()
-  (list h . t) i x -> cons h (insert-at t (sub i 1) x)
+  xs i x when (lte? i 0) -> cons &x &xs
+  '() _ x -> cons &x '()
+  (list h . t) i x -> cons &h (insert-at t (sub i 1) x)
 end
 
 export defn replace-at do
-  xs i _ when (lt? i 0) -> xs
+  xs i _ when (lt? i 0) -> &xs
   '() _ _ -> '()
-  (list _ . t) 0 x -> cons x t
-  (list h . t) i x -> cons h (replace-at t (sub i 1) x)
+  (list _ . t) 0 x -> cons &x &t
+  (list h . t) i x -> cons &h (replace-at t (sub i 1) x)
 end
 
 export defn update-at do
-  xs i _ when (lt? i 0) -> xs
+  xs i _ when (lt? i 0) -> &xs
   '() _ _ -> '()
-  (list h . t) 0 f -> cons (f h) t
-  (list h . t) i f -> cons h (update-at t (sub i 1) f)
+  (list h . t) 0 f -> cons (f &h) &t
+  (list h . t) i f -> cons &h (update-at t (sub i 1) f)
 end
 
 export defn starts-with? do
   _ '() -> :true
   '() _ -> :false
-  (list h . t) (list ph . pt) when (eq? h ph) -> starts-with? t pt
+  (list h . t) (list ph . pt) when (eq? &h &ph) -> starts-with? t pt
   _ _ -> :false
 end
 
@@ -261,5 +261,5 @@ export defn ends-with? xs suffix -> xs |> reverse |> starts-with? (suffix |> rev
 
 export defn duplicate do
   _ n when (lte? n 0) -> '()
-  x n -> cons x (duplicate x (sub n 1))
+  x n -> cons &x (duplicate x (sub n 1))
 end

@@ -66,7 +66,7 @@ suite do
     assert-inspect (range 1 4) "(1 2 3)"
     assert-inspect ([1 2].zip [:a :b]) "({1 :a} {2 :b})"
     assert-inspect [3 1 2].sort "(1 2 3)"
-    assert-inspect ([20 3 1].sort-by (fn a b -> lt? (str a) (str b))) "(1 20 3)"
+    assert-inspect ([20 3 1].sort-by (fn a b -> a |> str |> compare (b |> str) |> eq? :lt)) "(1 20 3)"
     assert-eq [3 1 2].min-of 1
     assert-eq [3 1 2].max-of 3
   end

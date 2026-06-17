@@ -162,6 +162,16 @@ struct IdmScheduler {
 static void sched_lock(IdmScheduler *sched) { pthread_mutex_lock(&sched->mu); }
 static void sched_unlock(IdmScheduler *sched) { pthread_mutex_unlock(&sched->mu); }
 
+static void sched_wake(IdmScheduler *sched, bool all) {
+    if (sched->nworkers <= 1u) return;
+    if (all) pthread_cond_broadcast(&sched->work_cv);
+    else pthread_cond_signal(&sched->work_cv);
+    if (sched->poller_active && sched->wake_pipe[1] >= 0) {
+        ssize_t ignored = write(sched->wake_pipe[1], "w", 1u);
+        (void)ignored;
+    }
+}
+
 static int g_sig_pipe[2] = {-1, -1};
 
 static void sig_handler(int signo) {
@@ -299,8 +309,8 @@ IdmScheduler *idm_sched_create(IdmRuntime *rt, const IdmBytecodeModule *module, 
     idm_error_init(&sched->fatal_err);
     sched->nworkers = 1u;
     const char *procs = getenv("IDIOMMAXPROCS");
-    long n = procs && procs[0] ? strtol(procs, NULL, 10) : (long)sysconf(_SC_NPROCESSORS_ONLN);
-    if (n > 1) sched->nworkers = (size_t)(n > 64 ? 64 : n);
+    long n = procs && procs[0] ? strtol(procs, NULL, 10) : 1;
+    if (n > 1 && sched->wake_pipe[0] >= 0 && sched->wake_pipe[1] >= 0) sched->nworkers = (size_t)(n > 64 ? 64 : n);
     sched->gc_threshold = gc_threshold_from_env();
     return sched;
 }
@@ -460,13 +470,7 @@ static bool ready_push(IdmScheduler *sched, uint64_t pid, IdmError *err) {
     }
     sched->ready[sched->ready_head + sched->ready_count] = pid;
     sched->ready_count++;
-    if (sched->nworkers > 1u && sched->ready_count > 1u) {
-        pthread_cond_signal(&sched->work_cv);
-        if (sched->wake_pipe[1] >= 0) {
-            ssize_t ignored = write(sched->wake_pipe[1], "w", 1u);
-            (void)ignored;
-        }
-    }
+    sched_wake(sched, false);
     return true;
 }
 
@@ -711,6 +715,7 @@ static void mon_in_remove(IdmActor *actor, uint64_t ref) {
 static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason) {
     if (actor->exited) return;
     bool running = actor->status == ACT_RUNNING;
+    bool finished = false;
     if (actor->status == ACT_WAITING_TTY) sched->tty_waiting--;
     actor->exited = true;
     actor->status = ACT_EXITED;
@@ -757,6 +762,7 @@ static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason) {
         sched->main_value = idm_nil();
         sched->main_reason = reason;
         sched->main_abnormal = !reason_is_normal(reason);
+        finished = true;
     }
     if (actor->pid == sched->interrupt_pid) {
         sched->interrupt_pid = 0;
@@ -766,7 +772,9 @@ static void terminate(IdmScheduler *sched, IdmActor *actor, IdmValue reason) {
     if (actor->pid == sched->eval_pid && !sched->eval_done) {
         sched->eval_done = true;
         sched->eval_reason = reason;
+        finished = true;
     }
+    if (finished) sched_wake(sched, true);
     if (!running) {
         actor_release_resources(actor);
         if (reapable(sched, actor)) reap_queue_push(sched, actor);
@@ -1309,7 +1317,7 @@ static bool sched_poll(IdmScheduler *sched, bool mt, bool block, IdmError *err) 
                 wait_count++;
             }
             if (mt) sched_unlock(sched);
-            poll(wait_count != 0 ? waitfds : NULL, wait_count, mt ? 50 : -1);
+            poll(wait_count != 0 ? waitfds : NULL, wait_count, -1);
             if (mt) sched_lock(sched);
             char drain[64];
             while (mt && sched->wake_pipe[0] >= 0 && read(sched->wake_pipe[0], drain, sizeof(drain)) > 0) {}
@@ -1364,7 +1372,6 @@ static bool sched_poll(IdmScheduler *sched, bool mt, bool block, IdmError *err) 
             int delta = nearest > now ? (int)(nearest - now) : 0;
             if (timeout < 0 || delta < timeout) timeout = delta;
         }
-        if (mt && (timeout < 0 || timeout > 50)) timeout = 50;
         if (nfds > 0 || timeout >= 0) {
             if (mt) sched_unlock(sched);
             poll(nfds > 0 ? fds : NULL, nfds, timeout);
@@ -1458,6 +1465,7 @@ static bool run_slice(IdmScheduler *sched, uint64_t pid, IdmError *err) {
                         sched->main_terminated = true;
                         sched->main_value = result;
                         sched->main_abnormal = false;
+                        sched_wake(sched, true);
                     }
                     if (actor->pid == sched->eval_pid && !sched->eval_done) sched->eval_value = result;
                     terminate(sched, actor, idm_atom(sched->rt, "normal"));
@@ -1602,8 +1610,10 @@ static void worker_fatal(IdmScheduler *sched, IdmError *err) {
     } else {
         idm_error_clear(err);
     }
-    sched->shutdown = true;
-    pthread_cond_broadcast(&sched->work_cv);
+    if (!sched->shutdown) {
+        sched->shutdown = true;
+        sched_wake(sched, true);
+    }
 }
 
 static void *worker_main(void *argp) {
@@ -1614,8 +1624,10 @@ static void *worker_main(void *argp) {
     for (;;) {
         if (sched->shutdown) break;
         if (sched->main_terminated || sched->eval_done) {
-            sched->shutdown = true;
-            pthread_cond_broadcast(&sched->work_cv);
+            if (!sched->shutdown) {
+                sched->shutdown = true;
+                sched_wake(sched, true);
+            }
             break;
         }
         sched_maybe_collect(sched);
@@ -1641,6 +1653,7 @@ static void *worker_main(void *argp) {
             continue;
         }
         sched->parked++;
+        sched_wake(sched, false);
         pthread_cond_wait(&sched->work_cv, &sched->mu);
         sched->parked--;
     }

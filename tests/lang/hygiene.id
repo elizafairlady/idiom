@@ -10,7 +10,7 @@ defmacro defmm stx do
   syntax-case stx do
     (_ n) -> do
       expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ a) -> %`(add %,a 1) end end)
-      %`(do end)
+      %`:nil
     end
   end
 end

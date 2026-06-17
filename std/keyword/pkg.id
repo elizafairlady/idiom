@@ -1,18 +1,18 @@
 package keyword
 
 defn reverse-list do
-  '() acc -> acc
-  (list h . t) acc -> reverse-list t (cons h acc)
+  '() acc -> &acc
+  (list h . t) acc -> reverse-list t (cons &h acc)
 end
 
 defn append-list do
-  '() ys -> ys
-  (list h . t) ys -> cons h (append-list t ys)
+  '() ys -> &ys
+  (list h . t) ys -> cons &h (append-list t ys)
 end
 
 defn key-member? do
   '() _ -> :false
-  (list h . _) k when (eq? h k) -> :true
+  (list h . _) k when (eq? &h &k) -> :true
   (list _ . t) k -> key-member? t k
 end
 
@@ -24,31 +24,31 @@ end
 
 export defn has? do
   '() _ -> :false
-  (list {k _v} . _) key when (eq? k key) -> :true
+  (list {k _v} . _) key when (eq? &k &key) -> :true
   (list _ . t) key -> has? t key
 end
 
 export defn get do
   '() _ -> :nil
-  (list {k v} . _) key when (eq? k key) -> v
+  (list {k v} . _) key when (eq? &k &key) -> &v
   (list _ . t) key -> get t key
 end
 
 export defn get-or do
-  '() _ default -> default
-  (list {k v} . _) key _default when (eq? k key) -> v
+  '() _ default -> &default
+  (list {k v} . _) key _default when (eq? &k &key) -> &v
   (list _ . t) key default -> get-or t key default
 end
 
 export defn get! do
-  '() key -> error {:key-not-found key}
-  (list {k v} . _) key when (eq? k key) -> v
+  '() key -> error {:key-not-found &key}
+  (list {k v} . _) key when (eq? &k &key) -> &v
   (list _ . t) key -> get! t key
 end
 
 defn get-all-into do
   '() _ acc -> acc |> reverse-list '()
-  (list {k v} . t) key acc when (eq? k key) -> get-all-into t key (cons v acc)
+  (list {k v} . t) key acc when (eq? &k &key) -> get-all-into t key (cons &v acc)
   (list _ . t) key acc -> get-all-into t key acc
 end
 
@@ -56,33 +56,33 @@ export defn get-all kws key -> kws |> get-all-into key '()
 
 defn keys-into do
   '() acc -> acc |> reverse-list '()
-  (list {k _v} . t) acc -> keys-into t (cons k acc)
+  (list {k _v} . t) acc -> keys-into t (cons &k acc)
 end
 
 export defn keys kws -> kws |> keys-into '()
 
 defn vals-into do
   '() acc -> acc |> reverse-list '()
-  (list {_k v} . t) acc -> vals-into t (cons v acc)
+  (list {_k v} . t) acc -> vals-into t (cons &v acc)
 end
 
 export defn vals kws -> kws |> vals-into '()
 
 export defn delete do
   '() _ -> '()
-  (list {k _v} . t) key when (eq? k key) -> delete t key
-  (list kv . t) key -> cons kv (delete t key)
+  (list {k _v} . t) key when (eq? &k &key) -> delete t key
+  (list kv . t) key -> cons &kv (delete t key)
 end
 
 export defn delete-first do
   '() _ -> '()
-  (list {k _v} . t) key when (eq? k key) -> t
-  (list kv . t) key -> cons kv (delete-first t key)
+  (list {k _v} . t) key when (eq? &k &key) -> &t
+  (list kv . t) key -> cons &kv (delete-first t key)
 end
 
-export defn put kws key value -> {key value} |> cons (kws |> delete key)
+export defn put kws key value -> {&key &value} |> cons (kws |> delete key)
 
-export defn put-new kws key value -> cond (kws |> has? key) kws ({key value} |> cons kws)
+export defn put-new kws key value -> cond (kws |> has? key) &kws ({&key &value} |> cons &kws)
 
 export defn pop kws key -> {(kws |> get key) (kws |> delete key)}
 
@@ -90,16 +90,16 @@ export defn pop-or kws key default -> {(kws |> get-or key default) (kws |> delet
 
 defn delete-keys do
   '() _ -> '()
-  (list {k _v} . t) ks when (key-member? ks k) -> delete-keys t ks
-  (list kv . t) ks -> cons kv (delete-keys t ks)
+  (list {k _v} . t) ks when (key-member? ks &k) -> delete-keys t ks
+  (list kv . t) ks -> cons &kv (delete-keys t ks)
 end
 
 export defn merge a b -> a |> delete-keys (b |> keys) |> append-list b
 
 defn merge-with-pairs do
-  '() acc _ -> acc
+  '() acc _ -> &acc
   (list {k v} . t) acc f -> do
-    next = cond (acc |> has? k) (acc |> put k (f k (acc |> get k) v)) (acc |> put k v)
+    next = cond (acc |> has? &k) (acc |> put &k (f &k (acc |> get &k) &v)) (acc |> put &k &v)
     t |> merge-with-pairs next f
   end
 end
@@ -108,15 +108,15 @@ export defn merge-with a b f -> b |> merge-with-pairs a f
 
 export defn take do
   '() _ -> '()
-  (list {k v} . t) ks when (key-member? ks k) -> cons {k v} (take t ks)
+  (list {k v} . t) ks when (key-member? ks &k) -> cons {&k &v} (take t ks)
   (list _ . t) ks -> take t ks
 end
 
 export defn drop kws ks -> kws |> delete-keys ks
 
 defn to-map-into do
-  '() acc -> acc
-  (list {k v} . t) acc -> to-map-into t (dict-put acc k v)
+  '() acc -> &acc
+  (list {k v} . t) acc -> to-map-into t (dict-put acc &k &v)
 end
 
 export defn to-map kws -> kws |> to-map-into %{}

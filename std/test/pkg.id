@@ -2,6 +2,46 @@ package test
 
 use std/enum
 
+defn run-one do
+  {:test name thunk} failures -> do
+    parent = self
+    spawn (fn do
+      outcome = try do
+        thunk
+        :ok
+        rescue r -> {:failed r}
+      end
+      send parent {:test-outcome outcome}
+    end)
+    outcome = receive do
+      {:test-outcome o} -> o
+    end
+    match outcome do
+      :ok -> failures
+      {:failed r} -> do
+        "FAIL ${name}: #{inspect r}" |> println
+        add failures 1
+      end
+    end
+  end
+end
+
+defn run-all do
+  '() failures total -> {failures total}
+  (list t . rest) failures total -> run-all rest (run-one t failures) (add total 1)
+end
+
+export defn run-suite tests do
+  result = run-all (tests.to-list) 0 0
+  match result do
+    {0 total} -> do
+      "ok: ${total} tests" |> println
+      :ok
+    end
+    {failures total} -> error {:suite-failed failures :of total}
+  end
+end
+
 export defrules test do
   (_ name body) -> %`{:test %,name (fn %,body)}
 end
@@ -13,7 +53,12 @@ export defmacro suite stx do
   end
   body = syntax-nth stx 2
   body-form? = and (syntax-list? body) (gt? (syntax-length body) 0) (syntax-word? (syntax-nth body 0)) (eq? (syntax-word-text (syntax-nth body 0)) "%-body")
-  cond body-form? %`(run-suite (list %,@(parts-of 1 (syntax-length body) body))) %`(run-suite %,body)
+  if body-form? do
+    parts = parts-of 1 (syntax-length body) body
+    cond (eq? parts '()) %`(run-suite '()) %`(run-suite (list %,@parts))
+  else do
+    %`(run-suite %,body)
+  end
 end
 
 export defn assert do
@@ -61,45 +106,5 @@ export defn assert-compiles do
   source -> match (expand-check source) do
     :ok -> :ok
     {:error {:expand msg}} -> error {:assert-compiles :failed msg :source source}
-  end
-end
-
-defn run-one do
-  {:test name thunk} failures -> do
-    parent = self
-    spawn (fn do
-      outcome = try do
-        thunk
-        :ok
-        rescue r -> {:failed r}
-      end
-      send parent {:test-outcome outcome}
-    end)
-    outcome = receive do
-      {:test-outcome o} -> o
-    end
-    match outcome do
-      :ok -> failures
-      {:failed r} -> do
-        "FAIL ${name}: #{inspect r}" |> println
-        add failures 1
-      end
-    end
-  end
-end
-
-defn run-all do
-  '() failures total -> {failures total}
-  (list t . rest) failures total -> run-all rest (run-one t failures) (add total 1)
-end
-
-export defn run-suite tests do
-  result = run-all (tests.to-list) 0 0
-  match result do
-    {0 total} -> do
-      "ok: ${total} tests" |> println
-      :ok
-    end
-    {failures total} -> error {:suite-failed failures :of total}
   end
 end

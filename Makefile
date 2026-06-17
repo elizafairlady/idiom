@@ -1,5 +1,5 @@
 CC ?= cc
-VERSION := 0.1.0-dev
+VERSION := 0.29.0-dev
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -g -D_POSIX_C_SOURCE=200809L -Iinclude -DIDM_VERSION=\"$(VERSION)\"
 DEPFLAGS ?= -MMD -MP
 LDFLAGS ?= -lpthread -lm
@@ -28,7 +28,7 @@ TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(patsubst %.c,build/%.o,$(TEST_SRCS))
 DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) build/src/cli/ish.d $(TEST_OBJS:.o=.d)
 
-.PHONY: all test sanitize tsan conformance release clean snapshots
+.PHONY: all test sanitize tsan conformance release clean snapshots perf perf-compare
 
 SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -76,6 +76,17 @@ release:
 	$(CC) -std=c11 -O2 -flto -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude -o build/release/idiomc $(LIB_SRCS) src/cli/main.c $(LDFLAGS)
 	$(CC) -std=c11 -O2 -flto -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude -o build/release/ish $(LIB_SRCS) src/cli/ish.c $(LDFLAGS)
 	strip build/release/idiomc build/release/ish
+
+PERF_RUNS ?= 5
+PERF_WARMUPS ?= 1
+PERF_BASE_REF ?= 9dbab72
+PERF_ARGS ?=
+
+perf: release
+	@python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) $(PERF_ARGS)
+
+perf-compare: release
+	@python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --base-ref $(PERF_BASE_REF) --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) $(PERF_ARGS)
 
 build/tsan/idiomc: $(LIB_SRCS) src/cli/main.c
 	mkdir -p build/tsan

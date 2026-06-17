@@ -11,6 +11,33 @@ static bool install_relocated_operator(ExpandContext *ctx, const IdmOperatorDef 
 static const char *idm_std_root(void);
 static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const char *unit_name_hint, bool kernel_mode, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err);
 
+static void import_names_free(char **names, size_t count) {
+    for (size_t i = 0; i < count; i++) free(names[i]);
+    free(names);
+}
+
+bool runtime_globals_imported(const ExpandContext *ctx, const IdmArtifact *art) {
+    for (size_t i = 0; i < ctx->runtime_import_count; i++) {
+        if (ctx->runtime_imports[i].art == art && ctx->runtime_imports[i].phase == ctx->phase) return true;
+    }
+    return false;
+}
+
+bool record_runtime_globals_import(ExpandContext *ctx, const IdmArtifact *art, IdmSpan span, IdmError *err) {
+    if (runtime_globals_imported(ctx, art)) return true;
+    if (ctx->runtime_import_count == ctx->runtime_import_cap) {
+        size_t cap = ctx->runtime_import_cap ? ctx->runtime_import_cap * 2u : 8u;
+        void *grown = realloc(ctx->runtime_imports, cap * sizeof(*ctx->runtime_imports));
+        if (!grown) return idm_error_oom(err, span);
+        ctx->runtime_imports = grown;
+        ctx->runtime_import_cap = cap;
+    }
+    ctx->runtime_imports[ctx->runtime_import_count].art = art;
+    ctx->runtime_imports[ctx->runtime_import_count].phase = ctx->phase;
+    ctx->runtime_import_count++;
+    return true;
+}
+
 IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier, IdmSyntax *const *items, size_t cont_index, size_t cont_count, IdmSpan span, IdmError *err) {
     const IdmArtifact *art = artifact_get(ctx, path, span, err);
     if (!art) {
@@ -31,15 +58,19 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
     char provider_key[17];
     artifact_provider_key(art->src_hash, provider_key);
 
-    size_t import_count = art->export_count + art->global_count;
+    bool import_globals = art->global_count != 0 && !runtime_globals_imported(ctx, art);
+    size_t import_count = art->export_count + (import_globals ? art->global_count : 0u);
     uint32_t *export_src = NULL;
     uint32_t *export_dst = NULL;
+    char **export_names = NULL;
     if (import_count != 0) {
         export_src = malloc(import_count * sizeof(*export_src));
         export_dst = malloc(import_count * sizeof(*export_dst));
-        if (!export_src || !export_dst) {
+        export_names = calloc(import_count, sizeof(*export_names));
+        if (!export_src || !export_dst || !export_names) {
             free(export_src);
             free(export_dst);
+            free(export_names);
             idm_scope_set_destroy(&act_scopes);
             return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
         }
@@ -50,7 +81,6 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
         uint32_t consumer_slot = ctx->global_seq++;
         export_src[import_index] = art->exports[i].slot;
         export_dst[import_index] = consumer_slot;
-        import_index++;
         const char *bind_name = art->exports[i].name;
         char *qualified = NULL;
         if (qualifier) {
@@ -60,13 +90,18 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
             qualified = idm_buf_take(&qb);
             bind_name = qualified;
         }
-        ok = idm_binding_table_add_with_arity(&ctx->bindings, bind_name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &act_scopes, consumer_slot, IDM_FRAME_GLOBAL, art->exports[i].arity, NULL);
+        export_names[import_index] = idm_strdup(bind_name);
+        if (!export_names[import_index]) ok = false;
+        import_index++;
+        ok = ok && idm_binding_table_add_with_arity(&ctx->bindings, bind_name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &act_scopes, consumer_slot, IDM_FRAME_GLOBAL, art->exports[i].arity, NULL);
         free(qualified);
     }
-    for (size_t i = 0; i < art->global_count && ok; i++) {
+    for (size_t i = 0; i < (import_globals ? art->global_count : 0u) && ok; i++) {
         uint32_t consumer_slot = ctx->global_seq++;
         export_src[import_index] = art->globals[i].slot;
         export_dst[import_index] = consumer_slot;
+        export_names[import_index] = idm_strdup(art->globals[i].name);
+        if (!export_names[import_index]) { ok = false; break; }
         import_index++;
         IdmScopeSet gscopes;
         idm_scope_set_init(&gscopes);
@@ -103,14 +138,21 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
     if (!ok) {
         free(export_src);
         free(export_dst);
+        import_names_free(export_names, import_count);
         if (err && !err->present) idm_error_oom(err, span);
+        return NULL;
+    }
+    if (import_globals && !record_runtime_globals_import(ctx, art, span, err)) {
+        free(export_src);
+        free(export_dst);
+        import_names_free(export_names, import_count);
         return NULL;
     }
 
     IdmValue name_value = idm_atom(ctx->rt, art->name ? art->name : path);
     bool init_pending = artifact_init_pending(ctx, art);
     IdmCore *cont = expand_body_items(ctx, items, cont_index, cont_count, false, err);
-    if (!cont) { free(export_src); free(export_dst); return NULL; }
+    if (!cont) { free(export_src); free(export_dst); import_names_free(export_names, import_count); return NULL; }
 
     uint32_t fn_off = 0;
     IdmBytecodeModule *module = NULL;
@@ -119,14 +161,16 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
         if (!module) {
             free(export_src);
             free(export_dst);
+            import_names_free(export_names, import_count);
             idm_core_free(cont);
             return NULL;
         }
     }
-    IdmCore *use_core = idm_core_use_package(name_value, module, art->init_fn + fn_off, export_src, export_dst, import_count, cont, span);
+    IdmCore *use_core = idm_core_use_package(name_value, module, art->init_fn + fn_off, export_src, export_dst, export_names, import_count, cont, span);
     if (!use_core) {
         free(export_src);
         free(export_dst);
+        import_names_free(export_names, import_count);
         idm_bc_destroy(module);
         free(module);
         idm_core_free(cont);
@@ -245,7 +289,7 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
         if (!install_imported_macro(ctx, k->macros[i].name, &ctx->empty_scopes, k->macros[i].module, k->macros[i].function_index, k->macros[i].phase_ns, k->macros[i].phase_env, kernel_name, kernel_key, err)) return false;
     }
     if (k->resolver_module) {
-        if (!install_imported_macro(ctx, "%resolver", &ctx->empty_scopes, k->resolver_module, k->resolver_fn, k->resolver_phase_ns, k->resolver_phase_env, kernel_name, kernel_key, err)) return false;
+        if (!install_imported_resolver(ctx, &ctx->empty_scopes, k->resolver_module, k->resolver_fn, k->resolver_phase_ns, k->resolver_phase_env, kernel_name, kernel_key, err)) return false;
     }
     if (!install_artifact_traits(ctx, k->traits, k->trait_count, &ctx->empty_scopes, NULL, kernel_name, kernel_key, err)) return false;
     if (!install_artifact_types(ctx, k->types, k->type_count, &ctx->empty_scopes, NULL, kernel_name, kernel_key, err)) return false;
@@ -253,12 +297,16 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
     if (import_count != 0) {
         ctx->kernel_import_src = malloc(import_count * sizeof(*ctx->kernel_import_src));
         ctx->kernel_import_dst = malloc(import_count * sizeof(*ctx->kernel_import_dst));
-        if (!ctx->kernel_import_src || !ctx->kernel_import_dst) return idm_error_oom(err, idm_span_unknown(NULL));
+        ctx->kernel_import_names = calloc(import_count, sizeof(*ctx->kernel_import_names));
+        ctx->kernel_import_count = import_count;
+        if (!ctx->kernel_import_src || !ctx->kernel_import_dst || !ctx->kernel_import_names) return idm_error_oom(err, idm_span_unknown(NULL));
         size_t n = 0;
         for (size_t i = 0; i < k->export_count; i++) {
             uint32_t consumer_slot = ctx->global_seq++;
             ctx->kernel_import_src[n] = k->exports[i].slot;
             ctx->kernel_import_dst[n] = consumer_slot;
+            ctx->kernel_import_names[n] = idm_strdup(k->exports[i].name);
+            if (!ctx->kernel_import_names[n]) return idm_error_oom(err, idm_span_unknown(NULL));
             n++;
             if (!idm_binding_table_add_with_arity(&ctx->bindings, k->exports[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &ctx->empty_scopes, consumer_slot, IDM_FRAME_GLOBAL, k->exports[i].arity, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
         }
@@ -266,10 +314,11 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
             uint32_t consumer_slot = ctx->global_seq++;
             ctx->kernel_import_src[n] = k->globals[i].slot;
             ctx->kernel_import_dst[n] = consumer_slot;
+            ctx->kernel_import_names[n] = idm_strdup(k->globals[i].name);
+            if (!ctx->kernel_import_names[n]) return idm_error_oom(err, idm_span_unknown(NULL));
             n++;
             if (!idm_binding_table_add_with_arity(&ctx->bindings, k->globals[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_GLOBAL, &k->globals[i].scopes, consumer_slot, IDM_FRAME_GLOBAL, k->globals[i].arity, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
         }
-        ctx->kernel_import_count = import_count;
     }
     ctx->kernel_wrap = import_count != 0;
     return true;
@@ -295,12 +344,15 @@ IdmCore *wrap_kernel_use(ExpandContext *ctx, IdmCore *body, IdmError *err) {
     size_t n = ctx->kernel_import_count;
     uint32_t *src = NULL;
     uint32_t *dst = NULL;
+    char **names = NULL;
     if (n != 0) {
         src = malloc(n * sizeof(*src));
         dst = malloc(n * sizeof(*dst));
-        if (!src || !dst) {
+        names = calloc(n, sizeof(*names));
+        if (!src || !dst || !names) {
             free(src);
             free(dst);
+            free(names);
             idm_bc_destroy(module);
             free(module);
             idm_core_free(body);
@@ -308,12 +360,25 @@ IdmCore *wrap_kernel_use(ExpandContext *ctx, IdmCore *body, IdmError *err) {
         }
         memcpy(src, ctx->kernel_import_src, n * sizeof(*src));
         memcpy(dst, ctx->kernel_import_dst, n * sizeof(*dst));
+        for (size_t i = 0; i < n; i++) {
+            names[i] = idm_strdup(ctx->kernel_import_names[i]);
+            if (!names[i]) {
+                free(src);
+                free(dst);
+                import_names_free(names, n);
+                idm_bc_destroy(module);
+                free(module);
+                idm_core_free(body);
+                return (IdmCore *)(uintptr_t)idm_error_oom(err, idm_span_unknown(NULL));
+            }
+        }
     }
     IdmValue name_value = idm_atom(ctx->rt, k->name ? k->name : "std/kernel");
-    IdmCore *wrapped = idm_core_use_package(name_value, module, k->init_fn + fn_off, src, dst, n, body, idm_span_unknown(NULL));
+    IdmCore *wrapped = idm_core_use_package(name_value, module, k->init_fn + fn_off, src, dst, names, n, body, idm_span_unknown(NULL));
     if (!wrapped) {
         free(src);
         free(dst);
+        import_names_free(names, n);
         idm_bc_destroy(module);
         free(module);
         idm_core_free(body);
@@ -759,7 +824,7 @@ bool activate_artifact(ExpandContext *ctx, const char *activation_name, const Id
     if (art->resolver_module) {
         IdmModuleRef *module = relocated_module_ref(ctx, art->resolver_module, min_id, delta, err);
         if (!module) return false;
-        bool ok = install_imported_macro(ctx, "%resolver", act_scopes, module, art->resolver_fn, art->resolver_phase_ns ? art->resolver_phase_ns : ctx->phase_ns, art->resolver_phase_env ? art->resolver_phase_env : ctx->phase_env, activation_name, provider_key, err);
+        bool ok = install_imported_resolver(ctx, act_scopes, module, art->resolver_fn, art->resolver_phase_ns ? art->resolver_phase_ns : ctx->phase_ns, art->resolver_phase_env ? art->resolver_phase_env : ctx->phase_env, activation_name, provider_key, err);
         idm_module_ref_release(module);
         if (!ok) return false;
     }
@@ -1029,6 +1094,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
         body = wrap_kernel_use(&ctx, body, err);
         if (!body) copy_ok = false;
     }
+    if (copy_ok && !idm_core_normalize(rt, &body, err)) copy_ok = false;
     if (copy_ok) {
         module = malloc(sizeof(*module));
         if (module) {

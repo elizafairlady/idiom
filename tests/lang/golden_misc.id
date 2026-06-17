@@ -327,7 +327,7 @@ suite do
     got = do
       send self {:keep 1}; send self {:take 2}; send self {:keep 3}; send self {:take 4}
       defn drain acc -> receive do {:take n} -> drain (cons n acc); after 30 -> acc end
-      drain (list)
+      drain '()
     end
     assert-inspect got "(4 2)"
   end

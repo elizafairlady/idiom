@@ -1,0 +1,7 @@
+defn loop k parent acc -> if (k < 1) do acc else do
+  spawn (fn -> send parent {:done})
+  receive do {:done} -> loop (k - 1) parent (acc + 1) end
+end
+
+me = self
+println (loop 100000 me 0)

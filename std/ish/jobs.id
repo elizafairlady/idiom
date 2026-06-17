@@ -6,7 +6,7 @@ end
 
 defn job-line n mark status text -> "[${n}]${mark}  #{status-name status}  ${text}"
 
-defn jobs-init _tag -> {'() 1}
+defn jobs-init -> {'() 1}
 
 defn find-port do
   '() _p -> :nil
@@ -97,7 +97,7 @@ defn jobs-print do
   end
 end
 
-defn jobs-cmd _tag -> match ish-session do
+defn jobs-cmd -> match ish-session do
   :nil -> :nil
   spid -> do
     send spid {:ish-jobs (self)}
@@ -143,7 +143,7 @@ defn bg-cmd n do
 end
 
 export defmacro jobs _stx do
-  %`(jobs-cmd :go)
+  %`jobs-cmd
 end
 
 export defmacro fg stx do

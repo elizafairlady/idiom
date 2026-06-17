@@ -1,0 +1,6 @@
+(let ((acc 0)
+      (i 0))
+  (while (< i 500000)
+    (setq acc (% (+ acc (* i 3) 7) 1000000007))
+    (setq i (1+ i)))
+  (princ (format "%d\n" acc)))

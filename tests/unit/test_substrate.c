@@ -249,9 +249,9 @@ static void test_core_compile_and_vm(void) {
     IdmError err;
     idm_error_init(&err);
     IdmSpan span = idm_span_unknown("<core-test>");
-    IdmCore *add = idm_core_app(idm_core_primitive(IDM_PRIM_ADD, span), span);
-    CHECK(idm_core_app_add_arg(add, idm_core_literal(idm_int(20), span)));
-    CHECK(idm_core_app_add_arg(add, idm_core_literal(idm_int(22), span)));
+    IdmCore *add = idm_core_call(idm_core_primitive(IDM_PRIM_ADD, span), span);
+    CHECK(idm_core_call_add_arg(add, idm_core_literal(idm_int(20), span)));
+    CHECK(idm_core_call_add_arg(add, idm_core_literal(idm_int(22), span)));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
@@ -451,10 +451,10 @@ static void test_core_do_and_local_bind(void) {
     idm_error_init(&err);
     IdmSpan span = idm_span_unknown("<local-core-test>");
 
-    IdmCore *add = idm_core_app(idm_core_primitive(IDM_PRIM_ADD, span), span);
-    CHECK(idm_core_app_add_arg(add, idm_core_local_ref(0, span)));
-    CHECK(idm_core_app_add_arg(add, idm_core_literal(idm_int(1), span)));
-    IdmCore *bind = idm_core_bind_local(0, idm_core_literal(idm_int(41), span), add, span);
+    IdmCore *add = idm_core_call(idm_core_primitive(IDM_PRIM_ADD, span), span);
+    CHECK(idm_core_call_add_arg(add, idm_core_local_ref("x", 0, span)));
+    CHECK(idm_core_call_add_arg(add, idm_core_literal(idm_int(1), span)));
+    IdmCore *bind = idm_core_bind_local("x", 0, idm_core_literal(idm_int(41), span), add, span);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
@@ -488,12 +488,12 @@ static void test_core_fn_literal_and_call(void) {
     idm_error_init(&err);
     IdmSpan span = idm_span_unknown("<fn-core-test>");
 
-    IdmCore *body_add = idm_core_app(idm_core_primitive(IDM_PRIM_ADD, span), span);
-    CHECK(idm_core_app_add_arg(body_add, idm_core_arg_ref(0, span)));
-    CHECK(idm_core_app_add_arg(body_add, idm_core_literal(idm_int(1), span)));
+    IdmCore *body_add = idm_core_call(idm_core_primitive(IDM_PRIM_ADD, span), span);
+    CHECK(idm_core_call_add_arg(body_add, idm_core_arg_ref("n", 0, span)));
+    CHECK(idm_core_call_add_arg(body_add, idm_core_literal(idm_int(1), span)));
     IdmCore *fn = idm_core_fn("inc", 1, body_add, span);
-    IdmCore *call = idm_core_app(fn, span);
-    CHECK(idm_core_app_add_arg(call, idm_core_literal(idm_int(41), span)));
+    IdmCore *call = idm_core_call(fn, span);
+    CHECK(idm_core_call_add_arg(call, idm_core_literal(idm_int(41), span)));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
@@ -501,8 +501,7 @@ static void test_core_fn_literal_and_call(void) {
     IdmBuffer dis;
     idm_buf_init(&dis);
     CHECK(idm_bc_disassemble(&dis, &module));
-    CHECK(strstr(dis.data, "MAKE_CLOSURE") != NULL);
-    CHECK(strstr(dis.data, "CALL") != NULL);
+    CHECK(strstr(dis.data, "TAIL_CALL        direct argc=1") != NULL);
     idm_buf_destroy(&dis);
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -515,11 +514,11 @@ static void test_core_fn_literal_and_call(void) {
 }
 
 static IdmCore *binary_prim(IdmPrimitive prim, IdmCore *a, IdmCore *b, IdmSpan span) {
-    IdmCore *app = idm_core_app(idm_core_primitive(prim, span), span);
-    CHECK(app != NULL);
-    CHECK(idm_core_app_add_arg(app, a));
-    CHECK(idm_core_app_add_arg(app, b));
-    return app;
+    IdmCore *call = idm_core_call(idm_core_primitive(prim, span), span);
+    CHECK(call != NULL);
+    CHECK(idm_core_call_add_arg(call, a));
+    CHECK(idm_core_call_add_arg(call, b));
+    return call;
 }
 
 static void test_core_letrec_recursion(void) {
@@ -529,18 +528,18 @@ static void test_core_letrec_recursion(void) {
     idm_error_init(&err);
     IdmSpan span = idm_span_unknown("<letrec-core-test>");
 
-    IdmCore *cond = binary_prim(IDM_PRIM_LT, idm_core_arg_ref(0, span), idm_core_literal(idm_int(1), span), span);
-    IdmCore *minus_one = binary_prim(IDM_PRIM_SUB, idm_core_arg_ref(0, span), idm_core_literal(idm_int(1), span), span);
-    IdmCore *recursive_call = idm_core_app(idm_core_capture_ref(0, span), span);
-    CHECK(idm_core_app_add_arg(recursive_call, minus_one));
-    IdmCore *sum = binary_prim(IDM_PRIM_ADD, idm_core_arg_ref(0, span), recursive_call, span);
+    IdmCore *cond = binary_prim(IDM_PRIM_LT, idm_core_arg_ref("n", 0, span), idm_core_literal(idm_int(1), span), span);
+    IdmCore *minus_one = binary_prim(IDM_PRIM_SUB, idm_core_arg_ref("n", 0, span), idm_core_literal(idm_int(1), span), span);
+    IdmCore *recursive_call = idm_core_call(idm_core_capture_ref("sumdown", 0, span), span);
+    CHECK(idm_core_call_add_arg(recursive_call, minus_one));
+    IdmCore *sum = binary_prim(IDM_PRIM_ADD, idm_core_arg_ref("n", 0, span), recursive_call, span);
     IdmCore *body = idm_core_cond(cond, idm_core_literal(idm_int(0), span), sum, span);
     IdmCore *fn = idm_core_fn("sumdown", 1, body, span);
-    CHECK(idm_core_fn_add_capture(fn, false, 0));
+    CHECK(idm_core_fn_add_capture(fn, IDM_CAP_LOCAL, "sumdown", 0));
     IdmCore *letrec = idm_core_letrec(span);
     CHECK(idm_core_letrec_add(letrec, "sumdown", 0, fn));
-    IdmCore *call = idm_core_app(idm_core_local_ref(0, span), span);
-    CHECK(idm_core_app_add_arg(call, idm_core_literal(idm_int(5), span)));
+    IdmCore *call = idm_core_call(idm_core_local_ref("sumdown", 0, span), span);
+    CHECK(idm_core_call_add_arg(call, idm_core_literal(idm_int(5), span)));
     CHECK(idm_core_letrec_set_body(letrec, call));
 
     IdmBytecodeModule module;
@@ -567,7 +566,7 @@ static void test_source_expansion_capabilities(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(bind-local 0 40 (app (prim add) (local 0) 2))");
+    CHECK_STR(dump.data, "(bind-local x#0 40 ((prim add) (local x#0) 2))");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);

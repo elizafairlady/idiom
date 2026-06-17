@@ -1,8 +1,8 @@
 package function
 
-export defn identity x -> x
+export defn identity x -> &x
 
-export defn const x -> fn _ -> x
+export defn const x -> fn _ -> &x
 
 export defn compose f g -> fn x -> f (g x)
 
@@ -12,7 +12,7 @@ export defn then x f -> f x
 
 export defn tap x f -> do
   f x
-  x
+  &x
 end
 
 export defn flip f -> fn a b -> f b a

@@ -54,24 +54,34 @@ bool resolve_transformer(ExpandContext *ctx, const IdmSyntax *head, uint32_t *ou
 
 bool resolve_head_resolver(ExpandContext *ctx, const IdmSyntax *head, uint32_t *out_payload, IdmError *err) {
     if (!head || head->kind != IDM_SYN_WORD) return false;
-    IdmSyntax *resolver = idm_syn_word("%resolver", head->span);
-    if (!resolver) {
-        idm_error_oom(err, head->span);
-        return false;
-    }
     const IdmScopeSet *scopes = idm_syn_scope_set(head, 0);
     if (scopes) {
-        for (size_t i = 0; i < scopes->count; i++) {
-            if (!idm_syn_scope_add(resolver, 0, scopes->items[i])) {
-                idm_syn_free(resolver);
-                idm_error_oom(err, head->span);
+        const ResolverDef *best = NULL;
+        for (size_t i = 0; i < ctx->resolver_count; i++) {
+            const ResolverDef *candidate = &ctx->resolvers[i];
+            if (!idm_scope_set_subset(&candidate->scopes, scopes)) continue;
+            if (!best || idm_scope_set_subset(&best->scopes, &candidate->scopes)) best = candidate;
+        }
+        if (!best) return false;
+        for (size_t i = 0; i < ctx->resolver_count; i++) {
+            const ResolverDef *candidate = &ctx->resolvers[i];
+            if (!idm_scope_set_subset(&candidate->scopes, scopes)) continue;
+            if (!idm_scope_set_subset(&candidate->scopes, &best->scopes)) {
+                expand_error(err, head->span, "ambiguous resolver for '%s'", head->as.text);
                 return false;
             }
         }
+        *out_payload = best->payload;
+        return true;
     }
-    bool ok = resolve_transformer(ctx, resolver, out_payload, err);
-    idm_syn_free(resolver);
-    return ok;
+    for (size_t i = ctx->resolver_count; i > 0; i--) {
+        const ResolverDef *candidate = &ctx->resolvers[i - 1u];
+        if (candidate->scopes.count == 0) {
+            *out_payload = candidate->payload;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool local_macro_invoke(void *user, IdmRuntime *rt, uint32_t payload, const IdmSyntax *use_syntax, IdmSyntax **out_syntax, IdmError *err) {
@@ -307,7 +317,7 @@ bool register_resolver(ExpandContext *ctx, IdmCore *fn, IdmSpan span, IdmError *
     if (ctx->decl_resolver) return idm_error_set(err, span, "only one resolver may be declared per protocol");
     ctx->decl_resolver_module = idm_module_ref_create(ctx->rt);
     if (!ctx->decl_resolver_module) return idm_error_oom(err, span);
-    if (!idm_core_compile_function_body(fn->as.fn.body, "%resolver", fn->as.fn.arity, &ctx->decl_resolver_module->module, &ctx->decl_resolver_fn, err)) {
+    if (!idm_core_compile_function_body(fn->as.fn.body, "resolver", fn->as.fn.arity, &ctx->decl_resolver_module->module, &ctx->decl_resolver_fn, err)) {
         idm_module_ref_release(ctx->decl_resolver_module);
         ctx->decl_resolver_module = NULL;
         return false;
@@ -403,6 +413,46 @@ bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScope
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
     ctx->macro_count++;
+    return true;
+}
+
+bool install_imported_resolver(ExpandContext *ctx, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
+    const IdmScopeSet *binding_scopes = scopes ? scopes : &ctx->empty_scopes;
+    int guard = surface_install_guard(ctx, provider, provider_key, "resolver", "resolver", IDM_BIND_SPACE_RESOLVER, binding_scopes, err);
+    if (guard <= 0) return guard == 0;
+    if (ctx->macro_count == ctx->macro_cap) {
+        size_t cap = ctx->macro_cap ? ctx->macro_cap * 2u : 4u;
+        MacroDef *macros = realloc(ctx->macros, cap * sizeof(*macros));
+        if (!macros) return idm_error_oom(err, idm_span_unknown(NULL));
+        ctx->macros = macros;
+        ctx->macro_cap = cap;
+    }
+    if (ctx->resolver_count == ctx->resolver_cap) {
+        size_t cap = ctx->resolver_cap ? ctx->resolver_cap * 2u : 4u;
+        ResolverDef *resolvers = realloc(ctx->resolvers, cap * sizeof(*resolvers));
+        if (!resolvers) return idm_error_oom(err, idm_span_unknown(NULL));
+        ctx->resolvers = resolvers;
+        ctx->resolver_cap = cap;
+    }
+    MacroDef *macro = &ctx->macros[ctx->macro_count];
+    memset(macro, 0, sizeof(*macro));
+    macro->name = idm_strdup("resolver");
+    if (!macro->name) return idm_error_oom(err, idm_span_unknown(NULL));
+    macro->module = idm_module_ref_retain(module);
+    macro->function_index = function_index;
+    macro->phase_ns = phase_ns ? phase_ns : ctx->phase_ns;
+    macro->phase_env = idm_phase_env_retain(phase_env ? phase_env : ctx->phase_env);
+    macro->exported = false;
+    macro->resolver_backed = true;
+    ResolverDef *resolver = &ctx->resolvers[ctx->resolver_count];
+    memset(resolver, 0, sizeof(*resolver));
+    if (!idm_scope_set_copy(&resolver->scopes, binding_scopes)) {
+        macro_def_destroy(macro);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    resolver->payload = (uint32_t)ctx->macro_count;
+    ctx->macro_count++;
+    ctx->resolver_count++;
     return true;
 }
 

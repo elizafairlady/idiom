@@ -5,7 +5,7 @@ defmacro twin-a stx do syntax-case stx do (_ e) -> %`(add %,e 1) end end
 defmacro mk-twin stx do syntax-case stx do
   (_ n) -> do
     expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ e) -> %`(add %,e 1) end end)
-    %`(do end)
+    %`:nil
   end
 end end
 mk-twin twin-b
@@ -34,7 +34,7 @@ suite do
     assert-expand-error "defmacro answer stx -> make-syntax-int stx 5\nactivate tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
   end
   test "provider over registered macro collides naming the unit" do
-    assert-expand-error "defmacro mk stx do syntax-case stx do\n  (_ n) -> do\n    expander-register-macro (syntax-nth stx 2) (fn s -> make-syntax-int s 5)\n    %`(do end)\n  end\nend end\nmk answer\nactivate tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
+    assert-expand-error "defmacro mk stx do syntax-case stx do\n  (_ n) -> do\n    expander-register-macro (syntax-nth stx 2) (fn s -> make-syntax-int s 5)\n    %`:nil\n  end\nend end\nmk answer\nactivate tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
   end
   test "provider over provider still collides naming the provider" do
     assert-expand-error "activate tests/pkg/exporter\nactivate tests/pkg/exporter2\nanswer x" "from 'tests/pkg/exporter' is already active in this context"
@@ -50,7 +50,7 @@ suite do
     assert-inspect got "{2 2}"
   end
   test "registered macro extent at block exit matches defmacro" do
-    assert-expand-error "defmacro mk stx do syntax-case stx do\n  (_ n) -> do\n    expander-register-macro (syntax-nth stx 2) (fn s -> make-syntax-int s 7)\n    %`(do end)\n  end\nend end\ndo\n  mk reg-in-block\n  reg-in-block q\nend\nreg-in-block q" "unbound identifier 'reg-in-block'"
+    assert-expand-error "defmacro mk stx do syntax-case stx do\n  (_ n) -> do\n    expander-register-macro (syntax-nth stx 2) (fn s -> make-syntax-int s 7)\n    %`:nil\n  end\nend end\ndo\n  mk reg-in-block\n  reg-in-block q\nend\nreg-in-block q" "unbound identifier 'reg-in-block'"
     assert-expand-error "do\n  defmacro def-in-block stx -> make-syntax-int stx 7\n  def-in-block q\nend\ndef-in-block q" "unbound identifier 'def-in-block'"
   end
   test "bare rebind in same unit stays legal after threading" do

@@ -181,7 +181,7 @@ static void test_session_windows_in_session(void) {
     check_eval_value(repl, "{:ok f tok} = repl-compile \"receive do :go -> 42 end\"", ":nil");
     check_eval_value(repl,
                      "do\n"
-                     "  w = repl-spawn f\n"
+                     "  w = repl-spawn &f\n"
                      "  monitor w\n"
                      "  send w :go\n"
                      "  receive do {:down _ p r} -> r end\n"

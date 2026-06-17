@@ -21,15 +21,27 @@ typedef struct IdmPattern IdmPattern;
 typedef struct IdmPatternSelector IdmPatternSelector;
 
 typedef struct {
+    char *name;
+    uint32_t slot;
+} IdmPatternLocal;
+
+typedef struct {
     IdmValue key;
     IdmPattern *pattern;
 } IdmDictPatternEntry;
 
+#define IDM_PATTERN_INLINE_BINDINGS 4u
+
 typedef struct {
     char **names;
     IdmValue *values;
+    uint32_t *slots;
     size_t count;
     size_t cap;
+    bool heap;
+    char *inline_names[IDM_PATTERN_INLINE_BINDINGS];
+    IdmValue inline_values[IDM_PATTERN_INLINE_BINDINGS];
+    uint32_t inline_slots[IDM_PATTERN_INLINE_BINDINGS];
 } IdmPatternBindings;
 
 typedef struct {
@@ -37,6 +49,10 @@ typedef struct {
     uint32_t arity;
     IdmPattern *const *patterns;
     uint32_t pattern_count;
+    const IdmPatternLocal *pattern_locals;
+    uint32_t pattern_local_count;
+    bool trivial_match;
+    bool has_guard;
 } IdmPatternSelectorClause;
 
 typedef bool (*IdmPatternGuardFn)(void *user, uint32_t function_index, const IdmPatternBindings *bindings, bool *out_pass, IdmError *err);
@@ -68,7 +84,9 @@ void idm_pat_free(IdmPattern *pat);
 void idm_pattern_bindings_init(IdmPatternBindings *bindings);
 void idm_pattern_bindings_destroy(IdmPatternBindings *bindings);
 const IdmValue *idm_pattern_bindings_get(const IdmPatternBindings *bindings, const char *name);
+const IdmValue *idm_pattern_bindings_get_slot(const IdmPatternBindings *bindings, uint32_t slot);
 bool idm_pattern_bindings_add(IdmPatternBindings *bindings, const char *name, IdmValue value);
+bool idm_pattern_bindings_add_slot(IdmPatternBindings *bindings, const char *name, uint32_t slot, IdmValue value);
 bool idm_pattern_match(IdmRuntime *rt, IdmPattern *pat, IdmValue value, IdmPatternBindings *bindings, IdmError *err);
 
 bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t clause_count, IdmPatternSelector **out, IdmError *err);

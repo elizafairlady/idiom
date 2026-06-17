@@ -28,7 +28,7 @@ struct SelPat {
     SelPatKind kind;
     IdmSpan span;
     union {
-        char *name;
+        struct { char *name; uint32_t slot; } name;
         IdmValue literal;
         struct { SelPat *left; SelPat *right; } pair;
         struct { SelPat **items; size_t count; } seq;
@@ -64,6 +64,7 @@ typedef struct {
     SelActionKind kind;
     uint32_t access;
     char *name;
+    uint32_t slot;
     IdmValue key;
 } SelAction;
 
@@ -75,6 +76,7 @@ typedef struct {
 typedef struct {
     uint32_t function_index;
     uint32_t arity;
+    bool has_guard;
     SelCell *cells;
     size_t cell_count;
     SelAction *actions;
@@ -115,6 +117,7 @@ struct SelNode {
     union {
         struct {
             uint32_t function_index;
+            bool has_guard;
             SelAction *actions;
             size_t action_count;
             SelCell *residuals;
@@ -333,20 +336,27 @@ IdmPattern *idm_pat_clone(const IdmPattern *pat) {
 }
 
 void idm_pattern_bindings_init(IdmPatternBindings *bindings) {
-    bindings->names = NULL;
-    bindings->values = NULL;
+    bindings->names = bindings->inline_names;
+    bindings->values = bindings->inline_values;
+    bindings->slots = bindings->inline_slots;
     bindings->count = 0;
-    bindings->cap = 0;
+    bindings->cap = IDM_PATTERN_INLINE_BINDINGS;
+    bindings->heap = false;
 }
 
 void idm_pattern_bindings_destroy(IdmPatternBindings *bindings) {
     if (!bindings) return;
-    free(bindings->names);
-    free(bindings->values);
-    bindings->names = NULL;
-    bindings->values = NULL;
+    if (bindings->heap) {
+        free(bindings->names);
+        free(bindings->values);
+        free(bindings->slots);
+    }
+    bindings->names = bindings->inline_names;
+    bindings->values = bindings->inline_values;
+    bindings->slots = bindings->inline_slots;
     bindings->count = 0;
-    bindings->cap = 0;
+    bindings->cap = IDM_PATTERN_INLINE_BINDINGS;
+    bindings->heap = false;
 }
 
 const IdmValue *idm_pattern_bindings_get(const IdmPatternBindings *bindings, const char *name) {
@@ -356,23 +366,60 @@ const IdmValue *idm_pattern_bindings_get(const IdmPatternBindings *bindings, con
     return NULL;
 }
 
-bool idm_pattern_bindings_add(IdmPatternBindings *bindings, const char *name, IdmValue value) {
+const IdmValue *idm_pattern_bindings_get_slot(const IdmPatternBindings *bindings, uint32_t slot) {
+    for (size_t i = 0; i < bindings->count; i++) {
+        if (bindings->slots[i] == slot) return &bindings->values[i];
+    }
+    return NULL;
+}
+
+bool idm_pattern_bindings_add_slot(IdmPatternBindings *bindings, const char *name, uint32_t slot, IdmValue value) {
+    if (slot != UINT32_MAX) {
+        const IdmValue *existing = idm_pattern_bindings_get_slot(bindings, slot);
+        if (existing) return idm_value_equal(*existing, value);
+    }
     const IdmValue *existing = idm_pattern_bindings_get(bindings, name);
     if (existing) return idm_value_equal(*existing, value);
     if (bindings->count == bindings->cap) {
         size_t cap = bindings->cap ? bindings->cap * 2u : 4u;
-        char **names = realloc(bindings->names, cap * sizeof(*names));
+        char **names = malloc(cap * sizeof(*names));
         if (!names) return false;
+        IdmValue *values = malloc(cap * sizeof(*values));
+        if (!values) {
+            free(names);
+            return false;
+        }
+        uint32_t *slots = malloc(cap * sizeof(*slots));
+        if (!slots) {
+            free(names);
+            free(values);
+            return false;
+        }
+        if (bindings->count != 0) {
+            memcpy(names, bindings->names, bindings->count * sizeof(*names));
+            memcpy(values, bindings->values, bindings->count * sizeof(*values));
+            memcpy(slots, bindings->slots, bindings->count * sizeof(*slots));
+        }
+        if (bindings->heap) {
+            free(bindings->names);
+            free(bindings->values);
+            free(bindings->slots);
+        }
         bindings->names = names;
-        IdmValue *values = realloc(bindings->values, cap * sizeof(*values));
-        if (!values) return false;
         bindings->values = values;
+        bindings->slots = slots;
         bindings->cap = cap;
+        bindings->heap = true;
     }
     bindings->names[bindings->count] = (char *)name;
     bindings->values[bindings->count] = value;
+    bindings->slots[bindings->count] = slot;
     bindings->count++;
     return true;
+}
+
+bool idm_pattern_bindings_add(IdmPatternBindings *bindings, const char *name, IdmValue value) {
+    return idm_pattern_bindings_add_slot(bindings, name, UINT32_MAX, value);
 }
 
 static void bindings_truncate(IdmPatternBindings *bindings, size_t count) {
@@ -510,7 +557,7 @@ static void sel_pat_free(SelPat *pat) {
     switch (pat->kind) {
         case SEL_PAT_BIND:
         case SEL_PAT_PIN:
-            free(pat->as.name);
+            free(pat->as.name.name);
             break;
         case SEL_PAT_PAIR:
             sel_pat_free(pat->as.pair.left);
@@ -538,12 +585,19 @@ static void sel_pat_free(SelPat *pat) {
     free(pat);
 }
 
-static SelPat *sel_pat_from_idm(const IdmPattern *pat, IdmError *err);
+static uint32_t selector_local_slot(const IdmPatternLocal *locals, uint32_t local_count, const char *name) {
+    for (uint32_t i = 0; i < local_count; i++) {
+        if (strcmp(locals[i].name, name) == 0) return locals[i].slot;
+    }
+    return UINT32_MAX;
+}
 
-static SelPat *sel_pat_list_from_idm_items(IdmPattern *const *items, size_t count, IdmSpan span, IdmError *err) {
+static SelPat *sel_pat_from_idm(const IdmPattern *pat, const IdmPatternLocal *locals, uint32_t local_count, IdmError *err);
+
+static SelPat *sel_pat_list_from_idm_items(IdmPattern *const *items, size_t count, const IdmPatternLocal *locals, uint32_t local_count, IdmSpan span, IdmError *err) {
     if (count == 0) return sel_pat_literal(idm_empty_list(), span);
-    SelPat *head = sel_pat_from_idm(items[0], err);
-    SelPat *tail = sel_pat_list_from_idm_items(items + 1u, count - 1u, span, err);
+    SelPat *head = sel_pat_from_idm(items[0], locals, local_count, err);
+    SelPat *tail = sel_pat_list_from_idm_items(items + 1u, count - 1u, locals, local_count, span, err);
     SelPat *out = head && tail ? sel_pat_alloc(SEL_PAT_PAIR, span) : NULL;
     if (!out) {
         sel_pat_free(head);
@@ -556,7 +610,7 @@ static SelPat *sel_pat_list_from_idm_items(IdmPattern *const *items, size_t coun
     return out;
 }
 
-static SelPat *sel_pat_from_idm(const IdmPattern *pat, IdmError *err) {
+static SelPat *sel_pat_from_idm(const IdmPattern *pat, const IdmPatternLocal *locals, uint32_t local_count, IdmError *err) {
     if (!pat) {
         idm_error_set(err, idm_span_unknown(NULL), "cannot lower null pattern");
         return NULL;
@@ -569,8 +623,9 @@ static SelPat *sel_pat_from_idm(const IdmPattern *pat, IdmError *err) {
         case IDM_PAT_PIN:
             out = sel_pat_alloc(pat->kind == IDM_PAT_BIND ? SEL_PAT_BIND : SEL_PAT_PIN, pat->span);
             if (!out) { idm_error_oom(err, pat->span); return NULL; }
-            out->as.name = idm_strdup(pat->as.name);
-            if (!out->as.name) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }
+            out->as.name.name = idm_strdup(pat->as.name);
+            out->as.name.slot = selector_local_slot(locals, local_count, pat->as.name);
+            if (!out->as.name.name) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }
             return out;
         case IDM_PAT_LITERAL:
             out = sel_pat_literal(pat->as.literal, pat->span);
@@ -579,12 +634,12 @@ static SelPat *sel_pat_from_idm(const IdmPattern *pat, IdmError *err) {
         case IDM_PAT_PAIR:
             out = sel_pat_alloc(SEL_PAT_PAIR, pat->span);
             if (!out) { idm_error_oom(err, pat->span); return NULL; }
-            out->as.pair.left = sel_pat_from_idm(pat->as.pair.left, err);
-            out->as.pair.right = sel_pat_from_idm(pat->as.pair.right, err);
+            out->as.pair.left = sel_pat_from_idm(pat->as.pair.left, locals, local_count, err);
+            out->as.pair.right = sel_pat_from_idm(pat->as.pair.right, locals, local_count, err);
             if (!out->as.pair.left || !out->as.pair.right) { sel_pat_free(out); return NULL; }
             return out;
         case IDM_PAT_LIST:
-            return sel_pat_list_from_idm_items(pat->as.seq.items, pat->as.seq.count, pat->span, err);
+            return sel_pat_list_from_idm_items(pat->as.seq.items, pat->as.seq.count, locals, local_count, pat->span, err);
         case IDM_PAT_VECTOR:
         case IDM_PAT_TUPLE: {
             out = sel_pat_alloc(pat->kind == IDM_PAT_VECTOR ? SEL_PAT_VECTOR : SEL_PAT_TUPLE, pat->span);
@@ -593,7 +648,7 @@ static SelPat *sel_pat_from_idm(const IdmPattern *pat, IdmError *err) {
             out->as.seq.items = pat->as.seq.count == 0 ? NULL : calloc(pat->as.seq.count, sizeof(*out->as.seq.items));
             if (pat->as.seq.count != 0 && !out->as.seq.items) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }
             for (size_t i = 0; i < pat->as.seq.count; i++) {
-                out->as.seq.items[i] = sel_pat_from_idm(pat->as.seq.items[i], err);
+                out->as.seq.items[i] = sel_pat_from_idm(pat->as.seq.items[i], locals, local_count, err);
                 if (!out->as.seq.items[i]) { sel_pat_free(out); return NULL; }
             }
             return out;
@@ -606,10 +661,10 @@ static SelPat *sel_pat_from_idm(const IdmPattern *pat, IdmError *err) {
             out->as.seq_rest.items = pat->as.seq_rest.count == 0 ? NULL : calloc(pat->as.seq_rest.count, sizeof(*out->as.seq_rest.items));
             if (pat->as.seq_rest.count != 0 && !out->as.seq_rest.items) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }
             for (size_t i = 0; i < pat->as.seq_rest.count; i++) {
-                out->as.seq_rest.items[i] = sel_pat_from_idm(pat->as.seq_rest.items[i], err);
+                out->as.seq_rest.items[i] = sel_pat_from_idm(pat->as.seq_rest.items[i], locals, local_count, err);
                 if (!out->as.seq_rest.items[i]) { sel_pat_free(out); return NULL; }
             }
-            out->as.seq_rest.rest = sel_pat_from_idm(pat->as.seq_rest.rest, err);
+            out->as.seq_rest.rest = sel_pat_from_idm(pat->as.seq_rest.rest, locals, local_count, err);
             if (!out->as.seq_rest.rest) { sel_pat_free(out); return NULL; }
             return out;
         }
@@ -621,7 +676,7 @@ static SelPat *sel_pat_from_idm(const IdmPattern *pat, IdmError *err) {
             if (pat->as.dict.count != 0 && !out->as.dict.entries) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }
             for (size_t i = 0; i < pat->as.dict.count; i++) {
                 out->as.dict.entries[i].key = pat->as.dict.entries[i].key;
-                out->as.dict.entries[i].pattern = sel_pat_from_idm(pat->as.dict.entries[i].pattern, err);
+                out->as.dict.entries[i].pattern = sel_pat_from_idm(pat->as.dict.entries[i].pattern, locals, local_count, err);
                 if (!out->as.dict.entries[i].pattern) { sel_pat_free(out); return NULL; }
             }
             return out;
@@ -658,6 +713,7 @@ static bool sel_row_clone(const SelRow *src, SelRow *dst, IdmError *err, IdmSpan
     memset(dst, 0, sizeof(*dst));
     dst->function_index = src->function_index;
     dst->arity = src->arity;
+    dst->has_guard = src->has_guard;
     dst->cell_count = src->cell_count;
     dst->action_count = src->action_count;
     if (src->cell_count != 0) {
@@ -708,11 +764,12 @@ static bool sel_row_add_action(SelRow *row, SelAction action, IdmError *err, Idm
     return true;
 }
 
-static bool sel_row_add_name_action(SelRow *row, SelActionKind kind, uint32_t access, const char *name, IdmError *err, IdmSpan span) {
+static bool sel_row_add_name_action(SelRow *row, SelActionKind kind, uint32_t access, const char *name, uint32_t slot, IdmError *err, IdmSpan span) {
     SelAction action;
     memset(&action, 0, sizeof(action));
     action.kind = kind;
     action.access = access;
+    action.slot = slot;
     action.name = idm_strdup(name);
     if (!action.name) return idm_error_oom(err, span);
     return sel_row_add_action(row, action, err, span);
@@ -993,8 +1050,8 @@ static bool specialize_defaultable_cell(const SelRow *src, size_t cell_index, Se
     SelPat *pat = src->cells[cell_index].pattern;
     uint32_t access = src->cells[cell_index].access;
     if (!sel_row_clone_without_cell(src, cell_index, dst, err, span)) return false;
-    if (pat->kind == SEL_PAT_BIND) return sel_row_add_name_action(dst, SEL_ACTION_BIND, access, pat->as.name, err, pat->span);
-    if (pat->kind == SEL_PAT_PIN) return sel_row_add_name_action(dst, SEL_ACTION_PIN, access, pat->as.name, err, pat->span);
+    if (pat->kind == SEL_PAT_BIND) return sel_row_add_name_action(dst, SEL_ACTION_BIND, access, pat->as.name.name, pat->as.name.slot, err, pat->span);
+    if (pat->kind == SEL_PAT_PIN) return sel_row_add_name_action(dst, SEL_ACTION_PIN, access, pat->as.name.name, pat->as.name.slot, err, pat->span);
     return true;
 }
 
@@ -1108,6 +1165,7 @@ static SelNode *make_try_node(const SelRow *row, SelNode *next, IdmError *err) {
     }
     node->kind = SEL_NODE_TRY;
     node->as.try_row.function_index = row->function_index;
+    node->as.try_row.has_guard = row->has_guard;
     node->as.try_row.next = next;
     if (!copy_actions(&node->as.try_row.actions, &node->as.try_row.action_count, row->actions, row->action_count, err, idm_span_unknown(NULL))) {
         free(node);
@@ -1302,14 +1360,18 @@ static bool selector_match_value(IdmRuntime *rt, IdmValue value, const SelPat *p
         case SEL_PAT_WILDCARD:
             return true;
         case SEL_PAT_BIND:
-            if (!idm_pattern_bindings_add(bindings, pat->as.name, value)) {
-                const IdmValue *existing = idm_pattern_bindings_get(bindings, pat->as.name);
+            if (!idm_pattern_bindings_add_slot(bindings, pat->as.name.name, pat->as.name.slot, value)) {
+                const IdmValue *existing = pat->as.name.slot != UINT32_MAX
+                    ? idm_pattern_bindings_get_slot(bindings, pat->as.name.slot)
+                    : idm_pattern_bindings_get(bindings, pat->as.name.name);
                 if (existing) return false;
                 return idm_error_oom(err, pat->span);
             }
             return true;
         case SEL_PAT_PIN: {
-            const IdmValue *pinned = idm_pattern_bindings_get(bindings, pat->as.name);
+            const IdmValue *pinned = pat->as.name.slot != UINT32_MAX
+                ? idm_pattern_bindings_get_slot(bindings, pat->as.name.slot)
+                : idm_pattern_bindings_get(bindings, pat->as.name.name);
             return pinned && idm_value_equal(*pinned, value);
         }
         case SEL_PAT_LITERAL:
@@ -1379,14 +1441,18 @@ static bool selector_apply_action(IdmRuntime *rt, const IdmPatternSelector *sele
     if (!available) return false;
     switch (action->kind) {
         case SEL_ACTION_BIND:
-            if (!idm_pattern_bindings_add(bindings, action->name, value)) {
-                const IdmValue *existing = idm_pattern_bindings_get(bindings, action->name);
+            if (!idm_pattern_bindings_add_slot(bindings, action->name, action->slot, value)) {
+                const IdmValue *existing = action->slot != UINT32_MAX
+                    ? idm_pattern_bindings_get_slot(bindings, action->slot)
+                    : idm_pattern_bindings_get(bindings, action->name);
                 if (existing) return false;
                 return idm_error_oom(err, idm_span_unknown(NULL));
             }
             return true;
         case SEL_ACTION_PIN: {
-            const IdmValue *pinned = idm_pattern_bindings_get(bindings, action->name);
+            const IdmValue *pinned = action->slot != UINT32_MAX
+                ? idm_pattern_bindings_get_slot(bindings, action->slot)
+                : idm_pattern_bindings_get(bindings, action->name);
             return pinned && idm_value_equal(*pinned, value);
         }
         case SEL_ACTION_DICT_HAS:
@@ -1409,6 +1475,11 @@ static bool selector_exec_node(IdmRuntime *rt, const IdmPatternSelector *selecto
             *out_matched = false;
             return true;
         case SEL_NODE_TRY: {
+            if (node->as.try_row.action_count == 0 && node->as.try_row.residual_count == 0 && !node->as.try_row.has_guard) {
+                *out_function_index = node->as.try_row.function_index;
+                *out_matched = true;
+                return true;
+            }
             size_t checkpoint = bindings->count;
             bool ok = true;
             for (size_t i = 0; ok && i < node->as.try_row.action_count; i++) {
@@ -1419,7 +1490,8 @@ static bool selector_exec_node(IdmRuntime *rt, const IdmPatternSelector *selecto
                 ok = selector_match_pat(rt, selector, args, argc, node->as.try_row.residuals[i].access, node->as.try_row.residuals[i].pattern, bindings, err);
                 if (err && err->present) return false;
             }
-            if (ok && guard) {
+            if (ok && node->as.try_row.has_guard) {
+                if (!guard) return idm_error_set(err, idm_span_unknown(NULL), "selector guard callback missing");
                 bool pass = true;
                 if (!guard(guard_user, node->as.try_row.function_index, bindings, &pass, err)) return false;
                 ok = pass;
@@ -1503,7 +1575,9 @@ bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t 
             memset(&row, 0, sizeof(row));
             row.function_index = clauses[c].function_index;
             row.arity = arity;
-            if (clauses[c].pattern_count != 0) {
+            row.has_guard = clauses[c].has_guard;
+            bool trivial_no_bindings = clauses[c].trivial_match && clauses[c].pattern_local_count == 0;
+            if (clauses[c].pattern_count != 0 && !trivial_no_bindings) {
                 row.cells = calloc(arity, sizeof(*row.cells));
                 if (!row.cells) {
                     rows_destroy(rows, row_count);
@@ -1514,7 +1588,7 @@ bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t 
                 row.cell_count = arity;
                 for (uint32_t p = 0; p < arity; p++) {
                     uint32_t root = 0;
-                    SelPat *pat = sel_pat_from_idm(clauses[c].patterns[p], err);
+                    SelPat *pat = sel_pat_from_idm(clauses[c].patterns[p], clauses[c].pattern_locals, clauses[c].pattern_local_count, err);
                     if (!pat || !selector_add_pattern_root(selector, pat, err, clauses[c].patterns[p]->span) ||
                         !selector_root_access(selector, p, &root, err, clauses[c].patterns[p]->span)) {
                         sel_row_destroy(&row);

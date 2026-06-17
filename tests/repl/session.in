@@ -38,7 +38,7 @@ end
 {:ok f tok} = repl-compile "20 + 22"
 do
   trap-exit :true
-  w = repl-spawn f
+  w = repl-spawn &f
   link w
   receive do {:exit p r} -> r end
 end

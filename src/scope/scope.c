@@ -279,6 +279,7 @@ const char *idm_binding_space_name(IdmBindingSpace space) {
         case IDM_BIND_SPACE_PROTOCOL: return "protocol";
         case IDM_BIND_SPACE_TRAIT: return "trait";
         case IDM_BIND_SPACE_TYPE: return "type";
+        case IDM_BIND_SPACE_RESOLVER: return "resolver";
     }
     return "<bad-space>";
 }

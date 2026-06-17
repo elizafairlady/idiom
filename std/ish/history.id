@@ -14,7 +14,7 @@ defn hist-path-under do
   state -> "${state}/idiom/ish_history"
 end
 
-defn hist-path _tag ->
+defn hist-path ->
   match (env-get "ISH_HISTFILE") do
     v when (present? v) -> v
     _ -> do
@@ -26,7 +26,7 @@ defn hist-path _tag ->
     end
   end
 
-defn hist-cap _tag -> match (parse-int (env-or "ISH_HISTSIZE" "")) do
+defn hist-cap -> match (parse-int (env-or "ISH_HISTSIZE" "")) do
   {:ok n} when (gt? n 0) -> n
   _ -> 10000
 end
@@ -97,12 +97,12 @@ defn render-oldest-first do
 end
 
 defn history-load shell do
-  path = cond shell (hist-path :go) :nil
+  path = cond shell hist-path :nil
   match path do
     :nil -> {:nil '()}
     p -> do
       mkdirs (dir-of p)
-      cap = hist-cap :go
+      cap = hist-cap
       match (file-read p) do
         {:ok data} -> do
           newest-first = parse-rev (split data "\n") '()

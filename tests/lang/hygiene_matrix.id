@@ -35,7 +35,7 @@ end end
 defmacro defmm2 stx do syntax-case stx do
   (_ n) -> do
     expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ a) -> %`(add %,a 1) end end)
-    %`(do end)
+    %`:nil
   end
 end end
 defmm2 inc2
@@ -390,7 +390,7 @@ suite do
         activate tests/pkg/exporter
         fn x -> x <+> (answer q)
       end
-      f = mk 0
+      f = mk
       f 1
     end
     assert-eq got 100

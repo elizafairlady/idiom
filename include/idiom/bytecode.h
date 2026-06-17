@@ -55,10 +55,13 @@ typedef enum {
     IDM_OP_TAIL_RECV
 } IdmOpcode;
 
+#define IDM_CALL_DIRECT_FLAG 0x80000000u
+#define IDM_CALL_ARGC_MASK 0x7fffffffu
+
 typedef struct {
+    uint32_t offset;
     char *name;
-    uint32_t slot;
-} IdmPatternLocal;
+} IdmBcNameNote;
 
 typedef struct {
     char *name;
@@ -90,6 +93,9 @@ typedef struct IdmBytecodeModule {
     struct { uint32_t offset; uint32_t file; uint32_t line; uint32_t column; } *spans;
     size_t span_count;
     size_t span_cap;
+    IdmBcNameNote *name_notes;
+    size_t name_note_count;
+    size_t name_note_cap;
 } IdmBytecodeModule;
 
 void idm_bc_init(IdmBytecodeModule *module);
@@ -99,6 +105,7 @@ bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError 
 bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t arity, uint32_t local_count, size_t entry, uint32_t *out_index);
 bool idm_bc_set_function_entry(IdmBytecodeModule *module, uint32_t function_index, size_t entry);
 bool idm_bc_note_span(IdmBytecodeModule *module, IdmSpan span);
+bool idm_bc_note_name(IdmBytecodeModule *module, size_t offset, const char *name);
 IdmSpan idm_bc_span_at(const IdmBytecodeModule *module, size_t ip);
 bool idm_bc_set_function_patterns_take(IdmBytecodeModule *module, uint32_t function_index, IdmPattern **patterns, uint32_t pattern_count);
 bool idm_bc_set_function_pattern_locals_take(IdmBytecodeModule *module, uint32_t function_index, IdmPatternLocal *locals, uint32_t local_count);

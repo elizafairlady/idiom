@@ -82,7 +82,7 @@ suite do
     end) 41
     captured = try do
       raise :boom
-      rescue r -> (fn _go -> r) :go
+      rescue r -> r
     end
     assert-eq captured :boom
     assert-eq (try do
@@ -119,12 +119,12 @@ suite do
     assert-eq f 9
   end
   test "zero-arity-captured-binding-reference-calls" do
-    make = fn _tag do
+    make = fn do
       f = fn -> 11
-      fn _go -> f
+      fn x -> f + x
     end
-    thunk = make :ready
-    assert-eq (thunk :go) 11
+    thunk = make
+    assert-eq (thunk 0) 11
   end
   test "float-prints-distinguishably" do
     assert-inspect 1.0 "1.0"
@@ -197,6 +197,23 @@ suite do
       tag 1
     end
     assert-inspect got ":second"
+  end
+  test "trait-cache-invalidates-after-rebind" do
+    got = do
+      trait Tag do
+        method tag x
+      end
+      implement Tag on int do
+        method tag _n -> :first
+      end
+      defn cached-tag n -> tag n
+      before = cached-tag 1
+      implement Tag on int do
+        method tag _n -> :second
+      end
+      {before (cached-tag 1)}
+    end
+    assert-inspect got "{:first :second}"
   end
   test "tail-method-dispatch" do
     got = do

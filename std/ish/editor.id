@@ -398,31 +398,31 @@ defn read-csi-seq acc -> match (tty-read 50) do
   _ -> :unknown
 end
 
-defn read-ss3 _tag -> match (tty-read 50) do
+defn read-ss3 -> match (tty-read 50) do
   {:byte b} -> csi-key b ""
   _ -> :unknown
 end
 
-defn read-escape _tag -> match (tty-read 50) do
+defn read-escape -> match (tty-read 50) do
   :timeout -> :esc
   :eof -> :eof
   {:byte 91} -> read-csi-seq ""
-  {:byte 79} -> read-ss3 :go
+  {:byte 79} -> read-ss3
   {:byte 98} -> :m-b
   {:byte 102} -> :m-f
   {:byte _} -> :unknown
   other -> other
 end
 
-defn read-key _tag -> match (tty-read :nil) do
+defn read-key -> match (tty-read :nil) do
   :eof -> :eof
   {:signal s} -> {:signal s}
-  {:byte 27} -> read-escape :go
+  {:byte 27} -> read-escape
   {:byte b} -> decode-byte b
   _ -> :unknown
 end
 
-defn term-cols _tag -> match tty-size do
+defn term-cols -> match tty-size do
   {c _r} -> c
 end
 
@@ -445,9 +445,9 @@ defn finish-cancel state do
   {:cancel (reset state)}
 end
 
-defn edit-loop state -> match (read-key :go) do
+defn edit-loop state -> match read-key do
   :eof -> {:eof state}
-  {:signal :resize} -> edit-loop (paint (sput state :cols (term-cols :go)))
+  {:signal :resize} -> edit-loop (paint (sput state :cols term-cols))
   {:signal _} -> finish-cancel state
   :unknown -> edit-loop state
   :esc -> edit-loop state
@@ -500,6 +500,6 @@ defn guarded-raw state -> match (try do {:ok (raw-read state)}; rescue r -> {:fa
 end
 
 export defn read state do
-  st = sput state :cols (term-cols :go)
+  st = sput state :cols term-cols
   cond (cooked? st) (cooked-read st) (guarded-raw st)
 end

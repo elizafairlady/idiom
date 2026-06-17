@@ -1,9 +1,11 @@
 #include "idiom/actor.h"
+#include "idiom/artifact.h"
 #include "idiom/common.h"
 #include "idiom/expand.h"
 #include "idiom/reader.h"
 #include "idiom/vm.h"
 
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,21 +24,65 @@ static bool read_input_arg(const char *arg, char **source, IdmError *err) {
     return idm_read_file(arg, source, &len, err);
 }
 
+static bool read_source_arg(const char *arg, IdmRuntime *rt, char **source, const char **label, IdmError *err) {
+    *source = NULL;
+    *label = strcmp(arg, "-") == 0 ? "<stdin>" : arg;
+    if (strcmp(arg, "-") == 0) {
+        size_t len = 0;
+        return idm_read_stream(stdin, "<stdin>", source, &len, err);
+    }
+    struct stat st;
+    if (stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) {
+        IdmBuffer src;
+        idm_buf_init(&src);
+        const char *pkg_label = NULL;
+        bool ok = idm_package_read_source(rt, arg, &src, &pkg_label, idm_span_unknown(arg), err);
+        if (!ok) {
+            idm_buf_destroy(&src);
+            return false;
+        }
+        *source = idm_buf_take(&src);
+        if (!*source) return idm_error_oom(err, idm_span_unknown(arg));
+        *label = pkg_label ? pkg_label : arg;
+        return true;
+    }
+    if (stat(arg, &st) != 0) {
+        IdmBuffer src;
+        idm_buf_init(&src);
+        const char *pkg_label = NULL;
+        bool ok = idm_package_read_source(rt, arg, &src, &pkg_label, idm_span_unknown(arg), err);
+        if (!ok) {
+            idm_buf_destroy(&src);
+            return false;
+        }
+        *source = idm_buf_take(&src);
+        if (!*source) return idm_error_oom(err, idm_span_unknown(arg));
+        *label = pkg_label ? pkg_label : arg;
+        return true;
+    }
+    size_t len = 0;
+    return idm_read_file(arg, source, &len, err);
+}
+
 static int dump_reader(const char *path) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     IdmError err;
     idm_error_init(&err);
     char *source = NULL;
-    if (!read_input_arg(path, &source, &err)) {
+    const char *file = NULL;
+    if (!read_source_arg(path, &rt, &source, &file, &err)) {
         idm_error_fprint(stderr, &err);
         idm_error_clear(&err);
+        idm_runtime_destroy(&rt);
         return 1;
     }
     IdmSyntax *program = NULL;
-    const char *file = strcmp(path, "-") == 0 ? "<stdin>" : path;
     if (!idm_reader_read_string(file, source, &program, &err)) {
         idm_error_fprint(stderr, &err);
         idm_error_clear(&err);
         free(source);
+        idm_runtime_destroy(&rt);
         return 1;
     }
     IdmBuffer buf;
@@ -46,19 +92,21 @@ static int dump_reader(const char *path) {
         idm_buf_destroy(&buf);
         idm_syn_free(program);
         free(source);
+        idm_runtime_destroy(&rt);
         return 1;
     }
     fputs(buf.data, stdout);
     idm_buf_destroy(&buf);
     idm_syn_free(program);
     free(source);
+    idm_runtime_destroy(&rt);
     return 0;
 }
 
 static bool expand_input(const char *path, IdmRuntime *rt, IdmCore **out, IdmError *err) {
     char *source = NULL;
-    if (!read_input_arg(path, &source, err)) return false;
-    const char *file = strcmp(path, "-") == 0 ? "<stdin>" : path;
+    const char *file = NULL;
+    if (!read_source_arg(path, rt, &source, &file, err)) return false;
     bool ok = idm_expand_string(rt, file, source, out, err);
     free(source);
     return ok;
@@ -217,7 +265,6 @@ static int run_file(const char *path) {
 }
 
 #include <dirent.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 static int collect_test_files(const char *dir_path, char ***out_files, size_t *out_count, size_t *out_cap) {

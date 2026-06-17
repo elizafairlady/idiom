@@ -45,9 +45,14 @@ typedef struct {
     IdmPhaseEnv *phase_env;
     bool exported;
     bool closure_backed;
+    bool resolver_backed;
     IdmValue transformer;
     IdmRuntime *rt;
 } MacroDef;
+typedef struct {
+    IdmScopeSet scopes;
+    uint32_t payload;
+} ResolverDef;
 typedef struct SavedFunctionContext_s {
     size_t table_base;
     uint32_t frame;
@@ -108,6 +113,7 @@ typedef struct {
 typedef struct {
     size_t binding_count;
     size_t macro_count;
+    size_t resolver_count;
     size_t operator_count;
     size_t protocol_count;
     size_t trait_count;
@@ -118,6 +124,7 @@ typedef struct {
     size_t activation_count;
     size_t surface_install_count;
     size_t artifact_base_count;
+    size_t runtime_import_count;
 } SurfaceCheckpoint;
 typedef struct {
     IdmRuntime *rt;
@@ -142,6 +149,9 @@ typedef struct {
     MacroDef *macros;
     size_t macro_count;
     size_t macro_cap;
+    ResolverDef *resolvers;
+    size_t resolver_count;
+    size_t resolver_cap;
     IdmOperatorDef *operators;
     size_t operator_count;
     size_t operator_cap;
@@ -168,6 +178,7 @@ typedef struct {
     bool value_context;
     bool command_sub_context;
     struct BodyDefCtx *def_ctx;
+    struct ScopePropagation_s *scope_propagation;
     const IdmScopeSet *op_fallback;
     bool repl_global_binds;
     struct { char *name; IdmSpan span; } *activations;
@@ -187,11 +198,15 @@ typedef struct {
     const char *trait_name;
     uint32_t *kernel_import_src;
     uint32_t *kernel_import_dst;
+    char **kernel_import_names;
     size_t kernel_import_count;
     bool kernel_wrap;
     struct { const void *art; IdmScopeId base; bool init_emitted[2]; } *artifact_bases;
     size_t artifact_base_count;
     size_t artifact_base_cap;
+    struct { const void *art; int phase; } *runtime_imports;
+    size_t runtime_import_count;
+    size_t runtime_import_cap;
     IdmArtifactDep *deps;
     size_t dep_count;
     size_t dep_cap;
@@ -206,6 +221,12 @@ typedef struct BodyDefCtx {
     IdmScopeSet use_site;
     struct BodyDefCtx *prev;
 } BodyDefCtx;
+typedef struct ScopePropagation_s {
+    IdmSyntax **work;
+    size_t start;
+    size_t count;
+    struct ScopePropagation_s *prev;
+} ScopePropagation;
 typedef struct {
     ExpandContext *ctx;
     IdmSyntax *const *items;
@@ -260,9 +281,11 @@ bool arg_push_slot(ExpandContext *ctx, const IdmSyntax *word, uint32_t slot);
 bool artifact_base(ExpandContext *ctx, const IdmArtifact *art, IdmScopeId *out_base, IdmError *err);
 bool artifact_init_pending(ExpandContext *ctx, const IdmArtifact *art);
 const IdmArtifact *artifact_get(ExpandContext *ctx, const char *path, IdmSpan span, IdmError *err);
+bool runtime_globals_imported(const ExpandContext *ctx, const IdmArtifact *art);
+bool record_runtime_globals_import(ExpandContext *ctx, const IdmArtifact *art, IdmSpan span, IdmError *err);
 void begin_clause_context(ExpandContext *ctx, SavedClauseContext *saved);
 void begin_function_context(ExpandContext *ctx, SavedFunctionContext *saved);
-bool capture_lookup_existing(const CaptureBinding *captures, size_t count, const IdmSyntax *word, uint32_t *out, const IdmArity **out_arity);
+const CaptureBinding *capture_lookup_existing(const CaptureBinding *captures, size_t count, const IdmSyntax *word);
 bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const char *unit_name_hint, const unsigned char src_hash[32], IdmArtifact *out, IdmError *err);
 bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err);
 void ctx_destroy(ExpandContext *ctx);
@@ -294,6 +317,7 @@ bool free_identifier_eq_callback(void *user, IdmRuntime *rt, const IdmSyntax *a,
 bool global_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_id);
 bool global_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, uint32_t *out_id);
 bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err);
+bool install_imported_resolver(ExpandContext *ctx, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err);
 bool install_artifact_traits(ExpandContext *ctx, const IdmPkgTrait *traits, size_t trait_count, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err);
 bool install_artifact_types(ExpandContext *ctx, const IdmPkgType *types, size_t type_count, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err);
 bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err);

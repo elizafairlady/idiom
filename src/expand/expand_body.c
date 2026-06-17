@@ -12,6 +12,8 @@ static DefnGroup *find_or_add_group(DefnGroup **groups, size_t *count, size_t *c
 static bool group_add_index(DefnGroup *group, size_t index);
 static void body_recs_destroy(BodyRec *recs, size_t count);
 static bool body_work_splice(IdmSyntax ***work, size_t *work_count, size_t *work_cap, size_t at, const IdmSyntax *body, IdmError *err);
+static bool body_scope_add_range(ExpandContext *ctx, IdmSyntax **work, size_t start, size_t count, IdmScopeId scope, IdmSpan span, IdmError *err);
+static bool body_definition_scope_add(ExpandContext *ctx, IdmSyntax **work, size_t start, size_t count, IdmScopeId scope, IdmSpan span, IdmError *err);
 static bool defn_clause_arity_from_items(const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, uint32_t *out_arity, IdmError *err);
 static bool defn_group_arity(const DefnGroup *group, IdmSyntax *const *items, IdmArity *out_arity, IdmError *err);
 static IdmCore *expand_defn_clause(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err);
@@ -609,38 +611,38 @@ static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, u
 static IdmCore *pattern_extract_value(BodyRec *rec, size_t index, IdmError *err) {
     IdmSpan span = rec->pattern_names[index]->span;
     IdmCore *prim = idm_core_primitive(IDM_PRIM_TUPLE_GET, span);
-    IdmCore *app = prim ? idm_core_app(prim, span) : NULL;
-    if (!app) {
+    IdmCore *call = prim ? idm_core_call(prim, span) : NULL;
+    if (!call) {
         idm_core_free(prim);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
-    IdmCore *ref = idm_core_local_ref(rec->pattern_tmp_slot, span);
-    if (!ref || !idm_core_app_add_arg(app, ref)) {
+    IdmCore *ref = idm_core_local_ref("_match", rec->pattern_tmp_slot, span);
+    if (!ref || !idm_core_call_add_arg(call, ref)) {
         idm_core_free(ref);
-        idm_core_free(app);
+        idm_core_free(call);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     IdmCore *idx = idm_core_literal(idm_int((int64_t)index), span);
-    if (!idx || !idm_core_app_add_arg(app, idx)) {
+    if (!idx || !idm_core_call_add_arg(call, idx)) {
         idm_core_free(idx);
-        idm_core_free(app);
+        idm_core_free(call);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
-    return app;
+    return call;
 }
 
-static IdmCore *pattern_bind_app(BodyRec *rec, IdmCore *rhs, IdmError *err) {
+static IdmCore *pattern_bind_call(BodyRec *rec, IdmCore *rhs, IdmError *err) {
     IdmSpan span = rec->pattern_syntax->span;
     IdmCore *prim = idm_core_primitive(IDM_PRIM_TUPLE, span);
-    IdmCore *body = prim ? idm_core_app(prim, span) : NULL;
+    IdmCore *body = prim ? idm_core_call(prim, span) : NULL;
     if (!body) {
         idm_core_free(prim);
         idm_core_free(rhs);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     for (size_t i = 0; i < rec->pattern_name_count; i++) {
-        IdmCore *ref = idm_core_local_ref((uint32_t)i, rec->pattern_names[i]->span);
-        if (!ref || !idm_core_app_add_arg(body, ref)) {
+        IdmCore *ref = idm_core_local_ref(rec->pattern_names[i]->as.text, (uint32_t)i, rec->pattern_names[i]->span);
+        if (!ref || !idm_core_call_add_arg(body, ref)) {
             idm_core_free(ref);
             idm_core_free(body);
             idm_core_free(rhs);
@@ -699,18 +701,18 @@ static IdmCore *pattern_bind_app(BodyRec *rec, IdmCore *rhs, IdmError *err) {
         idm_core_free(rhs);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
-    IdmCore *app = idm_core_app(fn, rec->form->span);
-    if (!app) {
+    IdmCore *call = idm_core_call(fn, rec->form->span);
+    if (!call) {
         idm_core_free(fn);
         idm_core_free(rhs);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, rec->form->span);
     }
-    if (!idm_core_app_add_arg(app, rhs)) {
-        idm_core_free(app);
+    if (!idm_core_call_add_arg(call, rhs)) {
+        idm_core_free(call);
         idm_core_free(rhs);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, rec->form->span);
     }
-    return app;
+    return call;
 }
 
 static IdmCore *build_macro_registration(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *fn, IdmSpan span, IdmError *err) {
@@ -720,25 +722,25 @@ static IdmCore *build_macro_registration(ExpandContext *ctx, const IdmSyntax *na
         return NULL;
     }
     IdmCore *callee = idm_core_primitive(IDM_PRIM_EXPANDER_REGISTER_MACRO, span);
-    IdmCore *app = callee ? idm_core_app(callee, span) : NULL;
-    if (!app) {
+    IdmCore *call = callee ? idm_core_call(callee, span) : NULL;
+    if (!call) {
         idm_core_free(callee);
         idm_core_free(fn);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     IdmCore *name_lit = idm_core_literal(name_value, span);
-    if (!name_lit || !idm_core_app_add_arg(app, name_lit)) {
+    if (!name_lit || !idm_core_call_add_arg(call, name_lit)) {
         idm_core_free(name_lit);
-        idm_core_free(app);
+        idm_core_free(call);
         idm_core_free(fn);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
-    if (!idm_core_app_add_arg(app, fn)) {
-        idm_core_free(app);
+    if (!idm_core_call_add_arg(call, fn)) {
+        idm_core_free(call);
         idm_core_free(fn);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
-    return app;
+    return call;
 }
 
 static bool body_work_splice(IdmSyntax ***work, size_t *work_count, size_t *work_cap, size_t at, const IdmSyntax *body, IdmError *err) {
@@ -758,6 +760,22 @@ static bool body_work_splice(IdmSyntax ***work, size_t *work_count, size_t *work
     return true;
 }
 
+static bool body_scope_add_range(ExpandContext *ctx, IdmSyntax **work, size_t start, size_t count, IdmScopeId scope, IdmSpan span, IdmError *err) {
+    (void)ctx;
+    for (size_t i = start; i < count; i++) {
+        if (!idm_syn_scope_add_tree(work[i], 0, scope)) return idm_error_oom(err, span);
+    }
+    return true;
+}
+
+static bool body_definition_scope_add(ExpandContext *ctx, IdmSyntax **work, size_t start, size_t count, IdmScopeId scope, IdmSpan span, IdmError *err) {
+    if (!body_scope_add_range(ctx, work, start, count, scope, span, err)) return false;
+    for (ScopePropagation *p = ctx->scope_propagation; p != NULL; p = p->prev) {
+        if (!body_scope_add_range(ctx, p->work, p->start, p->count, scope, span, err)) return false;
+    }
+    return true;
+}
+
 IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t index, size_t count, bool def_scope, IdmError *err) {
     if (index >= count) return idm_core_literal(idm_nil(), idm_span_unknown(NULL));
     size_t work_count = count - index;
@@ -767,11 +785,9 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     for (size_t i = 0; i < work_count; i++) work[i] = items[index + i];
     if (def_scope) {
         IdmScopeId body_scope = idm_scope_fresh(&ctx->scope_store);
-        for (size_t i = 0; i < work_count; i++) {
-            if (!idm_syn_scope_add_tree(work[i], 0, body_scope)) {
-                free(work);
-                return (IdmCore *)(uintptr_t)idm_error_oom(err, items[index]->span);
-            }
+        if (!body_scope_add_range(ctx, work, 0, work_count, body_scope, items[index]->span, err)) {
+            free(work);
+            return NULL;
         }
     }
     IdmScopeSet body_ctx_scopes;
@@ -794,6 +810,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     bool failed = false;
     bool boundary = false;
     size_t boundary_index = 0;
+    IdmScopeId definition_scope = 0;
     size_t i = 0;
 
     while (i < work_count && !failed && !boundary) {
@@ -817,7 +834,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             syn_is_form(form->as.seq.items[3], "%-body")) {
             int saved_phase = ctx->phase;
             ctx->phase = 1;
-            IdmCore *fn = expand_function_literal(ctx, "%resolver", form->as.seq.items[1], form->as.seq.items, 2u, form->as.seq.count, err);
+            IdmCore *fn = expand_function_literal(ctx, "resolver", form->as.seq.items[1], form->as.seq.items, 2u, form->as.seq.count, err);
             ctx->phase = saved_phase;
             if (!fn) { failed = true; break; }
             bool ok = register_resolver(ctx, fn, form->span, err);
@@ -830,7 +847,10 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         if (for_syntax_form(form, &for_syntax_body)) {
             int saved_phase = ctx->phase;
             ctx->phase = 1;
+            ScopePropagation propagation = { work, i + 1u, work_count, ctx->scope_propagation };
+            ctx->scope_propagation = &propagation;
             IdmCore *ignored = expand_body_items(ctx, for_syntax_body->as.seq.items, 1, for_syntax_body->as.seq.count, false, err);
+            ctx->scope_propagation = propagation.prev;
             bool ran = ignored != NULL && run_phase_core(ctx, ignored, err);
             ctx->phase = saved_phase;
             idm_core_free(ignored);
@@ -913,6 +933,15 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             DefnGroup *groups = NULL;
             size_t group_count = 0;
             size_t group_cap = 0;
+            bool persistent_repl_global = ctx->repl_global_binds && ctx->frame == IDM_FRAME_TOP;
+            if (!persistent_repl_global) {
+                if (definition_scope == 0) definition_scope = idm_scope_fresh(&ctx->scope_store);
+                if (!body_definition_scope_add(ctx, work, i, work_count, definition_scope, form->span, err)) {
+                    failed = true;
+                    break;
+                }
+                form = work[i];
+            }
             while (j < work_count) {
                 const IdmSyntax *def_name = NULL;
                 size_t ignored_start = 0;
@@ -1086,7 +1115,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             IdmCore *rhs = expand_parts(ctx, rec->form->as.seq.items, rec->rhs_start, rec->form->as.seq.count, err);
             ctx->value_context = saved_vc;
             if (!rhs) { failed = true; break; }
-            rec->core = pattern_bind_app(rec, rhs, err);
+            rec->core = pattern_bind_call(rec, rhs, err);
             if (!rec->core) { failed = true; break; }
             for (size_t n = 0; n < rec->pattern_name_count; n++) {
                 if (!push_bind_binder(ctx, rec->pattern_names[n], rec->pattern_slots[n], idm_arity_unknown())) {
@@ -1213,7 +1242,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                         core = letrec;
                     }
                 } else {
-                    core = idm_core_bind_local(rec->bind_slot, inner, core, rec->form->span);
+                    core = idm_core_bind_local(rec->bind_name->as.text, rec->bind_slot, inner, core, rec->form->span);
                     if (!core) { idm_core_free(inner); idm_error_oom(err, rec->form->span); failed = true; }
                 }
             } else if (rec->kind == BODY_REC_BIND_PATTERN) {
@@ -1243,7 +1272,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                             core = letrec;
                         }
                     } else {
-                        core = idm_core_bind_local(rec->pattern_slots[n - 1u], value, core, nspan);
+                        core = idm_core_bind_local(rec->pattern_names[n - 1u]->as.text, rec->pattern_slots[n - 1u], value, core, nspan);
                         if (!core) {
                             idm_core_free(value);
                             idm_error_oom(err, rec->form->span);
@@ -1252,7 +1281,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     }
                 }
                 if (!failed) {
-                    core = idm_core_bind_local(rec->pattern_tmp_slot, inner, core, rec->form->span);
+                    core = idm_core_bind_local("_match", rec->pattern_tmp_slot, inner, core, rec->form->span);
                     if (!core) { idm_core_free(inner); idm_error_oom(err, rec->form->span); failed = true; }
                 } else {
                     idm_core_free(inner);
@@ -1432,7 +1461,7 @@ IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, con
         return NULL;
     }
     for (size_t i = 0; i < ctx->capture_count; i++) {
-        if (!idm_core_fn_add_capture(fn, ctx->captures[i].kind, ctx->captures[i].source_index)) {
+        if (!idm_core_fn_add_capture(fn, ctx->captures[i].kind, ctx->captures[i].name, ctx->captures[i].source_index)) {
             idm_core_free(fn);
             end_function_context(ctx, &saved);
             idm_error_oom(err, head->span);
@@ -1727,7 +1756,7 @@ static IdmCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, Id
     }
 
     for (size_t i = 0; i < ctx->capture_count; i++) {
-        bool ok = single ? idm_core_fn_add_capture(result, ctx->captures[i].kind, ctx->captures[i].source_index) : idm_core_fn_multi_add_capture(result, ctx->captures[i].kind, ctx->captures[i].source_index);
+        bool ok = single ? idm_core_fn_add_capture(result, ctx->captures[i].kind, ctx->captures[i].name, ctx->captures[i].source_index) : idm_core_fn_multi_add_capture(result, ctx->captures[i].kind, ctx->captures[i].name, ctx->captures[i].source_index);
         if (!ok) {
             idm_core_free(result);
             end_function_context(ctx, &saved);
@@ -1850,7 +1879,7 @@ static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body
         }
     }
     for (size_t i = 0; i < ctx->capture_count; i++) {
-        if (!idm_core_fn_multi_add_capture(multi, ctx->captures[i].kind, ctx->captures[i].source_index)) {
+        if (!idm_core_fn_multi_add_capture(multi, ctx->captures[i].kind, ctx->captures[i].name, ctx->captures[i].source_index)) {
             idm_core_free(multi);
             end_function_context(ctx, &saved);
             return (IdmCore *)(uintptr_t)idm_error_oom(err, body->span);

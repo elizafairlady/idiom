@@ -10,7 +10,7 @@ static void test_source_defmacro(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(app (prim add) 40 2)");
+    CHECK_STR(dump.data, "((prim add) 40 2)");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
@@ -37,7 +37,7 @@ static void test_source_defmacro(void) {
     CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2)\nplus2 40\n", &core, &err));
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(app (prim add) 40 2)");
+    CHECK_STR(dump.data, "((prim add) 40 2)");
     idm_buf_destroy(&dump);
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
@@ -68,7 +68,7 @@ static void test_source_syntax_case(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(app (prim add) 40 2)");
+    CHECK_STR(dump.data, "((prim add) 40 2)");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
@@ -144,7 +144,7 @@ static void test_source_standard_if(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(cond :false 0 42)");
+    CHECK_STR(dump.data, "42");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);

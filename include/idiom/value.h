@@ -114,6 +114,7 @@ typedef struct {
 } IdmRuntimeTraitConformance;
 
 typedef struct {
+    uint64_t version;
     IdmRuntimeTraitContract *contracts;
     size_t contract_count;
     size_t contract_cap;
@@ -254,6 +255,7 @@ bool idm_trait_define(IdmRuntime *rt, const char *trait, const IdmTraitRequireme
 bool idm_trait_implement(IdmRuntime *rt, const char *trait, const char *type, const char *provider, const char *provider_key, const IdmTraitImplSpec *impls, size_t impl_count, IdmError *err);
 bool idm_trait_implements(IdmRuntime *rt, const char *trait, const char *type);
 bool idm_trait_lookup(IdmRuntime *rt, const char *trait, const char *method, const char *type, uint32_t argc, IdmValue *out_impl, IdmError *err);
+uint64_t idm_trait_world_version(IdmRuntime *rt);
 
 bool idm_is_nil(IdmValue value);
 bool idm_is_empty_list(IdmValue value);

@@ -27,7 +27,7 @@ export trait Prompt do
   method continuation-prompt _state -> "...> "
 end
 
-defn prompt-state status jobs -> %{:cwd (pwd) :status status :jobs jobs :cols (term-cols :go)}
+defn prompt-state status jobs -> %{:cwd (pwd) :status status :jobs jobs :cols term-cols}
 
 defn fenced-prompt do
   pst when (implements? Prompt pst) ->
@@ -157,7 +157,10 @@ defn dispatch res print? text -> match res do
   end
   {:ok f tok} -> do
     session = (self)
-    pid = repl-spawn (fn -> send session {:eval-value (self) ('() |> apply f)})
+    pid = repl-spawn (fn do
+      value = '() |> apply &f
+      send session {:eval-value (self) &value}
+    end)
     link pid
     observe pid tok print? text
   end
@@ -171,7 +174,7 @@ defn eval-text text print? -> match (repl-compile text) do
   res -> dispatch res print? text
 end
 
-defn config-home _tag ->
+defn config-home ->
   match (env-get "XDG_CONFIG_HOME") do
     v when (present? v) -> v
     _ -> match (env-get "HOME") do
@@ -180,8 +183,8 @@ defn config-home _tag ->
     end
   end
 
-defn rc-file _tag do
-  primary = match (config-home :go) do
+defn rc-file do
+  primary = match config-home do
     :nil -> :nil
     c -> "${c}/ish/rc.ish"
   end
@@ -195,7 +198,7 @@ defn rc-file _tag do
     end)
 end
 
-defn run-rc _tag -> match (rc-file :go) do
+defn run-rc -> match rc-file do
   :nil -> 0
   path -> match (file-read path) do
     {:ok src} -> eval-text src :false
@@ -211,7 +214,7 @@ defn first-hist ed -> match (sget ed :history) do
   _ -> :nil
 end
 
-defn jobs-poll _tag -> match ish-session do
+defn jobs-poll -> match ish-session do
   :nil -> {'() 0}
   spid when (eq? spid (self)) -> {'() 0}
   spid -> do
@@ -240,7 +243,7 @@ defn hist-notify text entries -> match ish-session do
   end
 end
 
-defn cwd-sync _tag -> match ish-session do
+defn cwd-sync -> match ish-session do
   :nil -> :ok
   spid when (eq? spid (self)) -> :ok
   spid -> do
@@ -253,7 +256,7 @@ defn cwd-sync _tag -> match ish-session do
 end
 
 defn exit-attempt st n status shell warned do
-  {lines _live} = jobs-poll :go
+  {lines _live} = jobs-poll
   stopped = stopped-lines lines
   if (eq? stopped '()) do
     n
@@ -267,8 +270,8 @@ defn exit-attempt st n status shell warned do
 end
 
 defn serve ed status shell warned do
-  cwd-sync :go
-  {lines live} = jobs-poll :go
+  cwd-sync
+  {lines live} = jobs-poll
   print-done (done-lines lines)
   ed2 = arm ed status shell live
   entry = read-entry ed2
@@ -309,7 +312,7 @@ defn run-loop shell entries rc do
   base = initial-state "idiom> "
   ed = cond (eq? (tty?) :true) base (sput base :dumb :true)
   ed2 = sput ed :history entries
-  rcr = cond (and shell rc) (run-rc :go) 0
+  rcr = cond (and shell rc) run-rc 0
   match rcr do
     {:exit n} -> n
     _ -> serve ed2 :nil shell :false
@@ -389,5 +392,5 @@ export defn main mode do
   end
   eval-text "activate std/ish\nuse std/ish" :false
   {hist entries} = history-load shell
-  state-loop shell (start-loop shell entries :true) '() (jobs-init :go) hist :nil
+  state-loop shell (start-loop shell entries :true) '() jobs-init hist :nil
 end

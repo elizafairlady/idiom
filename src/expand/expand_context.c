@@ -2,6 +2,7 @@
 
 static void capture_bindings_destroy(CaptureBinding *captures, size_t count);
 static void method_surface_def_destroy(MethodSurfaceDef *method);
+static void resolver_def_destroy(ResolverDef *resolver);
 static bool seed_primitive(ExpandContext *ctx, const char *name, IdmPrimitive primitive);
 static const char *operator_fixity_name(IdmOpFixity fixity);
 static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap);
@@ -32,6 +33,9 @@ void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     ctx->macros = NULL;
     ctx->macro_count = 0;
     ctx->macro_cap = 0;
+    ctx->resolvers = NULL;
+    ctx->resolver_count = 0;
+    ctx->resolver_cap = 0;
     ctx->operators = NULL;
     ctx->operator_count = 0;
     ctx->operator_cap = 0;
@@ -59,6 +63,7 @@ void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     ctx->value_context = false;
     ctx->command_sub_context = false;
     ctx->def_ctx = NULL;
+    ctx->scope_propagation = NULL;
     ctx->op_fallback = NULL;
     ctx->repl_global_binds = false;
     ctx->activations = NULL;
@@ -78,11 +83,15 @@ void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     ctx->trait_name = NULL;
     ctx->kernel_import_src = NULL;
     ctx->kernel_import_dst = NULL;
+    ctx->kernel_import_names = NULL;
     ctx->kernel_import_count = 0;
     ctx->kernel_wrap = false;
     ctx->artifact_bases = NULL;
     ctx->artifact_base_count = 0;
     ctx->artifact_base_cap = 0;
+    ctx->runtime_imports = NULL;
+    ctx->runtime_import_count = 0;
+    ctx->runtime_import_cap = 0;
     ctx->deps = NULL;
     ctx->dep_count = 0;
     ctx->dep_cap = 0;
@@ -156,6 +165,12 @@ void macro_def_destroy(MacroDef *macro) {
     idm_phase_env_release(macro->phase_env);
     macro->phase_env = NULL;
     macro->exported = false;
+}
+
+static void resolver_def_destroy(ResolverDef *resolver) {
+    if (!resolver) return;
+    idm_scope_set_destroy(&resolver->scopes);
+    memset(resolver, 0, sizeof(*resolver));
 }
 
 static void method_surface_def_destroy(MethodSurfaceDef *method) {
@@ -253,6 +268,7 @@ int surface_install_guard(ExpandContext *ctx, const char *provider, const char *
 void surface_checkpoint(ExpandContext *ctx, SurfaceCheckpoint *checkpoint) {
     checkpoint->binding_count = ctx->bindings.count;
     checkpoint->macro_count = ctx->macro_count;
+    checkpoint->resolver_count = ctx->resolver_count;
     checkpoint->operator_count = ctx->operator_count;
     checkpoint->protocol_count = ctx->protocol_count;
     checkpoint->trait_count = ctx->trait_count;
@@ -263,12 +279,15 @@ void surface_checkpoint(ExpandContext *ctx, SurfaceCheckpoint *checkpoint) {
     checkpoint->activation_count = ctx->activation_count;
     checkpoint->surface_install_count = ctx->surface_install_count;
     checkpoint->artifact_base_count = ctx->artifact_base_count;
+    checkpoint->runtime_import_count = ctx->runtime_import_count;
 }
 
 void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint) {
     while (ctx->activation_count > checkpoint->activation_count) free(ctx->activations[--ctx->activation_count].name);
     while (ctx->surface_install_count > checkpoint->surface_install_count) surface_install_destroy(&ctx->surface_installs[--ctx->surface_install_count]);
     if (ctx->artifact_base_count > checkpoint->artifact_base_count) ctx->artifact_base_count = checkpoint->artifact_base_count;
+    if (ctx->runtime_import_count > checkpoint->runtime_import_count) ctx->runtime_import_count = checkpoint->runtime_import_count;
+    while (ctx->resolver_count > checkpoint->resolver_count) resolver_def_destroy(&ctx->resolvers[--ctx->resolver_count]);
     while (ctx->macro_count > checkpoint->macro_count) macro_def_destroy(&ctx->macros[--ctx->macro_count]);
     while (ctx->operator_count > checkpoint->operator_count) idm_operator_def_destroy(&ctx->operators[--ctx->operator_count]);
     while (ctx->protocol_count > checkpoint->protocol_count) protocol_def_destroy(&ctx->protocols[--ctx->protocol_count]);
@@ -309,6 +328,8 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->package_globals);
     for (size_t i = 0; i < ctx->macro_count; i++) macro_def_destroy(&ctx->macros[i]);
     free(ctx->macros);
+    for (size_t i = 0; i < ctx->resolver_count; i++) resolver_def_destroy(&ctx->resolvers[i]);
+    free(ctx->resolvers);
     for (size_t i = 0; i < ctx->operator_count; i++) idm_operator_def_destroy(&ctx->operators[i]);
     free(ctx->operators);
     for (size_t i = 0; i < ctx->protocol_count; i++) protocol_def_destroy(&ctx->protocols[i]);
@@ -326,7 +347,12 @@ void ctx_destroy(ExpandContext *ctx) {
     idm_phase_env_release(ctx->phase_env);
     free(ctx->kernel_import_src);
     free(ctx->kernel_import_dst);
+    if (ctx->kernel_import_names) {
+        for (size_t i = 0; i < ctx->kernel_import_count; i++) free(ctx->kernel_import_names[i]);
+    }
+    free(ctx->kernel_import_names);
     free(ctx->artifact_bases);
+    free(ctx->runtime_imports);
     for (size_t i = 0; i < ctx->dep_count; i++) free(ctx->deps[i].path);
     free(ctx->deps);
     free(ctx->pat_binders);
@@ -678,20 +704,18 @@ static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, cons
     return (int)c->capture_index;
 }
 
-bool capture_lookup_existing(const CaptureBinding *captures, size_t count, const IdmSyntax *word, uint32_t *out, const IdmArity **out_arity) {
+const CaptureBinding *capture_lookup_existing(const CaptureBinding *captures, size_t count, const IdmSyntax *word) {
     for (size_t i = 0; i < count; i++) {
         if (strcmp(captures[i].name, word->as.text) == 0 && scopes_subset_for_ref(&captures[i].scopes, word)) {
-            if (out) *out = captures[i].capture_index;
-            if (out_arity) *out_arity = &captures[i].arity;
-            return true;
+            return &captures[i];
         }
     }
-    return false;
+    return NULL;
 }
 
 static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, const IdmBinding *b) {
-    uint32_t existing = 0;
-    if (capture_lookup_existing(g->captures, g->capture_count, word, &existing, NULL)) return (int)existing;
+    const CaptureBinding *existing = capture_lookup_existing(g->captures, g->capture_count, word);
+    if (existing) return (int)existing->capture_index;
     if (!g->prev) return -1;
     if (g->prev->frame == b->frame_id) {
         IdmCaptureKind kind = b->kind == IDM_BIND_ARG ? IDM_CAP_ARG : IDM_CAP_LOCAL;
@@ -840,13 +864,16 @@ bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, Idm
             acc = idm_cons(rt, entry, acc, err);
             if (err && err->present) return false;
         }
-    } else if (strcmp(kind, "macros") == 0 || strcmp(kind, "resolvers") == 0) {
-        bool want_resolvers = kind[0] == 'r';
+    } else if (strcmp(kind, "macros") == 0) {
         for (size_t i = ctx->macro_count; i > 0; i--) {
+            if (ctx->macros[i - 1u].resolver_backed) continue;
             const char *name = ctx->macros[i - 1u].name;
-            bool is_resolver = strcmp(name, "%resolver") == 0;
-            if (is_resolver != want_resolvers) continue;
             acc = idm_cons(rt, idm_atom(rt, name), acc, err);
+            if (err && err->present) return false;
+        }
+    } else if (strcmp(kind, "resolvers") == 0) {
+        for (size_t i = ctx->resolver_count; i > 0; i--) {
+            acc = idm_cons(rt, idm_atom(rt, "resolver"), acc, err);
             if (err && err->present) return false;
         }
     } else if (strcmp(kind, "protocols") == 0) {

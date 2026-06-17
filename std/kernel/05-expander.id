@@ -42,5 +42,5 @@ export defmacro operator stx do
 
   arrow = find-arrow 3
   finish (parse-opts 3 arrow {50 "left" "infix"}) (target-of arrow)
-  %`(do end)
+  %`:nil
 end

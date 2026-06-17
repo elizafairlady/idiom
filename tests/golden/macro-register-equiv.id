@@ -2,7 +2,7 @@ defmacro twin-a stx do syntax-case stx do (_ e) -> %`(add %,e 1) end end
 defmacro mk-twin stx do syntax-case stx do
   (_ n) -> do
     expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ e) -> %`(add %,e 1) end end)
-    %`(do end)
+    %`:nil
   end
 end end
 mk-twin twin-b

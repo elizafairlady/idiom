@@ -320,11 +320,16 @@ resolver form do
     end
   end
 
+  defn graph-list do
+    '() -> %`'()
+    xs -> %`(list %,@xs)
+  end
+
   defn stage-of parts do
     {envs body} = scan-envs parts
     check-stage body
     {argv redirs} = scan-body body
-    %`{:stage (list %,@argv) (list %,@redirs) (list %,@envs)}
+    %`{:stage %,(graph-list argv) %,(graph-list redirs) %,(graph-list envs)}
   end
 
   defn check-stage do
@@ -458,7 +463,8 @@ resolver form do
   defn write-sub-graph sub do
     sub-parts = collect-parts sub 1 (syntax-length sub)
     {argv redirs} = scan-body sub-parts
-    %`{:exec {:stage (list %,@argv) (list {:redir %,(make-syntax-atom form "<") 0 {:temp __psw}} %,@redirs) (list)} {:stdio :inherit :inherit :inherit}}
+    input-redir = %`{:redir %,(make-syntax-atom form "<") 0 {:temp __psw}}
+    %`{:exec {:stage %,(graph-list argv) %,(graph-list (cons input-redir redirs)) '()} {:stdio :inherit :inherit :inherit}}
   end
 
   defn bg-elem do

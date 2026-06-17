@@ -10,7 +10,7 @@ typedef enum {
     IDM_CORE_LOCAL_REF,
     IDM_CORE_CAPTURE_REF,
     IDM_CORE_PRIMITIVE,
-    IDM_CORE_APP,
+    IDM_CORE_CALL,
     IDM_CORE_COND,
     IDM_CORE_DO,
     IDM_CORE_BIND_LOCAL,
@@ -292,9 +292,15 @@ typedef enum {
 
 typedef struct {
     IdmCaptureKind kind;
+    char *name;
     uint32_t index;
     bool celled;
 } IdmCapture;
+
+typedef struct {
+    char *name;
+    uint32_t slot;
+} IdmCoreSlot;
 
 typedef struct {
     uint32_t arity;
@@ -318,14 +324,14 @@ struct IdmCore {
     bool local_celled;
     union {
         IdmValue literal;
-        uint32_t local_slot;
+        IdmCoreSlot slot_ref;
         IdmPrimitive primitive;
         struct {
             IdmCore *callee;
             IdmCore **args;
             size_t arg_count;
             size_t arg_cap;
-        } app;
+        } call;
         struct {
             IdmCore *cond;
             IdmCore *then_branch;
@@ -337,6 +343,7 @@ struct IdmCore {
             size_t cap;
         } do_expr;
         struct {
+            char *name;
             uint32_t slot;
             IdmCore *value;
             IdmCore *body;
@@ -389,6 +396,7 @@ struct IdmCore {
             uint32_t init_fn;
             uint32_t *export_src;
             uint32_t *export_dst;
+            char **export_names;
             size_t export_count;
             IdmCore *cont;
         } use_package;
@@ -421,33 +429,33 @@ struct IdmCore {
 };
 
 IdmCore *idm_core_literal(IdmValue value, IdmSpan span);
-IdmCore *idm_core_arg_ref(uint32_t slot, IdmSpan span);
-IdmCore *idm_core_local_ref(uint32_t slot, IdmSpan span);
-IdmCore *idm_core_capture_ref(uint32_t slot, IdmSpan span);
+IdmCore *idm_core_arg_ref(const char *name, uint32_t slot, IdmSpan span);
+IdmCore *idm_core_local_ref(const char *name, uint32_t slot, IdmSpan span);
+IdmCore *idm_core_capture_ref(const char *name, uint32_t slot, IdmSpan span);
 IdmCore *idm_core_primitive(IdmPrimitive primitive, IdmSpan span);
-IdmCore *idm_core_app(IdmCore *callee, IdmSpan span);
-bool idm_core_app_add_arg(IdmCore *app, IdmCore *arg);
+IdmCore *idm_core_call(IdmCore *callee, IdmSpan span);
+bool idm_core_call_add_arg(IdmCore *call, IdmCore *arg);
 IdmCore *idm_core_cond(IdmCore *cond, IdmCore *then_branch, IdmCore *else_branch, IdmSpan span);
 IdmCore *idm_core_do(IdmSpan span);
 bool idm_core_do_add(IdmCore *do_expr, IdmCore *item);
-IdmCore *idm_core_bind_local(uint32_t slot, IdmCore *value, IdmCore *body, IdmSpan span);
+IdmCore *idm_core_bind_local(const char *name, uint32_t slot, IdmCore *value, IdmCore *body, IdmSpan span);
 IdmCore *idm_core_fn(const char *name, uint32_t arity, IdmCore *body, IdmSpan span);
-bool idm_core_fn_add_capture(IdmCore *fn, IdmCaptureKind kind, uint32_t index);
+bool idm_core_fn_add_capture(IdmCore *fn, IdmCaptureKind kind, const char *name, uint32_t index);
 bool idm_core_fn_set_param_patterns_take(IdmCore *fn, IdmPattern **patterns, uint32_t pattern_count);
 bool idm_core_fn_set_pattern_locals_take(IdmCore *fn, IdmPatternLocal *locals, uint32_t local_count);
 bool idm_core_fn_set_guard_take(IdmCore *fn, IdmCore *guard);
 IdmCore *idm_core_fn_multi(const char *name, IdmSpan span);
-bool idm_core_fn_multi_add_capture(IdmCore *multi, IdmCaptureKind kind, uint32_t index);
+bool idm_core_fn_multi_add_capture(IdmCore *multi, IdmCaptureKind kind, const char *name, uint32_t index);
 bool idm_core_fn_multi_add_clause_take(IdmCore *multi, uint32_t arity, IdmPattern **patterns, uint32_t pattern_count, IdmPatternLocal *locals, uint32_t local_count, IdmCore *guard, IdmCore *body);
 IdmCore *idm_core_letrec(IdmSpan span);
 bool idm_core_letrec_add(IdmCore *letrec, const char *name, uint32_t slot, IdmCore *value);
 bool idm_core_letrec_set_body(IdmCore *letrec, IdmCore *body);
 void idm_core_letrec_set_global(IdmCore *letrec);
 void idm_core_letrec_set_fill_only(IdmCore *letrec);
-IdmCore *idm_core_global_ref(uint32_t id, IdmSpan span);
+IdmCore *idm_core_global_ref(const char *name, uint32_t id, IdmSpan span);
 IdmCore *idm_core_receive(IdmCore *receiver, IdmCore *timeout, IdmCore *timeout_body, IdmSpan span);
 IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, IdmCore *cleanup, uint32_t ensure_slot, IdmSpan span);
-IdmCore *idm_core_use_package(IdmValue name, IdmBytecodeModule *module, uint32_t init_fn, uint32_t *export_src, uint32_t *export_dst, size_t export_count, IdmCore *cont, IdmSpan span);
+IdmCore *idm_core_use_package(IdmValue name, IdmBytecodeModule *module, uint32_t init_fn, uint32_t *export_src, uint32_t *export_dst, char **export_names, size_t export_count, IdmCore *cont, IdmSpan span);
 IdmCore *idm_core_define_trait(IdmValue name, IdmSpan span);
 bool idm_core_define_trait_add_requirement(IdmCore *core, IdmValue requirement);
 bool idm_core_define_trait_add_method(IdmCore *core, IdmValue method, uint32_t arity, IdmCore *default_fn);
@@ -456,6 +464,7 @@ bool idm_core_implement_trait_add_impl(IdmCore *core, IdmValue method, uint32_t 
 IdmCore *idm_core_method_call(IdmValue trait, IdmValue method, IdmSpan span);
 bool idm_core_method_call_add_arg(IdmCore *core, IdmCore *arg);
 void idm_core_free(IdmCore *core);
+bool idm_core_normalize(IdmRuntime *rt, IdmCore **core, IdmError *err);
 bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmError *err);
 bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t arity, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
 bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);

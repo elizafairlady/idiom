@@ -67,6 +67,25 @@ static void test_for_syntax_context(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_phase_boundary_hint(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    expect_expand_error_note_rt(&rt, "<phase-transformer-helper>",
+        "defn helper x -> x\n"
+        "defmacro m stx -> helper stx\n"
+        "m 1\n",
+        "unbound identifier 'helper'",
+        "use for-syntax for transformer helpers");
+    expect_expand_error_note_rt(&rt, "<phase-runtime-helper>",
+        "for-syntax do\n"
+        "  defn helper x -> x\n"
+        "end\n"
+        "helper 1\n",
+        "unbound identifier 'helper'",
+        "bound for-syntax (phase 1) but referenced at runtime");
+    idm_runtime_destroy(&rt);
+}
+
 static void test_clause_failure_names_function(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
@@ -165,6 +184,7 @@ void run_diagnostics_suite(void) {
     test_hygiene_hint();
     test_package_load_context();
     test_for_syntax_context();
+    test_phase_boundary_hint();
     test_clause_failure_names_function();
     test_runtime_call_trace();
     test_expander_surface_introspection();

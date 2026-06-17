@@ -3,12 +3,12 @@
 static void test_source_operator_surface(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    check_operator_eval(&rt, "84 / 2\n", "(app (prim div) 84 2)", 42);
-    check_operator_eval(&rt, "142 % 100\n", "(app (prim mod) 142 100)", 42);
-    check_operator_eval(&rt, "2 ** 5 + 10\n", "(app (prim add) (app (prim pow) 2 5) 10)", 42);
-    check_operator_eval(&rt, "2 ** 3 ** 2\n", "(app (prim pow) 2 (app (prim pow) 3 2))", 512);
-    check_operator_eval(&rt, "50 + -8\n", "(app (prim add) 50 -8)", 42);
-    check_operator_eval(&rt, "50 + - 8\n", "(app (prim add) 50 (app (prim neg) 8))", 42);
+    check_operator_eval(&rt, "84 / 2\n", "((prim div) 84 2)", 42);
+    check_operator_eval(&rt, "142 % 100\n", "((prim mod) 142 100)", 42);
+    check_operator_eval(&rt, "2 ** 5 + 10\n", "((prim add) ((prim pow) 2 5) 10)", 42);
+    check_operator_eval(&rt, "2 ** 3 ** 2\n", "((prim pow) 2 ((prim pow) 3 2))", 512);
+    check_operator_eval(&rt, "50 + -8\n", "((prim add) 50 -8)", 42);
+    check_operator_eval(&rt, "50 + - 8\n", "((prim add) 50 ((prim neg) 8))", 42);
     check_operator_eval(&rt, "x = -5\nx + 47\n", NULL, 42);
     check_operator_eval(&rt, "if (3 != 4) do 42 else do 0 end\n", NULL, 42);
     check_operator_eval(&rt, "if (3 != 3) do 0 else do 42 end\n", NULL, 42);
@@ -70,7 +70,7 @@ static void test_source_operator(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(app (prim add) 1 (app (prim mul) 2 3))");
+    CHECK_STR(dump.data, "((prim add) 1 ((prim mul) 2 3))");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
@@ -150,7 +150,7 @@ static void test_source_fn(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(bind-local 0 (fn <lambda>/1 (app (prim add) (arg 0) 1)) (app (local 0) 41))");
+    CHECK_STR(dump.data, "(bind-local inc#0 (fn <lambda>/1 ((prim add) (arg x#0) 1)) ((local inc#0) 41))");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
@@ -205,7 +205,7 @@ static void test_source_defn_letrec(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(letrec ((inc #0 (fn inc/1 (app (prim add) (arg 0) 1)))) (app (global 0) 41))");
+    CHECK_STR(dump.data, "(letrec ((inc#0 (fn inc/1 ((prim add) (arg x#0) 1)))) ((global inc#0) 41))");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);

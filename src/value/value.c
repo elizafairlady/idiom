@@ -960,6 +960,10 @@ static IdmTraitWorld *trait_world(IdmRuntime *rt) {
     return &rt->trait_worlds[rt->trait_phase ? 1 : 0];
 }
 
+uint64_t idm_trait_world_version(IdmRuntime *rt) {
+    return trait_world(rt)->version;
+}
+
 static IdmRuntimeTraitContract *runtime_trait_find_contract(IdmRuntime *rt, const char *trait) {
     IdmTraitWorld *w = trait_world(rt);
     for (size_t i = 0; i < w->contract_count; i++) {
@@ -1112,12 +1116,14 @@ bool idm_trait_define(IdmRuntime *rt, const char *trait, const IdmTraitRequireme
             idm_error_set(err, idm_span_unknown(NULL), "trait '%s' is already defined with an incompatible contract", trait);
             return idm_error_reason(rt, err, "trait-redefinition", 1, idm_atom(rt, trait));
         }
+        IdmTraitWorld *w = trait_world(rt);
         for (size_t i = 0; i < method_count; i++) {
             IdmRuntimeTraitMethod *existing = runtime_trait_find_method(rt, trait, methods[i].name);
             existing->has_default = methods[i].has_default;
             existing->default_impl = methods[i].has_default ? idm_value_copy(rt, &rt->immortal, methods[i].default_impl, err) : idm_nil();
             if (err->present) return false;
         }
+        w->version++;
         return true;
     }
 
@@ -1181,6 +1187,7 @@ bool idm_trait_define(IdmRuntime *rt, const char *trait, const IdmTraitRequireme
     w->contracts[w->contract_count++] = staged_contract;
     for (size_t i = 0; i < method_count; i++) w->methods[w->method_count++] = staged[i];
     free(staged);
+    w->version++;
     return true;
 }
 
@@ -1268,6 +1275,7 @@ bool idm_trait_implement(IdmRuntime *rt, const char *trait, const char *type, co
     }
     for (size_t i = 0; i < impl_count; i++) w->impls[w->impl_count++] = staged[i];
     free(staged);
+    w->version++;
     return true;
 }
 

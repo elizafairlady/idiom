@@ -9,7 +9,7 @@ defn wait-done do
   end
 end
 
-p = exec {:exec {:stage (list {:lit "cat"}) (list) (list)} {:stdio :pipe :pipe :pipe}}
+p = exec {:exec {:stage (list {:lit "cat"}) '() '()} {:stdio :pipe :pipe :pipe}}
 me = self
 _writer = spawn (fn -> receive do
   {:never x} -> x
@@ -22,7 +22,7 @@ end
 closed = port-close-input p
 result = await p
 
-p2 = exec {:exec {:stage (list {:lit "printf"} {:lit "done"}) (list) (list)} {:stdio :null :pipe :pipe}}
+p2 = exec {:exec {:stage (list {:lit "printf"} {:lit "done"}) '() '()} {:stdio :null :pipe :pipe}}
 waited = wait-done p2 50
 after_done = port-read p2 :stdout 1024
 eof = port-read p2 :stdout 1024

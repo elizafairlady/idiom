@@ -1,0 +1,5 @@
+defn loop i n acc -> if (i >= n) do acc else do
+  loop (i + 1) n ((acc + (i * 3) + 7) % 1000000007)
+end
+
+println (loop 0 500000 0)
