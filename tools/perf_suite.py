@@ -333,8 +333,8 @@ def emit_idiom_dumps(cases, runtimes, dump_dir, timeout):
             if not filename:
                 continue
             path = runtime_file("idiom", filename)
-            core = run_checked([*runtime["cmd"], "--dump-core", str(path)], cwd=runtime.get("cwd"), timeout=timeout)
-            bytecode = run_checked([*runtime["cmd"], "--dump-bytecode", str(path)], cwd=runtime.get("cwd"), timeout=timeout)
+            core = run_checked([*runtime["cmd"], "dump", "core", str(path)], cwd=runtime.get("cwd"), timeout=timeout)
+            bytecode = run_checked([*runtime["cmd"], "dump", "bytecode", str(path)], cwd=runtime.get("cwd"), timeout=timeout)
             (label_dir / f"{case['name']}.core").write_text(core.stdout)
             (label_dir / f"{case['name']}.bytecode").write_text(bytecode.stdout)
 
@@ -411,7 +411,7 @@ def main(argv):
     parser.add_argument("--no-external", action="store_true")
     parser.add_argument("--with-sealed", action="store_true", help="Also benchmark Idiom sealed bytecode artifacts.")
     parser.add_argument("--json-out", type=Path)
-    parser.add_argument("--dump-dir", type=Path, help="Write --dump-core and --dump-bytecode outputs for Idiom cases.")
+    parser.add_argument("--dump-dir", type=Path, help="Write 'idiomc dump core' and 'idiomc dump bytecode' outputs for Idiom cases.")
     parser.add_argument("--callgrind-dir", type=Path, help="Run Idiom source cases under valgrind callgrind and store profiles.")
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args(argv)

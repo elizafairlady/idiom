@@ -5,23 +5,24 @@
 #include "idiom/reader.h"
 #include "idiom/vm.h"
 
+#include <dirent.h>
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static void usage(FILE *out) {
     fputs("usage:\n", out);
-    fputs("  idiomc <file|->            run a script (\"-\" reads stdin)\n", out);
-    fputs("  idiomc --eval <source>     run source text and print its value\n", out);
-    fputs("  idiomc --dump-reader <file|->\n", out);
-    fputs("  idiomc --dump-core <file|->\n", out);
-    fputs("  idiomc --dump-bytecode <file|->\n", out);
-}
-
-static bool read_input_arg(const char *arg, char **source, IdmError *err) {
-    size_t len = 0;
-    if (strcmp(arg, "-") == 0) return idm_read_stream(stdin, "<stdin>", source, &len, err);
-    return idm_read_file(arg, source, &len, err);
+    fputs("  idiomc run <file|package|-> [--] [args...]\n", out);
+    fputs("  idiomc <file|package|-> [args...]          run shorthand\n", out);
+    fputs("  idiomc eval <source> [--] [args...]        evaluate source and print its value\n", out);
+    fputs("  idiomc build <file|package|-> [-o OUT]\n", out);
+    fputs("  idiomc test [path...]\n", out);
+    fputs("  idiomc repl\n", out);
+    fputs("  idiomc dump reader|core|bytecode <file|package|->\n", out);
+    fputs("  idiomc dump surface [prelude]\n", out);
+    fputs("  idiomc version\n", out);
+    fputs("  idiomc help\n", out);
 }
 
 static bool read_source_arg(const char *arg, IdmRuntime *rt, char **source, const char **label, IdmError *err) {
@@ -32,21 +33,8 @@ static bool read_source_arg(const char *arg, IdmRuntime *rt, char **source, cons
         return idm_read_stream(stdin, "<stdin>", source, &len, err);
     }
     struct stat st;
-    if (stat(arg, &st) == 0 && S_ISDIR(st.st_mode)) {
-        IdmBuffer src;
-        idm_buf_init(&src);
-        const char *pkg_label = NULL;
-        bool ok = idm_package_read_source(rt, arg, &src, &pkg_label, idm_span_unknown(arg), err);
-        if (!ok) {
-            idm_buf_destroy(&src);
-            return false;
-        }
-        *source = idm_buf_take(&src);
-        if (!*source) return idm_error_oom(err, idm_span_unknown(arg));
-        *label = pkg_label ? pkg_label : arg;
-        return true;
-    }
-    if (stat(arg, &st) != 0) {
+    bool is_path = stat(arg, &st) == 0;
+    if (!is_path || S_ISDIR(st.st_mode)) {
         IdmBuffer src;
         idm_buf_init(&src);
         const char *pkg_label = NULL;
@@ -187,6 +175,17 @@ static size_t g_cli_arg_count = 0;
 
 static int run_sealed(const char *file, const unsigned char *data, size_t len);
 
+static void set_cli_args(int argc, char **argv, int first) {
+    if (first < argc && strcmp(argv[first], "--") == 0) first++;
+    if (first < argc) {
+        g_cli_args = argv + first;
+        g_cli_arg_count = (size_t)(argc - first);
+    } else {
+        g_cli_args = NULL;
+        g_cli_arg_count = 0;
+    }
+}
+
 static int run_source(const char *file, const char *source, bool print_result) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
@@ -228,44 +227,63 @@ done:
     return status;
 }
 
-static int run_file(const char *path) {
+static int run_source_arg(const char *path) {
+    IdmRuntime loader;
+    idm_runtime_init(&loader);
     IdmError err;
     idm_error_init(&err);
     char *source = NULL;
-    if (strcmp(path, "-") != 0) {
-        size_t len = 0;
-        if (!idm_read_file(path, &source, &len, &err)) {
-            idm_error_fprint(stderr, &err);
-            idm_error_clear(&err);
-            return 1;
-        }
-        const unsigned char *p = (const unsigned char *)source;
-        size_t remaining = len;
-        if (remaining >= 2 && p[0] == '#' && p[1] == '!') {
-            while (remaining > 0 && *p != '\n') { p++; remaining--; }
-            if (remaining > 0) { p++; remaining--; }
-        }
-        if (remaining >= 20 && memcmp(p, "IDMX", 4u) == 0) {
-            int status = run_sealed(path, p, remaining);
-            free(source);
-            return status;
-        }
-        int status = run_source(path, source, false);
-        free(source);
-        return status;
+    const char *label = NULL;
+    int status = 1;
+    if (!read_source_arg(path, &loader, &source, &label, &err)) {
+        idm_error_fprint(stderr, &err);
+        goto done;
     }
-    if (!read_input_arg(path, &source, &err)) {
+    char *owned_label = idm_strdup(label ? label : path);
+    if (!owned_label) {
+        idm_error_oom(&err, idm_span_unknown(path));
+        idm_error_fprint(stderr, &err);
+        goto done;
+    }
+    status = run_source(owned_label, source, false);
+    free(owned_label);
+done:
+    idm_error_clear(&err);
+    free(source);
+    idm_runtime_destroy(&loader);
+    return status;
+}
+
+static int run_file(const char *path) {
+    if (strcmp(path, "-") == 0) return run_source_arg(path);
+    struct stat st;
+    if (stat(path, &st) != 0 || S_ISDIR(st.st_mode)) return run_source_arg(path);
+
+    IdmError err;
+    idm_error_init(&err);
+    char *source = NULL;
+    size_t len = 0;
+    if (!idm_read_file(path, &source, &len, &err)) {
         idm_error_fprint(stderr, &err);
         idm_error_clear(&err);
         return 1;
     }
-    int status = run_source("<stdin>", source, false);
+    const unsigned char *p = (const unsigned char *)source;
+    size_t remaining = len;
+    if (remaining >= 2 && p[0] == '#' && p[1] == '!') {
+        while (remaining > 0 && *p != '\n') { p++; remaining--; }
+        if (remaining > 0) { p++; remaining--; }
+    }
+    if (remaining >= 20 && memcmp(p, "IDMX", 4u) == 0) {
+        int status = run_sealed(path, p, remaining);
+        free(source);
+        return status;
+    }
+    int status = run_source(path, source, false);
     free(source);
+    idm_error_clear(&err);
     return status;
 }
-
-#include <dirent.h>
-#include <unistd.h>
 
 static int collect_test_files(const char *dir_path, char ***out_files, size_t *out_count, size_t *out_cap) {
     DIR *dir = opendir(dir_path);
@@ -314,7 +332,9 @@ static int run_tests(int argc, char **argv) {
                 files = grown;
                 cap = next;
             }
-            files[count++] = strdup(argv[i]);
+            files[count] = idm_strdup(argv[i]);
+            if (!files[count]) return 1;
+            count++;
         }
     }
     if (count == 0) {
@@ -396,7 +416,7 @@ static int build_sealed(const char *src_path, const char *out_path) {
     IdmError err;
     idm_error_init(&err);
     char *source = NULL;
-    size_t len = 0;
+    const char *file = NULL;
     int status = 1;
     IdmCore *core = NULL;
     IdmSyntax *program = NULL;
@@ -409,12 +429,12 @@ static int build_sealed(const char *src_path, const char *out_path) {
     idm_buf_init(&blob);
     IdmBuffer out;
     idm_buf_init(&out);
-    if (!idm_read_file(src_path, &source, &len, &err)) goto done;
-    if (!idm_reader_read_string(src_path, source, &program, &err)) goto done;
+    if (!read_source_arg(src_path, &rt, &source, &file, &err)) goto done;
+    if (!idm_reader_read_string(file, source, &program, &err)) goto done;
     size_t src_len = strlen(src_path);
     if (src_len >= 4 && strcmp(src_path + src_len - 4, ".ish") == 0) {
-        wrapped = idm_syn_program_prepend_activate(program, "std/shell", src_path);
-        if (!wrapped) { idm_error_oom(&err, idm_span_unknown(src_path)); goto done; }
+        wrapped = idm_syn_program_prepend_activate(program, "std/shell", file);
+        if (!wrapped) { idm_error_oom(&err, idm_span_unknown(file)); goto done; }
     }
     if (!idm_expand_syntax(&rt, wrapped ? wrapped : program, &core, &err)) goto done;
     uint32_t main_fn = 0;
@@ -430,7 +450,13 @@ static int build_sealed(const char *src_path, const char *out_path) {
         goto done;
     }
     FILE *f = fopen(out_path, "wb");
-    if (!f || fwrite(out.data, 1u, out.len, f) != out.len || fclose(f) != 0) {
+    if (!f) {
+        idm_error_set(&err, idm_span_unknown(out_path), "cannot write '%s'", out_path);
+        goto done;
+    }
+    bool wrote = fwrite(out.data, 1u, out.len, f) == out.len;
+    if (fclose(f) != 0) wrote = false;
+    if (!wrote) {
         idm_error_set(&err, idm_span_unknown(out_path), "cannot write '%s'", out_path);
         goto done;
     }
@@ -449,6 +475,22 @@ done:
     free(source);
     idm_runtime_destroy(&rt);
     return status;
+}
+
+static int dump_surface(const char *prelude) {
+    char source[4096];
+    snprintf(source, sizeof(source),
+             "%s\n"
+             "for-syntax do\n"
+             "  println (tuple :operators (expander-surface :operators))\n"
+             "  println (tuple :macros (expander-surface :macros))\n"
+             "  println (tuple :protocols (expander-surface :protocols))\n"
+             "  println (tuple :resolvers (expander-surface :resolvers))\n"
+             "  println (tuple :methods (expander-surface :methods))\n"
+             "  println (tuple :active (expander-surface :active))\n"
+             "end\n"
+             ":ok\n", prelude);
+    return run_source("<dump-surface>", source, false);
 }
 
 #ifndef IDM_VERSION
@@ -480,61 +522,120 @@ static int run_repl(void) {
     return status;
 }
 
-int main(int argc, char **argv) {
-    if (argc == 2 && strcmp(argv[1], "repl") == 0) return run_repl();
-    if (argc >= 2 && strcmp(argv[1], "test") == 0) return run_tests(argc - 2, argv + 2);
-    if (argc >= 3 && strcmp(argv[1], "build") == 0) {
-        const char *out_path = NULL;
-        const char *src_path = argv[2];
-        if (argc == 5 && strcmp(argv[3], "-o") == 0) out_path = argv[4];
-        if (argc == 3) {
-            static char derived[1024];
-            snprintf(derived, sizeof(derived), "%s", src_path);
-            char *dot = strrchr(derived, '.');
-            if (dot && dot != derived) *dot = '\0';
-            out_path = derived;
+static int command_run(int argc, char **argv) {
+    int path_index = 0;
+    if (argc > 0 && strcmp(argv[0], "--") == 0) path_index = 1;
+    if (path_index >= argc) {
+        fprintf(stderr, "usage: idiomc run <file|package|-> [--] [args...]\n");
+        return 64;
+    }
+    set_cli_args(argc, argv, path_index + 1);
+    return run_file(argv[path_index]);
+}
+
+static int command_eval(int argc, char **argv) {
+    int source_index = 0;
+    if (argc > 0 && strcmp(argv[0], "--") == 0) source_index = 1;
+    if (source_index >= argc) {
+        fprintf(stderr, "usage: idiomc eval <source> [--] [args...]\n");
+        return 64;
+    }
+    set_cli_args(argc, argv, source_index + 1);
+    return run_source("<eval>", argv[source_index], true);
+}
+
+static int command_build(int argc, char **argv) {
+    const char *src_path = NULL;
+    const char *out_path = NULL;
+    bool parse_options = true;
+    for (int i = 0; i < argc; i++) {
+        if (parse_options && strcmp(argv[i], "--") == 0) {
+            parse_options = false;
+            continue;
         }
-        if (!out_path) {
-            fprintf(stderr, "usage: idiomc build SRC [-o OUT]\n");
+        if (parse_options && strcmp(argv[i], "-o") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "usage: idiomc build <file|package|-> [-o OUT]\n");
+                return 64;
+            }
+            out_path = argv[++i];
+            continue;
+        }
+        if (parse_options && argv[i][0] == '-' && strcmp(argv[i], "-") != 0) {
+            fprintf(stderr, "idiomc build: unknown option '%s'\n", argv[i]);
             return 64;
         }
-        return build_sealed(src_path, out_path);
+        if (src_path) {
+            fprintf(stderr, "idiomc build: expected one source input\n");
+            return 64;
+        }
+        src_path = argv[i];
     }
-    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+    if (!src_path) {
+        fprintf(stderr, "usage: idiomc build <file|package|-> [-o OUT]\n");
+        return 64;
+    }
+    char derived[1024];
+    if (!out_path) {
+        if (strcmp(src_path, "-") == 0) {
+            fprintf(stderr, "idiomc build: stdin requires -o OUT\n");
+            return 64;
+        }
+        snprintf(derived, sizeof(derived), "%s", src_path);
+        char *dot = strrchr(derived, '.');
+        if (dot && dot != derived) *dot = '\0';
+        out_path = derived;
+    }
+    return build_sealed(src_path, out_path);
+}
 
-        printf("idiomc %s (idiom)\n", IDM_VERSION);
-        return 0;
+static int command_dump(int argc, char **argv) {
+    if (argc < 1) {
+        fprintf(stderr, "usage: idiomc dump reader|core|bytecode <file|package|->\n       idiomc dump surface [prelude]\n");
+        return 64;
     }
-    if (argc == 2 && strcmp(argv[1], "--help") == 0) {
+    if (strcmp(argv[0], "surface") == 0) {
+        if (argc > 2) {
+            fprintf(stderr, "usage: idiomc dump surface [prelude]\n");
+            return 64;
+        }
+        return dump_surface(argc == 2 ? argv[1] : "");
+    }
+    if (argc != 2) {
+        fprintf(stderr, "usage: idiomc dump reader|core|bytecode <file|package|->\n");
+        return 64;
+    }
+    if (strcmp(argv[0], "reader") == 0) return dump_reader(argv[1]);
+    if (strcmp(argv[0], "core") == 0) return dump_core(argv[1]);
+    if (strcmp(argv[0], "bytecode") == 0) return dump_bytecode(argv[1]);
+    fprintf(stderr, "idiomc dump: unknown target '%s'\n", argv[0]);
+    return 64;
+}
+
+int main(int argc, char **argv) {
+    if (argc <= 1) {
+        usage(stderr);
+        return 64;
+    }
+    const char *cmd = argv[1];
+    if ((strcmp(cmd, "help") == 0 || strcmp(cmd, "--help") == 0) && argc == 2) {
         usage(stdout);
         return 0;
     }
-    if (argc == 3 && strcmp(argv[1], "--eval") == 0) return run_source("<eval>", argv[2], true);
-    if (argc == 3 && strcmp(argv[1], "--dump-reader") == 0) return dump_reader(argv[2]);
-    if (argc == 3 && strcmp(argv[1], "--dump-core") == 0) return dump_core(argv[2]);
-    if (argc == 3 && strcmp(argv[1], "--dump-bytecode") == 0) return dump_bytecode(argv[2]);
-    if ((argc == 2 || argc == 3) && strcmp(argv[1], "--dump-surface") == 0) {
-        const char *prelude = argc == 3 ? argv[2] : "";
-        char source[4096];
-        snprintf(source, sizeof(source),
-                 "%s\n"
-                 "for-syntax do\n"
-                 "  println (tuple :operators (expander-surface :operators))\n"
-                 "  println (tuple :macros (expander-surface :macros))\n"
-                 "  println (tuple :protocols (expander-surface :protocols))\n"
-                 "  println (tuple :resolvers (expander-surface :resolvers))\n"
-                 "  println (tuple :methods (expander-surface :methods))\n"
-                 "  println (tuple :active (expander-surface :active))\n"
-                 "end\n"
-                 ":ok\n", prelude);
-        return run_source("<dump-surface>", source, false);
+    if ((strcmp(cmd, "version") == 0 || strcmp(cmd, "--version") == 0) && argc == 2) {
+        printf("idiomc %s (idiom)\n", IDM_VERSION);
+        return 0;
     }
-    if (argc >= 2 && argv[1][0] != '-') {
-        g_cli_args = argv + 2;
-        g_cli_arg_count = (size_t)(argc - 2);
-        return run_file(argv[1]);
+    if (strcmp(cmd, "repl") == 0 && argc == 2) return run_repl();
+    if (strcmp(cmd, "test") == 0) return run_tests(argc - 2, argv + 2);
+    if (strcmp(cmd, "build") == 0) return command_build(argc - 2, argv + 2);
+    if (strcmp(cmd, "run") == 0) return command_run(argc - 2, argv + 2);
+    if (strcmp(cmd, "eval") == 0) return command_eval(argc - 2, argv + 2);
+    if (strcmp(cmd, "dump") == 0) return command_dump(argc - 2, argv + 2);
+    if (cmd[0] != '-' || strcmp(cmd, "-") == 0) {
+        set_cli_args(argc, argv, 2);
+        return run_file(cmd);
     }
-    if (argc == 2 && strcmp(argv[1], "-") == 0) return run_file("-");
     usage(stderr);
     return 64;
 }

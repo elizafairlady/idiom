@@ -35,6 +35,16 @@ status_pin() {
 }
 
 if [ "$MODE" != "san" ]; then
+    "$IDIOMC" eval 'add 40 2' > build/cli-eval.out 2>build/cli-eval.err
+    if [ -s build/cli-eval.err ] || ! grep -qx '42' build/cli-eval.out; then
+        echo "CLI FAIL: eval"; cat build/cli-eval.err; fail=1
+    fi
+    printf 'use std/string\nargs |> join "," |> println\n' | "$IDIOMC" run - -- alpha beta > build/cli-run-stdin.out 2>build/cli-run-stdin.err
+    if [ -s build/cli-run-stdin.err ] || ! grep -qx 'alpha,beta' build/cli-run-stdin.out; then
+        echo "CLI FAIL: run stdin args"; cat build/cli-run-stdin.err; fail=1
+    fi
+    "$IDIOMC" dump bytecode tests/perf/idiom/startup.id >/dev/null 2>build/cli-dump-bytecode.err || { echo "CLI FAIL: dump bytecode"; cat build/cli-dump-bytecode.err; fail=1; }
+
     "$IDIOMC" test tests/lang || fail=1
     IDIOMMAXPROCS=1 "$IDIOMC" test tests/lang >/dev/null 2>build/lang-n1.err || { echo "LANG FAIL (IDIOMMAXPROCS=1)"; cat build/lang-n1.err; fail=1; }
     echo "lang suites passed (IDIOMMAXPROCS=1)"
@@ -59,14 +69,14 @@ fi
 for f in tests/golden/*.id; do
     name=$(basename "$f" .id)
     if [ "$MODE" != "san" ]; then
-        "$IDIOMC" --eval "$(cat "$f")" >"build/golden-$name.out" 2>"build/golden-$name.err"
+        "$IDIOMC" eval "$(cat "$f")" >"build/golden-$name.out" 2>"build/golden-$name.err"
         if [ -s "build/golden-$name.err" ]; then
             echo "GOLDEN STDERR: $name"; cat "build/golden-$name.err"; fail=1
         else
             pin_check "tests/golden/$name.out" "build/golden-$name.out" "GOLDEN FAIL: $name"
         fi
     else
-        "$IDIOMC" --eval "$(cat "$f")" >/dev/null 2>"build/san-golden-$name.err" || true
+        "$IDIOMC" eval "$(cat "$f")" >/dev/null 2>"build/san-golden-$name.err" || true
         san_check "build/san-golden-$name.err" "golden $name"
     fi
 done
@@ -227,21 +237,21 @@ if [ "$MODE" != "san" ]; then
         echo "repl session passed (2 cases)"
     fi
 
-    "$IDIOMC" --dump-surface > build/dump-surface-default.out 2>/dev/null
+    "$IDIOMC" dump surface > build/dump-surface-default.out 2>/dev/null
     pin_check tests/dump/surface-default.out build/dump-surface-default.out "DUMP FAIL: surface-default"
-    "$IDIOMC" --dump-surface 'activate std/shell' > build/dump-surface-shell.out 2>/dev/null
+    "$IDIOMC" dump surface 'activate std/shell' > build/dump-surface-shell.out 2>/dev/null
     pin_check tests/dump/surface-shell.out build/dump-surface-shell.out "DUMP FAIL: surface-shell"
 
-    printf 'foo bar\n' | "$IDIOMC" --dump-reader - >/dev/null || fail=1
-    printf 'activate std/shell\necho hello\n' | "$IDIOMC" --dump-core - | grep -q 'prim exec' || { echo "PIN FAIL: exec"; fail=1; }
-    printf 'activate std/shell\nls -la | wc -l\n' | "$IDIOMC" --dump-core - | grep -q ':pipeline' || { echo "PIN FAIL: pipeline"; fail=1; }
-    printf 'echo hello\n' | "$IDIOMC" --dump-core - 2>&1 | grep -q "unbound identifier 'echo'" || { echo "PIN FAIL: no-shell"; fail=1; }
-    printf 'activate std/shell\nls *.zz\n' | "$IDIOMC" --dump-core - | grep -q ':glob' || { echo "PIN FAIL: glob"; fail=1; }
-    printf 'activate std/shell\nls nl*\n' | "$IDIOMC" --dump-core - | grep -q ':glob "nl\*"' || { echo "PIN FAIL: glob-joined"; fail=1; }
-    printf 'activate std/shell\nsh -c x 2>&1\n' | "$IDIOMC" --dump-core - | grep -q ':dup' || { echo "PIN FAIL: dup"; fail=1; }
-    printf 'activate std/shell\nFOO=bar printenv FOO\n' | "$IDIOMC" --dump-core - | grep -q '"FOO"' || { echo "PIN FAIL: env"; fail=1; }
-    printf 'activate std/shell\necho a$X.txt\n' | "$IDIOMC" --dump-core - | grep -q ':cat' || { echo "PIN FAIL: cat"; fail=1; }
-    printf 'activate std/shell\necho hi > out.txt\n' | "$IDIOMC" --dump-core - | grep -q ':lit "out.txt"' || { echo "PIN FAIL: redirect-join"; fail=1; }
+    printf 'foo bar\n' | "$IDIOMC" dump reader - >/dev/null || fail=1
+    printf 'activate std/shell\necho hello\n' | "$IDIOMC" dump core - | grep -q 'prim exec' || { echo "PIN FAIL: exec"; fail=1; }
+    printf 'activate std/shell\nls -la | wc -l\n' | "$IDIOMC" dump core - | grep -q ':pipeline' || { echo "PIN FAIL: pipeline"; fail=1; }
+    printf 'echo hello\n' | "$IDIOMC" dump core - 2>&1 | grep -q "unbound identifier 'echo'" || { echo "PIN FAIL: no-shell"; fail=1; }
+    printf 'activate std/shell\nls *.zz\n' | "$IDIOMC" dump core - | grep -q ':glob' || { echo "PIN FAIL: glob"; fail=1; }
+    printf 'activate std/shell\nls nl*\n' | "$IDIOMC" dump core - | grep -q ':glob "nl\*"' || { echo "PIN FAIL: glob-joined"; fail=1; }
+    printf 'activate std/shell\nsh -c x 2>&1\n' | "$IDIOMC" dump core - | grep -q ':dup' || { echo "PIN FAIL: dup"; fail=1; }
+    printf 'activate std/shell\nFOO=bar printenv FOO\n' | "$IDIOMC" dump core - | grep -q '"FOO"' || { echo "PIN FAIL: env"; fail=1; }
+    printf 'activate std/shell\necho a$X.txt\n' | "$IDIOMC" dump core - | grep -q ':cat' || { echo "PIN FAIL: cat"; fail=1; }
+    printf 'activate std/shell\necho hi > out.txt\n' | "$IDIOMC" dump core - | grep -q ':lit "out.txt"' || { echo "PIN FAIL: redirect-join"; fail=1; }
 fi
 
 if [ "$MODE" = "update" ]; then
