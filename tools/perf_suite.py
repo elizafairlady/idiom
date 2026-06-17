@@ -44,6 +44,8 @@ CASES = [
     {
         "name": "arith_idiomatic",
         "summary": "integer arithmetic through each language's reduce/range idiom",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current std/range",
         "files": {
             "idiom": "arith_idiomatic.id",
             "python": "arith_idiomatic.py",
@@ -68,6 +70,8 @@ CASES = [
     {
         "name": "list_sum_idiomatic",
         "summary": "build and reduce a sequence through each language's collection idiom",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current std/range and std/list",
         "files": {
             "idiom": "list_sum_idiomatic.id",
             "python": "list_sum_idiomatic.py",
@@ -138,12 +142,19 @@ def fail(message):
     raise SystemExit(1)
 
 
+def child_env():
+    env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+    if not env.get("IDIOMROOT"):
+        env["IDIOMROOT"] = str(ROOT / "std")
+    return env
+
+
 def run_checked(cmd, cwd=None, timeout=None, capture=True):
     kwargs = {
         "cwd": cwd,
         "timeout": timeout,
         "text": True,
-        "env": {**os.environ, "LC_ALL": "C", "LANG": "C"},
+        "env": child_env(),
     }
     if capture:
         kwargs.update({"stdout": subprocess.PIPE, "stderr": subprocess.PIPE})
@@ -177,7 +188,8 @@ def build_base_ref(ref):
     print(f"building baseline {ref} in {src_path}", file=sys.stderr)
     run_checked(["git", "archive", "--format=tar", "--output", str(tar_path), ref], cwd=ROOT)
     safe_extract(tar_path, src_path)
-    run_checked(["make", "release"], cwd=src_path, capture=False)
+    base_ldflags = os.environ.get("LDFLAGS", "-lpthread -lm")
+    run_checked(["make", "release", f"LDFLAGS={base_ldflags} -flto=auto"], cwd=src_path, capture=False)
     bin_path = src_path / "build" / "release" / "idiomc"
     if not bin_path.exists():
         fail(f"baseline build did not produce {bin_path}")
@@ -249,7 +261,14 @@ def discover_runtimes(args):
 
 def selected_cases(args):
     if not args.cases:
-        return CASES
+        selected = CASES
+        if args.base_ref:
+            skipped = [case for case in selected if not case.get("base_ref_default", True)]
+            selected = [case for case in selected if case.get("base_ref_default", True)]
+            if skipped:
+                names = ", ".join(f"{case['name']} ({case.get('base_ref_skip', 'not baseline-compatible')})" for case in skipped)
+                print(f"perf: skipping baseline-incompatible default case(s): {names}", file=sys.stderr)
+        return selected
     wanted = set(part.strip() for part in args.cases.split(",") if part.strip())
     selected = [case for case in CASES if case["name"] in wanted]
     found = {case["name"] for case in selected}

@@ -3,6 +3,8 @@ VERSION := 0.31.0-dev
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -g -D_POSIX_C_SOURCE=200809L -Iinclude -DIDM_VERSION=\"$(VERSION)\"
 DEPFLAGS ?= -MMD -MP
 LDFLAGS ?= -lpthread -lm
+RELEASE_LTO ?= -flto=auto
+RELEASE_CFLAGS ?= -std=c11 -O2 $(RELEASE_LTO) -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude
 
 LIB_SRCS := \
  src/common/common.c \
@@ -73,23 +75,24 @@ sanitize: build/unit_tests_san build/san/idiomc build/san/ish build/pty_driver
 
 release:
 	mkdir -p build/release
-	$(CC) -std=c11 -O2 -flto -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude -o build/release/idiomc $(LIB_SRCS) src/cli/main.c $(LDFLAGS)
-	$(CC) -std=c11 -O2 -flto -DNDEBUG -DIDM_VERSION=\"$(VERSION)\" -D_POSIX_C_SOURCE=200809L -Iinclude -o build/release/ish $(LIB_SRCS) src/cli/ish.c $(LDFLAGS)
+	$(CC) $(RELEASE_CFLAGS) -o build/release/idiomc $(LIB_SRCS) src/cli/main.c $(LDFLAGS)
+	$(CC) $(RELEASE_CFLAGS) -o build/release/ish $(LIB_SRCS) src/cli/ish.c $(LDFLAGS)
 	strip build/release/idiomc build/release/ish
 
 PERF_RUNS ?= 5
 PERF_WARMUPS ?= 1
 PERF_BASE_REF ?= 9dbab72
 PERF_ARGS ?=
+PERF_ENV := IDIOMROOT=$(CURDIR)/std
 
 perf: release
-	@python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) $(PERF_ARGS)
+	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) $(PERF_ARGS)
 
 perf-compare: release
-	@python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --base-ref $(PERF_BASE_REF) --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) $(PERF_ARGS)
+	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --base-ref $(PERF_BASE_REF) --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) $(PERF_ARGS)
 
 perf-profile: release
-	@python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --with-sealed --dump-dir build/perf-dumps --callgrind-dir build/perf-callgrind --json-out build/perf-profile.json $(PERF_ARGS)
+	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --with-sealed --dump-dir build/perf-dumps --callgrind-dir build/perf-callgrind --json-out build/perf-profile.json $(PERF_ARGS)
 
 build/tsan/idiomc: $(LIB_SRCS) src/cli/main.c
 	mkdir -p build/tsan
