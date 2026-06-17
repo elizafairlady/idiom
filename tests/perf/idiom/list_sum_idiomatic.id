@@ -1,0 +1,5 @@
+import std/list as List
+import std/range as Range
+
+xs = Range.new 0 100000 |> Range.to-list
+println (xs |> List.reverse |> List.foldl 0 (fn h acc -> (acc + h) % 1000000007))

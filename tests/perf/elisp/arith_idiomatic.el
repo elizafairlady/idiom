@@ -1,0 +1,5 @@
+(let ((acc 0))
+  (dotimes (i 500000)
+    (setq acc (mod (+ acc (* i 3) 7) 1000000007)))
+  (princ acc)
+  (princ "\n"))

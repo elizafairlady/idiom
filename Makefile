@@ -28,7 +28,7 @@ TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(patsubst %.c,build/%.o,$(TEST_SRCS))
 DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) build/src/cli/ish.d $(TEST_OBJS:.o=.d)
 
-.PHONY: all test sanitize tsan conformance release clean snapshots perf perf-compare
+.PHONY: all test sanitize tsan conformance release clean snapshots perf perf-compare perf-profile
 
 SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -87,6 +87,9 @@ perf: release
 
 perf-compare: release
 	@python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --base-ref $(PERF_BASE_REF) --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) $(PERF_ARGS)
+
+perf-profile: release
+	@python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --with-sealed --dump-dir build/perf-dumps --callgrind-dir build/perf-callgrind --json-out build/perf-profile.json $(PERF_ARGS)
 
 build/tsan/idiomc: $(LIB_SRCS) src/cli/main.c
 	mkdir -p build/tsan

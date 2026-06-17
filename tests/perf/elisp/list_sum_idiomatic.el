@@ -1,0 +1,8 @@
+(let ((xs nil)
+      (acc 0))
+  (dotimes (i 100000)
+    (push i xs))
+  (dolist (h (reverse xs))
+    (setq acc (mod (+ acc h) 1000000007)))
+  (princ acc)
+  (princ "\n"))

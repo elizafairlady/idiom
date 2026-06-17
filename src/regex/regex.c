@@ -101,12 +101,20 @@ typedef struct {
     } as;
 } RxInst;
 
+typedef struct {
+    size_t *pcs;
+    size_t count;
+    bool has_match;
+    bool dynamic;
+} RxTestClosure;
+
 struct RxProg {
     RxInst *insts;
     size_t count;
     size_t cap;
     size_t capture_count;
     uint32_t flags;
+    RxTestClosure *test_closures;
 };
 
 struct IdmRegex {
@@ -876,6 +884,7 @@ static bool prog_patch_split(RxProg *prog, size_t inst_index, size_t first, size
 }
 
 static bool compile_node(RxProg *prog, const RxNode *node, IdmError *err);
+static bool prog_build_test_closures(RxProg *prog, IdmError *err);
 
 static bool compile_alt_from(RxProg *prog, RxNode **items, size_t index, size_t count, IdmError *err) {
     if (index >= count) return true;
@@ -948,7 +957,7 @@ static bool compile_child_prog(const RxProg *parent, const RxNode *node, RxProg 
     *out = NULL;
     RxProg *child = prog_new(parent->capture_count, parent->flags, err);
     if (!child) return false;
-    if (!compile_node(child, node, err) || !prog_emit_simple(child, RXI_MATCH, NULL, err)) {
+    if (!compile_node(child, node, err) || !prog_emit_simple(child, RXI_MATCH, NULL, err) || !prog_build_test_closures(child, err)) {
         prog_free(child);
         return false;
     }
@@ -1016,10 +1025,98 @@ static bool compile_node(RxProg *prog, const RxNode *node, IdmError *err) {
     return true;
 }
 
+static bool test_closure_append(RxTestClosure *closure, size_t pc, IdmError *err) {
+    size_t *pcs = realloc(closure->pcs, (closure->count + 1u) * sizeof(*pcs));
+    if (!pcs) return idm_error_oom(err, idm_span_unknown(NULL));
+    closure->pcs = pcs;
+    closure->pcs[closure->count++] = pc;
+    return true;
+}
+
+static bool test_closure_push(size_t **stack, size_t *count, size_t *cap, size_t pc, IdmError *err) {
+    if (*count == *cap) {
+        size_t next_cap = *cap ? *cap * 2u : 16u;
+        size_t *next = realloc(*stack, next_cap * sizeof(*next));
+        if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+        *stack = next;
+        *cap = next_cap;
+    }
+    (*stack)[(*count)++] = pc;
+    return true;
+}
+
+static bool build_test_closure_one(const RxProg *prog, size_t start, RxTestClosure *closure, IdmError *err) {
+    unsigned char *seen = calloc(prog->count, sizeof(*seen));
+    if (!seen) return idm_error_oom(err, idm_span_unknown(NULL));
+    size_t *stack = NULL;
+    size_t stack_count = 0;
+    size_t stack_cap = 0;
+    bool ok = test_closure_push(&stack, &stack_count, &stack_cap, start, err);
+    while (ok && stack_count != 0) {
+        size_t pc = stack[--stack_count];
+        if (pc >= prog->count) {
+            ok = idm_error_set(err, idm_span_unknown(NULL), "regex compiler closure target out of bounds");
+            break;
+        }
+        if (seen[pc]) continue;
+        seen[pc] = 1u;
+        const RxInst *inst = &prog->insts[pc];
+        switch (inst->kind) {
+            case RXI_JUMP:
+                ok = test_closure_push(&stack, &stack_count, &stack_cap, inst->as.target, err);
+                break;
+            case RXI_SPLIT:
+                ok = test_closure_push(&stack, &stack_count, &stack_cap, inst->as.split.second, err)
+                    && test_closure_push(&stack, &stack_count, &stack_cap, inst->as.split.first, err);
+                break;
+            case RXI_SAVE:
+                ok = test_closure_push(&stack, &stack_count, &stack_cap, pc + 1u, err);
+                break;
+            case RXI_MATCH:
+                closure->has_match = true;
+                break;
+            case RXI_CHAR:
+            case RXI_DOT:
+            case RXI_CLASS:
+                ok = test_closure_append(closure, pc, err);
+                break;
+            case RXI_ASSERT_START:
+            case RXI_ASSERT_END:
+            case RXI_LOOK:
+                closure->dynamic = true;
+                break;
+        }
+    }
+    free(stack);
+    free(seen);
+    if (!ok) return false;
+    if (closure->dynamic) {
+        free(closure->pcs);
+        closure->pcs = NULL;
+        closure->count = 0;
+        closure->has_match = false;
+    }
+    return true;
+}
+
+static bool prog_build_test_closures(RxProg *prog, IdmError *err) {
+    if (prog->count == 0) return true;
+    prog->test_closures = calloc(prog->count, sizeof(*prog->test_closures));
+    if (!prog->test_closures) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < prog->count; i++) {
+        if (!build_test_closure_one(prog, i, &prog->test_closures[i], err)) return false;
+    }
+    return true;
+}
+
 static bool compile_regex_program(IdmRegex *rx, IdmError *err) {
     RxProg *prog = prog_new(rx->group_count + 1u, rx->flags, err);
     if (!prog) return false;
     if (!compile_node(prog, rx->root, err) || !prog_emit_simple(prog, RXI_MATCH, NULL, err)) {
+        prog_free(prog);
+        return false;
+    }
+    if (!prog_build_test_closures(prog, err)) {
         prog_free(prog);
         return false;
     }
@@ -1032,6 +1129,10 @@ static void prog_free(RxProg *prog) {
     for (size_t i = 0; i < prog->count; i++) {
         if (prog->insts[i].kind == RXI_LOOK) prog_free(prog->insts[i].as.look.prog);
     }
+    if (prog->test_closures) {
+        for (size_t i = 0; i < prog->count; i++) free(prog->test_closures[i].pcs);
+        free(prog->test_closures);
+    }
     free(prog->insts);
     free(prog);
 }
@@ -1039,6 +1140,10 @@ static void prog_free(RxProg *prog) {
 static size_t prog_footprint(const RxProg *prog) {
     if (!prog) return 0;
     size_t total = sizeof(*prog) + prog->cap * sizeof(*prog->insts);
+    if (prog->test_closures) {
+        total += prog->count * sizeof(*prog->test_closures);
+        for (size_t i = 0; i < prog->count; i++) total += prog->test_closures[i].count * sizeof(*prog->test_closures[i].pcs);
+    }
     for (size_t i = 0; i < prog->count; i++) {
         if (prog->insts[i].kind == RXI_LOOK) total += prog_footprint(prog->insts[i].as.look.prog);
     }
@@ -1227,6 +1332,23 @@ static bool nfa_add_test_closure(const RxProg *prog, RxTestStateVec *vec, uint32
     if (pc >= prog->count || pos > len) return idm_error_set(err, idm_span_unknown(NULL), "regex VM state out of bounds");
     if (marks[pc] == vec->mark) return true;
     marks[pc] = vec->mark;
+    const RxTestClosure *closure = prog->test_closures ? &prog->test_closures[pc] : NULL;
+    if (closure && !closure->dynamic) {
+        if (closure->has_match && (!exact_end || pos == end_pos)) {
+            *out_matched = true;
+            return true;
+        }
+        for (size_t i = 0; i < closure->count; i++) {
+            size_t item = closure->pcs[i];
+            if (item >= prog->count) return idm_error_set(err, idm_span_unknown(NULL), "regex VM closure state out of bounds");
+            if (item != pc) {
+                if (marks[item] == vec->mark) continue;
+                marks[item] = vec->mark;
+            }
+            if (!test_state_vec_push(vec, item, err)) return false;
+        }
+        return true;
+    }
 
     const RxInst *inst = &prog->insts[pc];
     switch (inst->kind) {

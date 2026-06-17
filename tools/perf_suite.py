@@ -42,6 +42,18 @@ CASES = [
         },
     },
     {
+        "name": "arith_idiomatic",
+        "summary": "integer arithmetic through each language's reduce/range idiom",
+        "files": {
+            "idiom": "arith_idiomatic.id",
+            "python": "arith_idiomatic.py",
+            "ruby": "arith_idiomatic.rb",
+            "bash": "arith_idiomatic.sh",
+            "elixir": "arith_idiomatic.exs",
+            "elisp": "arith_idiomatic.el",
+        },
+    },
+    {
         "name": "list_sum",
         "summary": "allocate a list/array and reduce it",
         "files": {
@@ -51,6 +63,18 @@ CASES = [
             "bash": "list_sum.sh",
             "elixir": "list_sum.exs",
             "elisp": "list_sum.el",
+        },
+    },
+    {
+        "name": "list_sum_idiomatic",
+        "summary": "build and reduce a sequence through each language's collection idiom",
+        "files": {
+            "idiom": "list_sum_idiomatic.id",
+            "python": "list_sum_idiomatic.py",
+            "ruby": "list_sum_idiomatic.rb",
+            "bash": "list_sum_idiomatic.sh",
+            "elixir": "list_sum_idiomatic.exs",
+            "elisp": "list_sum_idiomatic.el",
         },
     },
     {
@@ -295,6 +319,49 @@ def expected_for_case(case, runtimes, timeout):
     fail(f"no available runtime can establish expected output for {case['name']}")
 
 
+def emit_idiom_dumps(cases, runtimes, dump_dir, timeout):
+    if not dump_dir:
+        return
+    dump_dir.mkdir(parents=True, exist_ok=True)
+    for label, runtime in runtimes.items():
+        if runtime["kind"] != "idiom" or not runtime.get("available") or runtime.get("sealed"):
+            continue
+        label_dir = dump_dir / label
+        label_dir.mkdir(parents=True, exist_ok=True)
+        for case in cases:
+            filename = case["files"].get("idiom")
+            if not filename:
+                continue
+            path = runtime_file("idiom", filename)
+            core = run_checked([*runtime["cmd"], "--dump-core", str(path)], cwd=runtime.get("cwd"), timeout=timeout)
+            bytecode = run_checked([*runtime["cmd"], "--dump-bytecode", str(path)], cwd=runtime.get("cwd"), timeout=timeout)
+            (label_dir / f"{case['name']}.core").write_text(core.stdout)
+            (label_dir / f"{case['name']}.bytecode").write_text(bytecode.stdout)
+
+
+def run_callgrind(case, label, runtime, expected, out_dir, timeout):
+    if not out_dir or runtime["kind"] != "idiom" or runtime.get("sealed") or not runtime.get("available"):
+        return None
+    valgrind = shutil.which("valgrind")
+    if not valgrind:
+        fail("--callgrind-dir requested but valgrind is not available")
+    cmd = command_for(runtime, case)
+    if not cmd:
+        return None
+    label_dir = out_dir / label
+    label_dir.mkdir(parents=True, exist_ok=True)
+    out_file = label_dir / f"{case['name']}.callgrind"
+    proc = run_checked(
+        [valgrind, "--tool=callgrind", f"--callgrind-out-file={out_file}", *cmd],
+        cwd=runtime.get("cwd"),
+        timeout=timeout,
+    )
+    output = proc.stdout.strip()
+    if output != expected:
+        fail(f"unexpected callgrind output for {case['name']} {label}: got {output!r}, expected {expected!r}")
+    return str(out_file)
+
+
 def print_table(results, runtimes):
     labels = [name for name, info in runtimes.items() if info.get("available")]
     skipped = [name for name, info in runtimes.items() if not info.get("available")]
@@ -344,6 +411,8 @@ def main(argv):
     parser.add_argument("--no-external", action="store_true")
     parser.add_argument("--with-sealed", action="store_true", help="Also benchmark Idiom sealed bytecode artifacts.")
     parser.add_argument("--json-out", type=Path)
+    parser.add_argument("--dump-dir", type=Path, help="Write --dump-core and --dump-bytecode outputs for Idiom cases.")
+    parser.add_argument("--callgrind-dir", type=Path, help="Run Idiom source cases under valgrind callgrind and store profiles.")
     parser.add_argument("--list", action="store_true")
     args = parser.parse_args(argv)
 
@@ -376,6 +445,9 @@ def main(argv):
     runtimes = discover_runtimes(args)
     if not any(info.get("available") for info in runtimes.values()):
         fail("no runtimes available")
+    emit_idiom_dumps(cases, runtimes, args.dump_dir, args.timeout)
+    if args.callgrind_dir:
+        args.callgrind_dir.mkdir(parents=True, exist_ok=True)
 
     results = []
     try:
@@ -395,6 +467,9 @@ def main(argv):
                 if not cmd:
                     continue
                 stats = measure(cmd, runtime.get("cwd"), args.runs, args.warmups, args.timeout, expected)
+                profile = run_callgrind(case, label, runtime, expected, args.callgrind_dir, args.timeout)
+                if profile:
+                    stats["callgrind"] = profile
                 case_result["runtimes"][label] = stats
             results.append(case_result)
     finally:
@@ -407,6 +482,8 @@ def main(argv):
         "runs": args.runs,
         "warmups": args.warmups,
         "base_ref": args.base_ref,
+        "dump_dir": str(args.dump_dir) if args.dump_dir else None,
+        "callgrind_dir": str(args.callgrind_dir) if args.callgrind_dir else None,
         "results": results,
     }
     if args.json_out:

@@ -3,6 +3,7 @@
 #include "idiom/actor.h"
 #include "idiom/prims.h"
 
+#include <stdint.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,6 +42,8 @@ typedef struct {
     uint64_t trait_version;
     char *type;
     IdmValue impl;
+    bool direct;
+    uint32_t function_index;
 } MethodCacheEntry;
 
 struct IdmExec {
@@ -119,7 +122,7 @@ static void vm_reset(Vm *vm) {
     vm->ns_save = NULL;
     vm->ns_save_count = 0;
     vm->ns_save_cap = 0;
-    for (size_t i = 0; i < vm->selector_cache_count; i++) idm_pattern_selector_free(vm->selector_cache[i].selector);
+    for (size_t i = 0; i < vm->selector_cache_cap; i++) idm_pattern_selector_free(vm->selector_cache[i].selector);
     free(vm->selector_cache);
     vm->selector_cache = NULL;
     vm->selector_cache_count = 0;
@@ -131,7 +134,7 @@ static void vm_reset(Vm *vm) {
     vm->method_cache_cap = 0;
 }
 
-static bool stack_reserve(Vm *vm, size_t needed, IdmError *err) {
+static bool stack_reserve_slow(Vm *vm, size_t needed, IdmError *err) {
     if (needed > vm->limits.max_stack) return idm_error_set(err, idm_span_unknown(NULL), "VM stack limit exceeded");
     if (needed <= vm->stack_cap) return true;
     size_t cap = vm->stack_cap ? vm->stack_cap * 2u : 64u;
@@ -143,9 +146,15 @@ static bool stack_reserve(Vm *vm, size_t needed, IdmError *err) {
     return true;
 }
 
-static bool push(Vm *vm, IdmValue value, IdmError *err) {
-    if (!stack_reserve(vm, vm->sp + 1u, err)) return false;
-    vm->stack[vm->sp++] = value;
+static inline bool stack_reserve(Vm *vm, size_t needed, IdmError *err) {
+    return needed <= vm->stack_cap ? true : stack_reserve_slow(vm, needed, err);
+}
+
+static inline bool push(Vm *vm, IdmValue value, IdmError *err) {
+    size_t sp = vm->sp;
+    if (sp >= vm->stack_cap && !stack_reserve_slow(vm, sp + 1u, err)) return false;
+    vm->stack[sp] = value;
+    vm->sp = sp + 1u;
     return true;
 }
 
@@ -414,6 +423,7 @@ static bool vm_run_call(Vm *vm, int64_t budget, IdmExecStatus *out_status, IdmVa
 }
 
 static bool init_pattern_locals(Vm *vm, Frame *frame, const IdmBcFunction *fn, const IdmPatternBindings *bindings, IdmError *err) {
+    if (fn->pattern_local_count == 0) return true;
     for (uint32_t i = 0; i < fn->pattern_local_count; i++) {
         uint32_t slot = fn->pattern_locals[i].slot;
         if (slot >= frame->local_count) return idm_error_set(err, idm_span_unknown(NULL), "pattern local slot out of bounds");
@@ -451,51 +461,102 @@ static bool build_selector_for_entries(const IdmBytecodeModule *module, const ui
     return ok;
 }
 
-static bool selector_for_closure_site(Vm *vm, const IdmBytecodeModule *module, size_t site, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err) {
-    for (size_t i = 0; i < vm->selector_cache_count; i++) {
-        SelectorCacheEntry *entry = &vm->selector_cache[i];
+static size_t selector_cache_hash(const IdmBytecodeModule *module, size_t site) {
+    uintptr_t h = ((uintptr_t)module >> 4) ^ (uintptr_t)(site * 16777619u);
+    h ^= h >> 16;
+    h *= (uintptr_t)2246822519u;
+    h ^= h >> 13;
+    return (size_t)h;
+}
+
+static size_t selector_cache_slot(const SelectorCacheEntry *entries, size_t cap, const IdmBytecodeModule *module, size_t site, bool *out_found) {
+    size_t mask = cap - 1u;
+    size_t slot = selector_cache_hash(module, site) & mask;
+    for (;;) {
+        const SelectorCacheEntry *entry = &entries[slot];
+        if (!entry->selector) {
+            *out_found = false;
+            return slot;
+        }
         if (entry->module == module && entry->site == site) {
-            *out = entry->selector;
+            *out_found = true;
+            return slot;
+        }
+        slot = (slot + 1u) & mask;
+    }
+}
+
+static bool selector_cache_grow(Vm *vm, IdmError *err) {
+    size_t new_cap = vm->selector_cache_cap ? vm->selector_cache_cap * 2u : 32u;
+    SelectorCacheEntry *next = calloc(new_cap, sizeof(*next));
+    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < vm->selector_cache_cap; i++) {
+        SelectorCacheEntry entry = vm->selector_cache[i];
+        if (!entry.selector) continue;
+        bool found = false;
+        size_t slot = selector_cache_slot(next, new_cap, entry.module, entry.site, &found);
+        (void)found;
+        next[slot] = entry;
+    }
+    free(vm->selector_cache);
+    vm->selector_cache = next;
+    vm->selector_cache_cap = new_cap;
+    return true;
+}
+
+static bool selector_for_closure_site(Vm *vm, const IdmBytecodeModule *module, size_t site, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err) {
+    if (vm->selector_cache_cap != 0) {
+        bool found = false;
+        size_t slot = selector_cache_slot(vm->selector_cache, vm->selector_cache_cap, module, site, &found);
+        if (found) {
+            *out = vm->selector_cache[slot].selector;
             return true;
         }
     }
     IdmPatternSelector *selector = NULL;
     if (!build_selector_for_entries(module, entries, entry_count, &selector, err)) return false;
-    if (vm->selector_cache_count == vm->selector_cache_cap) {
-        size_t cap = vm->selector_cache_cap ? vm->selector_cache_cap * 2u : 16u;
-        SelectorCacheEntry *grown = realloc(vm->selector_cache, cap * sizeof(*grown));
-        if (!grown) {
+    if (vm->selector_cache_cap == 0 || (vm->selector_cache_count + 1u) * 4u >= vm->selector_cache_cap * 3u) {
+        if (!selector_cache_grow(vm, err)) {
             idm_pattern_selector_free(selector);
-            return idm_error_oom(err, idm_span_unknown(NULL));
+            return false;
         }
-        vm->selector_cache = grown;
-        vm->selector_cache_cap = cap;
     }
-    vm->selector_cache[vm->selector_cache_count].module = module;
-    vm->selector_cache[vm->selector_cache_count].site = site;
-    vm->selector_cache[vm->selector_cache_count].selector = selector;
+    bool found = false;
+    size_t slot = selector_cache_slot(vm->selector_cache, vm->selector_cache_cap, module, site, &found);
+    if (found) {
+        idm_pattern_selector_free(selector);
+        *out = vm->selector_cache[slot].selector;
+        return true;
+    }
+    vm->selector_cache[slot].module = module;
+    vm->selector_cache[slot].site = site;
+    vm->selector_cache[slot].selector = selector;
     vm->selector_cache_count++;
     *out = selector;
     return true;
 }
 
-static bool method_cache_lookup(Vm *vm, const IdmBytecodeModule *module, size_t site, uint32_t argc, int trait_phase, uint64_t trait_version, const char *type, IdmValue *out_impl) {
+static bool method_cache_lookup(Vm *vm, const IdmBytecodeModule *module, size_t site, uint32_t argc, int trait_phase, uint64_t trait_version, const char *type, IdmValue *out_impl, bool *out_direct, uint32_t *out_function_index) {
     for (size_t i = 0; i < vm->method_cache_count; i++) {
         MethodCacheEntry *entry = &vm->method_cache[i];
         if (entry->module == module && entry->site == site && entry->argc == argc && entry->trait_phase == trait_phase && entry->trait_version == trait_version && strcmp(entry->type, type) == 0) {
             *out_impl = entry->impl;
+            *out_direct = entry->direct;
+            *out_function_index = entry->function_index;
             return true;
         }
     }
     return false;
 }
 
-static void method_cache_store(Vm *vm, const IdmBytecodeModule *module, size_t site, uint32_t argc, int trait_phase, uint64_t trait_version, const char *type, IdmValue impl) {
+static void method_cache_store(Vm *vm, const IdmBytecodeModule *module, size_t site, uint32_t argc, int trait_phase, uint64_t trait_version, const char *type, IdmValue impl, bool direct, uint32_t function_index) {
     for (size_t i = 0; i < vm->method_cache_count; i++) {
         MethodCacheEntry *entry = &vm->method_cache[i];
         if (entry->module == module && entry->site == site && entry->argc == argc && entry->trait_phase == trait_phase && strcmp(entry->type, type) == 0) {
             entry->trait_version = trait_version;
             entry->impl = impl;
+            entry->direct = direct;
+            entry->function_index = function_index;
             return;
         }
     }
@@ -516,6 +577,8 @@ static void method_cache_store(Vm *vm, const IdmBytecodeModule *module, size_t s
     entry->trait_version = trait_version;
     entry->type = type_copy;
     entry->impl = impl;
+    entry->direct = direct;
+    entry->function_index = function_index;
 }
 
 static bool run_guard_function(Vm *caller, const IdmBytecodeModule *callee_module, IdmValue callee, const IdmBcFunction *candidate, const IdmPatternBindings *bindings, size_t arg_base, uint32_t argc, bool *out_pass, IdmError *err) {
@@ -736,6 +799,15 @@ static bool enter_clause(Vm *vm, IdmValue callee, uint32_t function_index, size_
     Frame *frame = current_frame(vm);
     if (!frame) return idm_error_set(err, idm_span_unknown(NULL), "tail clause entry without frame");
     size_t result_base = frame->result_base;
+    if (callee_module == frame->module && function_index == frame->function_index && callee.tag == IDM_VAL_CLOSURE && frame->closure.tag == IDM_VAL_CLOSURE && callee.as.obj == frame->closure.as.obj && bindings == NULL && fn->pattern_local_count == 0 && fn->arity == argc) {
+        for (uint32_t i = 0; i < argc; i++) vm->stack[result_base + i] = vm->stack[closure_index + 1u + i];
+        frame->ip = fn->entry;
+        frame->base = result_base;
+        frame->locals_base = result_base + fn->arity;
+        if (fn->local_count != 0) memset(&vm->stack[frame->locals_base], 0, fn->local_count * sizeof(IdmValue));
+        vm->sp = frame->locals_base + fn->local_count;
+        return true;
+    }
     frame->function_index = function_index;
     frame->module = callee_module;
     frame->ip = fn->entry;
@@ -793,6 +865,14 @@ static bool enter_direct_clause(Vm *vm, const IdmBytecodeModule *module, uint32_
     }
     Frame *frame = current_frame(vm);
     if (!frame) return idm_error_set(err, idm_span_unknown(NULL), "tail clause entry without frame");
+    if (module == frame->module && function_index == frame->function_index && capture_count == 0 && frame->capture_count == 0 && bindings == NULL && fn->pattern_local_count == 0 && fn->arity == argc) {
+        for (uint32_t i = 0; i < argc; i++) vm->stack[frame->base + i] = vm->stack[arg_base + i];
+        frame->ip = fn->entry;
+        if (fn->local_count != 0) memset(&vm->stack[frame->locals_base], 0, fn->local_count * sizeof(IdmValue));
+        vm->sp = frame->locals_base + fn->local_count;
+        if (ns) frame->ns = ns;
+        return true;
+    }
     size_t result_base = frame->result_base;
     if (capture_count != 0) memmove(&vm->stack[result_base], &vm->stack[capture_base], capture_count * sizeof(*vm->stack));
     if (argc != 0) memmove(&vm->stack[result_base + capture_count], &vm->stack[arg_base], argc * sizeof(*vm->stack));
@@ -1138,13 +1218,21 @@ static bool op_call_method(Vm *vm, Frame *frame, bool tail, IdmError *err) {
     int trait_phase = vm->rt->trait_phase ? 1 : 0;
     uint64_t trait_version = idm_trait_world_version(vm->rt);
     IdmValue impl = idm_nil();
-    if (!method_cache_lookup(vm, module, site, argc, trait_phase, trait_version, type, &impl)) {
+    bool direct = false;
+    uint32_t function_index = UINT32_MAX;
+    if (!method_cache_lookup(vm, module, site, argc, trait_phase, trait_version, type, &impl, &direct, &function_index)) {
         const char *trait = module_const_text(module, trait_const, "CALL_METHOD trait", err);
         const char *method = trait ? module_const_text(module, method_const, "CALL_METHOD method", err) : NULL;
         if (!trait || !method) return false;
         if (!idm_trait_lookup(vm->rt, trait, method, type, argc, &impl, err)) return false;
-        method_cache_store(vm, module, site, argc, trait_phase, trait_version, type, impl);
+        if (idm_is_closure(impl)) {
+            bool selected = false;
+            if (!select_trivial_closure(vm, impl, argc, &function_index, &selected, err)) return false;
+            direct = selected;
+        }
+        method_cache_store(vm, module, site, argc, trait_phase, trait_version, type, impl, direct, function_index);
     }
+    if (direct) return enter_closure_at_args(vm, impl, function_index, arg_base, argc, NULL, tail, err);
     return call_closure_at_args(vm, impl, arg_base, argc, tail, err);
 }
 
