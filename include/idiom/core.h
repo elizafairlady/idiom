@@ -468,6 +468,7 @@ bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmEr
 bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t arity, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
 bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
 bool idm_core_dump(IdmBuffer *buf, const IdmCore *core);
+bool idm_core_dump_pretty(IdmBuffer *buf, const IdmCore *core);
 const char *idm_primitive_name(IdmPrimitive primitive);
 bool idm_checked_add(int64_t a, int64_t b, int64_t *out);
 bool idm_checked_sub(int64_t a, int64_t b, int64_t *out);

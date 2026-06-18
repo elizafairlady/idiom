@@ -2151,3 +2151,294 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
     }
     return false;
 }
+
+#define IDM_CORE_PRETTY_WIDTH 80
+
+static bool pretty_newline(IdmBuffer *buf, size_t indent) {
+    if (!idm_buf_append_char(buf, '\n')) return false;
+    for (size_t i = 0; i < indent; i++) {
+        if (!idm_buf_append_char(buf, ' ')) return false;
+    }
+    return true;
+}
+
+static bool core_atomic(const IdmCore *core) {
+    switch (core->kind) {
+        case IDM_CORE_LITERAL:
+        case IDM_CORE_ARG_REF:
+        case IDM_CORE_LOCAL_REF:
+        case IDM_CORE_CAPTURE_REF:
+        case IDM_CORE_GLOBAL_REF:
+        case IDM_CORE_PRIMITIVE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool dump_captures(IdmBuffer *buf, const IdmCapture *captures, size_t count) {
+    if (!idm_buf_append(buf, " captures=[")) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
+        if (!idm_buf_appendf(buf, "%s%s#%u", capture_kind_tag(captures[i].kind), captures[i].name, captures[i].index)) return false;
+    }
+    return idm_buf_append_char(buf, ']');
+}
+
+static bool clause_compact(IdmBuffer *buf, const IdmFnClause *clause) {
+    if (!idm_buf_appendf(buf, "(/%u ", clause->arity)) return false;
+    if (clause->guard) {
+        if (!idm_buf_append(buf, "guard ") || !idm_core_dump(buf, clause->guard) || !idm_buf_append_char(buf, ' ')) return false;
+    }
+    if (!idm_core_dump(buf, clause->body)) return false;
+    return idm_buf_append_char(buf, ')');
+}
+
+static bool letrec_bindings_compact(IdmBuffer *buf, const IdmCore *core) {
+    if (!idm_buf_append_char(buf, '(')) return false;
+    for (size_t i = 0; i < core->as.letrec.count; i++) {
+        if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
+        if (!idm_buf_appendf(buf, "(%s#%u ", core->as.letrec.bindings[i].name, core->as.letrec.bindings[i].slot)) return false;
+        if (!idm_core_dump(buf, core->as.letrec.bindings[i].value)) return false;
+        if (!idm_buf_append_char(buf, ')')) return false;
+    }
+    return idm_buf_append_char(buf, ')');
+}
+
+static bool trait_method_compact(IdmBuffer *buf, const IdmCoreTraitMethod *method) {
+    if (!idm_buf_append(buf, "(method ") || !dump_value(buf, method->name) || !idm_buf_appendf(buf, "/%u", method->arity)) return false;
+    if (method->has_default) {
+        if (!idm_buf_append(buf, " default=") || !idm_core_dump(buf, method->default_fn)) return false;
+    }
+    return idm_buf_append_char(buf, ')');
+}
+
+static bool trait_impl_compact(IdmBuffer *buf, const IdmCoreTraitImpl *impl) {
+    if (!idm_buf_append(buf, "(impl ") || !dump_value(buf, impl->name) || !idm_buf_appendf(buf, "/%u ", impl->arity)) return false;
+    if (!idm_core_dump(buf, impl->impl_fn)) return false;
+    return idm_buf_append_char(buf, ')');
+}
+
+static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent);
+
+static bool pretty_marker_child(IdmBuffer *buf, size_t indent, const char *marker, const IdmCore *child) {
+    if (!idm_buf_append(buf, marker)) return false;
+    return core_pretty(buf, child, indent + strlen(marker));
+}
+
+static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent) {
+    if (!core) return idm_buf_append(buf, "#<null-core>");
+
+    IdmBuffer compact;
+    idm_buf_init(&compact);
+    if (!idm_core_dump(&compact, core)) { idm_buf_destroy(&compact); return false; }
+    if (core_atomic(core) || indent + compact.len <= IDM_CORE_PRETTY_WIDTH) {
+        bool ok = idm_buf_append_n(buf, compact.data ? compact.data : "", compact.len);
+        idm_buf_destroy(&compact);
+        return ok;
+    }
+    idm_buf_destroy(&compact);
+
+    size_t ci = indent + 2;
+    switch (core->kind) {
+        case IDM_CORE_CALL:
+            if (!idm_buf_append_char(buf, '(')) return false;
+            if (!core_pretty(buf, core->as.call.callee, indent + 1)) return false;
+            for (size_t i = 0; i < core->as.call.arg_count; i++) {
+                if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.call.args[i], ci)) return false;
+            }
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_COND:
+            if (!idm_buf_append(buf, "(cond")) return false;
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.cond_expr.cond, ci)) return false;
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.cond_expr.then_branch, ci)) return false;
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.cond_expr.else_branch, ci)) return false;
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_DO:
+            if (!idm_buf_append(buf, "(do")) return false;
+            for (size_t i = 0; i < core->as.do_expr.count; i++) {
+                if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.do_expr.items[i], ci)) return false;
+            }
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_BIND_LOCAL:
+            if (!idm_buf_appendf(buf, "(bind-local %s#%u", core->as.bind_local.name, core->as.bind_local.slot)) return false;
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.bind_local.value, ci)) return false;
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.bind_local.body, ci)) return false;
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_FN:
+            if (!idm_buf_appendf(buf, "(fn %s/%u", core->as.fn.name, core->as.fn.arity)) return false;
+            if (core->as.fn.capture_count != 0 && !dump_captures(buf, core->as.fn.captures, core->as.fn.capture_count)) return false;
+            if (core->as.fn.guard) {
+                if (!idm_buf_append(buf, " guard=") || !idm_core_dump(buf, core->as.fn.guard)) return false;
+            }
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.fn.body, ci)) return false;
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_FN_MULTI:
+            if (!idm_buf_appendf(buf, "(fn-multi %s", core->as.fn_multi.name)) return false;
+            if (core->as.fn_multi.capture_count != 0 && !dump_captures(buf, core->as.fn_multi.captures, core->as.fn_multi.capture_count)) return false;
+            for (size_t i = 0; i < core->as.fn_multi.count; i++) {
+                const IdmFnClause *clause = &core->as.fn_multi.clauses[i];
+                if (!pretty_newline(buf, ci)) return false;
+                IdmBuffer cc;
+                idm_buf_init(&cc);
+                if (!clause_compact(&cc, clause)) { idm_buf_destroy(&cc); return false; }
+                if (ci + cc.len <= IDM_CORE_PRETTY_WIDTH) {
+                    bool ok = idm_buf_append_n(buf, cc.data ? cc.data : "", cc.len);
+                    idm_buf_destroy(&cc);
+                    if (!ok) return false;
+                    continue;
+                }
+                idm_buf_destroy(&cc);
+                if (!idm_buf_appendf(buf, "(/%u", clause->arity)) return false;
+                if (clause->guard) {
+                    if (!idm_buf_append(buf, " guard ") || !idm_core_dump(buf, clause->guard)) return false;
+                }
+                if (!pretty_newline(buf, ci + 2) || !core_pretty(buf, clause->body, ci + 2)) return false;
+                if (!idm_buf_append_char(buf, ')')) return false;
+            }
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_LETREC:
+            if (!idm_buf_append(buf, "(letrec")) return false;
+            if (!pretty_newline(buf, ci)) return false;
+            {
+                IdmBuffer bb;
+                idm_buf_init(&bb);
+                if (!letrec_bindings_compact(&bb, core)) { idm_buf_destroy(&bb); return false; }
+                if (ci + bb.len <= IDM_CORE_PRETTY_WIDTH) {
+                    bool ok = idm_buf_append_n(buf, bb.data ? bb.data : "", bb.len);
+                    idm_buf_destroy(&bb);
+                    if (!ok) return false;
+                } else {
+                    idm_buf_destroy(&bb);
+                    if (!idm_buf_append_char(buf, '(')) return false;
+                    for (size_t i = 0; i < core->as.letrec.count; i++) {
+                        if (i != 0 && !pretty_newline(buf, ci + 1)) return false;
+                        IdmBuffer pfx;
+                        idm_buf_init(&pfx);
+                        if (!idm_buf_appendf(&pfx, "(%s#%u ", core->as.letrec.bindings[i].name, core->as.letrec.bindings[i].slot)) { idm_buf_destroy(&pfx); return false; }
+                        size_t vcol = ci + 1 + pfx.len;
+                        bool ok = idm_buf_append_n(buf, pfx.data ? pfx.data : "", pfx.len);
+                        idm_buf_destroy(&pfx);
+                        if (!ok || !core_pretty(buf, core->as.letrec.bindings[i].value, vcol) || !idm_buf_append_char(buf, ')')) return false;
+                    }
+                    if (!idm_buf_append_char(buf, ')')) return false;
+                }
+            }
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.letrec.body, ci)) return false;
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_RECEIVE:
+            if (!idm_buf_append(buf, "(receive")) return false;
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.receive.receiver, ci)) return false;
+            if (!pretty_newline(buf, ci) || !pretty_marker_child(buf, ci, "timeout ", core->as.receive.timeout)) return false;
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.receive.timeout_body, ci)) return false;
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_GUARD:
+            if (!idm_buf_append(buf, "(guard")) return false;
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.guard.body, ci)) return false;
+            if (core->as.guard.handler) {
+                IdmBuffer m;
+                idm_buf_init(&m);
+                if (!idm_buf_appendf(&m, "rescue _rescue#%u ", core->as.guard.rescue_slot)) { idm_buf_destroy(&m); return false; }
+                bool ok = pretty_newline(buf, ci) && idm_buf_append_n(buf, m.data ? m.data : "", m.len) && core_pretty(buf, core->as.guard.handler, ci + m.len);
+                idm_buf_destroy(&m);
+                if (!ok) return false;
+            }
+            if (core->as.guard.cleanup) {
+                IdmBuffer m;
+                idm_buf_init(&m);
+                if (!idm_buf_appendf(&m, "ensure _ensure#%u ", core->as.guard.ensure_slot)) { idm_buf_destroy(&m); return false; }
+                bool ok = pretty_newline(buf, ci) && idm_buf_append_n(buf, m.data ? m.data : "", m.len) && core_pretty(buf, core->as.guard.cleanup, ci + m.len);
+                idm_buf_destroy(&m);
+                if (!ok) return false;
+            }
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_USE_PACKAGE: {
+            if (!idm_buf_append(buf, "(use-package ") || !dump_value(buf, core->as.use_package.name) ||
+                !idm_buf_appendf(buf, " init=%u exports=", core->as.use_package.init_fn)) return false;
+            IdmBuffer ex;
+            idm_buf_init(&ex);
+            bool ex_ok = idm_buf_append_char(&ex, '[');
+            for (size_t i = 0; ex_ok && i < core->as.use_package.export_count; i++) {
+                if (i != 0) ex_ok = idm_buf_append_char(&ex, ' ');
+                ex_ok = ex_ok && idm_buf_appendf(&ex, "%s#%u->%s#%u", core->as.use_package.export_names[i], core->as.use_package.export_src[i], core->as.use_package.export_names[i], core->as.use_package.export_dst[i]);
+            }
+            ex_ok = ex_ok && idm_buf_append_char(&ex, ']');
+            if (!ex_ok) { idm_buf_destroy(&ex); return false; }
+            if (ci + ex.len <= IDM_CORE_PRETTY_WIDTH) {
+                bool ok = idm_buf_append_n(buf, ex.data ? ex.data : "", ex.len);
+                idm_buf_destroy(&ex);
+                if (!ok) return false;
+            } else {
+                idm_buf_destroy(&ex);
+                if (!idm_buf_append_char(buf, '[')) return false;
+                for (size_t i = 0; i < core->as.use_package.export_count; i++) {
+                    if (!pretty_newline(buf, ci + 2)) return false;
+                    if (!idm_buf_appendf(buf, "%s#%u->%s#%u", core->as.use_package.export_names[i], core->as.use_package.export_src[i], core->as.use_package.export_names[i], core->as.use_package.export_dst[i])) return false;
+                }
+                if (!pretty_newline(buf, ci) || !idm_buf_append_char(buf, ']')) return false;
+            }
+            if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.use_package.cont, ci)) return false;
+            return idm_buf_append_char(buf, ')');
+        }
+        case IDM_CORE_DEFINE_TRAIT:
+            if (!idm_buf_append(buf, "(define-trait ") || !dump_value(buf, core->as.define_trait.name)) return false;
+            for (size_t i = 0; i < core->as.define_trait.requirement_count; i++) {
+                if (!pretty_newline(buf, ci)) return false;
+                if (!idm_buf_append(buf, "(require ") || !dump_value(buf, core->as.define_trait.requirements[i].name) || !idm_buf_append_char(buf, ')')) return false;
+            }
+            for (size_t i = 0; i < core->as.define_trait.count; i++) {
+                const IdmCoreTraitMethod *method = &core->as.define_trait.methods[i];
+                if (!pretty_newline(buf, ci)) return false;
+                IdmBuffer mc;
+                idm_buf_init(&mc);
+                if (!trait_method_compact(&mc, method)) { idm_buf_destroy(&mc); return false; }
+                if (ci + mc.len <= IDM_CORE_PRETTY_WIDTH) {
+                    bool ok = idm_buf_append_n(buf, mc.data ? mc.data : "", mc.len);
+                    idm_buf_destroy(&mc);
+                    if (!ok) return false;
+                    continue;
+                }
+                idm_buf_destroy(&mc);
+                if (!idm_buf_append(buf, "(method ") || !dump_value(buf, method->name) || !idm_buf_appendf(buf, "/%u", method->arity)) return false;
+                if (method->has_default) {
+                    if (!pretty_newline(buf, ci + 2) || !pretty_marker_child(buf, ci + 2, "default=", method->default_fn)) return false;
+                }
+                if (!idm_buf_append_char(buf, ')')) return false;
+            }
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_IMPLEMENT_TRAIT:
+            if (!idm_buf_append(buf, "(implement-trait ") || !dump_value(buf, core->as.implement_trait.trait) ||
+                !idm_buf_append(buf, " type=") || !dump_value(buf, core->as.implement_trait.type)) return false;
+            for (size_t i = 0; i < core->as.implement_trait.count; i++) {
+                const IdmCoreTraitImpl *impl = &core->as.implement_trait.impls[i];
+                if (!pretty_newline(buf, ci)) return false;
+                IdmBuffer ic;
+                idm_buf_init(&ic);
+                if (!trait_impl_compact(&ic, impl)) { idm_buf_destroy(&ic); return false; }
+                if (ci + ic.len <= IDM_CORE_PRETTY_WIDTH) {
+                    bool ok = idm_buf_append_n(buf, ic.data ? ic.data : "", ic.len);
+                    idm_buf_destroy(&ic);
+                    if (!ok) return false;
+                    continue;
+                }
+                idm_buf_destroy(&ic);
+                if (!idm_buf_append(buf, "(impl ") || !dump_value(buf, impl->name) || !idm_buf_appendf(buf, "/%u", impl->arity)) return false;
+                if (!pretty_newline(buf, ci + 2) || !core_pretty(buf, impl->impl_fn, ci + 2)) return false;
+                if (!idm_buf_append_char(buf, ')')) return false;
+            }
+            return idm_buf_append_char(buf, ')');
+        case IDM_CORE_METHOD_CALL:
+            if (!idm_buf_append(buf, "(method-call ") || !dump_value(buf, core->as.method_call.trait) ||
+                !idm_buf_append_char(buf, ' ') || !dump_value(buf, core->as.method_call.method)) return false;
+            for (size_t i = 0; i < core->as.method_call.arg_count; i++) {
+                if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.method_call.args[i], ci)) return false;
+            }
+            return idm_buf_append_char(buf, ')');
+        default:
+            return idm_buf_append_n(buf, "", 0);
+    }
+}
+
+bool idm_core_dump_pretty(IdmBuffer *buf, const IdmCore *core) {
+    return core_pretty(buf, core, 0);
+}

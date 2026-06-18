@@ -115,7 +115,7 @@ static int dump_core(const char *path) {
     }
     IdmBuffer buf;
     idm_buf_init(&buf);
-    if (!idm_core_dump(&buf, core) || !idm_buf_append_char(&buf, '\n')) {
+    if (!idm_core_dump_pretty(&buf, core) || !idm_buf_append_char(&buf, '\n')) {
         fputs("idiomc: out of memory while dumping core\n", stderr);
         idm_buf_destroy(&buf);
         idm_core_free(core);
