@@ -4,6 +4,8 @@
 #include "idiom/value.h"
 #include "idiom/vm.h"
 
+typedef struct IdmPort IdmPort;
+
 typedef enum {
     IDM_RECV_TIMEOUT,
     IDM_RECV_BLOCK
@@ -19,6 +21,7 @@ void idm_sched_watch(IdmScheduler *sched, uint64_t pid);
 char *idm_sched_take_diagnostic(IdmScheduler *sched);
 bool idm_signals_install(IdmError *err);
 bool idm_sched_port_status(IdmScheduler *sched, uint64_t port_id, int *out_state);
+bool idm_sched_register_port(IdmScheduler *sched, IdmPort *port, IdmValue *out_port, IdmError *err);
 bool idm_sched_port_read(IdmScheduler *sched, uint64_t port_id, const char *stream, size_t max, IdmValue *out, bool *out_found, IdmError *err);
 bool idm_sched_port_write(IdmScheduler *sched, uint64_t port_id, const char *data, size_t len, IdmValue *out, bool *out_found, IdmError *err);
 bool idm_sched_port_close_input(IdmScheduler *sched, uint64_t port_id, IdmValue *out, bool *out_found, IdmError *err);

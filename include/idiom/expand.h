@@ -32,6 +32,9 @@ IdmScheduler *idm_repl_scheduler(IdmRepl *repl);
 uint64_t idm_repl_session_pid(const IdmRepl *repl);
 void idm_repl_set_session_pid(IdmRepl *repl, uint64_t pid);
 bool idm_repl_loop_thunk(IdmRepl *repl, const char *source, IdmValue *out_thunk, IdmError *err);
+bool idm_repl_seed_source(IdmRepl *repl, const char *source, IdmError *err);
+bool idm_expand_package_artifact_serialize(IdmRuntime *rt, const char *path, IdmBuffer *out, IdmError *err);
+bool idm_expand_preload_package_artifact(IdmRuntime *rt, const char *path, const unsigned char *data, size_t len, IdmError *err);
 
 bool idm_expand_string_with_runner(IdmRuntime *rt, const char *file, const char *source, IdmMacroRunner *runner, IdmCore **out, IdmError *err);
 

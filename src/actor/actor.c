@@ -334,6 +334,15 @@ static bool sched_register_port(IdmScheduler *sched, IdmPort *port, uint64_t *ou
     return true;
 }
 
+bool idm_sched_register_port(IdmScheduler *sched, IdmPort *port, IdmValue *out_port, IdmError *err) {
+    sched_lock(sched);
+    uint64_t port_id = 0;
+    bool ok = sched_register_port(sched, port, &port_id, err);
+    if (ok) *out_port = idm_port(port_id);
+    sched_unlock(sched);
+    return ok;
+}
+
 static PortEntry *sched_find_port(IdmScheduler *sched, uint64_t id) {
     for (size_t i = 0; i < sched->port_count; i++) {
         if (sched->ports[i].id == id) return &sched->ports[i];
@@ -1829,6 +1838,10 @@ bool idm_sched_port_close_input(IdmScheduler *sched, uint64_t port_id, IdmValue 
         return true;
     }
     IdmPortIoStatus status = idm_port_close_input(e->port);
+    if (!e->done && idm_port_try_complete(e->port)) {
+        e->done = true;
+        sched->ports_pending--;
+    }
     *out_found = true;
     *out = sched_port_io_atom(sched, status);
     sched_unlock(sched);

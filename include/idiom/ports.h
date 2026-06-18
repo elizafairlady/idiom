@@ -15,6 +15,7 @@ typedef enum {
 
 void idm_job_control_init(void);
 IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx, IdmError *err);
+IdmPort *idm_port_open_file(const char *path, const char *mode, bool readable, bool writable, IdmError *err);
 size_t idm_port_live_fds(const IdmPort *port, int *out_fds, size_t max);
 int idm_port_input_fd(const IdmPort *port);
 void idm_port_drain(IdmPort *port);

@@ -108,16 +108,21 @@ export defn decode-byte do
   4 -> :c-d
   5 -> :c-e
   6 -> :c-f
+  7 -> :c-g
   9 -> :tab
   10 -> :enter
   11 -> :c-k
   12 -> :c-l
   13 -> :enter
   14 -> :c-n
+  15 -> :c-o
   16 -> :c-p
   18 -> :c-r
+  19 -> :c-s
   21 -> :c-u
+  22 -> :c-v
   23 -> :c-w
+  24 -> :c-x
   25 -> :c-y
   8 -> :backspace
   127 -> :backspace
@@ -137,6 +142,8 @@ export defn csi-key do
   126 "7" -> :home
   126 "4" -> :end
   126 "8" -> :end
+  126 "5" -> :page-up
+  126 "6" -> :page-down
   _ _ -> :unknown
 end
 

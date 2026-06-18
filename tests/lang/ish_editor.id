@@ -1,6 +1,6 @@
 use std/test
 use std/string
-use std/ish
+use app/ish
 use std/term
 activate std/test
 
@@ -147,12 +147,16 @@ suite do
     assert-eq (decode-byte 127) :backspace
     assert-eq (decode-byte 18) :c-r
     assert-eq (decode-byte 65) {:char "A"}
-    assert-eq (decode-byte 7) :unknown
+    assert-eq (decode-byte 7) :c-g
+    assert-eq (decode-byte 15) :c-o
+    assert-eq (decode-byte 22) :c-v
+    assert-eq (decode-byte 24) :c-x
   end
   test "csi-key-table" do
     assert-eq (csi-key 68 "") :left
     assert-eq (csi-key 72 "") :home
     assert-eq (csi-key 126 "3") :delete
+    assert-eq (csi-key 126 "5") :page-up
     assert-eq (csi-key 126 "9") :unknown
   end
   test "reset-clears-line-state-keeps-history" do

@@ -44,6 +44,11 @@ typedef enum {
     STDIO_NULL
 } StdioPolicy;
 
+typedef enum {
+    PORT_PROCESS,
+    PORT_FILE
+} PortKind;
+
 static bool stage_own_temp(Stage *stage, const char *path) {
     if (stage->owned_temp_count == stage->owned_temp_cap) {
         size_t cap = stage->owned_temp_cap ? stage->owned_temp_cap * 2u : 4u;
@@ -59,6 +64,7 @@ static bool stage_own_temp(Stage *stage, const char *path) {
 }
 
 struct IdmPort {
+    PortKind kind;
     Stage *stages;
     size_t stage_count;
     bool pipefail;
@@ -78,6 +84,10 @@ struct IdmPort {
     bool fg;
     bool owns_terminal;
     pid_t pgid;
+    FILE *file;
+    bool file_readable;
+    bool file_writable;
+    bool file_closed;
 };
 
 static pid_t g_shell_pgid = 0;
@@ -384,6 +394,7 @@ static void stage_destroy(Stage *stage) {
 
 void idm_port_free(IdmPort *port) {
     if (!port) return;
+    if (port->file) fclose(port->file);
     for (size_t i = 0; i < port->stage_count; i++) stage_destroy(&port->stages[i]);
     free(port->stages);
     if (port->in_fd >= 0) close(port->in_fd);
@@ -393,6 +404,25 @@ void idm_port_free(IdmPort *port) {
     idm_buf_destroy(&port->err_buf);
     free(port->launch_error);
     free(port);
+}
+
+IdmPort *idm_port_open_file(const char *path, const char *mode, bool readable, bool writable, IdmError *err) {
+    FILE *file = fopen(path, mode);
+    if (!file) return NULL;
+    IdmPort *port = calloc(1u, sizeof(*port));
+    if (!port) {
+        fclose(file);
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return NULL;
+    }
+    port->kind = PORT_FILE;
+    port->file = file;
+    port->file_readable = readable;
+    port->file_writable = writable;
+    port->in_fd = -1;
+    port->out_fd = -1;
+    port->err_fd = -1;
+    return port;
 }
 
 static void set_nonblocking(int fd) {
@@ -449,6 +479,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
     const char *launch_cwd = idm_exec_cwd(exec_ctx);
     IdmPort *port = calloc(1u, sizeof(*port));
     if (!port) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
+    port->kind = PORT_PROCESS;
     port->in_fd = -1;
     port->out_fd = -1;
     port->err_fd = -1;
@@ -666,6 +697,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
 }
 
 size_t idm_port_live_fds(const IdmPort *port, int *out_fds, size_t max) {
+    if (port->kind == PORT_FILE) return 0;
     size_t n = 0;
     if (port->out_fd >= 0 && n < max) out_fds[n++] = port->out_fd;
     if (port->err_fd >= 0 && n < max) out_fds[n++] = port->err_fd;
@@ -673,6 +705,7 @@ size_t idm_port_live_fds(const IdmPort *port, int *out_fds, size_t max) {
 }
 
 int idm_port_input_fd(const IdmPort *port) {
+    if (port->kind == PORT_FILE) return -1;
     return port->stdin_policy == STDIO_PIPE ? port->in_fd : -1;
 }
 
@@ -708,6 +741,7 @@ static void drain_fd(IdmPort *port, int *fd, IdmBuffer *buf, int forward_to) {
 }
 
 void idm_port_drain(IdmPort *port) {
+    if (port->kind == PORT_FILE) return;
     drain_fd(port, &port->out_fd, &port->out_buf, -1);
     drain_fd(port, &port->err_fd, &port->err_buf, 2);
 }
@@ -732,6 +766,29 @@ static bool take_buffer_prefix(IdmBuffer *buf, size_t max, char **out_data, size
 bool idm_port_read(IdmPort *port, const char *stream, size_t max, char **out_data, size_t *out_len, IdmPortIoStatus *out_status, IdmError *err) {
     *out_data = NULL;
     *out_len = 0;
+    if (port->kind == PORT_FILE) {
+        if (strcmp(stream, "stdout") != 0 || !port->file || !port->file_readable || port->file_closed) {
+            *out_status = IDM_PORT_IO_CLOSED;
+            return true;
+        }
+        char *buf = malloc(max);
+        if (!buf) return idm_error_oom(err, idm_span_unknown(NULL));
+        size_t n = fread(buf, 1u, max, port->file);
+        if (n == 0 && ferror(port->file)) {
+            int saved = errno;
+            free(buf);
+            return idm_error_set(err, idm_span_unknown(NULL), "file port read failed: %s", strerror(saved));
+        }
+        if (n == 0) {
+            free(buf);
+            *out_status = IDM_PORT_IO_EOF;
+            return true;
+        }
+        *out_data = buf;
+        *out_len = n;
+        *out_status = IDM_PORT_IO_OK;
+        return true;
+    }
     IdmBuffer *buf = NULL;
     int *fd = NULL;
     bool has_stream = false;
@@ -758,6 +815,26 @@ bool idm_port_read(IdmPort *port, const char *stream, size_t max, char **out_dat
 
 bool idm_port_write(IdmPort *port, const char *data, size_t len, size_t *out_written, IdmPortIoStatus *out_status, IdmError *err) {
     *out_written = 0;
+    if (port->kind == PORT_FILE) {
+        if (!port->file || !port->file_writable || port->file_closed) {
+            *out_status = IDM_PORT_IO_CLOSED;
+            return true;
+        }
+        if (len == 0) {
+            *out_status = IDM_PORT_IO_OK;
+            return true;
+        }
+        size_t n = fwrite(data, 1u, len, port->file);
+        if (n < len && ferror(port->file)) {
+            return idm_error_set(err, idm_span_unknown(NULL), "file port write failed: %s", strerror(errno));
+        }
+        if (fflush(port->file) != 0) {
+            return idm_error_set(err, idm_span_unknown(NULL), "file port flush failed: %s", strerror(errno));
+        }
+        *out_written = n;
+        *out_status = IDM_PORT_IO_OK;
+        return true;
+    }
     if (port->stdin_policy != STDIO_PIPE || port->in_fd < 0) {
         *out_status = IDM_PORT_IO_CLOSED;
         return true;
@@ -790,6 +867,13 @@ bool idm_port_write(IdmPort *port, const char *data, size_t len, size_t *out_wri
 }
 
 IdmPortIoStatus idm_port_close_input(IdmPort *port) {
+    if (port->kind == PORT_FILE) {
+        if (!port->file || port->file_closed) return IDM_PORT_IO_CLOSED;
+        bool ok = fclose(port->file) == 0;
+        port->file = NULL;
+        port->file_closed = true;
+        return ok ? IDM_PORT_IO_OK : IDM_PORT_IO_CLOSED;
+    }
     if (port->stdin_policy != STDIO_PIPE || port->in_fd < 0) return IDM_PORT_IO_CLOSED;
     close(port->in_fd);
     port->in_fd = -1;
@@ -797,6 +881,7 @@ IdmPortIoStatus idm_port_close_input(IdmPort *port) {
 }
 
 bool idm_port_stopped(const IdmPort *port) {
+    if (port->kind == PORT_FILE) return false;
     bool any = false;
     for (size_t i = 0; i < port->stage_count; i++) {
         if (port->stages[i].reaped) continue;
@@ -807,10 +892,12 @@ bool idm_port_stopped(const IdmPort *port) {
 }
 
 bool idm_port_foreground(const IdmPort *port) {
+    if (port->kind == PORT_FILE) return false;
     return port->fg;
 }
 
 void idm_port_signal_group(IdmPort *port, int signo) {
+    if (port->kind == PORT_FILE) return;
     if (port->pgid > 0) {
         kill(-port->pgid, signo);
         return;
@@ -821,6 +908,7 @@ void idm_port_signal_group(IdmPort *port, int signo) {
 }
 
 void idm_port_resume(IdmPort *port, bool fg) {
+    if (port->kind == PORT_FILE) return;
     for (size_t i = 0; i < port->stage_count; i++) port->stages[i].stopped = false;
     port->fg = fg;
     if (fg && g_job_tty >= 0 && port->pgid > 0) {
@@ -831,6 +919,7 @@ void idm_port_resume(IdmPort *port, bool fg) {
 }
 
 bool idm_port_try_complete(IdmPort *port) {
+    if (port->kind == PORT_FILE) return port->file_closed || port->file == NULL;
     idm_port_drain(port);
     bool all_reaped = true;
     int flags = WNOHANG;
@@ -867,6 +956,12 @@ static int stage_exit_code(int status) {
 }
 
 IdmValue idm_port_result(IdmPort *port, IdmRuntime *rt, IdmError *err) {
+    if (port->kind == PORT_FILE) {
+        IdmValue empty = idm_string_n(rt, "", 0, err);
+        if (err->present) return idm_nil();
+        IdmValue items[4] = { idm_atom(rt, "ok"), idm_int(0), empty, empty };
+        return idm_tuple(rt, items, 4u, err);
+    }
     int final_code = 0;
     bool any_failure = false;
     int rightmost_failure = 0;

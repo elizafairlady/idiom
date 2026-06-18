@@ -139,7 +139,7 @@ CASES = [
         "name": "editor_line",
         "summary": "TEA-style line editor state updates over a bounded input trace",
         "base_ref_default": False,
-        "base_ref_skip": "requires current std/ish editor package",
+        "base_ref_skip": "requires current app/ish editor package",
         "files": {
             "idiom": "editor_line.id",
             "elisp": "editor_line.el",
@@ -206,6 +206,8 @@ def child_env():
     env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
     if not env.get("IDIOMROOT"):
         env["IDIOMROOT"] = str(ROOT / "std")
+    path = str(ROOT)
+    env["IDIOMPATH"] = path if not env.get("IDIOMPATH") else f"{path}:{env['IDIOMPATH']}"
     return env
 
 

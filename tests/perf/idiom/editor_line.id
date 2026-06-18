@@ -1,4 +1,4 @@
-use std/ish
+use app/ish
 
 defn key-for do
   0 -> {:char "a"}

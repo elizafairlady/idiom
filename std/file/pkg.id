@@ -10,6 +10,10 @@ export defn ls path -> file-list path
 export defn remove path -> file-remove path
 export defn mkdir path -> file-mkdir path
 export defn append path data -> file-append path data
+export defn open path mode -> file-open path mode
+export defn read-port port max -> port-read port :stdout max
+export defn write-port port data -> port-write port data
+export defn close port -> port-close-input port
 
 export defn read! do
   path -> match (file-read path) do
@@ -50,6 +54,55 @@ export defn append! do
   path data -> match (file-append path data) do
     :ok -> :ok
     {:error reason} -> error {:file-append path reason}
+  end
+end
+
+export defn open! do
+  path mode -> match (open path mode) do
+    {:ok port} -> port
+    {:error reason} -> error {:file-open path reason}
+  end
+end
+
+defn fold-open do
+  port _chunk-size acc _f when (eq? port :closed) -> {:ok acc}
+  port chunk-size acc f -> match (read-port port chunk-size) do
+    {:data chunk} -> fold-open port chunk-size (f chunk acc) f
+    :eof -> do
+      close port
+      {:ok acc}
+    end
+    :closed -> {:ok acc}
+    other -> do
+      close port
+      {:error other}
+    end
+  end
+end
+
+export defn fold-chunks path chunk-size acc f -> match (open path :read) do
+  {:ok port} -> fold-open port chunk-size acc f
+  {:error reason} -> {:error reason}
+end
+
+defn write-port-all-from do
+  port data offset len when (gte? offset len) -> {:ok offset}
+  port data offset len -> match (write-port port (str-slice data offset len)) do
+    {:ok count} when (gt? count 0) -> write-port-all-from port data (add offset count) len
+    {:ok _count} -> {:error :short-write}
+    :closed -> {:error :closed}
+    :eof -> {:error :eof}
+    {:error reason} -> {:error reason}
+    other -> {:error other}
+  end
+end
+
+export defn write-port-all port data -> write-port-all-from port data 0 (str-len data)
+
+export defn write-port-all! do
+  port data -> match (write-port-all port data) do
+    {:ok count} -> {:ok count}
+    {:error reason} -> error {:file-write-port reason}
   end
 end
 

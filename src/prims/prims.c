@@ -4,6 +4,7 @@
 #include "idiom/actor.h"
 #include "idiom/bytecode.h"
 #include "idiom/expand.h"
+#include "idiom/ports.h"
 #include "idiom/regex.h"
 #include "idiom/syntax.h"
 #include "idiom/tty.h"
@@ -18,6 +19,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 #include <string.h>
 #include <unistd.h>
@@ -26,6 +28,8 @@ static bool type_error(IdmRuntime *rt, IdmError *err, const char *name, IdmValue
     idm_error_set(err, idm_span_unknown(NULL), "%s expects %s", name, what);
     return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, name), got);
 }
+
+static IdmScheduler *job_sched(const char *name, IdmError *err);
 
 static bool require_arity(IdmRuntime *rt, IdmPrimitive prim, uint32_t argc, IdmError *err) {
     const IdmPrimitiveInfo *info = idm_primitive_info(prim);
@@ -1557,6 +1561,64 @@ static bool prim_file_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmEr
     return true;
 }
 
+static bool file_port_mode(IdmValue value, const char **out_mode, bool *out_readable, bool *out_writable) {
+    if (value.tag != IDM_VAL_ATOM) return false;
+    const char *text = idm_symbol_text(value.as.symbol);
+    if (strcmp(text, "read") == 0) {
+        *out_mode = "rb";
+        *out_readable = true;
+        *out_writable = false;
+        return true;
+    }
+    if (strcmp(text, "write") == 0) {
+        *out_mode = "wb";
+        *out_readable = false;
+        *out_writable = true;
+        return true;
+    }
+    if (strcmp(text, "append") == 0) {
+        *out_mode = "ab";
+        *out_readable = false;
+        *out_writable = true;
+        return true;
+    }
+    if (strcmp(text, "read-write") == 0) {
+        *out_mode = "r+b";
+        *out_readable = true;
+        *out_writable = true;
+        return true;
+    }
+    return false;
+}
+
+static bool prim_file_open(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *path; size_t plen;
+    const char *mode = NULL;
+    bool readable = false;
+    bool writable = false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "file-open", err)) return false;
+    if (!file_port_mode(args[1], &mode, &readable, &writable)) return type_error(rt, err, "file-open", args[1], ":read, :write, :append, or :read-write");
+    char pb[PATH_MAX];
+    const char *resolved = readable ? resolve_cwd_record(rt, path, pb, sizeof(pb)) : resolve_cwd(path, pb, sizeof(pb));
+    if (!resolved) return result_error(rt, out, err);
+    IdmPort *port = idm_port_open_file(resolved, mode, readable, writable, err);
+    if (!port) {
+        if (err && err->present) return false;
+        return result_error(rt, out, err);
+    }
+    IdmScheduler *sched = job_sched("file-open", err);
+    if (!sched) {
+        idm_port_free(port);
+        return false;
+    }
+    IdmValue port_value = idm_nil();
+    if (!idm_sched_register_port(sched, port, &port_value, err)) {
+        idm_port_free(port);
+        return false;
+    }
+    return result_ok(rt, port_value, out, err);
+}
+
 static bool prim_file_exists(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     if (!require_string_arg(rt, args[0], &path, &plen, "file-exists?", err)) return false;
@@ -2822,6 +2884,7 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_PARSE_FLOAT: return prim_parse_float(rt, args, out, err);
         case IDM_PRIM_FILE_MKDIR: return prim_file_mkdir(rt, args, out, err);
         case IDM_PRIM_FILE_APPEND: return prim_file_append(rt, args, out, err);
+        case IDM_PRIM_FILE_OPEN: return prim_file_open(rt, args, out, err);
         case IDM_PRIM_ORD_STR: return prim_ord_str(rt, args, out, err);
         case IDM_PRIM_STR_ORD: return prim_str_ord(rt, args, out, err);
         case IDM_PRIM_FROM_RUNES: return prim_from_runes(rt, args, out, err);

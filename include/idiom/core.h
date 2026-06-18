@@ -256,7 +256,8 @@ typedef enum {
     IDM_PRIM_BIT_COUNT,
     IDM_PRIM_BIT_LENGTH,
     IDM_PRIM_TO_INT,
-    IDM_PRIM_TO_FLOAT
+    IDM_PRIM_TO_FLOAT,
+    IDM_PRIM_FILE_OPEN
 } IdmPrimitive;
 
 typedef struct {

@@ -1,5 +1,5 @@
 use std/string
-use std/ish
+use app/ish
 
 defn serve state -> match (read state) do
   {:line text st} ->

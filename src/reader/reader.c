@@ -548,6 +548,19 @@ static bool at(Parser *p, TokenKind kind) { return cur(p)->kind == kind; }
 static Token *take(Parser *p) { return &p->tokens[p->pos++]; }
 static void skip_separators(Parser *p) { while (at(p, TOK_NEWLINE) || at(p, TOK_SEMI)) p->pos++; }
 
+static bool token_continues_shell_line(const Token *tok) {
+    if (!tok || tok->kind != TOK_OP) return false;
+    return strcmp(tok->lexeme, "|") == 0 ||
+           strcmp(tok->lexeme, "&&") == 0 ||
+           strcmp(tok->lexeme, "||") == 0 ||
+           strcmp(tok->lexeme, "<") == 0 ||
+           strcmp(tok->lexeme, ">") == 0 ||
+           strcmp(tok->lexeme, ">>") == 0 ||
+           strcmp(tok->lexeme, "&>") == 0 ||
+           strcmp(tok->lexeme, "&>>") == 0 ||
+           strcmp(tok->lexeme, ">&") == 0;
+}
+
 static bool is_stop(Parser *p, TokenKind a, TokenKind b, TokenKind c, bool separators_stop, bool end_stops, bool else_stops) {
     TokenKind k = cur(p)->kind;
     if (end_stops && k == TOK_IDENT && strcmp(cur(p)->lexeme, "end") == 0) return true;
@@ -903,6 +916,10 @@ static IdmSyntax *parse_expr_impl(Parser *p, TokenKind end1, TokenKind end2, Tok
     while (true) {
         if (separators_stop && at(p, TOK_SEMI)) break;
         if (separators_stop && at(p, TOK_NEWLINE)) {
+            if (p->pos > 0 && token_continues_shell_line(&p->tokens[p->pos - 1u])) {
+                skip_separators(p);
+                continue;
+            }
             if (!indented_newline_continues(p, span.column, end1, end2, end3, end_stops, else_stops)) break;
             skip_separators(p);
             continue;

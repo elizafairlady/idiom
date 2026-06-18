@@ -1173,6 +1173,7 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_BIT_LENGTH] = {"bit-length", 1, 1},
     [IDM_PRIM_TO_INT] = {"to-int", 1, 1},
     [IDM_PRIM_TO_FLOAT] = {"to-float", 1, 1},
+    [IDM_PRIM_FILE_OPEN] = {"file-open", 2, 2},
     [IDM_PRIM_OK] = {"ok?", 1, 1},
     [IDM_PRIM_TRAIT_IMPLEMENTED_P] = {"%trait-implements?", 2, 2},
     [IDM_PRIM_CONS] = {"cons", 2, 2},

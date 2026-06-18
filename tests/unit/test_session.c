@@ -188,6 +188,14 @@ static void test_session_windows_in_session(void) {
                      "end",
                      ":normal");
     check_eval_value(repl, "repl-compile \"do\"", ":incomplete");
+    check_eval_value(repl, "activate std/shell", ":nil");
+    check_eval_value(repl, "repl-compile \"echo hi |\"", ":incomplete");
+    IdmValue thunk = idm_nil();
+    uint64_t token = 0;
+    IdmReplStatus status = idm_repl_compile(repl, "echo hi |\nwc -c", &thunk, &token, &err);
+    CHECK(status == IDM_REPL_OK);
+    idm_repl_abort(repl, token);
+    idm_error_clear(&err);
     check_eval_value(repl, "ish-session", ":nil");
     idm_repl_destroy(repl);
     idm_runtime_destroy(&rt);

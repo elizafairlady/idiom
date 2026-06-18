@@ -102,6 +102,18 @@ resolver form do
 
   defn dup-op? node -> word-is? node ">&"
 
+  defn command-continuation-op? node ->
+    or (word-is? node "|") (or (word-is? node "&&") (word-is? node "||"))
+
+  defn incomplete-command-tail? do
+    '() -> :false
+    (list h) -> or (command-continuation-op? h) (or (redir-op? h) (dup-op? h))
+    (list a b) when (and (syntax-int? a) (redir-op? b) (syntax-adjacent? b)) -> :true
+    (list a b) when (and (syntax-int? a) (dup-op? b) (syntax-adjacent? b)) -> :true
+    (list a b) when (and (dup-op? a) (syntax-int? b) (syntax-adjacent? b)) -> :false
+    (list _ . t) -> incomplete-command-tail? t
+  end
+
   defn glob-text? t -> or (str-contains? t "*") (str-contains? t "?")
 
   defn string-syntax? p -> eq? (syntax-kind p) :string
@@ -522,6 +534,9 @@ resolver form do
   background = last-amp? n
   parts = collect-parts form 1 n
   check-amp parts
+  if (incomplete-command-tail? parts) do
+    syntax-error form "unterminated command"
+  end
   chain = split-chain parts '() :first
   capturing = cond background :true (eq? (syntax-property form "value-context") "true")
   cap = make-syntax-atom form (cond capturing "true" "false")

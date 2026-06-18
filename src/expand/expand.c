@@ -1190,11 +1190,24 @@ static IdmReplStatus repl_compile_fail(IdmRepl *repl, IdmError *err) {
     return IDM_REPL_ERROR;
 }
 
-IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_thunk, uint64_t *out_token, IdmError *err) {
-    *out_thunk = idm_nil();
-    *out_token = 0;
+static IdmReplStatus repl_compile_incomplete(IdmRepl *repl, IdmError *err) {
+    idm_error_clear(err);
+    surface_rollback(&repl->ctx, &repl->checkpoint);
+    repl->ctx.global_seq = repl->cp_global_seq;
+    repl->ctx.next_slot = repl->cp_next_slot;
+    pthread_mutex_unlock(&repl->mu);
+    return IDM_REPL_INCOMPLETE;
+}
+
+static bool repl_error_is_incomplete(const IdmError *err) {
+    return err && err->present && err->message && strcmp(err->message, "unterminated command") == 0;
+}
+
+static IdmReplStatus repl_compile_source(IdmRepl *repl, const char *file, const char *source, bool make_thunk, IdmValue *out_thunk, uint64_t *out_token, IdmError *err) {
+    if (out_thunk) *out_thunk = idm_nil();
+    if (out_token) *out_token = 0;
     IdmSyntax *program = NULL;
-    if (!idm_reader_read_string("<repl>", source, &program, err)) {
+    if (!idm_reader_read_string(file, source, &program, err)) {
         if (err->message && strstr(err->message, "unterminated")) {
             idm_error_clear(err);
             return IDM_REPL_INCOMPLETE;
@@ -1217,7 +1230,14 @@ IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_
         ? idm_core_literal(idm_nil(), program->span)
         : expand_body_items(&repl->ctx, program->as.seq.items, 1, program->as.seq.count, false, err);
     idm_syn_free(program);
+    if (!core && repl_error_is_incomplete(err)) return repl_compile_incomplete(repl, err);
     if (!core) return repl_compile_fail(repl, err);
+    if (!make_thunk) {
+        idm_core_free(core);
+        repl->token = 0;
+        pthread_mutex_unlock(&repl->mu);
+        return IDM_REPL_OK;
+    }
     IdmBytecodeModule *module = malloc(sizeof(*module));
     if (!module) {
         idm_core_free(core);
@@ -1240,11 +1260,19 @@ IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_
     if (!idm_bc_intern_literals(repl->rt, module, err)) return repl_compile_fail(repl, err);
     IdmValue thunk = idm_nil();
     if (!repl_make_thunk(repl->rt, module, main_fn, repl->rt->main_ns, &thunk, err)) return repl_compile_fail(repl, err);
-    repl->token = ++repl->next_token;
-    *out_token = repl->token;
-    *out_thunk = thunk;
+    if (out_token) {
+        repl->token = ++repl->next_token;
+        *out_token = repl->token;
+    } else {
+        repl->token = 0;
+    }
+    if (out_thunk) *out_thunk = thunk;
     pthread_mutex_unlock(&repl->mu);
     return IDM_REPL_OK;
+}
+
+IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_thunk, uint64_t *out_token, IdmError *err) {
+    return repl_compile_source(repl, "<repl>", source, true, out_thunk, out_token, err);
 }
 
 void idm_repl_abort(IdmRepl *repl, uint64_t token) {
@@ -1275,26 +1303,15 @@ void idm_repl_set_session_pid(IdmRepl *repl, uint64_t pid) {
 }
 
 bool idm_repl_loop_thunk(IdmRepl *repl, const char *source, IdmValue *out_thunk, IdmError *err) {
-    IdmCore *core = NULL;
-    if (!idm_expand_string(repl->rt, "<ish>", source, &core, err)) return false;
-    IdmBytecodeModule *module = malloc(sizeof(*module));
-    if (!module) {
-        idm_core_free(core);
-        return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    idm_bc_init(module);
-    uint32_t main_fn = 0;
-    bool compiled = idm_core_compile_main(core, module, &main_fn, err);
-    idm_core_free(core);
-    if (!compiled || !repl_track_module(repl, module)) {
-        idm_bc_destroy(module);
-        free(module);
-        return compiled ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
-    }
-    if (!idm_bc_intern_literals(repl->rt, module, err)) return false;
-    IdmNamespace *ns = idm_namespace_get_or_create(repl->rt, "ish-loop");
-    if (!ns) return idm_error_oom(err, idm_span_unknown(NULL));
-    return repl_make_thunk(repl->rt, module, main_fn, ns, out_thunk, err);
+    IdmReplStatus status = repl_compile_source(repl, "<repl>", source, true, out_thunk, NULL, err);
+    if (status == IDM_REPL_INCOMPLETE) return idm_error_set(err, idm_span_unknown("<repl>"), "incomplete REPL startup source");
+    return status == IDM_REPL_OK;
+}
+
+bool idm_repl_seed_source(IdmRepl *repl, const char *source, IdmError *err) {
+    IdmReplStatus status = repl_compile_source(repl, "<repl-seed>", source, false, NULL, NULL, err);
+    if (status == IDM_REPL_INCOMPLETE) return idm_error_set(err, idm_span_unknown("<repl-seed>"), "incomplete REPL seed source");
+    return status == IDM_REPL_OK;
 }
 
 void idm_repl_destroy(IdmRepl *repl) {

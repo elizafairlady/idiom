@@ -28,19 +28,22 @@ LIB_OBJS := $(LIB_SRCS:%.c=build/%.o)
 CLI_OBJS := build/src/cli/main.o
 TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(patsubst %.c,build/%.o,$(TEST_SRCS))
-DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) build/src/cli/ish.d $(TEST_OBJS:.o=.d)
+DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
 .PHONY: all test sanitize tsan conformance release clean snapshots perf perf-compare perf-profile perf-editor
 
 SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
-all: build/idiomc build/ish
+all: build/idiomc build/ish build/nani
 
 build/idiomc: $(LIB_OBJS) $(CLI_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
-build/ish: $(LIB_OBJS) build/src/cli/ish.o
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+build/ish: build/idiomc $(wildcard app/ish/*.id)
+	./build/idiomc build app/ish -o $@
+
+build/nani: build/idiomc app/nani/pkg.id
+	./build/idiomc build app/nani -o $@
 
 build/unit_tests: $(LIB_OBJS) $(TEST_OBJS)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
@@ -61,13 +64,12 @@ build/unit_tests_san: $(LIB_SRCS) $(TEST_SRCS)
 	mkdir -p build
 	$(CC) $(CFLAGS) $(SAN_FLAGS) -o $@ $(LIB_SRCS) $(TEST_SRCS) $(LDFLAGS)
 
-build/san/ish: $(LIB_SRCS) src/cli/ish.c
-	mkdir -p build/san
-	$(CC) $(CFLAGS) $(SAN_FLAGS) -o $@ $(LIB_SRCS) src/cli/ish.c $(LDFLAGS)
-
 build/san/idiomc: $(LIB_SRCS) src/cli/main.c
 	mkdir -p build/san
 	$(CC) $(CFLAGS) $(SAN_FLAGS) -o $@ $(LIB_SRCS) src/cli/main.c $(LDFLAGS)
+
+build/san/ish: build/san/idiomc $(wildcard app/ish/*.id)
+	./build/san/idiomc build app/ish -o $@
 
 sanitize: build/unit_tests_san build/san/idiomc build/san/ish build/pty_driver
 	ASAN_OPTIONS=detect_leaks=1 ./build/unit_tests_san
@@ -76,8 +78,9 @@ sanitize: build/unit_tests_san build/san/idiomc build/san/ish build/pty_driver
 release:
 	mkdir -p build/release
 	$(CC) $(RELEASE_CFLAGS) -o build/release/idiomc $(LIB_SRCS) src/cli/main.c $(LDFLAGS)
-	$(CC) $(RELEASE_CFLAGS) -o build/release/ish $(LIB_SRCS) src/cli/ish.c $(LDFLAGS)
-	strip build/release/idiomc build/release/ish
+	build/release/idiomc build app/ish -o build/release/ish
+	build/release/idiomc build app/nani -o build/release/nani
+	strip build/release/idiomc
 
 PERF_RUNS ?= 5
 PERF_WARMUPS ?= 1
@@ -103,6 +106,7 @@ build/tsan/idiomc: $(LIB_SRCS) src/cli/main.c
 
 tsan: build/tsan/idiomc
 	./build/tsan/idiomc test tests/lang
+	./build/tsan/idiomc test tests/app
 	./build/tsan/idiomc repl < tests/repl/session.in >/dev/null
 
 conformance: test sanitize tsan

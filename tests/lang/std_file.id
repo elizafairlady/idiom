@@ -3,6 +3,8 @@ activate std/test
 use std/file
 use std/enum
 
+defn collect-chunk chunk acc -> "#{acc}${chunk}"
+
 suite do
   test "file-roundtrip" do
     p = "/tmp/idiom_test_file_rt"
@@ -86,5 +88,32 @@ suite do
     end
     assert-eq (names.member? "idiom_test_dir_probe") :true
     remove p
+  end
+  test "file-port-read-fold-and-write" do
+    p = "/tmp/idiom_test_chunks"
+    remove p
+    out = open! p :write
+    assert (port? out)
+    assert-eq (write-port-all out "abcdef") {:ok 6}
+    assert-eq (close out) :ok
+    assert-eq (port-status out) :done
+    inp = open! p :read
+    assert (port? inp)
+    assert-eq (read-port inp 2) {:data "ab"}
+    assert-eq (read-port inp 3) {:data "cde"}
+    assert-eq (read-port inp 4) {:data "f"}
+    assert-eq (read-port inp 4) :eof
+    assert-eq (close inp) :ok
+    assert-eq (port-status inp) :done
+    folded = match (fold-chunks p 2 "" &collect-chunk) do
+      {:ok data} -> data
+    end
+    assert-eq folded "abcdef"
+    out2 = open! p :write
+    assert-eq (write-port-all! out2 "z") {:ok 1}
+    assert-eq (close out2) :ok
+    assert-eq (read! p) "z"
+    assert-inspect (open "/tmp/idiom_missing_chunk" :read) "{:error :enoent}"
+    assert-eq (remove p) :ok
   end
 end

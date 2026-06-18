@@ -708,6 +708,55 @@ const IdmArtifact *artifact_get(ExpandContext *ctx, const char *path, IdmSpan sp
     return &entry->art;
 }
 
+bool idm_expand_package_artifact_serialize(IdmRuntime *rt, const char *path, IdmBuffer *out, IdmError *err) {
+    ExpandContext ctx;
+    ctx_init(&ctx, rt);
+    const IdmArtifact *art = artifact_get(&ctx, path, idm_span_unknown(path), err);
+    bool ok = art && idm_artifact_serialize(art, out, err);
+    ctx_destroy(&ctx);
+    return ok;
+}
+
+bool idm_expand_preload_package_artifact(IdmRuntime *rt, const char *path, const unsigned char *data, size_t len, IdmError *err) {
+    ExpandCache *cache = kernel_artifact_get(rt, err);
+    if (!cache) return false;
+    for (size_t i = 0; i < cache->pkg_count; i++) {
+        if (strcmp(cache->pkgs[i]->path, path) == 0) return true;
+    }
+    CachedPackage *entry = calloc(1u, sizeof(*entry));
+    if (!entry) return idm_error_oom(err, idm_span_unknown(path));
+    entry->path = idm_strdup(path);
+    if (!entry->path) {
+        free(entry);
+        return idm_error_oom(err, idm_span_unknown(path));
+    }
+    if (!idm_artifact_deserialize(rt, data, len, &entry->art, err)) {
+        free(entry->path);
+        free(entry);
+        return false;
+    }
+    if (entry->art.module && !idm_bc_intern_literals(rt, entry->art.module, err)) {
+        idm_artifact_destroy(&entry->art);
+        free(entry->path);
+        free(entry);
+        return idm_error_oom(err, idm_span_unknown(path));
+    }
+    if (cache->pkg_count == cache->pkg_cap) {
+        size_t cap = cache->pkg_cap ? cache->pkg_cap * 2u : 8u;
+        CachedPackage **grown = realloc(cache->pkgs, cap * sizeof(*grown));
+        if (!grown) {
+            idm_artifact_destroy(&entry->art);
+            free(entry->path);
+            free(entry);
+            return idm_error_oom(err, idm_span_unknown(path));
+        }
+        cache->pkgs = grown;
+        cache->pkg_cap = cap;
+    }
+    cache->pkgs[cache->pkg_count++] = entry;
+    return true;
+}
+
 bool artifact_base(ExpandContext *ctx, const IdmArtifact *art, IdmScopeId *out_base, IdmError *err) {
     if (art->scope_base == art->scope_end) {
         *out_base = art->scope_base;

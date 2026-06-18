@@ -1,0 +1,756 @@
+package nani
+
+import std/file as File
+import std/list as List
+import std/string as Str
+import std/tea as Tea
+use std/string
+use std/string/runes
+use std/term
+
+record Page do
+  field lines
+  field count
+end
+
+export record Buffer do
+  field pages
+  field count
+end
+
+record Build do
+  field pages
+  field chunk
+  field n
+  field pending
+  field count
+end
+
+export record Editor do
+  field buffer
+  field path
+  field row
+  field col
+  field top
+  field left
+  field rows
+  field cols
+  field dirty
+  field message
+  field mode
+  field prompt
+  field query
+  field cut
+  field save_exit
+end
+
+export record NaniModel do
+  field editor
+end
+
+defn imax do
+  a b when (gt? a b) -> a
+  _ b -> b
+end
+
+defn imin do
+  a b when (lt? a b) -> a
+  _ b -> b
+end
+
+defn clamp n lo hi -> imax lo (imin hi n)
+
+defn page-size -> 128
+defn file-chunk-size -> 65536
+
+defn reverse-into do
+  '() acc -> acc
+  (list h . t) acc -> reverse-into t (cons &h acc)
+end
+
+defn make-page lines -> Page lines (List.length lines)
+
+defn flush-page chunk n pages -> cons (Page (List.reverse chunk) n) pages
+
+defn build-pages do
+  '() _chunk 0 pages -> List.reverse pages
+  '() chunk n pages -> List.reverse (flush-page chunk n pages)
+  xs chunk n pages when (gte? n (page-size)) -> build-pages xs '() 0 (flush-page chunk n pages)
+  (list h . t) chunk n pages -> build-pages t (cons &h chunk) (add n 1) pages
+end
+
+defn pages-from-lines lines -> build-pages lines '() 0 '()
+
+defn pages-to-lines-rev do
+  '() acc -> acc
+  (list page . rest) acc -> pages-to-lines-rev rest (reverse-into page.lines acc)
+end
+
+defn pages-to-lines pages -> List.reverse (pages-to-lines-rev pages '())
+
+defn blank-buffer -> Buffer (pages-from-lines '("")) 1
+
+export defn buffer-from-lines lines -> Buffer (pages-from-lines lines) (List.length lines)
+export defn buffer-lines buffer -> pages-to-lines buffer.pages
+export defn buffer-line-count buffer -> buffer.count
+export defn buffer-page-count buffer -> List.length buffer.pages
+export defn buffer-from-string text -> buffer-from-lines (Str.split text "\n")
+export defn buffer-to-string buffer -> Str.join (buffer-lines buffer) "\n"
+export defn empty-buffer -> blank-buffer
+
+defn build-empty -> Build '() '() 0 "" 0
+
+defn build-set-pending b pending ->
+  Build b.pages b.chunk b.n pending b.count
+
+defn build-flush b ->
+  cond (eq? b.n 0) b (Build (flush-page b.chunk b.n b.pages) '() 0 b.pending b.count)
+
+defn build-add-line b line do
+  b1 = if (gte? b.n (page-size)) do
+    build-flush b
+  else do
+    b
+  end
+  Build b1.pages (cons line b1.chunk) (add b1.n 1) b1.pending (add b1.count 1)
+end
+
+defn build-rest do
+  b '() -> b
+  b (list last) -> build-set-pending b last
+  b (list h . t) -> build-rest (build-add-line b h) t
+end
+
+defn build-feed-chunk chunk b -> match (Str.split chunk "\n") do
+  (list only) -> build-set-pending b "#{b.pending}${only}"
+  (list first . rest) ->
+    build-rest (build-add-line (build-set-pending b "") "#{b.pending}${first}") rest
+end
+
+defn build-finish b do
+  b1 = build-add-line b b.pending
+  b2 = build-flush b1
+  Buffer (List.reverse b2.pages) b2.count
+end
+
+export defn buffer-from-file path -> match (File.fold-chunks path (file-chunk-size) (build-empty) &build-feed-chunk) do
+  {:ok builder} -> {:ok (build-finish builder)}
+  {:error reason} -> {:error reason}
+end
+
+defn line-count buffer -> buffer.count
+defn last-row buffer -> imax 0 (sub (line-count buffer) 1)
+
+defn line-at-pages do
+  '() _row -> ""
+  (list page . _rest) row when (lt? row page.count) -> List.nth-or page.lines row ""
+  (list page . rest) row -> line-at-pages rest (sub row page.count)
+end
+
+export defn buffer-line buffer row -> line-at-pages buffer.pages row
+
+defn line-at buffer row -> buffer-line buffer row
+
+defn collect-page-window do
+  _lines _skip n acc when (lte? n 0) -> {acc 0}
+  '() _skip n acc -> {acc n}
+  (list _h . t) skip n acc when (gt? skip 0) ->
+    collect-page-window t (sub skip 1) n acc
+  (list h . t) _skip n acc ->
+    collect-page-window t 0 (sub n 1) (cons &h acc)
+end
+
+defn window-pages do
+  _pages _skip n acc when (lte? n 0) -> List.reverse acc
+  '() _skip _n acc -> List.reverse acc
+  (list page . rest) skip n acc when (gte? skip page.count) ->
+    window-pages rest (sub skip page.count) n acc
+  (list page . rest) skip n acc -> match (collect-page-window page.lines skip n acc) do
+    {acc2 remaining} -> window-pages rest 0 remaining acc2
+  end
+end
+
+defn buffer-window buffer start count ->
+  window-pages buffer.pages (clamp start 0 buffer.count) count '()
+
+defn replace-line-pages do
+  '() _row text -> pages-from-lines (list text)
+  (list page . rest) row text when (lt? row page.count) ->
+    cons (Page (List.replace-at page.lines row text) page.count) rest
+  (list page . rest) row text -> cons page (replace-line-pages rest (sub row page.count) text)
+end
+
+defn replace-line buffer row text -> Buffer (replace-line-pages buffer.pages row text) buffer.count
+
+defn insert-line-pages do
+  '() _row text -> pages-from-lines (list text)
+  (list page . rest) row text when (lte? row page.count) ->
+    List.concat (pages-from-lines (List.insert-at page.lines row text)) rest
+  (list page . rest) row text -> cons page (insert-line-pages rest (sub row page.count) text)
+end
+
+defn insert-line buffer row text ->
+  Buffer (insert-line-pages buffer.pages (clamp row 0 buffer.count) text) (add buffer.count 1)
+
+defn non-empty-pages lines -> cond (List.empty? lines) '() (pages-from-lines lines)
+
+defn delete-line-pages do
+  '() _row -> '()
+  (list page . rest) row when (lt? row page.count) ->
+    List.concat (non-empty-pages (List.delete-at page.lines row)) rest
+  (list page . rest) row -> cons page (delete-line-pages rest (sub row page.count))
+end
+
+defn delete-line buffer row ->
+  cond (lte? buffer.count 1) (blank-buffer) (Buffer (delete-line-pages buffer.pages row) (sub buffer.count 1))
+
+defn replace-line-with-lines-pages do
+  '() _row lines -> pages-from-lines lines
+  (list page . rest) row lines when (lt? row page.count) -> do
+    before = List.take page.lines row
+    after = List.drop page.lines (add row 1)
+    local = List.concat before (List.concat lines after)
+    List.concat (pages-from-lines local) rest
+  end
+  (list page . rest) row lines -> cons page (replace-line-with-lines-pages rest (sub row page.count) lines)
+end
+
+defn replace-line-with-lines buffer row lines ->
+  Buffer (replace-line-with-lines-pages buffer.pages row lines) (add (sub buffer.count 1) (List.length lines))
+
+defn body-rows editor -> imax 1 (sub editor.rows 2)
+defn usable-cols editor -> imax 1 editor.cols
+
+defn visible-prefix line col -> width (str-slice line 0 col)
+
+defn rebuild editor buffer path row col top left dirty message mode prompt query cut save_exit ->
+  Editor buffer path row col top left editor.rows editor.cols dirty message mode prompt query cut save_exit
+
+defn with-buffer editor buffer ->
+  rebuild editor buffer editor.path editor.row editor.col editor.top editor.left editor.dirty editor.message editor.mode editor.prompt editor.query editor.cut editor.save_exit
+
+defn with-path editor path ->
+  rebuild editor editor.buffer path editor.row editor.col editor.top editor.left editor.dirty editor.message editor.mode editor.prompt editor.query editor.cut editor.save_exit
+
+defn with-dirty editor dirty ->
+  rebuild editor editor.buffer editor.path editor.row editor.col editor.top editor.left dirty editor.message editor.mode editor.prompt editor.query editor.cut editor.save_exit
+
+defn with-message editor message ->
+  rebuild editor editor.buffer editor.path editor.row editor.col editor.top editor.left editor.dirty message editor.mode editor.prompt editor.query editor.cut editor.save_exit
+
+defn with-size editor rows cols ->
+  Editor editor.buffer editor.path editor.row editor.col editor.top editor.left (imax 3 rows) (imax 10 cols) editor.dirty editor.message editor.mode editor.prompt editor.query editor.cut editor.save_exit
+
+defn with-cut editor cut ->
+  rebuild editor editor.buffer editor.path editor.row editor.col editor.top editor.left editor.dirty editor.message editor.mode editor.prompt editor.query cut editor.save_exit
+
+defn with-mode editor mode prompt query save_exit ->
+  rebuild editor editor.buffer editor.path editor.row editor.col editor.top editor.left editor.dirty editor.message mode prompt query editor.cut save_exit
+
+defn edit-mode editor -> with-mode editor :edit "" "" :false
+
+defn with-top-left editor top left ->
+  rebuild editor editor.buffer editor.path editor.row editor.col top left editor.dirty editor.message editor.mode editor.prompt editor.query editor.cut editor.save_exit
+
+defn set-buffer-pos editor buffer row col do
+  r = clamp row 0 (last-row buffer)
+  line = line-at buffer r
+  c = clamp col 0 (str-len line)
+  e = rebuild editor buffer editor.path r c editor.top editor.left editor.dirty editor.message editor.mode editor.prompt editor.query editor.cut editor.save_exit
+  ensure-visible e
+end
+
+defn set-pos editor row col -> set-buffer-pos editor editor.buffer row col
+
+defn mark-edit editor buffer row col ->
+  set-buffer-pos (with-dirty (with-message editor "") :true) buffer row col
+
+defn ensure-visible editor do
+  h = body-rows editor
+  top1 = cond (lt? editor.row editor.top) (editor.row) (editor.top)
+  top2 = cond (gte? editor.row (add top1 h)) (sub (add editor.row 1) h) top1
+  line = line-at editor.buffer editor.row
+  vcol = visible-prefix line editor.col
+  span = imax 1 (sub (usable-cols editor) 1)
+  left1 = cond (lt? vcol editor.left) vcol (editor.left)
+  left2 = cond (gte? vcol (add left1 span)) (sub vcol span) left1
+  with-top-left editor (imax 0 top2) (imax 0 left2)
+end
+
+export defn initial do
+  path -> Editor (blank-buffer) path 0 0 0 0 24 80 :false "" :edit "" "" "" :false
+  path rows cols -> with-size (initial path) rows cols
+end
+
+export defn from-string do
+  path text -> with-buffer (initial path) (buffer-from-string text)
+  path text rows cols -> with-size (from-string path text) rows cols
+end
+
+export defn open path rows cols -> match (buffer-from-file path) do
+  {:ok buffer} -> with-size (with-buffer (initial path) buffer) rows cols
+  {:error :enoent} -> initial path rows cols |> with-message "[New File]"
+  {:error reason} -> initial path rows cols |> with-message "open failed: #{inspect reason}"
+end
+
+defn line-insert line col text -> "#{str-slice line 0 col}${text}#{str-slice line col (str-len line)}"
+
+defn append-suffix-last do
+  '() suffix -> list suffix
+  (list h) suffix -> list "#{h}${suffix}"
+  (list h . t) suffix -> cons h (append-suffix-last t suffix)
+end
+
+defn insert-lines-for current col parts do
+  before = str-slice current 0 col
+  after = str-slice current col (str-len current)
+  match parts do
+    '() -> list current
+    (list only) -> list "#{before}${only}${after}"
+    (list first . rest) -> cons "#{before}${first}" (append-suffix-last rest after)
+  end
+end
+
+defn last-piece do
+  '() -> ""
+  (list h) -> h
+  (list _ . t) -> last-piece t
+end
+
+export defn insert-text editor text do
+  parts = Str.split text "\n"
+  current = line-at editor.buffer editor.row
+  inserted = insert-lines-for current editor.col parts
+  b = replace-line-with-lines editor.buffer editor.row inserted
+  row2 = add editor.row (sub (List.length parts) 1)
+  col2 = match parts do
+    (list _only) -> add editor.col (str-len text)
+    _ -> str-len (last-piece parts)
+  end
+  mark-edit editor b row2 col2
+end
+
+defn insert-char editor c -> insert-text editor c
+
+defn split-line editor do
+  line = line-at editor.buffer editor.row
+  before = str-slice line 0 editor.col
+  after = str-slice line editor.col (str-len line)
+  b = replace-line-with-lines editor.buffer editor.row (list before after)
+  mark-edit editor b (add editor.row 1) 0
+end
+
+defn move-left editor do
+  line = line-at editor.buffer editor.row
+  cond (gt? editor.col 0) (set-pos editor editor.row (rune-back line editor.col)) (cond (gt? editor.row 0) (set-pos editor (sub editor.row 1) (str-len (line-at editor.buffer (sub editor.row 1)))) editor)
+end
+
+defn move-right editor do
+  line = line-at editor.buffer editor.row
+  cond (lt? editor.col (str-len line)) (set-pos editor editor.row (rune-fwd line editor.col)) (cond (lt? editor.row (last-row editor.buffer)) (set-pos editor (add editor.row 1) 0) editor)
+end
+
+defn move-up editor -> set-pos editor (sub editor.row 1) editor.col
+defn move-down editor -> set-pos editor (add editor.row 1) editor.col
+defn move-home editor -> set-pos editor editor.row 0
+defn move-end editor -> set-pos editor editor.row (str-len (line-at editor.buffer editor.row))
+defn page-up editor -> set-pos editor (sub editor.row (body-rows editor)) editor.col
+defn page-down editor -> set-pos editor (add editor.row (body-rows editor)) editor.col
+
+defn delete-range line a z -> "#{str-slice line 0 a}#{str-slice line z (str-len line)}"
+
+defn backspace editor do
+  line = line-at editor.buffer editor.row
+  if (gt? editor.col 0) do
+    a = rune-back line editor.col
+    b = replace-line editor.buffer editor.row (delete-range line a editor.col)
+    mark-edit editor b editor.row a
+  else do
+    if (gt? editor.row 0) do
+      prev = line-at editor.buffer (sub editor.row 1)
+      joined = "#{prev}${line}"
+      b = editor.buffer |> replace-line (sub editor.row 1) joined |> delete-line editor.row
+      mark-edit editor b (sub editor.row 1) (str-len prev)
+    else do
+      editor
+    end
+  end
+end
+
+defn delete-forward editor do
+  line = line-at editor.buffer editor.row
+  if (lt? editor.col (str-len line)) do
+    z = rune-fwd line editor.col
+    b = replace-line editor.buffer editor.row (delete-range line editor.col z)
+    mark-edit editor b editor.row editor.col
+  else do
+    if (lt? editor.row (last-row editor.buffer)) do
+      next = line-at editor.buffer (add editor.row 1)
+      b = editor.buffer |> replace-line editor.row "#{line}${next}" |> delete-line (add editor.row 1)
+      mark-edit editor b editor.row editor.col
+    else do
+      editor
+    end
+  end
+end
+
+defn cut-line editor do
+  count = line-count editor.buffer
+  line = line-at editor.buffer editor.row
+  if (eq? count 1) do
+    b = replace-line editor.buffer 0 ""
+    mark-edit (with-cut editor line) b 0 0
+  else do
+    b = delete-line editor.buffer editor.row
+    row2 = imin editor.row (last-row b)
+    mark-edit (with-cut editor "#{line}\n") b row2 0
+  end
+end
+
+defn paste-cut editor -> cond (eq? editor.cut "") editor (insert-text editor editor.cut)
+
+defn find-forward-lines do
+  '() _query _skip _col _row -> :nil
+  (list _line . rest) query skip col row when (gt? skip 0) ->
+    find-forward-lines rest query (sub skip 1) col (add row 1)
+  (list line . rest) query _skip col row -> match (Str.find-from line query col) do
+    :nil -> find-forward-lines rest query 0 0 (add row 1)
+    at -> {row at}
+  end
+end
+
+defn find-forward-pages do
+  '() _query _row _col _base -> :nil
+  (list page . rest) query row col base when (gte? row page.count) ->
+    find-forward-pages rest query (sub row page.count) col (add base page.count)
+  (list page . rest) query row col base -> match (find-forward-lines page.lines query row col (add base row)) do
+    :nil -> find-forward-pages rest query 0 0 (add base page.count)
+    found -> found
+  end
+end
+
+defn find-forward buffer query row col ->
+  cond (gt? row (last-row buffer)) :nil (find-forward-pages buffer.pages query row col 0)
+
+defn search-position editor query do
+  if (eq? query "") do
+    :nil
+  else do
+    match (find-forward editor.buffer query editor.row (imin (str-len (line-at editor.buffer editor.row)) (add editor.col 1))) do
+      :nil -> find-forward editor.buffer query 0 0
+      found -> found
+    end
+  end
+end
+
+defn start-search editor -> with-mode (with-message editor "") :search "Search: " "" :false
+defn start-save editor save_exit -> with-mode (with-message editor "") :save-prompt "File Name to Write: " editor.path save_exit
+defn start-quit editor -> with-mode (with-message editor "") :quit-prompt "Save modified buffer?  Y Yes  N No  C Cancel" "" :false
+
+defn prompt-backspace editor do
+  q = editor.query
+  q2 = cond (eq? q "") "" (str-slice q 0 (rune-back q (str-len q)))
+  with-mode editor editor.mode editor.prompt q2 editor.save_exit
+end
+
+defn cancel-prompt editor -> edit-mode (with-message editor "Cancelled")
+
+defn search-enter editor -> match (search-position editor editor.query) do
+  :nil -> edit-mode (with-message editor "Not found")
+  {r c} -> edit-mode (with-message (set-pos editor r c) "Found")
+end
+
+defn save-prompt-enter editor ->
+  if (eq? editor.query "") do
+    { :render (with-message editor "No file name") }
+  else do
+    e = edit-mode (with-path editor editor.query)
+    cond (editor.save_exit) {:save-exit e} {:save e}
+  end
+
+defn search-step editor key -> match key do
+  :enter -> {:render (search-enter editor)}
+  :c-c -> {:render (cancel-prompt editor)}
+  :c-g -> {:render (cancel-prompt editor)}
+  :backspace -> {:render (prompt-backspace editor)}
+  {:char c} -> {:render (with-mode editor :search editor.prompt "#{editor.query}${c}" editor.save_exit)}
+  _ -> {:render editor}
+end
+
+defn save-prompt-step editor key -> match key do
+  :enter -> save-prompt-enter editor
+  :c-c -> {:render (cancel-prompt editor)}
+  :c-g -> {:render (cancel-prompt editor)}
+  :backspace -> {:render (prompt-backspace editor)}
+  {:char c} -> {:render (with-mode editor :save-prompt editor.prompt "#{editor.query}${c}" editor.save_exit)}
+  _ -> {:render editor}
+end
+
+defn yes-key? do
+  {:char "y"} -> :true
+  {:char "Y"} -> :true
+  _ -> :false
+end
+
+defn no-key? do
+  {:char "n"} -> :true
+  {:char "N"} -> :true
+  _ -> :false
+end
+
+defn cancel-key? do
+  :c-c -> :true
+  :c-g -> :true
+  {:char "c"} -> :true
+  {:char "C"} -> :true
+  _ -> :false
+end
+
+defn quit-prompt-step editor key ->
+  if (yes-key? key) do
+    cond (eq? editor.path "") {:render (start-save (edit-mode editor) :true)} {:save-exit (edit-mode editor)}
+  else do
+    if (no-key? key) do
+      {:exit (edit-mode editor)}
+    else do
+      if (cancel-key? key) do
+        {:render (cancel-prompt editor)}
+      else do
+        {:render editor}
+      end
+    end
+  end
+
+defn edit-step editor key -> match key do
+  {:char c} -> {:render (insert-char editor c)}
+  :enter -> {:render (split-line editor)}
+  :backspace -> {:render (backspace editor)}
+  :delete -> {:render (delete-forward editor)}
+  :left -> {:render (move-left editor)}
+  :right -> {:render (move-right editor)}
+  :up -> {:render (move-up editor)}
+  :down -> {:render (move-down editor)}
+  :home -> {:render (move-home editor)}
+  :end -> {:render (move-end editor)}
+  :page-up -> {:render (page-up editor)}
+  :page-down -> {:render (page-down editor)}
+  :c-a -> {:render (move-home editor)}
+  :c-e -> {:render (move-end editor)}
+  :c-b -> {:render (move-left editor)}
+  :c-f -> {:render (move-right editor)}
+  :c-p -> {:render (move-up editor)}
+  :c-n -> {:render (move-down editor)}
+  :c-y -> {:render (page-up editor)}
+  :c-v -> {:render (page-down editor)}
+  :c-k -> {:render (cut-line editor)}
+  :c-u -> {:render (paste-cut editor)}
+  :c-w -> {:render (start-search editor)}
+  :c-o -> cond (eq? editor.path "") {:render (start-save editor :false)} {:save editor}
+  :c-s -> cond (eq? editor.path "") {:render (start-save editor :false)} {:save editor}
+  :c-x -> cond (editor.dirty) {:render (start-quit editor)} {:exit editor}
+  :c-g -> {:render (with-message editor "^X exit  ^O write  ^W search  ^K cut  ^U paste")}
+  :c-l -> {:render editor}
+  _ -> {:render editor}
+end
+
+export defn step editor key -> match (editor.mode) do
+  :search -> search-step editor key
+  :save-prompt -> save-prompt-step editor key
+  :quit-prompt -> quit-prompt-step editor key
+  _ -> edit-step editor key
+end
+
+defn editor-after-step editor key -> match (step editor key) do
+  {_tag next} -> next
+end
+
+export defn tea-model editor -> NaniModel editor
+
+defn page-save-text page first? ->
+  cond first? (Str.join page.lines "\n") "\n#{Str.join page.lines "\n"}"
+
+defn save-pages do
+  _port '() _first? -> :ok
+  port (list page . rest) first? -> do
+    text = page-save-text page first?
+    match (File.write-port-all port text) do
+      {:ok _count} -> save-pages port rest :false
+      other -> other
+    end
+  end
+end
+
+defn save-buffer path buffer -> match (File.open path :write) do
+  {:ok port} -> do
+    result = save-pages port buffer.pages :true
+    closed = File.close port
+    match result do
+      :ok -> cond (eq? closed :ok) :ok {:error closed}
+      other -> other
+    end
+  end
+  {:error reason} -> {:error reason}
+end
+
+export defn save editor do
+  if (eq? editor.path "") do
+    with-message editor "No file name"
+  else do
+    match (save-buffer editor.path editor.buffer) do
+      :ok -> with-dirty (with-message editor "Wrote ${editor.path}") :false
+      {:error reason} -> with-message editor "write failed: #{inspect reason}"
+    end
+  end
+end
+
+defn display-name editor -> cond (eq? editor.path "") "[No Name]" (editor.path)
+defn dirty-mark editor -> cond (editor.dirty) " *" ""
+
+defn clip-runes do
+  '() _start _stop _pos acc -> acc
+  _runes _start stop pos acc when (gte? pos stop) -> acc
+  (list h . t) start stop pos acc -> do
+    ch = ord->str h
+    w = imax 1 (width ch)
+    next = add pos w
+    if (lte? next start) do
+      clip-runes t start stop next acc
+    else do
+      if (gt? next stop) do
+        acc
+      else do
+        clip-runes t start stop next "#{acc}${ch}"
+      end
+    end
+  end
+end
+
+defn clip-cols text start cols -> clip-runes (str-to-list text) start (add start cols) 0 ""
+
+defn clear-line -> csi "K"
+defn line-out text -> "#{text}#{clear-line}"
+
+defn title-line editor do
+  name = display-name editor
+  mark = dirty-mark editor
+  line-out (clip-cols " Idiom nani  ${name}${mark}" 0 (usable-cols editor))
+end
+
+defn footer-text editor -> match (editor.mode) do
+  :search -> "#{editor.prompt}${editor.query}"
+  :save-prompt -> "#{editor.prompt}${editor.query}"
+  :quit-prompt -> editor.prompt
+  _ -> cond (eq? editor.message "") "^X Exit  ^O WriteOut  ^W Search  ^K Cut  ^U Paste" (editor.message)
+end
+
+defn footer-line editor -> line-out (clip-cols (footer-text editor) 0 (usable-cols editor))
+
+defn body-line-text editor text ->
+  line-out (clip-cols text editor.left (usable-cols editor))
+
+defn render-body-lines do
+  editor _lines i limit acc when (gte? i limit) -> acc
+  editor '() i limit acc ->
+    render-body-lines editor '() (add i 1) limit "#{acc}#{body-line-text editor "~"}\r\n"
+  editor (list line . rest) i limit acc ->
+    render-body-lines editor rest (add i 1) limit "#{acc}#{body-line-text editor line}\r\n"
+end
+
+defn render-body do
+  editor i limit acc when (gte? i limit) -> acc
+  editor i limit acc ->
+    render-body-lines editor (buffer-window editor.buffer (add editor.top i) (sub limit i)) i limit acc
+end
+
+defn prompt-cursor-col editor -> add 1 (width "#{editor.prompt}${editor.query}")
+
+defn edit-cursor-col editor do
+  line = line-at editor.buffer editor.row
+  add 1 (imax 0 (sub (visible-prefix line editor.col) editor.left))
+end
+
+defn cursor-position editor -> match (editor.mode) do
+  :search -> {editor.rows (prompt-cursor-col editor)}
+  :save-prompt -> {editor.rows (prompt-cursor-col editor)}
+  :quit-prompt -> {editor.rows 1}
+  _ -> {(add 2 (sub editor.row editor.top)) (edit-cursor-col editor)}
+end
+
+export defn render editor do
+  e = ensure-visible editor
+  h = body-rows e
+  {cr cc} = cursor-position e
+  home = csi "H"
+  hide = csi "?25l"
+  show = csi "?25h"
+  move = csi "${cr};${cc}H"
+  "#{hide}${home}#{title-line e}\r\n#{render-body e 0 h ""}#{footer-line e}${move}${show}"
+end
+
+implement Tea.Model on NaniModel do
+  method init _model -> Tea.none
+  method update model msg -> match msg do
+    {:nani-key key} -> match (step model.editor key) do
+      {tag next} -> {NaniModel next (Tea.emit {:nani tag})}
+    end
+    {:nani-resize rows cols} -> {NaniModel (with-size model.editor rows cols |> ensure-visible) (Tea.none)}
+    _ -> {model (Tea.none)}
+  end
+  method view model -> render model.editor
+end
+
+defn paint editor do
+  tty-write (render editor)
+  editor
+end
+
+defn screen-enter do
+  tty-raw!
+  tty-write "#{csi "?1049h"}#{csi "?25l"}"
+end
+
+defn screen-leave do
+  tty-write "#{csi "?25h"}#{csi "?1049l"}"
+  tty-restore!
+end
+
+defn loop editor -> match read-key do
+  :eof -> {:eof editor}
+  {:signal :resize} -> match tty-size do
+    {cols rows} -> loop (paint (with-size editor rows cols))
+  end
+  {:signal :interrupt} -> loop (paint (with-message editor "Interrupted"))
+  {:signal _} -> loop (paint editor)
+  :unknown -> loop editor
+  key -> match (step editor key) do
+    {:render next} -> loop (paint next)
+    {:save next} -> loop (paint (save next))
+    {:save-exit next} -> do
+      saved = save next
+      cond (saved.dirty) (loop (paint saved)) {:quit saved}
+    end
+    {:exit next} -> {:quit next}
+  end
+end
+
+export defn run path do
+  {cols rows} = tty-size
+  editor = open path rows cols
+  screen-enter
+  result = try do
+    {:ok (loop (paint editor))}
+  rescue r -> {:error r}
+  end
+  screen-leave
+  match result do
+    {:ok value} -> value
+    {:error reason} -> error reason
+  end
+end
+
+defn main-path do
+  '() -> ""
+  (list path . _rest) -> path
+end
+
+export defn main argv -> run (main-path argv)

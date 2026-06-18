@@ -2,6 +2,7 @@
 #include "idiom/artifact.h"
 #include "idiom/common.h"
 #include "idiom/expand.h"
+#include "idiom/ports.h"
 #include "idiom/reader.h"
 #include "idiom/vm.h"
 
@@ -376,6 +377,10 @@ static int run_tests(int argc, char **argv) {
 static int run_sealed(const char *file, const unsigned char *data, size_t len) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
+    if (isatty(STDIN_FILENO) && isatty(STDOUT_FILENO)) {
+        rt.interactive = true;
+        idm_job_control_init();
+    }
     rt.cli_args = g_cli_args;
     rt.cli_arg_count = g_cli_arg_count;
     IdmError err;
@@ -383,33 +388,98 @@ static int run_sealed(const char *file, const unsigned char *data, size_t len) {
     int status = 1;
     IdmBytecodeModule module;
     idm_bc_init(&module);
-    IdmScheduler *sched = NULL;
+    IdmRepl *repl = NULL;
+    char *package_path = NULL;
     IdmByteReader r = { data, len, 0u, true };
     r.pos = 4u;
     uint32_t version = idm_rd_u32(&r);
     uint32_t main_fn = idm_rd_u32(&r);
     uint64_t blob_len = idm_rd_u64(&r);
-    if (!r.ok || version != 1u || blob_len > len - r.pos) {
+    uint64_t package_len = 0;
+    uint64_t artifact_len = 0;
+    if (version == 2u) {
+        package_len = idm_rd_u64(&r);
+        artifact_len = idm_rd_u64(&r);
+    }
+    if (!r.ok || (version != 1u && version != 2u) || blob_len > (uint64_t)(len - r.pos)) {
         idm_error_set(&err, idm_span_unknown(file), "corrupt sealed program header");
         goto done;
     }
-    if (!idm_ic_deserialize(&rt, data + r.pos, (size_t)blob_len, &module, &err)) goto done;
+    const unsigned char *blob_data = data + r.pos;
+    r.pos += (size_t)blob_len;
+    if (version == 2u && (package_len > (uint64_t)(len - r.pos) || artifact_len > (uint64_t)(len - r.pos - (size_t)package_len))) {
+        idm_error_set(&err, idm_span_unknown(file), "corrupt sealed program header");
+        goto done;
+    }
+    const unsigned char *package_data = data + r.pos;
+    r.pos += (size_t)package_len;
+    const unsigned char *artifact_data = data + r.pos;
+    if (!idm_ic_deserialize(&rt, blob_data, (size_t)blob_len, &module, &err)) goto done;
     if (main_fn >= module.function_count) {
         idm_error_set(&err, idm_span_unknown(file), "sealed program main function is out of bounds");
         goto done;
     }
-    sched = idm_sched_create(&rt, &module, &err);
-    if (!sched) goto done;
+    repl = idm_repl_create(&rt, &err);
+    if (!repl) goto done;
+    if (version == 2u && package_len != 0u) {
+        package_path = malloc((size_t)package_len + 1u);
+        if (!package_path) {
+            idm_error_oom(&err, idm_span_unknown(file));
+            goto done;
+        }
+        memcpy(package_path, package_data, (size_t)package_len);
+        package_path[package_len] = '\0';
+        if (!idm_expand_preload_package_artifact(&rt, package_path, artifact_data, (size_t)artifact_len, &err)) goto done;
+        IdmBuffer seed;
+        idm_buf_init(&seed);
+        bool seed_ok = idm_buf_append(&seed, "use ") && idm_buf_append(&seed, package_path) &&
+            idm_buf_append(&seed, "\nactivate ") && idm_buf_append(&seed, package_path) && idm_buf_append(&seed, "\n");
+        if (!seed_ok) {
+            idm_buf_destroy(&seed);
+            idm_error_oom(&err, idm_span_unknown(file));
+            goto done;
+        }
+        bool seeded = idm_repl_seed_source(repl, seed.data, &err);
+        idm_buf_destroy(&seed);
+        if (!seeded) goto done;
+    }
+    IdmScheduler *sched = idm_repl_scheduler(repl);
+    IdmValue thunk = idm_closure_in_module(&rt, &module, main_fn, NULL, 0, rt.main_ns, &err);
+    if (err.present) goto done;
     IdmValue out = idm_nil();
-    if (!idm_sched_run_main(sched, main_fn, &out, &err)) goto done;
-    status = 0;
+    IdmValue reason = idm_nil();
+    if (!idm_sched_run_session(sched, thunk, rt.interactive, &out, &reason, &err)) goto done;
+    status = idm_sched_session_status(sched, out, reason);
 done:
     if (err.present) idm_error_fprint(stderr, &err);
     idm_error_clear(&err);
-    idm_sched_destroy(sched);
+    idm_repl_destroy(repl);
     idm_bc_destroy(&module);
+    free(package_path);
     idm_runtime_destroy(&rt);
     return status;
+}
+
+static bool source_arg_package_like(const char *arg) {
+    if (strcmp(arg, "-") == 0) return false;
+    struct stat st;
+    if (stat(arg, &st) != 0) return true;
+    return S_ISDIR(st.st_mode);
+}
+
+static bool build_package_entry_source(const char *package_path, char **out_source, IdmError *err) {
+    IdmBuffer src;
+    idm_buf_init(&src);
+    bool ok = idm_buf_append(&src, "use ")
+        && idm_buf_append(&src, package_path)
+        && idm_buf_append(&src, "\nmain args\n");
+    if (!ok) {
+        idm_buf_destroy(&src);
+        return idm_error_oom(err, idm_span_unknown(package_path));
+    }
+    *out_source = idm_buf_take(&src);
+    if (!*out_source) return idm_error_oom(err, idm_span_unknown(package_path));
+    return true;
 }
 
 static int build_sealed(const char *src_path, const char *out_path) {
@@ -427,9 +497,15 @@ static int build_sealed(const char *src_path, const char *out_path) {
     idm_bc_init(&module);
     IdmBuffer blob;
     idm_buf_init(&blob);
+    IdmBuffer artifact_blob;
+    idm_buf_init(&artifact_blob);
     IdmBuffer out;
     idm_buf_init(&out);
-    if (!read_source_arg(src_path, &rt, &source, &file, &err)) goto done;
+    bool package_entry = source_arg_package_like(src_path);
+    if (package_entry) {
+        file = src_path;
+        if (!build_package_entry_source(src_path, &source, &err)) goto done;
+    } else if (!read_source_arg(src_path, &rt, &source, &file, &err)) goto done;
     if (!idm_reader_read_string(file, source, &program, &err)) goto done;
     size_t src_len = strlen(src_path);
     if (src_len >= 4 && strcmp(src_path + src_len - 4, ".ish") == 0) {
@@ -440,12 +516,25 @@ static int build_sealed(const char *src_path, const char *out_path) {
     uint32_t main_fn = 0;
     if (!idm_core_compile_main(core, &module, &main_fn, &err)) goto done;
     if (!idm_ic_serialize(&module, &blob, &err)) goto done;
+    if (package_entry && !idm_expand_package_artifact_serialize(&rt, src_path, &artifact_blob, &err)) goto done;
+    uint32_t sealed_version = package_entry ? 2u : 1u;
     if (!idm_buf_append(&out, "#!/usr/bin/env idiomc\n") ||
         !idm_buf_append_n(&out, "IDMX", 4u) ||
-        !idm_buf_put_u32(&out, 1u) ||
+        !idm_buf_put_u32(&out, sealed_version) ||
         !idm_buf_put_u32(&out, main_fn) ||
-        !idm_buf_put_u64(&out, (uint64_t)blob.len) ||
-        !idm_buf_append_n(&out, blob.data, blob.len)) {
+        !idm_buf_put_u64(&out, (uint64_t)blob.len)) {
+        idm_error_oom(&err, idm_span_unknown(src_path));
+        goto done;
+    }
+    if (package_entry &&
+        (!idm_buf_put_u64(&out, (uint64_t)strlen(src_path)) ||
+         !idm_buf_put_u64(&out, (uint64_t)artifact_blob.len))) {
+        idm_error_oom(&err, idm_span_unknown(src_path));
+        goto done;
+    }
+    if (!idm_buf_append_n(&out, blob.data, blob.len) ||
+        (package_entry && (!idm_buf_append_n(&out, src_path, strlen(src_path)) ||
+                           !idm_buf_append_n(&out, artifact_blob.data, artifact_blob.len)))) {
         idm_error_oom(&err, idm_span_unknown(src_path));
         goto done;
     }
@@ -467,6 +556,7 @@ done:
     if (err.present) idm_error_fprint(stderr, &err);
     idm_error_clear(&err);
     idm_buf_destroy(&out);
+    idm_buf_destroy(&artifact_blob);
     idm_buf_destroy(&blob);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -506,7 +596,7 @@ static int run_repl(void) {
     int status = 1;
     IdmRepl *repl = idm_repl_create(&rt, &err);
     IdmValue thunk = idm_nil();
-    if (repl && idm_repl_loop_thunk(repl, "use std/ish\nmain :plain", &thunk, &err)) {
+    if (repl && idm_repl_loop_thunk(repl, "use app/ish\nactivate app/ish\nmain :plain", &thunk, &err)) {
         if (rt.interactive) printf("idiom %s — :quit or ^D to exit\n", IDM_VERSION);
         IdmValue value = idm_nil();
         IdmValue reason = idm_nil();

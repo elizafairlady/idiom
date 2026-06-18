@@ -1,0 +1,118 @@
+use std/test
+use std/string
+import std/file as File
+import std/tea as Tea
+use app/nani
+activate std/test
+
+defn feed do
+  editor '() -> editor
+  editor (list key . rest) -> match (step editor key) do
+    {_tag next} -> feed next rest
+  end
+end
+
+defn repeat-key do
+  editor _key n when (lte? n 0) -> editor
+  editor key n -> match (step editor key) do
+    {_tag next} -> repeat-key next key (sub n 1)
+  end
+end
+
+defn seed-lines do
+  i n acc when (gte? i n) -> acc
+  i n acc -> seed-lines (add i 1) n "#{acc}line-${i}\n"
+end
+
+defn esc-seq text -> "#{byte-str 27}[${text}"
+
+suite do
+  test "buffer-round-trips-trailing-newline" do
+    b = buffer-from-string "a\nb\n"
+    assert-eq (buffer-to-string b) "a\nb\n"
+  end
+
+  test "insert-motion-and-delete" do
+    e = feed (from-string "" "" 8 40) (list {:char "a"} {:char "b"} {:char "c"} :left {:char "X"} :backspace :delete)
+    assert-eq (buffer-to-string e.buffer) "ac"
+    assert-eq {e.row e.col e.dirty} {0 1 :true}
+  end
+
+  test "newline-backspace-and-vertical-motion" do
+    e = feed (from-string "" "one" 8 40) (list :end :enter {:char "t"} {:char "w"} {:char "o"} :up :end :down)
+    assert-eq (buffer-to-string e.buffer) "one\ntwo"
+    assert-eq {e.row e.col} {1 3}
+    e2 = feed e (list :home :backspace)
+    assert-eq (buffer-to-string e2.buffer) "onetwo"
+    assert-eq {e2.row e2.col} {0 3}
+  end
+
+  test "cut-and-paste-line" do
+    e = feed (from-string "" "a\nb\nc" 8 40) (list :down :c-k :end :c-u)
+    assert-eq (buffer-to-string e.buffer) "a\ncb\n"
+    assert-eq e.cut "b\n"
+  end
+
+  test "search-wraps-and-moves-cursor" do
+    e0 = from-string "" "alpha\nbeta\nagain" 8 40
+    e1 = feed e0 (list :c-w {:char "a"} {:char "g"} :enter)
+    assert-eq {e1.row e1.col e1.mode} {2 0 :edit}
+    e2 = feed e1 (list :c-w {:char "a"} {:char "l"} :enter)
+    assert-eq {e2.row e2.col} {0 0}
+  end
+
+  test "quit-dirty-prompts-and-cancel-restores-edit" do
+    e = feed (from-string "" "" 8 40) (list {:char "x"} :c-x)
+    assert-eq e.mode :quit-prompt
+    e2 = feed e (list {:char "c"})
+    assert-eq {e2.mode e2.message} {:edit "Cancelled"}
+  end
+
+  test "save-prompt-returns-save-tag" do
+    e = feed (from-string "" "body" 8 40) (list {:char "!"} :c-o {:char "/"} {:char "t"} {:char "m"} {:char "p"} {:char "/"} {:char "i"} {:char "d"} {:char "i"} {:char "o"} {:char "m"} {:char "-"} {:char "n"} {:char "a"} {:char "n"} {:char "i"} :enter)
+    assert-eq e.path "/tmp/idiom-nani"
+    assert-eq e.mode :edit
+  end
+
+  test "render-uses-viewport-and-cursor-position" do
+    text = seed-lines 0 40 ""
+    e = feed (from-string "big.txt" text 6 24) (list :c-v :c-v)
+    out = render e
+    assert (contains? out "Idiom nani  big.txt")
+    assert (contains? out "line-8")
+    assert (contains? out (esc-seq "?25l"))
+    assert (contains? out (esc-seq "?25h"))
+  end
+
+  test "paged-buffer-edits-deep-line-without-flattening" do
+    text = seed-lines 0 1200 ""
+    e0 = from-string "large.txt" text 10 80
+    assert-eq (buffer-line-count e0.buffer) 1201
+    assert (gt? (buffer-page-count e0.buffer) 5)
+    e1 = repeat-key e0 :c-v 90
+    target = e1.row
+    e2 = feed e1 (list :home {:char "!"})
+    assert (starts-with? (buffer-line e2.buffer target) "!line-")
+    assert-eq (buffer-line-count e2.buffer) (buffer-line-count e0.buffer)
+    assert (gt? (buffer-page-count e2.buffer) 5)
+  end
+
+  test "open-and-save-use-streamed-paged-buffer" do
+    path = "/tmp/idiom_nani_stream_open"
+    text = seed-lines 0 9000 ""
+    File.write! path text
+    editor = open path 12 80
+    assert-eq (buffer-line-count editor.buffer) 9001
+    assert (gt? (buffer-page-count editor.buffer) 50)
+    saved = save editor
+    assert-eq saved.dirty :false
+    assert-eq (File.read! path) text
+    File.remove path
+  end
+
+  test "tea-model-steps-through-nani-key" do
+    {model cmd} = Tea.step (tea-model (from-string "" "" 8 40)) {:nani-key {:char "x"}}
+    assert-eq (buffer-to-string model.editor.buffer) "x"
+    assert-inspect (Tea.command-messages cmd) "({:nani :render})"
+  end
+end

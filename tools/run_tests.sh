@@ -5,6 +5,15 @@ ISH="$2"
 MODE="$3"
 fail=0
 updated=0
+ROOT="$PWD"
+IDIOMC_DIR=$(dirname "$IDIOMC")
+case "$IDIOMC_DIR" in
+/*) ;;
+*) IDIOMC_DIR="$PWD/$IDIOMC_DIR" ;;
+esac
+PATH="$IDIOMC_DIR:$PATH"
+TEST_IDIOMPATH="$ROOT${IDIOMPATH:+:$IDIOMPATH}"
+export PATH
 
 san_check() {
     if grep -qiE 'leaked|AddressSanitizer:|UndefinedBehavior' "$1"; then
@@ -46,7 +55,13 @@ if [ "$MODE" != "san" ]; then
     "$IDIOMC" dump bytecode tests/perf/idiom/startup.id >/dev/null 2>build/cli-dump-bytecode.err || { echo "CLI FAIL: dump bytecode"; cat build/cli-dump-bytecode.err; fail=1; }
 
     "$IDIOMC" test tests/lang || fail=1
+    if [ -d tests/app ]; then
+        "$IDIOMC" test tests/app || fail=1
+    fi
     IDIOMMAXPROCS=1 "$IDIOMC" test tests/lang >/dev/null 2>build/lang-n1.err || { echo "LANG FAIL (IDIOMMAXPROCS=1)"; cat build/lang-n1.err; fail=1; }
+    if [ -d tests/app ]; then
+        IDIOMMAXPROCS=1 "$IDIOMC" test tests/app >/dev/null 2>build/app-n1.err || { echo "APP FAIL (IDIOMMAXPROCS=1)"; cat build/app-n1.err; fail=1; }
+    fi
     echo "lang suites passed (IDIOMMAXPROCS=1)"
     # actor-reap floor: 1,000,000 spawn+join must stay flat (corpses-not-reaped would be ~590MB).
     "$IDIOMC" tests/perf/actor-reap.id >/dev/null 2>&1 &
@@ -62,8 +77,16 @@ if [ "$MODE" != "san" ]; then
 else
     "$IDIOMC" test tests/lang >/dev/null 2>build/san-lang.err || true
     san_check build/san-lang.err "lang suites"
+    if [ -d tests/app ]; then
+        "$IDIOMC" test tests/app >/dev/null 2>build/san-app.err || true
+        san_check build/san-app.err "app suites"
+    fi
     IDIOMMAXPROCS=1 "$IDIOMC" test tests/lang >/dev/null 2>build/san-lang-n1.err || true
     san_check build/san-lang-n1.err "lang suites (IDIOMMAXPROCS=1)"
+    if [ -d tests/app ]; then
+        IDIOMMAXPROCS=1 "$IDIOMC" test tests/app >/dev/null 2>build/san-app-n1.err || true
+        san_check build/san-app-n1.err "app suites (IDIOMMAXPROCS=1)"
+    fi
 fi
 
 for f in tests/golden/*.id; do
@@ -111,7 +134,6 @@ for f in tests/diag/*.id; do
     fi
 done
 
-ROOT="$PWD"
 for f in tests/ish/*.keys; do
     name=$(basename "$f" .keys)
     case "$name" in
@@ -134,14 +156,14 @@ for f in tests/ish/*.keys; do
         [ -e "tests/ish/$name.status" ] && want=$(cat "tests/ish/$name.status")
         if [ "$MODE" != "san" ]; then
             (cd "$home" && env -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u ISH_HISTSIZE \
-                $extra_env $pty_env HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist \
+                $extra_env $pty_env HOME="$home" IDIOMROOT="$ROOT/std" IDIOMPATH="$TEST_IDIOMPATH" ISH_HISTFILE=hist \
                 "$ROOT/build/pty_driver" "$ROOT/$f" "$ROOT/$ISH") >"build/ish-$name.out" 2>"build/ish-$name.err"
             rc=$?
             status_pin "tests/ish/$name.status" "" "ISH SESSION STATUS: $name" "$rc" "$want"
             pin_check "tests/ish/$name.out" "build/ish-$name.out" "ISH SESSION FAIL: $name"
         else
             (cd "$home" && env -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u ISH_HISTSIZE \
-                $extra_env $pty_env HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist \
+                $extra_env $pty_env HOME="$home" IDIOMROOT="$ROOT/std" IDIOMPATH="$TEST_IDIOMPATH" ISH_HISTFILE=hist \
                 "$ROOT/build/pty_driver" "$ROOT/$f" "$ROOT/$ISH") >"build/san-ish-$name.out" 2>/dev/null || true
             san_check "build/san-ish-$name.out" "ish session $name"
         fi
@@ -171,7 +193,7 @@ if [ "$MODE" != "san" ]; then
         rm -rf "$home"
         mkdir -p "$home"
         (cd "$home" && env -u XDG_CONFIG_HOME -u XDG_STATE_HOME -u ISH_HISTSIZE \
-            HOME="$home" IDIOMROOT="$ROOT/std" ISH_HISTFILE=hist IDIOMMAXPROCS=$procs \
+            HOME="$home" IDIOMROOT="$ROOT/std" IDIOMPATH="$TEST_IDIOMPATH" ISH_HISTFILE=hist IDIOMMAXPROCS=$procs \
             "$ROOT/build/pty_driver" "$ROOT/tests/ish/$name.keys" "$ROOT/$ISH") >"build/ish-$name-n$procs.out" 2>"build/ish-$name-n$procs.err"
         rc=$?
         if [ "$rc" -ne 0 ]; then

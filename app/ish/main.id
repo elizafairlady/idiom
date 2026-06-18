@@ -20,7 +20,7 @@ defn status-mark do
   s -> " [${s}]"
 end
 
-defn default-prompt pst -> "#{home-abbrev (dict-get pst :cwd "")}#{status-mark (dict-get pst :status :nil)} % "
+export defn default-prompt pst -> "#{home-abbrev (dict-get pst :cwd "")}#{status-mark (dict-get pst :status :nil)} % "
 
 export trait Prompt do
   method prompt state -> default-prompt state
@@ -85,7 +85,7 @@ end
 
 defn drop-loop-frames do
   '() -> '()
-  (list h . t) when (contains? h "(std/ish:") -> drop-loop-frames t
+  (list h . t) when (contains? h "(app/ish:") -> drop-loop-frames t
   (list h . t) -> cons h (drop-loop-frames t)
 end
 
@@ -384,13 +384,72 @@ defn state-loop shell pid restarts jst hist cwd -> receive do
   end
 end
 
-export defn main mode do
+defn session-main mode do
   shell = eq? mode :shell
   trap-exit :true
   if shell do
     eval-text "activate std/shell" :false
   end
-  eval-text "activate std/ish\nuse std/ish" :false
   {hist entries} = history-load shell
-  state-loop shell (start-loop shell entries :true) '() jobs-init hist :nil
+  rcr = cond shell run-rc 0
+  match rcr do
+    {:exit n} -> n
+    _ -> state-loop shell (start-loop shell entries :false) '() jobs-init hist :nil
+  end
+end
+
+defn status-code do
+  {:exit n} -> mod n 256
+  n -> match (try do {:num (mod n 1) n}; rescue _ -> :not-int end) do
+    {:num 0 value} -> mod value 256
+    _ -> 1
+  end
+end
+
+defn shell-source-status source do
+  trap-exit :true
+  eval-text "activate std/shell" :false
+  status-code (eval-text source :false)
+end
+
+defn shell-file-status path -> match (file-read path) do
+  {:ok source} -> shell-source-status source
+  {:error reason} -> do
+    "ish: cannot read ${path}: #{inspect reason}" |> eprintln
+    1
+  end
+end
+
+defn usage do
+  println "ish - the idiom shell"
+  println "  ish                 start an interactive session"
+  println "  ish FILE.ish        run a shell script"
+  println "  ish -c 'COMMANDS'   run shell commands"
+  println "  ish --version"
+end
+
+defn usage-error do
+  usage
+  64
+end
+
+defn cli-main do
+  '() -> cond (eq? (tty?) :true) (session-main :shell) (shell-file-status "/dev/stdin")
+  (list "--version") -> do
+    println "ish 0.34.0-dev (idiom)"
+    0
+  end
+  (list "--help") -> do
+    usage
+    0
+  end
+  (list "-c" source) -> shell-source-status source
+  (list flag . _rest) when (starts-with? flag "-") -> usage-error
+  (list path . _rest) -> shell-file-status path
+end
+
+export defn main do
+  :shell -> session-main :shell
+  :plain -> session-main :plain
+  argv -> cli-main argv
 end
