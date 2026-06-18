@@ -76,7 +76,7 @@ static int dump_reader(const char *path) {
     }
     IdmBuffer buf;
     idm_buf_init(&buf);
-    if (!idm_syn_dump(&buf, program) || !idm_buf_append_char(&buf, '\n')) {
+    if (!idm_syn_dump_pretty(&buf, program) || !idm_buf_append_char(&buf, '\n')) {
         fputs("idiomc: out of memory while dumping reader syntax\n", stderr);
         idm_buf_destroy(&buf);
         idm_syn_free(program);

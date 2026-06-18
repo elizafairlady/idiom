@@ -92,6 +92,7 @@ IdmSyntax *idm_syn_program_prepend_activate(const IdmSyntax *program, const char
 IdmSyntax *idm_syn_clone(const IdmSyntax *syn);
 void idm_syn_free(IdmSyntax *syn);
 bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn);
+bool idm_syn_dump_pretty(IdmBuffer *buf, const IdmSyntax *syn);
 
 typedef struct IdmRuntime IdmRuntime;
 bool idm_syn_serialize(IdmBuffer *out, const IdmSyntax *syn, IdmError *err);

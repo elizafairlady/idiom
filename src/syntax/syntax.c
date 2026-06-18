@@ -442,6 +442,58 @@ bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn) {
     return false;
 }
 
+#define IDM_SYN_PRETTY_WIDTH 80
+
+static bool syn_pretty_newline(IdmBuffer *buf, size_t indent) {
+    if (!idm_buf_append_char(buf, '\n')) return false;
+    for (size_t i = 0; i < indent; i++) {
+        if (!idm_buf_append_char(buf, ' ')) return false;
+    }
+    return true;
+}
+
+static bool syn_compound(const IdmSyntax *syn) {
+    return syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR ||
+           syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT;
+}
+
+static bool syn_pretty(IdmBuffer *buf, const IdmSyntax *syn, size_t indent) {
+    if (!syn) return idm_buf_append(buf, "#<null-syntax>");
+
+    IdmBuffer compact;
+    idm_buf_init(&compact);
+    if (!idm_syn_dump(&compact, syn)) { idm_buf_destroy(&compact); return false; }
+    if (!syn_compound(syn) || indent + compact.len <= IDM_SYN_PRETTY_WIDTH) {
+        bool ok = idm_buf_append_n(buf, compact.data ? compact.data : "", compact.len);
+        idm_buf_destroy(&compact);
+        return ok;
+    }
+    idm_buf_destroy(&compact);
+
+    const char *open = "(";
+    const char *close = ")";
+    switch (syn->kind) {
+        case IDM_SYN_VECTOR: open = "["; close = "]"; break;
+        case IDM_SYN_TUPLE: open = "{"; close = "}"; break;
+        case IDM_SYN_DICT: open = "%{"; close = "}"; break;
+        default: break;
+    }
+    size_t ci = indent + 2;
+    if (!idm_buf_append(buf, open)) return false;
+    for (size_t i = 0; i < syn->as.seq.count; i++) {
+        if (i == 0) {
+            if (!syn_pretty(buf, syn->as.seq.items[0], indent + strlen(open))) return false;
+        } else {
+            if (!syn_pretty_newline(buf, ci) || !syn_pretty(buf, syn->as.seq.items[i], ci)) return false;
+        }
+    }
+    return idm_buf_append(buf, close);
+}
+
+bool idm_syn_dump_pretty(IdmBuffer *buf, const IdmSyntax *syn) {
+    return syn_pretty(buf, syn, 0);
+}
+
 static bool syn_serialize_depth(IdmBuffer *out, const IdmSyntax *syn, unsigned depth, IdmError *err) {
     if (!syn) return idm_error_set(err, idm_span_unknown(NULL), "cannot serialize null syntax");
     if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, syn->span, "syntax nested too deeply to serialize");
