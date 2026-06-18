@@ -442,8 +442,6 @@ bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn) {
     return false;
 }
 
-#define IDM_SYN_PRETTY_WIDTH 80
-
 static bool syn_pretty_newline(IdmBuffer *buf, size_t indent) {
     if (!idm_buf_append_char(buf, '\n')) return false;
     for (size_t i = 0; i < indent; i++) {
@@ -452,39 +450,45 @@ static bool syn_pretty_newline(IdmBuffer *buf, size_t indent) {
     return true;
 }
 
-static bool syn_compound(const IdmSyntax *syn) {
-    return syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR ||
-           syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT;
+static bool syn_is_statement_seq(const IdmSyntax *syn) {
+    if (syn->kind != IDM_SYN_LIST || syn->as.seq.count == 0) return false;
+    const IdmSyntax *head = syn->as.seq.items[0];
+    if (head->kind != IDM_SYN_WORD) return false;
+    return strcmp(head->as.text, "%-package-begin") == 0 || strcmp(head->as.text, "%-body") == 0;
+}
+
+static bool syn_breaks(const IdmSyntax *syn) {
+    if (!syn) return false;
+    if (syn_is_statement_seq(syn)) return true;
+    if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR ||
+        syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT) {
+        for (size_t i = 0; i < syn->as.seq.count; i++) {
+            if (syn_breaks(syn->as.seq.items[i])) return true;
+        }
+    }
+    return false;
 }
 
 static bool syn_pretty(IdmBuffer *buf, const IdmSyntax *syn, size_t indent) {
     if (!syn) return idm_buf_append(buf, "#<null-syntax>");
-
-    IdmBuffer compact;
-    idm_buf_init(&compact);
-    if (!idm_syn_dump(&compact, syn)) { idm_buf_destroy(&compact); return false; }
-    if (!syn_compound(syn) || indent + compact.len <= IDM_SYN_PRETTY_WIDTH) {
-        bool ok = idm_buf_append_n(buf, compact.data ? compact.data : "", compact.len);
-        idm_buf_destroy(&compact);
-        return ok;
-    }
-    idm_buf_destroy(&compact);
+    if (!syn_breaks(syn)) return idm_syn_dump(buf, syn);
 
     const char *open = "(";
     const char *close = ")";
-    switch (syn->kind) {
-        case IDM_SYN_VECTOR: open = "["; close = "]"; break;
-        case IDM_SYN_TUPLE: open = "{"; close = "}"; break;
-        case IDM_SYN_DICT: open = "%{"; close = "}"; break;
-        default: break;
-    }
-    size_t ci = indent + 2;
+    if (syn->kind == IDM_SYN_VECTOR) { open = "["; close = "]"; }
+    else if (syn->kind == IDM_SYN_TUPLE) { open = "{"; close = "}"; }
+    else if (syn->kind == IDM_SYN_DICT) { open = "%{"; close = "}"; }
+
     if (!idm_buf_append(buf, open)) return false;
-    for (size_t i = 0; i < syn->as.seq.count; i++) {
-        if (i == 0) {
-            if (!syn_pretty(buf, syn->as.seq.items[0], indent + strlen(open))) return false;
-        } else {
-            if (!syn_pretty_newline(buf, ci) || !syn_pretty(buf, syn->as.seq.items[i], ci)) return false;
+    if (syn_is_statement_seq(syn)) {
+        if (!idm_syn_dump(buf, syn->as.seq.items[0])) return false;
+        for (size_t i = 1; i < syn->as.seq.count; i++) {
+            if (!syn_pretty_newline(buf, indent + 2) || !syn_pretty(buf, syn->as.seq.items[i], indent + 2)) return false;
+        }
+    } else {
+        for (size_t i = 0; i < syn->as.seq.count; i++) {
+            if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
+            if (!syn_pretty(buf, syn->as.seq.items[i], indent)) return false;
         }
     }
     return idm_buf_append(buf, close);
