@@ -581,7 +581,7 @@ static void method_cache_store(Vm *vm, const IdmBytecodeModule *module, size_t s
     entry->function_index = function_index;
 }
 
-static bool run_guard_function(Vm *caller, const IdmBytecodeModule *callee_module, IdmValue callee, const IdmBcFunction *candidate, const IdmPatternBindings *bindings, size_t arg_base, uint32_t argc, bool *out_pass, IdmError *err) {
+static bool run_guard_function(Vm *caller, const IdmBytecodeModule *callee_module, IdmValue callee, const IdmBcFunction *candidate, const IdmPatternBindings *bindings, size_t arg_base, uint32_t argc, bool *out_pass, bool *out_exhausted, IdmError *err) {
     *out_pass = true;
     if (!candidate->has_guard) return true;
     if (candidate->guard_function >= callee_module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function guard index %u out of bounds", candidate->guard_function);
@@ -609,14 +609,15 @@ static bool run_guard_function(Vm *caller, const IdmBytecodeModule *callee_modul
     }
     idm_error_clear(&guard_err);
     if (status == IDM_EXEC_YIELD) {
-        return idm_error_set(err, idm_span_unknown(NULL), "guard of '%s' exceeded its budget of %d reductions",
-                             candidate->name && candidate->name[0] ? candidate->name : "<fn>", IDM_GUARD_BUDGET);
+        if (out_exhausted) *out_exhausted = true;
+        *out_pass = false;
+        return true;
     }
     *out_pass = idm_value_ok(result);
     return true;
 }
 
-static bool run_guard_function_direct(Vm *caller, const IdmBytecodeModule *module, uint32_t function_index, const IdmPatternBindings *bindings, size_t capture_base, uint32_t capture_count, size_t arg_base, uint32_t argc, IdmNamespace *ns, bool *out_pass, IdmError *err) {
+static bool run_guard_function_direct(Vm *caller, const IdmBytecodeModule *module, uint32_t function_index, const IdmPatternBindings *bindings, size_t capture_base, uint32_t capture_count, size_t arg_base, uint32_t argc, IdmNamespace *ns, bool *out_pass, bool *out_exhausted, IdmError *err) {
     *out_pass = true;
     if (function_index >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "selector chose invalid function %u", function_index);
     const IdmBcFunction *candidate = &module->functions[function_index];
@@ -649,8 +650,9 @@ static bool run_guard_function_direct(Vm *caller, const IdmBytecodeModule *modul
     }
     idm_error_clear(&guard_err);
     if (status == IDM_EXEC_YIELD) {
-        return idm_error_set(err, idm_span_unknown(NULL), "guard of '%s' exceeded its budget of %d reductions",
-                             candidate->name && candidate->name[0] ? candidate->name : "<fn>", IDM_GUARD_BUDGET);
+        if (out_exhausted) *out_exhausted = true;
+        *out_pass = false;
+        return true;
     }
     *out_pass = idm_value_ok(result);
     return true;
@@ -666,6 +668,7 @@ typedef struct {
     size_t capture_base;
     uint32_t capture_count;
     IdmNamespace *ns;
+    bool exhausted;
 } SelectorGuardCtx;
 
 static bool selector_guard(void *user, uint32_t function_index, const IdmPatternBindings *bindings, bool *out_pass, IdmError *err) {
@@ -673,9 +676,9 @@ static bool selector_guard(void *user, uint32_t function_index, const IdmPattern
     if (function_index >= ctx->callee_module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "selector chose invalid function %u", function_index);
     const IdmBcFunction *candidate = &ctx->callee_module->functions[function_index];
     if (ctx->direct) {
-        return run_guard_function_direct(ctx->vm, ctx->callee_module, function_index, bindings, ctx->capture_base, ctx->capture_count, ctx->arg_base, ctx->argc, ctx->ns, out_pass, err);
+        return run_guard_function_direct(ctx->vm, ctx->callee_module, function_index, bindings, ctx->capture_base, ctx->capture_count, ctx->arg_base, ctx->argc, ctx->ns, out_pass, &ctx->exhausted, err);
     }
-    return run_guard_function(ctx->vm, ctx->callee_module, ctx->callee, candidate, bindings, ctx->arg_base, ctx->argc, out_pass, err);
+    return run_guard_function(ctx->vm, ctx->callee_module, ctx->callee, candidate, bindings, ctx->arg_base, ctx->argc, out_pass, &ctx->exhausted, err);
 }
 
 static bool select_trivial_closure(Vm *vm, IdmValue callee, uint32_t argc, uint32_t *out_index, bool *out_selected, IdmError *err) {
@@ -693,10 +696,11 @@ static bool select_trivial_closure(Vm *vm, IdmValue callee, uint32_t argc, uint3
     return true;
 }
 
-static bool vm_select_clause(Vm *vm, IdmValue callee, size_t arg_base, uint32_t argc, uint32_t *out_index, IdmPatternBindings *out_bindings, bool *out_has_bindings, bool *out_matched, IdmError *err) {
+static bool vm_select_clause(Vm *vm, IdmValue callee, size_t arg_base, uint32_t argc, uint32_t *out_index, IdmPatternBindings *out_bindings, bool *out_has_bindings, bool *out_matched, bool *out_exhausted, IdmError *err) {
     *out_matched = false;
     *out_has_bindings = false;
     *out_index = UINT32_MAX;
+    if (out_exhausted) *out_exhausted = false;
     bool selected = false;
     if (!select_trivial_closure(vm, callee, argc, out_index, &selected, err)) return false;
     if (selected) {
@@ -716,8 +720,12 @@ static bool vm_select_clause(Vm *vm, IdmValue callee, size_t arg_base, uint32_t 
         guard_ctx.capture_base = 0;
         guard_ctx.capture_count = 0;
         guard_ctx.ns = NULL;
-        return idm_pattern_selector_select(vm->rt, selector, &vm->stack[arg_base], argc, selector_guard, &guard_ctx, out_index, out_bindings, out_has_bindings, out_matched, err);
+        guard_ctx.exhausted = false;
+        bool sel_ok = idm_pattern_selector_select(vm->rt, selector, &vm->stack[arg_base], argc, selector_guard, &guard_ctx, out_index, out_bindings, out_has_bindings, out_matched, err);
+        if (out_exhausted) *out_exhausted = guard_ctx.exhausted;
+        return sel_ok;
     }
+    bool lin_ex = false;
     for (size_t i = 0; i < idm_closure_entry_count(callee); i++) {
         uint32_t candidate_index = idm_closure_entry(callee, i, err);
         if (err && err->present) return false;
@@ -747,7 +755,7 @@ static bool vm_select_clause(Vm *vm, IdmValue callee, size_t arg_base, uint32_t 
             continue;
         }
         bool guard_ok = true;
-        if (!run_guard_function(vm, callee_module, callee, candidate, &bindings, arg_base, argc, &guard_ok, err)) {
+        if (!run_guard_function(vm, callee_module, callee, candidate, &bindings, arg_base, argc, &guard_ok, &lin_ex, err)) {
             idm_pattern_bindings_destroy(&bindings);
             return false;
         }
@@ -761,6 +769,7 @@ static bool vm_select_clause(Vm *vm, IdmValue callee, size_t arg_base, uint32_t 
         *out_matched = true;
         return true;
     }
+    if (out_exhausted) *out_exhausted = lin_ex;
     return true;
 }
 
@@ -787,6 +796,11 @@ static bool raise_no_clause(Vm *vm, const char *name, const IdmValue *args, uint
     IdmValue args_tuple = idm_tuple(vm->rt, argc == 0 ? NULL : args, argc, NULL);
     idm_buf_destroy(&message_buf);
     return idm_error_reason(vm->rt, err, "no-clause", 2, idm_atom(vm->rt, reason_name), args_tuple);
+}
+
+static bool raise_guard_budget(const char *name, IdmError *err) {
+    const char *display = (name && name[0] && !generated_clause_name(name)) ? name : "<fn>";
+    return idm_error_set(err, idm_span_unknown(NULL), "guard of '%s' exceeded its budget of %d reductions", display, IDM_GUARD_BUDGET);
 }
 
 static bool enter_clause(Vm *vm, IdmValue callee, uint32_t function_index, size_t closure_index, uint32_t argc, const IdmPatternBindings *bindings, bool tail, IdmError *err) {
@@ -924,6 +938,7 @@ static bool call_direct(Vm *vm, const IdmBytecodeModule *module, size_t site, co
     guard_ctx.capture_base = capture_base;
     guard_ctx.capture_count = capture_count;
     guard_ctx.ns = ns;
+    guard_ctx.exhausted = false;
     uint32_t function_index = UINT32_MAX;
     IdmPatternBindings selected_bindings;
     idm_pattern_bindings_init(&selected_bindings);
@@ -932,6 +947,7 @@ static bool call_direct(Vm *vm, const IdmBytecodeModule *module, size_t site, co
     if (!idm_pattern_selector_select(vm->rt, selector, &vm->stack[arg_base], argc, selector_guard, &guard_ctx, &function_index, &selected_bindings, &has_selected_bindings, &matched, err)) return false;
     if (!matched) {
         const char *cname = entries[0] < module->function_count ? module->functions[entries[0]].name : NULL;
+        if (guard_ctx.exhausted) return raise_guard_budget(cname, err);
         return raise_no_clause(vm, cname, &vm->stack[arg_base], argc, err);
     }
     bool entered = enter_direct_clause(vm, module, function_index, capture_base, capture_count, arg_base, argc, has_selected_bindings ? &selected_bindings : NULL, tail, ns, err);
@@ -966,13 +982,15 @@ static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err) {
     idm_pattern_bindings_init(&selected_bindings);
     bool has_selected_bindings = false;
     bool matched = false;
-    if (!vm_select_clause(vm, callee, closure_index + 1u, argc, &function_index, &selected_bindings, &has_selected_bindings, &matched, err)) return false;
+    bool budget_exhausted = false;
+    if (!vm_select_clause(vm, callee, closure_index + 1u, argc, &function_index, &selected_bindings, &has_selected_bindings, &matched, &budget_exhausted, err)) return false;
     if (!matched) {
         const IdmBytecodeModule *cm = closure_module_or_current(vm, callee);
         const char *cname = NULL;
         uint32_t first_entry = idm_closure_entry_count(callee) != 0 ? idm_closure_entry(callee, 0, NULL) : idm_closure_function_index(callee);
         if (cm && first_entry < cm->function_count) cname = cm->functions[first_entry].name;
         if (has_selected_bindings) idm_pattern_bindings_destroy(&selected_bindings);
+        if (budget_exhausted) return raise_guard_budget(cname, err);
         return raise_no_clause(vm, cname, &vm->stack[closure_index + 1u], argc, err);
     }
     bool entered = enter_clause(vm, callee, function_index, closure_index, argc, has_selected_bindings ? &selected_bindings : NULL, tail, err);
@@ -993,13 +1011,15 @@ static bool call_closure_at_args(Vm *vm, IdmValue callee, size_t arg_base, uint3
     idm_pattern_bindings_init(&selected_bindings);
     bool has_selected_bindings = false;
     bool matched = false;
-    if (!vm_select_clause(vm, callee, arg_base, argc, &function_index, &selected_bindings, &has_selected_bindings, &matched, err)) return false;
+    bool budget_exhausted = false;
+    if (!vm_select_clause(vm, callee, arg_base, argc, &function_index, &selected_bindings, &has_selected_bindings, &matched, &budget_exhausted, err)) return false;
     if (!matched) {
         const IdmBytecodeModule *cm = closure_module_or_current(vm, callee);
         const char *cname = NULL;
         uint32_t first_entry = idm_closure_entry_count(callee) != 0 ? idm_closure_entry(callee, 0, NULL) : idm_closure_function_index(callee);
         if (cm && first_entry < cm->function_count) cname = cm->functions[first_entry].name;
         if (has_selected_bindings) idm_pattern_bindings_destroy(&selected_bindings);
+        if (budget_exhausted) return raise_guard_budget(cname, err);
         return raise_no_clause(vm, cname, &vm->stack[arg_base], argc, err);
     }
     bool entered = enter_closure_at_args(vm, callee, function_index, arg_base, argc, has_selected_bindings ? &selected_bindings : NULL, tail, err);
@@ -1048,7 +1068,7 @@ static bool op_recv(Vm *vm, Frame *frame, size_t instr_ip, bool tail, IdmExecSta
         idm_pattern_bindings_init(&b);
         bool has = false;
         bool m = false;
-        bool ok = vm_select_clause(vm, closure, vm->sp - 1u, 1u, &idx, &b, &has, &m, err);
+        bool ok = vm_select_clause(vm, closure, vm->sp - 1u, 1u, &idx, &b, &has, &m, NULL, err);
         vm->sp--;
         if (!ok) { if (has) idm_pattern_bindings_destroy(&b); if (matched_has) idm_pattern_bindings_destroy(&matched_bindings); return false; }
         if (m) {

@@ -183,6 +183,14 @@ suite do
       {:error {:runtime msg}} -> assert (str-contains? msg "exceeded its budget")
     end
   end
+  test "guard-budget-falls-through" do
+    defn spin-guard n -> spin-guard n
+    defn pick2 do
+      n when (spin-guard n) -> :first
+      n -> :second
+    end
+    assert-eq (pick2 1) :second
+  end
   test "trait-implement-sequential-rebind" do
     got = do
       trait Tag do
