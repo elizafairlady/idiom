@@ -6,7 +6,7 @@ suite do
     got = do
       protocol QOps do
         defn qmul a b -> mul a b
-        operator <*!> precedence: 50 assoc: left fixity: infix -> qmul
+        operator <*!> precedence: 50 assoc: left capture: infix -> qmul
       end
       trait QSize do
         method qsize x
@@ -32,6 +32,15 @@ suite do
     end
     assert-inspect got "{:false :true :str}"
   end
+  test "trait method default accepts direct do body" do
+    trait DirectMethod do
+      method show x do
+        str "m:" x
+      end
+    end
+    implement DirectMethod on int
+    assert-eq (show 42) "m:42"
+  end
   test "implements? resolves trait names hygienically" do
     got = do
       trait R do
@@ -52,7 +61,7 @@ suite do
   end
   test "trait and protocol declarations roll back outside their block" do
     assert-expand-error "do\n  trait S do\n    method sz x\n  end\n  :ok\nend\nsz 1" "unbound identifier 'sz'"
-    assert-expand-error "do\n  protocol Shellp do\n    defn shelp a -> a\n    operator <!!> precedence: 50 assoc: left fixity: infix -> shelp\n  end\n  :ok\nend\n1 <!!> 2" "unbound identifier"
+    assert-expand-error "do\n  protocol Shellp do\n    defn shelp a -> a\n    operator <!!> precedence: 50 assoc: left capture: infix -> shelp\n  end\n  :ok\nend\n1 <!!> 2" "unbound identifier"
   end
   test "dispatch-cache-does-not-misserve-across-types" do
     trait Tag do method tag x end

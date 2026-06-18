@@ -1086,10 +1086,10 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                 if (!ctx.macros[i].exported) continue;
                 macros[k].name = idm_strdup(ctx.macros[i].name);
                 if (!macros[k].name) { copy_ok = false; break; }
-                macros[k].module = idm_module_ref_retain(ctx.macros[i].module);
-                macros[k].function_index = ctx.macros[i].function_index;
-                macros[k].phase_ns = ctx.macros[i].phase_ns;
-                macros[k].phase_env = idm_phase_env_retain(ctx.macros[i].phase_env);
+                macros[k].module = idm_module_ref_retain(ctx.macros[i].fn.module);
+                macros[k].function_index = ctx.macros[i].fn.function_index;
+                macros[k].phase_ns = ctx.macros[i].fn.phase_ns;
+                macros[k].phase_env = idm_phase_env_retain(ctx.macros[i].fn.phase_env);
                 k++;
             }
         }
@@ -1103,16 +1103,14 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                 if (!ctx.operators[i].exported) continue;
                 IdmOperatorDef *d = &operators[k];
                 d->name = idm_strdup(ctx.operators[i].name);
+                d->capture = ctx.operators[i].capture ? idm_strdup(ctx.operators[i].capture) : NULL;
                 d->precedence = ctx.operators[i].precedence;
                 d->assoc = ctx.operators[i].assoc;
-                d->fixity = ctx.operators[i].fixity;
-                d->target_kind = ctx.operators[i].target_kind;
-                d->primitive = ctx.operators[i].primitive;
                 d->target_name = ctx.operators[i].target_name ? idm_strdup(ctx.operators[i].target_name) : NULL;
                 d->exported = true;
                 idm_scope_set_init(&d->scopes);
                 bool sok = idm_scope_set_copy(&d->scopes, &ctx.operators[i].scopes);
-                if (!d->name || (ctx.operators[i].target_name && !d->target_name) || !sok) { copy_ok = false; break; }
+                if (!d->name || (ctx.operators[i].capture && !d->capture) || (ctx.operators[i].target_name && !d->target_name) || !sok) { copy_ok = false; break; }
                 k++;
             }
         }
@@ -1122,10 +1120,10 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
     IdmNamespace *res_phase_ns = NULL;
     IdmPhaseEnv *res_phase_env = NULL;
     if (copy_ok && ctx.decl_resolver) {
-        res_module = idm_module_ref_retain(ctx.decl_resolver_module);
-        res_fn = ctx.decl_resolver_fn;
-        res_phase_ns = ctx.decl_resolver_phase_ns;
-        res_phase_env = idm_phase_env_retain(ctx.decl_resolver_phase_env);
+        res_module = idm_module_ref_retain(ctx.decl_resolver_impl.module);
+        res_fn = ctx.decl_resolver_impl.function_index;
+        res_phase_ns = ctx.decl_resolver_impl.phase_ns;
+        res_phase_env = idm_phase_env_retain(ctx.decl_resolver_impl.phase_env);
     }
     IdmPhaseEnv *pkg_phase_env = copy_ok ? idm_phase_env_retain(ctx.phase_env) : NULL;
     IdmArtifactDep *pkg_deps = NULL;

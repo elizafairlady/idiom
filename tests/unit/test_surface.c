@@ -12,11 +12,18 @@ static void test_source_operator_surface(void) {
     check_operator_eval(&rt, "x = -5\nx + 47\n", NULL, 42);
     check_operator_eval(&rt, "if (3 != 4) do 42 else do 0 end\n", NULL, 42);
     check_operator_eval(&rt, "if (3 != 3) do 0 else do 42 end\n", NULL, 42);
-    check_operator_eval(&rt, "defn combine a b -> add (mul a 10) b\noperator glue precedence: 50 assoc: left fixity: infix -> combine\n4 glue 2\n", NULL, 42);
-    check_operator_eval(&rt, "defn negate x -> sub 0 x\noperator negof precedence: 80 fixity: prefix -> negate\nadd 50 (negof 8)\n", NULL, 42);
+    check_operator_eval(&rt, "defn combine a b -> add (mul a 10) b\noperator glue precedence: 50 assoc: left capture: infix -> combine\n4 glue 2\n", NULL, 42);
+    check_operator_eval(&rt, "defn negate x -> sub 0 x\noperator negof precedence: 80 capture: prefix -> negate\nadd 50 (negof 8)\n", NULL, 42);
+    check_value_written(&rt, "operator <++> precedence: 50 assoc: left capture: infix do\n  a b -> add (mul a 10) b\nend\n4 <++> 2\n", "42");
+    check_value_written(&rt, "defn captured-len xs -> syntax-length xs\noperator grab capture: {prefix count 2} -> captured-len\ngrab alpha beta\n", "2");
+    check_value_written(&rt, "defn body-len b -> syntax-length b\noperator blocky capture: indented -> body-len\nblocky do\n  alpha\n  beta\nend\n", "3");
+    check_value_written(&rt, "defn sentinel-len sent xs -> syntax-length xs\noperator hered capture: sentinel -> sentinel-len\nhered END alpha beta END\n", "2");
+    check_value_written(&rt, "defn add-captured left sent xs -> add left (syntax-length xs)\noperator << precedence: 20 assoc: left capture: {infix sentinel} -> add-captured\n38 + 2 << END alpha beta END\n", "42");
+    check_value_written(&rt, "defn add-counted left xs -> add left (syntax-length xs)\noperator take precedence: 20 assoc: left capture: {infix count 2} -> add-counted\n40 take alpha beta\n", "42");
+    check_value_written(&rt, "defmacro add-left stx -> %`(add %,(syntax-nth stx 2) 2)\noperator mop precedence: 20 assoc: left capture: {infix expression} -> add-left\n40 mop ignored\n", "42");
     check_operator_eval(&rt, "(fn x -> add x 1) 41\n", NULL, 42);
     check_operator_eval(&rt, "f = fn a -> (fn b -> (fn c -> add a (add b c)))\n((f 100) 20) 3\n", NULL, 123);
-    check_operator_eval(&rt, "defn combine a b -> add (mul a 10) b\noperator <+> precedence: 50 assoc: left fixity: infix -> combine\n1 <+> 2 <+> 3\n", NULL, 123);
+    check_operator_eval(&rt, "defn combine a b -> add (mul a 10) b\noperator <+> precedence: 50 assoc: left capture: infix -> combine\n1 <+> 2 <+> 3\n", NULL, 123);
     check_operator_eval(&rt, "defn ev n -> cond (n == 0) 1 (od (sub n 1))\ndefn od n -> cond (n == 0) 0 (ev (sub n 1))\nadd (ev 10) 41\n", NULL, 42);
     idm_runtime_destroy(&rt);
 }
@@ -501,10 +508,10 @@ static void test_operator_macro_negatives(void) {
     expect_expand_error_rt(&rt, "<op-bad-precedence>", "operator bad precedence: 999 -> add\n", "operator precedence must be an integer 0..255");
     expect_expand_error_rt(&rt, "<op-bad-assoc>", "operator bad assoc: sideways -> add\n", "operator assoc must be left, right, or none");
     expect_expand_error_rt(&rt, "<op-bad-keyword>", "operator bad bogus: 1 -> add\n", "unknown operator keyword 'bogus'");
-    expect_expand_error_rt(&rt, "<op-thread-prefix>", "operator bad fixity: prefix -> thread-first\n", "thread operators must be infix");
+    expect_expand_error_rt(&rt, "<op-macro-value-capture>", "operator bad capture: prefix -> thread-first\nbad 1\n", "use a syntax capture");
     expect_expand_error_rt(&rt, "<op-too-short>", "operator alone\n", "operator declaration requires a name and a target");
     expect_expand_error_rt(&rt, "<op-no-arrow>", "operator noarrow precedence: 9\n", "operator declaration requires '-> target'");
-    check_value_written(&rt, "defn combine a b -> add (mul a 10) b\noperator <%> precedence: 50 assoc: left fixity: infix -> combine\n1 <%> 2 <%> 3\n", "123");
+    check_value_written(&rt, "defn combine a b -> add (mul a 10) b\noperator <%> precedence: 50 assoc: left capture: infix -> combine\n1 <%> 2 <%> 3\n", "123");
     idm_runtime_destroy(&rt);
 }
 

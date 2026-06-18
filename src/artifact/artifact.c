@@ -95,6 +95,7 @@ bool idm_phase_env_add_module(IdmPhaseEnv *env, IdmBytecodeModule *module, uint3
 void idm_operator_def_destroy(IdmOperatorDef *op) {
     if (!op) return;
     free(op->name);
+    free(op->capture);
     free(op->target_name);
     idm_scope_set_destroy(&op->scopes);
     memset(op, 0, sizeof(*op));
@@ -353,10 +354,10 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 23u
+#define IDM_ARTIFACT_VERSION 26u
 
-static bool artifact_noop_register_operator(void *user, IdmRuntime *rt, const IdmSyntax *name, int64_t precedence, const char *assoc, const char *fixity, const IdmSyntax *target, IdmError *err) {
-    (void)user; (void)rt; (void)name; (void)precedence; (void)assoc; (void)fixity; (void)target; (void)err;
+static bool artifact_noop_register_operator(void *user, IdmRuntime *rt, const IdmSyntax *name, int64_t precedence, const char *assoc, const char *capture, const IdmSyntax *target, IdmError *err) {
+    (void)user; (void)rt; (void)name; (void)precedence; (void)assoc; (void)capture; (void)target; (void)err;
     return true;
 }
 
@@ -498,10 +499,9 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     for (size_t i = 0; ok && i < art->operator_count; i++) {
         const IdmOperatorDef *op = &art->operators[i];
         ok = idm_buf_put_str(out, op->name, strlen(op->name));
-        ok = ok && idm_buf_put_u8(out, op->precedence) && idm_buf_put_u8(out, (uint8_t)op->assoc) && idm_buf_put_u8(out, (uint8_t)op->fixity) && idm_buf_put_u8(out, (uint8_t)op->target_kind);
-        ok = ok && idm_buf_put_u32(out, (uint32_t)op->primitive);
-        ok = ok && idm_buf_put_u8(out, op->target_name ? 1u : 0u);
-        if (ok && op->target_name) ok = idm_buf_put_str(out, op->target_name, strlen(op->target_name));
+        ok = ok && idm_buf_put_str(out, op->capture ? op->capture : "infix", strlen(op->capture ? op->capture : "infix"));
+        ok = ok && idm_buf_put_u8(out, op->precedence) && idm_buf_put_u8(out, (uint8_t)op->assoc);
+        ok = ok && idm_buf_put_str(out, op->target_name, strlen(op->target_name));
         ok = ok && put_scope_set(out, &op->scopes);
     }
     if (!ok) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -636,15 +636,11 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         for (uint32_t i = 0; ok && i < operator_count; i++) {
             IdmOperatorDef *op = &out->operators[i];
             out->operator_count = i + 1u;
-            ok = artifact_read_str(&r, &op->name, err);
+            ok = artifact_read_str(&r, &op->name, err) && artifact_read_str(&r, &op->capture, err);
             op->precedence = ok ? idm_rd_u8(&r) : 0;
             op->assoc = (IdmOpAssoc)(ok ? idm_rd_u8(&r) : 0);
-            op->fixity = (IdmOpFixity)(ok ? idm_rd_u8(&r) : 0);
-            op->target_kind = (IdmOpTargetKind)(ok ? idm_rd_u8(&r) : 0);
-            op->primitive = (IdmPrimitive)(ok ? idm_rd_u32(&r) : 0);
-            uint8_t has_target = ok ? idm_rd_u8(&r) : 0;
             if (ok && !r.ok) ok = false;
-            if (ok && has_target) ok = artifact_read_str(&r, &op->target_name, err);
+            if (ok) ok = artifact_read_str(&r, &op->target_name, err);
             op->exported = true;
             idm_scope_set_init(&op->scopes);
             if (ok) ok = read_scope_set(&r, &op->scopes);

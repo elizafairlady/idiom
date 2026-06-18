@@ -14,7 +14,7 @@ suite do
   test "bare operator over provider operator shadows like any rebind" do
     got = do
       activate tests/pkg/exporter
-      operator <+> precedence: 50 assoc: left fixity: infix -> sub
+      operator <+> precedence: 50 assoc: left capture: infix -> sub
       3 <+> 4
     end
     assert-inspect got "-1"
@@ -28,7 +28,7 @@ suite do
     assert-eq got 5
   end
   test "provider over bare operator collides naming the unit" do
-    assert-expand-error "operator <+> precedence: 50 assoc: left fixity: infix -> sub\nactivate tests/pkg/exporter\n3 <+> 4" "surface '<+>' from '<expand-check>' is already active in this context"
+    assert-expand-error "operator <+> precedence: 50 assoc: left capture: infix -> sub\nactivate tests/pkg/exporter\n3 <+> 4" "surface '<+>' from '<expand-check>' is already active in this context"
   end
   test "provider over bare defmacro collides naming the unit" do
     assert-expand-error "defmacro answer stx -> make-syntax-int stx 5\nactivate tests/pkg/exporter\nanswer x" "surface 'answer' from '<expand-check>' is already active in this context"
@@ -63,8 +63,8 @@ suite do
   end
   test "bare operator rebind in same unit stays legal" do
     got = do
-      operator <+!> precedence: 50 assoc: left fixity: infix -> add
-      operator <+!> precedence: 50 assoc: left fixity: infix -> sub
+      operator <+!> precedence: 50 assoc: left capture: infix -> add
+      operator <+!> precedence: 50 assoc: left capture: infix -> sub
       3 <+!> 4
     end
     assert-inspect got "-1"

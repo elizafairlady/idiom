@@ -618,43 +618,25 @@ static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, u
 
 static IdmCore *pattern_extract_value(BodyRec *rec, size_t index, IdmError *err) {
     IdmSpan span = rec->pattern_names[index]->span;
-    IdmCore *prim = idm_core_primitive(IDM_PRIM_TUPLE_GET, span);
-    IdmCore *call = prim ? idm_core_call(prim, span) : NULL;
-    if (!call) {
-        idm_core_free(prim);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    }
-    IdmCore *ref = idm_core_local_ref("_match", rec->pattern_tmp_slot, span);
-    if (!ref || !idm_core_call_add_arg(call, ref)) {
-        idm_core_free(ref);
-        idm_core_free(call);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    }
-    IdmCore *idx = idm_core_literal(idm_int((int64_t)index), span);
-    if (!idx || !idm_core_call_add_arg(call, idx)) {
-        idm_core_free(idx);
-        idm_core_free(call);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    }
+    IdmCore *call = expand_primitive_call(IDM_PRIM_TUPLE_GET, span, err);
+    if (!call) return NULL;
+    if (!core_call_add_arg_or_free(call, idm_core_local_ref("_match", rec->pattern_tmp_slot, span), err, span)) return NULL;
+    if (!core_call_add_arg_or_free(call, idm_core_literal(idm_int((int64_t)index), span), err, span)) return NULL;
     return call;
 }
 
 static IdmCore *pattern_bind_call(BodyRec *rec, IdmCore *rhs, IdmError *err) {
     IdmSpan span = rec->pattern_syntax->span;
-    IdmCore *prim = idm_core_primitive(IDM_PRIM_TUPLE, span);
-    IdmCore *body = prim ? idm_core_call(prim, span) : NULL;
+    IdmCore *body = expand_primitive_call(IDM_PRIM_TUPLE, span, err);
     if (!body) {
-        idm_core_free(prim);
         idm_core_free(rhs);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        return NULL;
     }
     for (size_t i = 0; i < rec->pattern_name_count; i++) {
         IdmCore *ref = idm_core_local_ref(rec->pattern_names[i]->as.text, (uint32_t)i, rec->pattern_names[i]->span);
-        if (!ref || !idm_core_call_add_arg(body, ref)) {
-            idm_core_free(ref);
-            idm_core_free(body);
+        if (!core_call_add_arg_or_free(body, ref, err, span)) {
             idm_core_free(rhs);
-            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+            return NULL;
         }
     }
     IdmBuffer name_buf;
@@ -715,11 +697,7 @@ static IdmCore *pattern_bind_call(BodyRec *rec, IdmCore *rhs, IdmError *err) {
         idm_core_free(rhs);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, rec->form->span);
     }
-    if (!idm_core_call_add_arg(call, rhs)) {
-        idm_core_free(call);
-        idm_core_free(rhs);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, rec->form->span);
-    }
+    if (!core_call_add_arg_or_free(call, rhs, err, rec->form->span)) return NULL;
     return call;
 }
 
@@ -729,25 +707,13 @@ static IdmCore *build_macro_registration(ExpandContext *ctx, const IdmSyntax *na
         idm_core_free(fn);
         return NULL;
     }
-    IdmCore *callee = idm_core_primitive(IDM_PRIM_EXPANDER_REGISTER_MACRO, span);
-    IdmCore *call = callee ? idm_core_call(callee, span) : NULL;
+    IdmCore *call = expand_primitive_call(IDM_PRIM_EXPANDER_REGISTER_MACRO, span, err);
     if (!call) {
-        idm_core_free(callee);
         idm_core_free(fn);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        return NULL;
     }
-    IdmCore *name_lit = idm_core_literal(name_value, span);
-    if (!name_lit || !idm_core_call_add_arg(call, name_lit)) {
-        idm_core_free(name_lit);
-        idm_core_free(call);
-        idm_core_free(fn);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    }
-    if (!idm_core_call_add_arg(call, fn)) {
-        idm_core_free(call);
-        idm_core_free(fn);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    }
+    if (!core_call_add_arg_or_free(call, idm_core_literal(name_value, span), err, span)) { idm_core_free(fn); return NULL; }
+    if (!core_call_add_arg_or_free(call, fn, err, span)) return NULL;
     return call;
 }
 
@@ -854,13 +820,16 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         const IdmSyntax *for_syntax_body = NULL;
         if (for_syntax_form(form, &for_syntax_body)) {
             int saved_phase = ctx->phase;
+            int saved_surface_phase = ctx->surface_phase;
             ctx->phase = 1;
+            if (ctx->surface_phase < 0) ctx->surface_phase = saved_phase;
             ScopePropagation propagation = { work, i + 1u, work_count, ctx->scope_propagation };
             ctx->scope_propagation = &propagation;
             IdmCore *ignored = expand_body_items(ctx, for_syntax_body->as.seq.items, 1, for_syntax_body->as.seq.count, false, err);
             ctx->scope_propagation = propagation.prev;
             bool ran = ignored != NULL && run_phase_core(ctx, ignored, err);
             ctx->phase = saved_phase;
+            ctx->surface_phase = saved_surface_phase;
             idm_core_free(ignored);
             if (!ran) {
                 if (err && err->present) idm_error_note(err, "during for-syntax evaluation (%s:%u:%u)", form->span.file ? form->span.file : "<unknown>", form->span.line, form->span.column);

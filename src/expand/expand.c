@@ -24,12 +24,20 @@ static IdmCore *parse_postfix_expr(ExpandContext *ctx, IdmSyntax *const *items, 
 static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size_t *pos, size_t end, bool stop_at_operator, IdmCore *receiver, IdmError *err);
 static bool arg_parse_at_stop(ExpandContext *ctx, IdmSyntax *const *items, size_t pos, size_t end, bool stop_at_operator);
 static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
+typedef enum { SYNTAX_CAPTURE_NONE, SYNTAX_CAPTURE_INDENTED, SYNTAX_CAPTURE_SENTINEL, SYNTAX_CAPTURE_COUNT, SYNTAX_CAPTURE_EXPRESSION } SyntaxCaptureKind;
+typedef struct { IdmSyntax *items[2]; size_t count; } SyntaxCapturePayload;
+static SyntaxCaptureKind syntax_capture_kind(const char *capture, bool *out_left, uint32_t *out_count);
+static IdmCore *expand_syntax_capture_tail(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *left, IdmSyntax *const *items, size_t cursor, size_t end, IdmError *err);
+static IdmCore *expand_syntax_capture_macro(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSyntax *target_word, uint32_t payload, IdmSyntax *const *items, size_t left_start, size_t left_end, size_t cursor, size_t end, IdmError *err);
+static IdmCore *expand_syntax_capture_dispatch(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSyntax *const *items, size_t left_start, size_t left_end, size_t cursor, size_t end, IdmError *err);
 static bool enforest_at_end_or_operator(EnforestParser *parser);
 static IdmCore *parse_enforest_primary(EnforestParser *parser);
-static bool core_call_prepend_arg(IdmCore *call, IdmCore *arg);
+static void core_args_free(IdmCore **args, size_t arg_count);
+static IdmSyntax *operator_target_word(const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSpan span, IdmError *err);
 static IdmCore *operator_callee(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSpan span, IdmError *err);
 static IdmCore *make_operator_call(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *left, IdmCore *right, IdmSpan span, IdmError *err);
 static IdmCore *make_operator_unary(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *operand, IdmSpan span, IdmError *err);
+static IdmCore *make_operator_call_args(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err);
 static IdmCore *parse_enforest_expr(EnforestParser *parser, uint8_t min_prec);
 static IdmCore *expand_form_expr(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 static IdmCore *expand_form_body(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
@@ -248,18 +256,9 @@ static IdmCore *expand_raise_parts(ExpandContext *ctx, IdmSyntax *const *items, 
     if (start + 1u >= end) return expand_error(err, items[start]->span, "raise requires a value");
     IdmCore *value = expand_parts(ctx, items, start + 1u, end, err);
     if (!value) return NULL;
-    IdmCore *callee = idm_core_primitive(IDM_PRIM_RAISE, items[start]->span);
-    IdmCore *call = callee ? idm_core_call(callee, items[start]->span) : NULL;
-    if (!call) {
-        idm_core_free(callee);
-        idm_core_free(value);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
-    }
-    if (!idm_core_call_add_arg(call, value)) {
-        idm_core_free(value);
-        idm_core_free(call);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
-    }
+    IdmCore *call = expand_primitive_call(IDM_PRIM_RAISE, items[start]->span, err);
+    if (!call) { idm_core_free(value); return NULL; }
+    if (!core_call_add_arg_or_free(call, value, err, items[start]->span)) return NULL;
     return call;
 }
 
@@ -388,25 +387,17 @@ static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *it
         idm_core_free(value);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
     }
-    IdmCore *callee = idm_core_primitive(IDM_PRIM_IS_A_P, items[start]->span);
-    IdmCore *call = callee ? idm_core_call(callee, items[start]->span) : NULL;
+    IdmCore *call = expand_primitive_call(IDM_PRIM_IS_A_P, items[start]->span, err);
     if (!call) {
+        idm_core_free(identity);
         idm_core_free(value);
-        idm_core_free(identity);
-        idm_core_free(callee);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+        return NULL;
     }
-    if (!idm_core_call_add_arg(call, value)) {
-        idm_core_free(value);
+    if (!core_call_add_arg_or_free(call, value, err, items[start]->span)) {
         idm_core_free(identity);
-        idm_core_free(call);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+        return NULL;
     }
-    if (!idm_core_call_add_arg(call, identity)) {
-        idm_core_free(identity);
-        idm_core_free(call);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
-    }
+    if (!core_call_add_arg_or_free(call, identity, err, items[start]->span)) return NULL;
     return call;
 }
 
@@ -457,24 +448,24 @@ static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const Metho
     size_t argc = (receiver ? 1u : 0u) + arg_count;
     if (argc != method->arity) {
         idm_core_free(receiver);
-        for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
+        core_args_free(args, arg_count);
         return expand_error(err, span, "method '%s.%s' expects %u argument(s), got %zu", method->trait, method->name, method->arity, argc);
     }
     IdmCore *call = idm_core_method_call(idm_atom(ctx->rt, method->trait), idm_atom(ctx->rt, method->name), receiver ? receiver->span : span);
     if (!call) {
         idm_core_free(receiver);
-        for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
+        core_args_free(args, arg_count);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     if (receiver && !idm_core_method_call_add_arg(call, receiver)) {
         idm_core_free(receiver);
-        for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
+        core_args_free(args, arg_count);
         idm_core_free(call);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, receiver->span);
     }
     for (size_t i = 0; i < arg_count; i++) {
         if (!idm_core_method_call_add_arg(call, args[i])) {
-            for (size_t j = i; j < arg_count; j++) idm_core_free(args[j]);
+            core_args_free(args + i, arg_count - i);
             idm_core_free(call);
             if (!err->present) idm_error_oom(err, span);
             return NULL;
@@ -524,14 +515,14 @@ static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size
         *pos = dot + 2u;
         for (size_t i = 0; i < extra_count; i++) {
             if (arg_parse_at_stop(ctx, items, *pos, end, stop_at_operator)) {
-                for (size_t j = 0; j < i; j++) idm_core_free(args[j]);
+                core_args_free(args, i);
                 free(args);
                 idm_core_free(receiver);
                 return expand_error(err, items[dot + 1u]->span, "method '%s.%s' expects %u argument(s), got %zu", method->trait, method->name, method->arity, i + 1u);
             }
             args[i] = parse_postfix_expr(ctx, items, pos, end, stop_at_operator, err);
             if (!args[i]) {
-                for (size_t j = 0; j < i; j++) idm_core_free(args[j]);
+                core_args_free(args, i);
                 free(args);
                 idm_core_free(receiver);
                 return NULL;
@@ -612,6 +603,46 @@ static bool reserved_prefix_string(IdmSyntax *const *items, size_t start, size_t
     return false;
 }
 
+static bool capture_separator(char c) {
+    return c == ' ' || c == ':';
+}
+
+static const char *capture_role(const char *capture, const char *role) {
+    size_t n = strlen(role);
+    return capture && strncmp(capture, role, n) == 0 && capture_separator(capture[n]) && capture[n + 1u] ? capture + n + 1u : NULL;
+}
+
+static SyntaxCaptureKind syntax_capture_kind(const char *capture, bool *out_left, uint32_t *out_count) {
+    bool left = false;
+    const char *shape = capture;
+    if (!shape || operator_capture_is_expression(shape)) return SYNTAX_CAPTURE_NONE;
+    const char *after = capture_role(shape, "infix");
+    if (after) {
+        left = true;
+        shape = after;
+    } else if ((after = capture_role(shape, "prefix")) != NULL) {
+        shape = after;
+    } else if (capture_role(shape, "postfix")) {
+        return SYNTAX_CAPTURE_NONE;
+    }
+    if (out_left) *out_left = left;
+    if (out_count) *out_count = 0;
+    if (strcmp(shape, "indented") == 0) return SYNTAX_CAPTURE_INDENTED;
+    if (strcmp(shape, "sentinel") == 0) return SYNTAX_CAPTURE_SENTINEL;
+    if (strcmp(shape, "expression") == 0 || strcmp(shape, "expr") == 0) return SYNTAX_CAPTURE_EXPRESSION;
+    if (strncmp(shape, "count", 5u) == 0 && capture_separator(shape[5])) {
+        const char *ntext = shape + 5u;
+        while (capture_separator(*ntext)) ntext++;
+        if (*ntext == '\0') return SYNTAX_CAPTURE_NONE;
+        char *tail = NULL;
+        unsigned long n = strtoul(ntext, &tail, 10);
+        if (*tail != '\0' || n > UINT32_MAX) return SYNTAX_CAPTURE_NONE;
+        if (out_count) *out_count = (uint32_t)n;
+        return SYNTAX_CAPTURE_COUNT;
+    }
+    return SYNTAX_CAPTURE_NONE;
+}
+
 static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
     if (start >= end) return expand_error(err, idm_span_unknown(NULL), "empty expression");
     size_t len = end - start;
@@ -653,6 +684,11 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "raise") == 0) return expand_raise_parts(ctx, items, start, end, err);
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "try") == 0) return expand_try_parts(ctx, items, start, end, err);
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "implements?") == 0) return expand_implements_parts(ctx, items, start, end, err);
+    if (items[start]->kind == IDM_SYN_WORD) {
+        const IdmOperatorDef *syntax_capture = op_lookup_syntax_capture(ctx, items[start], false, err);
+        if (err && err->present) return NULL;
+        if (syntax_capture) return expand_syntax_capture_dispatch(ctx, syntax_capture, items[start], items, start, start, start + 1u, end, err);
+    }
     if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "cond") == 0) {
         if (len != 3 && len != 4) return expand_error(err, items[start]->span, "cond expects two or three arguments: condition, then[, else]");
         IdmCore *condition = expand_syntax(ctx, items[start + 1u], err);
@@ -686,8 +722,8 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
     }
     if (items[start]->kind == IDM_SYN_WORD && !head_is_bound(ctx, items[start]) &&
         !op_lookup(ctx, items[start], true) && !op_lookup(ctx, items[start], false)) {
-        uint32_t resolver_payload = 0;
-        if (resolve_head_resolver(ctx, items[start], &resolver_payload, err)) return expand_macro_use_from_parts(ctx, items, start, end, resolver_payload, err);
+        uint32_t resolver_index = 0;
+        if (resolve_head_resolver(ctx, items[start], &resolver_index, err)) return expand_resolver_use_from_parts(ctx, items, start, end, resolver_index, err);
         if (err && err->present) return NULL;
         if (reserved_prefix_string(items, start, end, err)) return NULL;
         expand_error(err, items[start]->span, "unbound identifier '%s'", items[start]->as.text);
@@ -698,11 +734,18 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
     if (len == 1) return expand_syntax(ctx, items[start], err);
 
     bool has_operator = false;
+    size_t syntax_op_index = 0;
+    const IdmOperatorDef *syntax_infix = NULL;
     for (size_t i = start; i < end; i++) {
-        if (op_lookup(ctx, items[i], false) || op_lookup(ctx, items[i], true)) {
-            has_operator = true;
-            break;
+        if (i > start && !syntax_infix) {
+            syntax_infix = op_lookup_syntax_capture(ctx, items[i], true, err);
+            if (err && err->present) return NULL;
+            if (syntax_infix) syntax_op_index = i;
         }
+        if (op_lookup(ctx, items[i], false) || op_lookup(ctx, items[i], true)) has_operator = true;
+    }
+    if (syntax_infix) {
+        return expand_syntax_capture_dispatch(ctx, syntax_infix, items[syntax_op_index], items, start, syntax_op_index, syntax_op_index + 1u, end, err);
     }
     if (has_operator) {
         EnforestParser parser = {ctx, items, end, start, err};
@@ -753,12 +796,11 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
     size_t pos = start + 1u;
     while (pos < end) {
         IdmCore *arg = parse_postfix_expr(ctx, items, &pos, end, false, err);
-        if (!arg || !idm_core_call_add_arg(call, arg)) {
-            idm_core_free(arg);
+        if (!arg) {
             idm_core_free(call);
-            if (!err->present) idm_error_oom(err, pos < end ? items[pos]->span : items[start]->span);
             return NULL;
         }
+        if (!core_call_add_arg_or_free(call, arg, err, pos < end ? items[pos]->span : items[start]->span)) return NULL;
     }
     return call;
 }
@@ -797,12 +839,11 @@ static IdmCore *parse_enforest_primary(EnforestParser *parser) {
         }
         while (!enforest_at_end_or_operator(parser)) {
             IdmCore *arg = parse_postfix_expr(parser->ctx, parser->items, &parser->pos, parser->end, true, parser->err);
-            if (!arg || !idm_core_call_add_arg(call, arg)) {
-                idm_core_free(arg);
+            if (!arg) {
                 idm_core_free(call);
-                if (!parser->err->present) idm_error_oom(parser->err, head->span);
                 return NULL;
             }
+            if (!core_call_add_arg_or_free(call, arg, parser->err, head->span)) return NULL;
         }
         return parse_dot_tail(parser->ctx, parser->items, &parser->pos, parser->end, true, call, parser->err);
     }
@@ -812,33 +853,45 @@ static IdmCore *parse_enforest_primary(EnforestParser *parser) {
     return parse_dot_tail(parser->ctx, parser->items, &parser->pos, parser->end, true, core, parser->err);
 }
 
-static bool core_call_prepend_arg(IdmCore *call, IdmCore *arg) {
-    if (!call || call->kind != IDM_CORE_CALL || !arg) return false;
-    if (call->as.call.arg_count == call->as.call.arg_cap) {
-        size_t cap = call->as.call.arg_cap ? call->as.call.arg_cap * 2u : 4u;
-        IdmCore **args = realloc(call->as.call.args, cap * sizeof(*args));
-        if (!args) return false;
-        call->as.call.args = args;
-        call->as.call.arg_cap = cap;
+static IdmSyntax *operator_target_word(const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSpan span, IdmError *err) {
+    if (!op->target_name) { idm_error_set(err, span, "operator '%s' has no target", op->name); return NULL; }
+    IdmSyntax *word = idm_syn_word(op->target_name, op_token ? op_token->span : span);
+    if (!word) { idm_error_oom(err, span); return NULL; }
+    for (size_t i = 0; i < op->scopes.count; i++) {
+        if (!idm_syn_scope_add(word, 0, op->scopes.items[i])) {
+            idm_syn_free(word);
+            idm_error_oom(err, span);
+            return NULL;
+        }
     }
-    for (size_t i = call->as.call.arg_count; i > 0; i--) call->as.call.args[i] = call->as.call.args[i - 1u];
-    call->as.call.args[0] = arg;
-    call->as.call.arg_count++;
-    return true;
+    return word;
+}
+
+static IdmCore *expand_syntax_capture_dispatch(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSyntax *const *items, size_t left_start, size_t left_end, size_t cursor, size_t end, IdmError *err) {
+    IdmSyntax *target_word = operator_target_word(op, op_token, op_token ? op_token->span : idm_span_unknown(NULL), err);
+    if (!target_word) return NULL;
+    IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
+    const IdmBinding *binding = resolve_default(ctx, target_word, &status);
+    if (status == IDM_RESOLVE_AMBIGUOUS) {
+        expand_error(err, target_word->span, "ambiguous operator target '%s'", op->target_name);
+        idm_syn_free(target_word);
+        return NULL;
+    }
+    if (status == IDM_RESOLVE_OK && binding && binding->kind == IDM_BIND_TRANSFORMER)
+        return expand_syntax_capture_macro(ctx, op, op_token, target_word, binding->payload, items, left_start, left_end, cursor, end, err);
+    idm_syn_free(target_word);
+    IdmCore *left = left_start == left_end ? NULL : expand_parts(ctx, items, left_start, left_end, err);
+    return (left_start == left_end || left) ? expand_syntax_capture_tail(ctx, op, op_token, left, items, cursor, end, err) : NULL;
 }
 
 static IdmCore *operator_callee(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSpan span, IdmError *err) {
-    if (op->target_kind != IDM_OP_TGT_NAMED) return idm_core_primitive(op->primitive, span);
-    IdmSyntax *word = idm_syn_word(op->target_name, op_token ? op_token->span : span);
-    if (!word) return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    for (size_t i = 0; i < op->scopes.count; i++) {
-        if (!idm_syn_scope_add(word, 0, op->scopes.items[i])) { idm_syn_free(word); return (IdmCore *)(uintptr_t)idm_error_oom(err, span); }
-    }
+    IdmSyntax *word = operator_target_word(op, op_token, span, err);
+    if (!word) return NULL;
     IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
     const IdmBinding *binding = resolve_default(ctx, word, &status);
     if (status == IDM_RESOLVE_OK && binding->kind == IDM_BIND_TRANSFORMER) {
         idm_syn_free(word);
-        return expand_error(err, span, "operator target '%s' is a macro; macro operator targets are not yet supported", op->target_name);
+        return expand_error(err, span, "operator target '%s' is phase syntax; use a syntax capture such as capture: {infix expression}", op->target_name);
     }
     IdmCore *callee = expand_word_callee(ctx, word, err);
     idm_syn_free(word);
@@ -846,43 +899,209 @@ static IdmCore *operator_callee(ExpandContext *ctx, const IdmOperatorDef *op, co
 }
 
 static IdmCore *make_operator_call(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *left, IdmCore *right, IdmSpan span, IdmError *err) {
-    if (op->target_kind == IDM_OP_TGT_THREAD_FIRST || op->target_kind == IDM_OP_TGT_THREAD_LAST) {
-        if (right && right->kind == IDM_CORE_CALL) {
-            bool ok = op->target_kind == IDM_OP_TGT_THREAD_FIRST ? core_call_prepend_arg(right, left) : idm_core_call_add_arg(right, left);
-            if (!ok) {
-                idm_core_free(left);
-                idm_core_free(right);
-                idm_error_oom(err, span);
-                return NULL;
-            }
-            return right;
-        }
-        IdmCore *call = idm_core_call(right, span);
-        if (!call || !idm_core_call_add_arg(call, left)) {
-            idm_core_free(call);
-            if (!call) idm_core_free(right);
-            idm_core_free(left);
-            idm_error_oom(err, span);
-            return NULL;
-        }
-        return call;
-    }
-    IdmCore *callee = operator_callee(ctx, op, op_token, span, err);
-    if (!callee) { idm_core_free(left); idm_core_free(right); return NULL; }
-    IdmCore *call = idm_core_call(callee, span);
-    if (!call) { idm_core_free(callee); idm_core_free(left); idm_core_free(right); return (IdmCore *)(uintptr_t)idm_error_oom(err, span); }
-    if (!idm_core_call_add_arg(call, left)) { idm_core_free(left); idm_core_free(right); idm_core_free(call); return (IdmCore *)(uintptr_t)idm_error_oom(err, span); }
-    if (!idm_core_call_add_arg(call, right)) { idm_core_free(right); idm_core_free(call); return (IdmCore *)(uintptr_t)idm_error_oom(err, span); }
-    return call;
+    IdmCore *args[2] = {left, right};
+    return make_operator_call_args(ctx, op, op_token, args, 2u, span, err);
 }
 
 static IdmCore *make_operator_unary(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *operand, IdmSpan span, IdmError *err) {
+    IdmCore *args[1] = {operand};
+    return make_operator_call_args(ctx, op, op_token, args, 1u, span, err);
+}
+
+static void core_args_free(IdmCore **args, size_t arg_count) {
+    for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
+}
+
+static IdmCore *make_operator_call_args(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err) {
     IdmCore *callee = operator_callee(ctx, op, op_token, span, err);
-    if (!callee) { idm_core_free(operand); return NULL; }
+    if (!callee) {
+        core_args_free(args, arg_count);
+        return NULL;
+    }
     IdmCore *call = idm_core_call(callee, span);
-    if (!call) { idm_core_free(callee); idm_core_free(operand); return (IdmCore *)(uintptr_t)idm_error_oom(err, span); }
-    if (!idm_core_call_add_arg(call, operand)) { idm_core_free(operand); idm_core_free(call); return (IdmCore *)(uintptr_t)idm_error_oom(err, span); }
+    if (!call) {
+        idm_core_free(callee);
+        core_args_free(args, arg_count);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    for (size_t i = 0; i < arg_count; i++) {
+        if (!core_call_add_arg_or_free(call, args[i], err, span)) {
+            core_args_free(args + i + 1u, arg_count - i - 1u);
+            return NULL;
+        }
+        args[i] = NULL;
+    }
     return call;
+}
+
+static IdmCore *syntax_literal_core(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+    IdmValue value = idm_syntax_value(ctx->rt, syn, err);
+    if (err && err->present) return NULL;
+    IdmCore *core = idm_core_literal(value, syn ? syn->span : idm_span_unknown(NULL));
+    if (!core) idm_error_oom(err, syn ? syn->span : idm_span_unknown(NULL));
+    return core;
+}
+
+static IdmSyntax *syntax_list_from_range(IdmSyntax *const *items, size_t start, size_t end, IdmSpan span, IdmError *err) {
+    IdmSyntax *captured = idm_syn_list(span);
+    if (!captured) { idm_error_oom(err, span); return NULL; }
+    for (size_t i = start; i < end; i++) {
+        IdmSyntax *item = idm_syn_clone(items[i]);
+        if (!item || !idm_syn_append(captured, item)) {
+            idm_syn_free(item);
+            idm_syn_free(captured);
+            idm_error_oom(err, items[i]->span);
+            return NULL;
+        }
+    }
+    return captured;
+}
+
+static const char *sentinel_text(const IdmSyntax *syn) {
+    if (!syn) return NULL;
+    if (syn->kind == IDM_SYN_WORD || syn->kind == IDM_SYN_ATOM || syn->kind == IDM_SYN_STRING) return syn->as.text;
+    if (syn_is_form(syn, "%-word") && syn->as.seq.count == 2 && syn->as.seq.items[1]->kind == IDM_SYN_STRING) return syn->as.seq.items[1]->as.text;
+    return NULL;
+}
+
+static bool copy_use_scopes(IdmSyntax *dst, const IdmSyntax *src, IdmError *err) {
+    if (!dst || !src) return true;
+    for (int phase = 0; phase < 2; phase++) {
+        const IdmScopeSet *scopes = idm_syn_scope_set(src, phase);
+        for (size_t i = 0; scopes && i < scopes->count; i++) if (!idm_syn_scope_add(dst, phase, scopes->items[i])) return idm_error_oom(err, src->span);
+    }
+    return true;
+}
+
+static bool append_syntax_or_oom(IdmSyntax *seq, IdmSyntax *item, IdmSpan span, IdmError *err) {
+    if (item && idm_syn_append(seq, item)) return true;
+    idm_syn_free(item);
+    idm_error_oom(err, span);
+    return false;
+}
+
+static void syntax_payload_free(SyntaxCapturePayload *payload) {
+    for (size_t i = 0; i < payload->count; i++) idm_syn_free(payload->items[i]);
+    memset(payload, 0, sizeof(*payload));
+}
+
+static bool syntax_payload_add(SyntaxCapturePayload *payload, IdmSyntax *item, IdmSpan span, IdmError *err) {
+    if (!item) return err && err->present ? false : idm_error_oom(err, span);
+    payload->items[payload->count++] = item;
+    return true;
+}
+
+static bool build_syntax_capture_payload(ExpandContext *ctx, SyntaxCaptureKind kind, uint32_t count, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSyntax *const *items, size_t cursor, size_t end, SyntaxCapturePayload *out, IdmError *err) {
+    memset(out, 0, sizeof(*out));
+    if (kind == SYNTAX_CAPTURE_INDENTED) {
+        if (cursor + 1u != end || !syn_is_form(items[cursor], "%-body")) return idm_error_set(err, op_token->span, "operator '%s' expects an indented do/end body", op->name);
+        return syntax_payload_add(out, idm_syn_clone(items[cursor]), items[cursor]->span, err);
+    }
+    if (kind == SYNTAX_CAPTURE_COUNT) {
+        size_t close = cursor + (size_t)count;
+        if (close > end) return idm_error_set(err, op_token->span, "operator '%s' expected %u captured syntax item(s)", op->name, count);
+        if (close != end) return idm_error_set(err, items[close]->span, "unexpected trailing syntax after operator '%s' count capture", op->name);
+        return syntax_payload_add(out, syntax_list_from_range(items, cursor, close, op_token->span, err), op_token->span, err);
+    }
+    if (kind == SYNTAX_CAPTURE_EXPRESSION) {
+        if (cursor >= end) return idm_error_set(err, op_token->span, "operator '%s' expression capture requires an expression", op->name);
+        return syntax_payload_add(out, syntax_use_from_parts(ctx, items, cursor, end, err), op_token->span, err);
+    }
+    if (kind != SYNTAX_CAPTURE_SENTINEL) return idm_error_set(err, op_token->span, "operator '%s' has unsupported capture '%s'", op->name, op->capture ? op->capture : "");
+    if (cursor >= end) return idm_error_set(err, op_token->span, "operator '%s' sentinel capture requires a sentinel token", op->name);
+    const char *sentinel = sentinel_text(items[cursor]);
+    if (!sentinel) return idm_error_set(err, items[cursor]->span, "operator '%s' sentinel must be a word, atom, or string", op->name);
+    size_t close = SIZE_MAX;
+    for (size_t i = cursor + 1u; i < end; i++) {
+        const char *text = sentinel_text(items[i]);
+        if (text && strcmp(text, sentinel) == 0) { close = i; break; }
+    }
+    if (close == SIZE_MAX) return idm_error_set(err, items[cursor]->span, "operator '%s' sentinel '%s' was not closed", op->name, sentinel);
+    if (close + 1u != end) return idm_error_set(err, items[close + 1u]->span, "unexpected trailing syntax after operator '%s' sentinel capture", op->name);
+    return syntax_payload_add(out, idm_syn_clone(items[cursor]), items[cursor]->span, err) &&
+           syntax_payload_add(out, syntax_list_from_range(items, cursor + 1u, close, items[cursor]->span, err), items[cursor]->span, err);
+}
+
+static IdmSyntax *operator_macro_use_start(const IdmSyntax *op_token, IdmSyntax *target_word, IdmError *err) {
+    IdmSpan span = op_token ? op_token->span : idm_span_unknown(NULL);
+    IdmSyntax *use = idm_syn_list(span);
+    if (!use) { idm_syn_free(target_word); idm_error_oom(err, span); return NULL; }
+    if (!append_syntax_or_oom(use, idm_syn_word("%-expr", span), span, err) || !copy_use_scopes(use, op_token, err) || !append_syntax_or_oom(use, target_word, span, err)) {
+        idm_syn_free(use);
+        return NULL;
+    }
+    return use;
+}
+
+static IdmCore *expand_syntax_capture_macro(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSyntax *target_word, uint32_t payload, IdmSyntax *const *items, size_t left_start, size_t left_end, size_t cursor, size_t end, IdmError *err) {
+    bool wants_left = false;
+    uint32_t count = 0;
+    SyntaxCaptureKind kind = syntax_capture_kind(op->capture, &wants_left, &count);
+    if (kind == SYNTAX_CAPTURE_NONE) {
+        idm_syn_free(target_word);
+        return expand_error(err, op_token->span, "operator '%s' has unsupported capture '%s'", op->name, op->capture ? op->capture : "");
+    }
+    IdmSyntax *use = operator_macro_use_start(op_token, target_word, err);
+    if (!use) return NULL;
+    SyntaxCapturePayload captured = {0};
+#define MACRO_CAPTURE_FAIL(span, ...) do { expand_error(err, span, __VA_ARGS__); goto fail; } while (0)
+    if (wants_left) {
+        if (left_start == left_end) MACRO_CAPTURE_FAIL(op_token->span, "operator '%s' requires a left operand", op->name);
+        IdmSyntax *left = syntax_use_from_parts(ctx, items, left_start, left_end, err);
+        if (!append_syntax_or_oom(use, left, op_token->span, err)) goto fail;
+    } else if (left_start != left_end) {
+        MACRO_CAPTURE_FAIL(op_token->span, "operator '%s' does not accept a left operand", op->name);
+    }
+    if (!build_syntax_capture_payload(ctx, kind, count, op, op_token, items, cursor, end, &captured, err)) goto fail;
+    for (size_t i = 0; i < captured.count; i++) {
+        IdmSyntax *arg = captured.items[i];
+        captured.items[i] = NULL;
+        if (!append_syntax_or_oom(use, arg, arg ? arg->span : op_token->span, err)) goto fail;
+    }
+#undef MACRO_CAPTURE_FAIL
+    IdmCore *core = expand_macro_use(ctx, use, use->as.seq.items[1], payload, err);
+    idm_syn_free(use);
+    return core;
+fail:
+    idm_syn_free(use);
+    syntax_payload_free(&captured);
+    return NULL;
+}
+
+static IdmCore *expand_syntax_capture_tail(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *left, IdmSyntax *const *items, size_t cursor, size_t end, IdmError *err) {
+    bool wants_left = false;
+    uint32_t count = 0;
+    SyntaxCaptureKind kind = syntax_capture_kind(op->capture, &wants_left, &count);
+    if (kind == SYNTAX_CAPTURE_NONE) {
+        idm_core_free(left);
+        return expand_error(err, op_token->span, "operator '%s' has unsupported capture '%s'", op->name, op->capture ? op->capture : "");
+    }
+    IdmCore *args[3] = {0};
+    size_t arg_count = 0;
+#define CAPTURE_FAIL(span, ...) do { core_args_free(args, arg_count); return expand_error(err, span, __VA_ARGS__); } while (0)
+    if (wants_left) {
+        if (!left) return expand_error(err, op_token->span, "operator '%s' requires a left operand", op->name);
+        args[arg_count++] = left;
+        left = NULL;
+    } else if (left) {
+        idm_core_free(left);
+        return expand_error(err, op_token->span, "operator '%s' does not accept a left operand", op->name);
+    }
+    SyntaxCapturePayload captured = {0};
+    if (!build_syntax_capture_payload(ctx, kind, count, op, op_token, items, cursor, end, &captured, err)) goto oom;
+    for (size_t i = 0; i < captured.count; i++) {
+        args[arg_count] = syntax_literal_core(ctx, captured.items[i], err);
+        idm_syn_free(captured.items[i]);
+        captured.items[i] = NULL;
+        if (!args[arg_count]) goto oom;
+        arg_count++;
+    }
+#undef CAPTURE_FAIL
+    return make_operator_call_args(ctx, op, op_token, args, arg_count, op_token->span, err);
+oom:
+    syntax_payload_free(&captured);
+    core_args_free(args, arg_count);
+    return NULL;
 }
 
 static IdmCore *parse_enforest_expr(EnforestParser *parser, uint8_t min_prec) {
@@ -895,7 +1114,7 @@ static IdmCore *parse_enforest_expr(EnforestParser *parser, uint8_t min_prec) {
         if (!op || op->precedence < min_prec) break;
         IdmSpan op_span = op_token->span;
         parser->pos++;
-        if (op->fixity == IDM_OP_FIX_POSTFIX) {
+        if (op->capture && strcmp(op->capture, "postfix") == 0) {
             left = make_operator_unary(parser->ctx, op, op_token, left, op_span, parser->err);
             if (!left) return NULL;
             continue;
@@ -1024,23 +1243,14 @@ static IdmCore *expand_container(ExpandContext *ctx, const IdmSyntax *syn, IdmEr
             return expand_error(err, syn->span, "unsupported container syntax");
     }
     if (syn->as.seq.count == 0) return empty_container_literal(ctx->rt, prim, syn->span, err);
-    IdmCore *callee = idm_core_primitive(prim, syn->span);
-    if (!callee) return (IdmCore *)(uintptr_t)idm_error_oom(err, syn->span);
-    IdmCore *call = idm_core_call(callee, syn->span);
-    if (!call) {
-        idm_core_free(callee);
-        return (IdmCore *)(uintptr_t)idm_error_oom(err, syn->span);
-    }
+    IdmCore *call = expand_primitive_call(prim, syn->span, err);
+    if (!call) return NULL;
     size_t pos = 0;
     size_t elem_count = 0;
     while (pos < syn->as.seq.count) {
         IdmCore *elem = parse_postfix_expr(ctx, syn->as.seq.items, &pos, syn->as.seq.count, false, err);
-        if (!elem || !idm_core_call_add_arg(call, elem)) {
-            idm_core_free(elem);
-            idm_core_free(call);
-            if (!err->present) idm_error_oom(err, syn->span);
-            return NULL;
-        }
+        if (!elem) { idm_core_free(call); return NULL; }
+        if (!core_call_add_arg_or_free(call, elem, err, syn->span)) return NULL;
         elem_count++;
     }
     if (syn->kind == IDM_SYN_DICT && elem_count % 2u != 0) {

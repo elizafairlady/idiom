@@ -1,5 +1,5 @@
-{:operators ({:== 30 :left :infix} {:!= 30 :left :infix} {:< 30 :left :infix} {:> 30 :left :infix} {:<= 30 :left :infix} {:>= 30 :left :infix} {:+ 50 :left :infix} {:- 50 :left :infix} {:* 60 :left :infix} {:/ 60 :left :infix} {:% 60 :left :infix} {:// 60 :left :infix} {:%% 60 :left :infix} {:** 70 :right :infix} {:- 80 :left :prefix} {:|> 10 :left :infix} {:|>> 10 :left :infix} {:| 20 :left :infix} {:&& 10 :left :infix} {:|| 10 :left :infix} {:& 5 :left :postfix} {:>> 30 :left :infix} {:>& 30 :left :infix} {:&> 30 :left :infix} {:&>> 30 :left :infix})}
-{:macros (:operator :syntax-case :defrules :if :match :error :case :unless :not? :and :or :jobs :fg :bg :cd)}
+{:operators ({:== 30 :left "infix"} {:!= 30 :left "infix"} {:< 30 :left "infix"} {:> 30 :left "infix"} {:<= 30 :left "infix"} {:>= 30 :left "infix"} {:+ 50 :left "infix"} {:- 50 :left "infix"} {:* 60 :left "infix"} {:/ 60 :left "infix"} {:% 60 :left "infix"} {:// 60 :left "infix"} {:%% 60 :left "infix"} {:** 70 :right "infix"} {:- 80 :left "prefix"} {:|> 10 :left "infix expression"} {:|>> 10 :left "infix expression"} {:| 20 :left "infix"} {:&& 10 :left "infix"} {:|| 10 :left "infix"} {:& 5 :left "postfix"} {:>> 30 :left "infix"} {:<< 30 :left "infix sentinel"} {:>& 30 :left "infix"} {:&> 30 :left "infix"} {:&>> 30 :left "infix"})}
+{:macros (:operator :thread-first :thread-last :syntax-case :defrules :if :match :error :case :unless :not? :and :or :jobs :fg :bg :cd)}
 {:protocols ()}
 {:resolvers (:resolver)}
 {:methods ()}

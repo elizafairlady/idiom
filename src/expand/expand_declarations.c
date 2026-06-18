@@ -19,8 +19,6 @@ static bool record_form_parts(const IdmSyntax *form, const IdmSyntax **out_name,
 static void record_field_names_destroy(char **fields, size_t count);
 static bool record_field_seen(char **fields, size_t count, const char *name);
 static bool parse_record_fields(const IdmSyntax *body, char ***out_fields, size_t *out_count, IdmError *err);
-static IdmCore *make_prim_call(IdmPrimitive primitive, IdmSpan span, IdmError *err);
-static bool core_call_add_or_oom(IdmCore *call, IdmCore *arg, IdmError *err, IdmSpan span);
 static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, const char *identity, char **fields, size_t field_count, IdmSpan span, IdmError *err);
 static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *identity, const char *predicate_name, IdmSpan span, IdmError *err);
 static char *record_predicate_name(const char *record_name);
@@ -883,54 +881,29 @@ static bool parse_record_fields(const IdmSyntax *body, char ***out_fields, size_
     return true;
 }
 
-static IdmCore *make_prim_call(IdmPrimitive primitive, IdmSpan span, IdmError *err) {
-    IdmCore *callee = idm_core_primitive(primitive, span);
-    IdmCore *call = callee ? idm_core_call(callee, span) : NULL;
-    if (!call) {
-        idm_core_free(callee);
-        idm_error_oom(err, span);
-        return NULL;
-    }
-    return call;
-}
-
-static bool core_call_add_or_oom(IdmCore *call, IdmCore *arg, IdmError *err, IdmSpan span) {
-    if (!arg || !idm_core_call_add_arg(call, arg)) {
-        idm_core_free(arg);
-        idm_error_oom(err, span);
-        return false;
-    }
-    return true;
-}
-
 IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const char *field, IdmSpan span, IdmError *err) {
-    IdmCore *call = make_prim_call(IDM_PRIM_RECORD_FIELD, span, err);
+    IdmCore *call = expand_primitive_call(IDM_PRIM_RECORD_FIELD, span, err);
     if (!call) { idm_core_free(receiver); return NULL; }
-    if (!core_call_add_or_oom(call, receiver, err, span) ||
-        !core_call_add_or_oom(call, idm_core_literal(idm_atom(ctx->rt, field), span), err, span)) {
-        idm_core_free(call);
+    if (!core_call_add_arg_or_free(call, receiver, err, span) ||
+        !core_call_add_arg_or_free(call, idm_core_literal(idm_atom(ctx->rt, field), span), err, span)) {
         return NULL;
     }
     return call;
 }
 
 static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, const char *identity, char **fields, size_t field_count, IdmSpan span, IdmError *err) {
-    IdmCore *dict = make_prim_call(IDM_PRIM_DICT, span, err);
+    IdmCore *dict = expand_primitive_call(IDM_PRIM_DICT, span, err);
     if (!dict) return NULL;
     for (size_t i = 0; i < field_count; i++) {
-        if (!core_call_add_or_oom(dict, idm_core_literal(idm_atom(ctx->rt, fields[i]), span), err, span) ||
-            !core_call_add_or_oom(dict, idm_core_arg_ref(fields[i], (uint32_t)i, span), err, span)) {
-            idm_core_free(dict);
+        if (!core_call_add_arg_or_free(dict, idm_core_literal(idm_atom(ctx->rt, fields[i]), span), err, span) ||
+            !core_call_add_arg_or_free(dict, idm_core_arg_ref(fields[i], (uint32_t)i, span), err, span)) {
             return NULL;
         }
     }
-    IdmCore *make = make_prim_call(IDM_PRIM_MAKE_RECORD, span, err);
+    IdmCore *make = expand_primitive_call(IDM_PRIM_MAKE_RECORD, span, err);
     if (!make) { idm_core_free(dict); return NULL; }
-    if (!core_call_add_or_oom(make, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span) ||
-        !core_call_add_or_oom(make, dict, err, span)) {
-        idm_core_free(make);
-        return NULL;
-    }
+    if (!core_call_add_arg_or_free(make, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span)) { idm_core_free(dict); return NULL; }
+    if (!core_call_add_arg_or_free(make, dict, err, span)) return NULL;
     if (field_count > UINT32_MAX) {
         idm_core_free(make);
         idm_error_set(err, span, "record '%s' has too many fields", record_name);
@@ -940,11 +913,10 @@ static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_nam
 }
 
 static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *identity, const char *predicate_name, IdmSpan span, IdmError *err) {
-    IdmCore *call = make_prim_call(IDM_PRIM_IS_A_P, span, err);
+    IdmCore *call = expand_primitive_call(IDM_PRIM_IS_A_P, span, err);
     if (!call) return NULL;
-    if (!core_call_add_or_oom(call, idm_core_arg_ref("value", 0u, span), err, span) ||
-        !core_call_add_or_oom(call, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span)) {
-        idm_core_free(call);
+    if (!core_call_add_arg_or_free(call, idm_core_arg_ref("value", 0u, span), err, span) ||
+        !core_call_add_arg_or_free(call, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span)) {
         return NULL;
     }
     return idm_core_fn(predicate_name, 1u, call, span);

@@ -23,16 +23,12 @@ typedef struct {
 } IdmPhaseEnv;
 
 typedef enum { IDM_OP_ASSOC_LEFT, IDM_OP_ASSOC_RIGHT, IDM_OP_ASSOC_NONE } IdmOpAssoc;
-typedef enum { IDM_OP_FIX_INFIX, IDM_OP_FIX_PREFIX, IDM_OP_FIX_POSTFIX } IdmOpFixity;
-typedef enum { IDM_OP_TGT_PRIMITIVE, IDM_OP_TGT_THREAD_FIRST, IDM_OP_TGT_THREAD_LAST, IDM_OP_TGT_NAMED } IdmOpTargetKind;
 
 typedef struct {
     char *name;
+    char *capture;
     uint8_t precedence;
     IdmOpAssoc assoc;
-    IdmOpFixity fixity;
-    IdmOpTargetKind target_kind;
-    IdmPrimitive primitive;
     char *target_name;
     IdmScopeSet scopes;
     bool exported;

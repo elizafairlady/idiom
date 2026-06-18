@@ -1,13 +1,22 @@
 export defmacro operator stx do
   n = syntax-length stx
-  if (lte? n 4) do
+  if (lt? n 4) do
     syntax-error stx "operator declaration requires a name and a target"
   end
 
-  defn find-arrow do
-    i when (eq? i n) -> syntax-error stx "operator declaration requires '-> target'"
-    i when (and (syntax-word? (syntax-nth stx i)) (eq? (syntax-word-text (syntax-nth stx i)) "->")) -> i
-    i -> find-arrow (add i 1)
+  defn head-is? do
+    node name when (and (syntax? node) (syntax-list? node)) ->
+      and (gt? (syntax-length node) 0) (and (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name))
+    _ _ -> :false
+  end
+
+  defn body-form? node -> head-is? node "%-body"
+
+  defn find-decl-end do
+    i when (eq? i n) -> syntax-error stx "operator declaration requires '-> target' or an operator body"
+    i when (and (syntax-word? (syntax-nth stx i)) (eq? (syntax-word-text (syntax-nth stx i)) "->")) -> {:arrow i}
+    i when (body-form? (syntax-nth stx i)) -> cond (eq? (add i 1) n) {:body i} (syntax-error stx "operator body must be the final operator form")
+    i -> find-decl-end (add i 1)
   end
 
   defn kw-text do
@@ -20,17 +29,43 @@ export defmacro operator stx do
     _ -> syntax-error stx "operator option must be an identifier"
   end
 
+  defn syntax-string? v -> eq? (syntax-kind v) :string
+
+  defn syntax-tuple? v -> eq? (syntax-kind v) :tuple
+
+  defn capture-part-text do
+    v when (syntax-word? v) -> syntax-word-text v
+    v when (syntax-atom? v) -> syntax-atom-text v
+    v when (syntax-string? v) -> syntax-string-text v
+    v when (syntax-int? v) -> "#{syntax-int-value v}"
+    _ -> syntax-error stx "operator capture must be an identifier, string, integer, tuple, or grouped expression"
+  end
+
+  defn capture-join do
+    v i len "" when (eq? i len) -> ""
+    v i len acc when (eq? i len) -> acc
+    v i len "" -> capture-join v (add i 1) len (capture-part-text (syntax-nth v i))
+    v i len acc -> capture-join v (add i 1) len "${acc} #{capture-part-text (syntax-nth v i)}"
+  end
+
+  defn capture-text do
+    v when (head-is? v "%-group") -> capture-text (syntax-nth v 1)
+    v when (and (head-is? v "%-expr") (gt? (syntax-length v) 1)) -> capture-join v 1 (syntax-length v) ""
+    v when (syntax-tuple? v) -> capture-join v 0 (syntax-length v) ""
+    v -> capture-part-text v
+  end
+
   defn apply-opt do
-    "precedence" v {p a f} -> {(syntax-int-value v) a f}
-    "assoc" v {p a f} -> {p (opt-word v) f}
-    "fixity" v {p a f} -> {p a (opt-word v)}
+    "precedence" v {p a c} -> {(syntax-int-value v) a c}
+    "assoc" v {p a c} -> {p (opt-word v) c}
+    "capture" v {p a c} -> {p a (capture-text v)}
     other _ _ -> syntax-error stx "unknown operator keyword '${other}'"
   end
 
   defn parse-opts do
-    i arrow acc when (eq? i arrow) -> acc
-    i arrow acc when (eq? (add i 1) arrow) -> syntax-error stx "operator keyword '#{kw-text (syntax-nth stx i)}' requires a value"
-    i arrow acc -> parse-opts (add i 2) arrow (apply-opt (kw-text (syntax-nth stx i)) (syntax-nth stx (add i 1)) acc)
+    i stop acc when (eq? i stop) -> acc
+    i stop acc when (eq? (add i 1) stop) -> syntax-error stx "operator keyword '#{kw-text (syntax-nth stx i)}' requires a value"
+    i stop acc -> parse-opts (add i 2) stop (apply-opt (kw-text (syntax-nth stx i)) (syntax-nth stx (add i 1)) acc)
   end
 
   defn target-of do
@@ -38,9 +73,28 @@ export defmacro operator stx do
     a -> syntax-nth stx (add a 1)
   end
 
-  defn finish {p a f} target -> expander-register-operator (syntax-nth stx 2) p a f target
+  defn emit do
+    {:arrow arrow} -> do
+      {p a c} = parse-opts 3 arrow {50 "left" "infix"}
+      target = target-of arrow
+      %`do
+        for-syntax do
+          expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
+        end
+      end
+    end
+    {:body bodyi} -> do
+      target = make-syntax-word stx "__operator_target__"
+      {p a c} = parse-opts 3 bodyi {50 "left" "infix"}
+      body = syntax-nth stx bodyi
+      %`do
+        defn %,target %,body
+        for-syntax do
+          expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
+        end
+      end
+    end
+  end
 
-  arrow = find-arrow 3
-  finish (parse-opts 3 arrow {50 "left" "infix"}) (target-of arrow)
-  %`:nil
+  emit (find-decl-end 3)
 end

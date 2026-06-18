@@ -1,5 +1,5 @@
 package exporter
-operator <+> precedence: 6 assoc: left fixity: infix -> add
+operator <+> precedence: 6 assoc: left capture: infix -> add
 export defmacro answer s -> (make-syntax-int s 99)
 export defn dbl x -> add x x
 export defn who x -> :first

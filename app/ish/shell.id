@@ -10,30 +10,49 @@ defn shell-check do
   name r -> error :command name (tuple-get r 1)
 end
 
-defn shell-pipe-operator left right -> {:pipeline (list left right) {:stdio :inherit :inherit :inherit} :true}
+defn write-heredoc-temp data do
+  path = make-procsub-temp
+  match (file-write path data) do
+    :ok -> path
+    {:error reason} -> error {:heredoc path reason}
+  end
+end
 
-defn shell-and-operator left right -> cond (shell-ok? left) right left
+operator | precedence: 20 assoc: left capture: infix do
+  left right -> {:pipeline (list left right) {:stdio :inherit :inherit :inherit} :true}
+end
 
-defn shell-or-operator left right -> cond (shell-ok? left) left right
+operator && precedence: 10 assoc: left capture: infix do
+  left right -> cond (shell-ok? left) right left
+end
 
-defn shell-background-operator port -> ish-notify-job port "<background>"
+operator || precedence: 10 assoc: left capture: infix do
+  left right -> cond (shell-ok? left) left right
+end
 
-defn shell-redir-append-operator left right -> {:redir ">>" left right}
+operator & precedence: 5 assoc: left capture: postfix do
+  port -> ish-notify-job port "<background>"
+end
 
-defn shell-redir-dup-operator left right -> {:dup left right}
+operator >> precedence: 30 assoc: left capture: infix do
+  left right -> {:redir ">>" left right}
+end
 
-defn shell-redir-both-operator left right -> {:redir "&>" left right}
+operator << precedence: 30 assoc: left capture: {infix sentinel} do
+  left _sent body -> {:heredoc left body}
+end
 
-defn shell-redir-both-append-operator left right -> {:redir "&>>" left right}
+operator >& precedence: 30 assoc: left capture: infix do
+  left right -> {:dup left right}
+end
 
-operator | precedence: 20 assoc: left fixity: infix -> shell-pipe-operator
-operator && precedence: 10 assoc: left fixity: infix -> shell-and-operator
-operator || precedence: 10 assoc: left fixity: infix -> shell-or-operator
-operator & precedence: 5 assoc: left fixity: postfix -> shell-background-operator
-operator >> precedence: 30 assoc: left fixity: infix -> shell-redir-append-operator
-operator >& precedence: 30 assoc: left fixity: infix -> shell-redir-dup-operator
-operator &> precedence: 30 assoc: left fixity: infix -> shell-redir-both-operator
-operator &>> precedence: 30 assoc: left fixity: infix -> shell-redir-both-append-operator
+operator &> precedence: 30 assoc: left capture: infix do
+  left right -> {:redir "&>" left right}
+end
+
+operator &>> precedence: 30 assoc: left capture: infix do
+  left right -> {:redir "&>>" left right}
+end
 
 defn shell-cd path do
   chdir path
@@ -131,7 +150,18 @@ resolver form do
 
   defn part-word-is? node text -> eq? (word-text node) text
 
-  defn redir-op-text do
+  defn active-operator? do
+    _ _ '() -> :false
+    text capture (list entry . rest) ->
+      cond (and (eq? (str (tuple-get entry 0)) text) (eq? (str (tuple-get entry 3)) capture)) :true (active-operator? text capture rest)
+  end
+
+  defn operator-word? do
+    node capture when (word-syntax? node) -> active-operator? (syntax-word-text node) capture (expander-surface :operators)
+    _ _ -> :false
+  end
+
+  defn redir-op-name? do
     ">" -> :true
     ">>" -> :true
     "<" -> :true
@@ -140,16 +170,24 @@ resolver form do
     _ -> :false
   end
 
-  defn redir-op? node -> and (word-syntax? node) (redir-op-text (syntax-word-text node))
+  defn redir-op? node -> match (word-text node) do
+    :nil -> :false
+    text -> and (redir-op-name? text) (operator-word? node "infix")
+  end
 
-  defn dup-op? node -> word-is? node ">&"
+  defn dup-op? node -> and (word-is? node ">&") (operator-word? node "infix")
+  defn pipe-op? node -> and (word-is? node "|") (operator-word? node "infix")
+  defn and-op? node -> and (word-is? node "&&") (operator-word? node "infix")
+  defn or-op? node -> and (word-is? node "||") (operator-word? node "infix")
+  defn background-op? node -> and (word-is? node "&") (operator-word? node "postfix")
+  defn heredoc-op? node -> and (word-is? node "<<") (operator-word? node "infix sentinel")
 
   defn command-continuation-op? node ->
-    or (word-is? node "|") (or (word-is? node "&&") (word-is? node "||"))
+    or (pipe-op? node) (or (and-op? node) (or-op? node))
 
   defn incomplete-command-tail? do
     '() -> :false
-    (list h) -> or (command-continuation-op? h) (or (redir-op? h) (dup-op? h))
+    (list h) -> or (command-continuation-op? h) (or (background-op? h) (or (heredoc-op? h) (or (redir-op? h) (dup-op? h))))
     (list a b) when (and (int-syntax? a) (redir-op? b) (syntax-adjacent? b)) -> :true
     (list a b) when (and (int-syntax? a) (dup-op? b) (syntax-adjacent? b)) -> :true
     (list a b) when (and (dup-op? a) (int-syntax? b) (syntax-adjacent? b)) -> :false
@@ -267,6 +305,68 @@ resolver form do
     (list _ . t) k -> drop-n t (sub k 1)
   end
 
+  defn sentinel-name node -> match (word-text node) do
+    :nil -> syntax-error node "'<<' sentinel must be a word"
+    text -> text
+  end
+
+  defn heredoc-token-text do
+    p when (word-syntax? p) -> syntax-word-text p
+    p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
+    p when (and (syntax? p) (eq? (syntax-kind p) :string)) -> syntax-string-text p
+    p when (int-syntax? p) -> "#{syntax-int-value p}"
+    p when (float-syntax? p) -> "#{syntax->datum p}"
+    _ -> ""
+  end
+
+  defn heredoc-join do
+    '() acc -> acc
+    (list h . t) "" -> heredoc-join t (heredoc-token-text h)
+    (list h . t) acc -> heredoc-join t "${acc}\n${heredoc-token-text h}"
+  end
+
+  defn heredoc-text do
+    '() -> ""
+    body -> do
+      text = heredoc-join body ""
+      "${text}\n"
+    end
+  end
+
+  defn split-heredoc-body do
+    sentinel '() _ -> syntax-error form "'<<' sentinel '${sentinel}' was not closed"
+    sentinel (list h . t) acc when (eq? (word-text h) sentinel) -> {acc t}
+    sentinel (list h . t) acc -> split-heredoc-body sentinel t (append acc (cons h '()))
+  end
+
+  defn mk-heredoc-redir fdn body ->
+    %`{:redir %,(make-syntax-atom form "<") %,(make-syntax-int form fdn) {:temp (write-heredoc-temp %,(make-syntax-string form (heredoc-text body)))}}
+
+  defn fd-heredoc? do
+    (list a b _ . _) -> and (int-syntax? a) (heredoc-op? b) (syntax-adjacent? b)
+    _ -> :false
+  end
+
+  defn plain-heredoc? do
+    (list a _ . _) -> heredoc-op? a
+    _ -> :false
+  end
+
+  defn heredoc-head? parts -> or (fd-heredoc? parts) (plain-heredoc? parts)
+
+  defn take-heredoc do
+    parts when (fd-heredoc? parts) -> do
+      sent = sentinel-name (first (drop-n parts 2))
+      {body rest} = split-heredoc-body sent (drop-n parts 3) '()
+      {(mk-heredoc-redir (syntax-int-value (first parts)) body) rest}
+    end
+    parts when (plain-heredoc? parts) -> do
+      sent = sentinel-name (first (rest parts))
+      {body rest} = split-heredoc-body sent (drop-n parts 2) '()
+      {(mk-heredoc-redir 0 body) rest}
+    end
+  end
+
   defn fd-redir? do
     (list a b _ . _) -> and (int-syntax? a) (redir-op? b) (syntax-adjacent? b)
     _ -> :false
@@ -288,6 +388,7 @@ resolver form do
   end
 
   defn static-seg? do
+    p when (heredoc-op? p) -> :false
     p when (redir-op? p) -> :false
     p when (dup-op? p) -> :false
     p when (var-seg? p) -> :false
@@ -405,6 +506,10 @@ resolver form do
 
   defn scan-body do
     '() -> {'() '()}
+    parts when (heredoc-head? parts) -> do
+      {redir rest} = take-heredoc parts
+      add-redir redir (scan-body rest)
+    end
     parts when (redir-head? parts) -> do
       {redir n} = take-redir parts
       add-redir redir (scan-body (drop-n parts n))
@@ -468,24 +573,24 @@ resolver form do
 
   defn split-stages do
     '() cur -> cons (stage-of cur) '()
-    (list h . t) cur when (word-is? h "|") -> cons (stage-of cur) (split-stages t '())
+    (list h . t) cur when (pipe-op? h) -> cons (stage-of cur) (split-stages t '())
     (list h . t) cur -> split-stages t (append cur (cons h '()))
   end
 
   defn collect-parts do
     f i n when (eq? i n) -> '()
-    f i n when (and (word-is? (syntax-nth f i) "&") (eq? (add i 1) n)) -> '()
+    f i n when (and (background-op? (syntax-nth f i)) (eq? (add i 1) n)) -> '()
     f i n -> cons (syntax-nth f i) (collect-parts f (add i 1) n)
   end
 
   defn last-amp? do
     1 -> :false
-    n -> word-is? (syntax-nth form (sub n 1)) "&"
+    n -> background-op? (syntax-nth form (sub n 1))
   end
 
   defn check-amp do
     '() -> :true
-    (list h . _) when (word-is? h "&") -> syntax-error h "'&' is only allowed at the end of a command"
+    (list h . _) when (background-op? h) -> syntax-error h "'&' is only allowed at the end of a command"
     (list _ . t) -> check-amp t
   end
 
@@ -516,14 +621,14 @@ resolver form do
 
   defn split-chain do
     '() cur op -> cons {op cur} '()
-    (list h . t) cur op when (word-is? h "&&") -> cons {op cur} (split-chain t '() :and)
-    (list h . t) cur op when (word-is? h "||") -> cons {op cur} (split-chain t '() :or)
+    (list h . t) cur op when (and-op? h) -> cons {op cur} (split-chain t '() :and)
+    (list h . t) cur op when (or-op? h) -> cons {op cur} (split-chain t '() :or)
     (list h . t) cur op -> split-chain t (append cur (cons h '())) op
   end
 
   defn after-last-pipe do
     '() acc -> acc
-    (list h . t) _ when (word-is? h "|") -> after-last-pipe t '()
+    (list h . t) _ when (pipe-op? h) -> after-last-pipe t '()
     (list h . t) acc -> after-last-pipe t (append acc (cons h '()))
   end
 

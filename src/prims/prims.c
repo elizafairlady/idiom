@@ -1262,12 +1262,12 @@ static bool prim_expander_register_operator(IdmRuntime *rt, IdmValue *args, IdmV
     if (!name) return false;
     if (args[1].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "operator precedence must be an integer");
     if (args[2].tag != IDM_VAL_ATOM && args[2].tag != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "operator assoc must be an atom");
-    if (args[3].tag != IDM_VAL_ATOM && args[3].tag != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "operator fixity must be an atom");
+    if (args[3].tag != IDM_VAL_ATOM && args[3].tag != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "operator capture must be an atom or string");
     const IdmSyntax *target = idm_syntax_get(args[4], err);
     if (!target) return false;
     const char *assoc = args[2].tag == IDM_VAL_ATOM ? idm_symbol_text(args[2].as.symbol) : idm_string_bytes(args[2]);
-    const char *fixity = args[3].tag == IDM_VAL_ATOM ? idm_symbol_text(args[3].as.symbol) : idm_string_bytes(args[3]);
-    if (!rt->register_operator(rt->register_operator_user, rt, name, args[1].as.i, assoc, fixity, target, err)) return false;
+    const char *capture = args[3].tag == IDM_VAL_ATOM ? idm_symbol_text(args[3].as.symbol) : idm_string_bytes(args[3]);
+    if (!rt->register_operator(rt->register_operator_user, rt, name, args[1].as.i, assoc, capture, target, err)) return false;
     *out = idm_atom(rt, "ok");
     return true;
 }

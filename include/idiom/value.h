@@ -18,7 +18,7 @@ typedef struct IdmRegexResult IdmRegexResult;
 
 typedef bool (*IdmLocalExpandFn)(void *user, IdmRuntime *rt, const IdmSyntax *syntax, IdmSyntax **out_syntax, IdmError *err);
 typedef bool (*IdmFreeIdentifierEqFn)(void *user, IdmRuntime *rt, const IdmSyntax *a, const IdmSyntax *b, bool *out_equal, IdmError *err);
-typedef bool (*IdmRegisterOperatorFn)(void *user, IdmRuntime *rt, const IdmSyntax *name, int64_t precedence, const char *assoc, const char *fixity, const IdmSyntax *target, IdmError *err);
+typedef bool (*IdmRegisterOperatorFn)(void *user, IdmRuntime *rt, const IdmSyntax *name, int64_t precedence, const char *assoc, const char *capture, const IdmSyntax *target, IdmError *err);
 
 typedef enum {
     IDM_SYMBOL_WORD,

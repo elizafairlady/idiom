@@ -93,6 +93,13 @@ suite do
     end
     assert-inspect got "{{:ok 0 \"hi\\n\" \"\"} {:ok 0 \"prehipost\\n\" \"\"} {:ok 0 \"ab\\n\" \"\"} {:ok 0 \"env\\n\" \"\"}}"
   end
+  test "shell-heredoc-sentinel" do
+    got = do
+      activate app/ish
+      cat << EOF hello EOF
+    end
+    assert-inspect got "{:ok 0 \"hello\\n\" \"\"}"
+  end
   test "word-syntax-requires-resolver" do
     assert-expand-error "\$(echo hi)" "word syntax requires a resolver"
   end
