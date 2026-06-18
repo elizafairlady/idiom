@@ -388,7 +388,7 @@ static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *it
         idm_core_free(value);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
     }
-    IdmCore *callee = idm_core_primitive(IDM_PRIM_TRAIT_IMPLEMENTED_P, items[start]->span);
+    IdmCore *callee = idm_core_primitive(IDM_PRIM_IS_A_P, items[start]->span);
     IdmCore *call = callee ? idm_core_call(callee, items[start]->span) : NULL;
     if (!call) {
         idm_core_free(value);
@@ -1070,11 +1070,8 @@ IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) 
     if (syn_is_form(syn, "%-string")) return expand_form_string(ctx, syn, err);
     if (syn_is_form(syn, "%-regex")) return expand_form_regex(ctx, syn, err);
     if (syn_is_form(syn, "%-package-begin")) return expand_program(ctx, syn, err);
-    if (syn_is_form(syn, "%-command-sub")) {
-        return expand_error(err, syn->span, "command substitution requires shell or string context");
-    }
-    if (syn_is_form(syn, "%-word") || syn_is_form(syn, "%-shell-var") || syn_is_form(syn, "%-redirect")) {
-        return expand_error(err, syn->span, "shell syntax requires command graph expansion");
+    if (syn_is_form(syn, "%-word")) {
+        return expand_error(err, syn->span, "word syntax requires a resolver");
     }
     if (syn_is_form(syn, "%-pin")) {
         return expand_error(err, syn->span, "pin '^name' is only valid in pattern position");
@@ -1203,6 +1200,16 @@ static bool repl_error_is_incomplete(const IdmError *err) {
     return err && err->present && err->message && strcmp(err->message, "unterminated command") == 0;
 }
 
+static char *repl_flatten_lines(const char *source) {
+    if (!strchr(source, '\n')) return NULL;
+    char *flat = idm_strdup(source);
+    if (!flat) return NULL;
+    for (char *p = flat; *p; p++) {
+        if (*p == '\n') *p = ' ';
+    }
+    return flat;
+}
+
 static IdmReplStatus repl_compile_source(IdmRepl *repl, const char *file, const char *source, bool make_thunk, IdmValue *out_thunk, uint64_t *out_token, IdmError *err) {
     if (out_thunk) *out_thunk = idm_nil();
     if (out_token) *out_token = 0;
@@ -1272,7 +1279,13 @@ static IdmReplStatus repl_compile_source(IdmRepl *repl, const char *file, const 
 }
 
 IdmReplStatus idm_repl_compile(IdmRepl *repl, const char *source, IdmValue *out_thunk, uint64_t *out_token, IdmError *err) {
-    return repl_compile_source(repl, "<repl>", source, true, out_thunk, out_token, err);
+    IdmReplStatus status = repl_compile_source(repl, "<repl>", source, true, out_thunk, out_token, err);
+    if (status != IDM_REPL_INCOMPLETE) return status;
+    char *flat = repl_flatten_lines(source);
+    if (!flat) return status;
+    status = repl_compile_source(repl, "<repl>", flat, true, out_thunk, out_token, err);
+    free(flat);
+    return status;
 }
 
 void idm_repl_abort(IdmRepl *repl, uint64_t token) {

@@ -1,4 +1,4 @@
-activate std/shell
+activate app/ish
 a = printf one &
 b = printf two &
 {(await a) (await b)}

@@ -1,4 +1,4 @@
-activate std/shell
+activate app/ish
 a = echo one && echo two
 println a
 b = false || echo rescue

@@ -55,9 +55,9 @@ static void test_artifact_cache_relocation(void) {
     check_value_written(&rt, "activate tests/pkg/exporter\n3 <+> 4\nanswer x\n", "99");
     check_value_written(&rt, "activate tests/pkg/exporter\n3 <+> 4\n", "7");
     check_value_written(&rt,
-        "activate std/shell\n"
+        "activate app/ish\n"
         "x = do\n"
-        "  activate std/shell\n"
+        "  activate app/ish\n"
         "  1\n"
         "end\n"
         "add x 1\n",

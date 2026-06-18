@@ -430,13 +430,13 @@ static void test_compile_time_surface_scoping(void) {
         false);
     expect_expand_result("<surface-scope-ok-shell>",
         "do\n"
-        "  activate std/shell\n"
+        "  activate app/ish\n"
         "  echo inner\n"
         "end\n",
         true);
     expect_expand_result("<surface-scope-leak-shell>",
         "do\n"
-        "  activate std/shell\n"
+        "  activate app/ish\n"
         "  echo inner\n"
         "end\n"
         "echo outer\n",

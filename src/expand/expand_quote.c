@@ -14,7 +14,6 @@ static IdmCore *datum_constant(ExpandContext *ctx, const IdmSyntax *t, IdmError 
 static IdmCore *quasiquote_list(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmSpan span, IdmError *err);
 static IdmCore *quasiquote_container(ExpandContext *ctx, const IdmSyntax *t, IdmPrimitive prim, IdmError *err);
 static IdmCore *quasiquote_template(ExpandContext *ctx, const IdmSyntax *t, IdmError *err);
-static IdmCore *expand_command_sub(ExpandContext *ctx, const IdmSyntax *part, IdmError *err);
 
 static IdmCore *primitive_call(IdmPrimitive primitive, IdmSpan span) {
     return idm_core_call(idm_core_primitive(primitive, span), span);
@@ -328,18 +327,6 @@ IdmCore *expand_form_quasiquote(ExpandContext *ctx, const IdmSyntax *syn, IdmErr
     return quasiquote_template(ctx, syn->as.seq.items[1], err);
 }
 
-static IdmCore *expand_command_sub(ExpandContext *ctx, const IdmSyntax *part, IdmError *err) {
-    if (part->as.seq.count != 2) return expand_error(err, part->span, "%-command-sub expects one child");
-    bool saved = ctx->value_context;
-    bool saved_cs = ctx->command_sub_context;
-    ctx->value_context = true;
-    ctx->command_sub_context = true;
-    IdmCore *command = expand_syntax(ctx, part->as.seq.items[1], err);
-    ctx->value_context = saved;
-    ctx->command_sub_context = saved_cs;
-    return command;
-}
-
 IdmCore *expand_form_string(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     IdmCore *call = primitive_call(IDM_PRIM_STR, syn->span);
     if (!call) return (IdmCore *)(uintptr_t)idm_error_oom(err, syn->span);
@@ -355,7 +342,7 @@ IdmCore *expand_form_string(ExpandContext *ctx, const IdmSyntax *syn, IdmError *
     }
     for (size_t i = 1; i < syn->as.seq.count; i++) {
         const IdmSyntax *part = syn->as.seq.items[i];
-        IdmCore *pc = syn_is_form(part, "%-command-sub") ? expand_command_sub(ctx, part, err) : expand_syntax(ctx, part, err);
+        IdmCore *pc = expand_syntax(ctx, part, err);
         if (!pc || !idm_core_call_add_arg(call, pc)) {
             idm_core_free(pc);
             idm_core_free(call);

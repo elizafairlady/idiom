@@ -326,7 +326,6 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
                     : strcmp(ops, ">>") == 0 ? 'a'
                     : strcmp(ops, "&>") == 0 ? 'b'
                     : strcmp(ops, "&>>") == 0 ? 'B'
-                    : strcmp(ops, "heredoc") == 0 ? 'h'
                     : '>';
             char **tav = NULL;
             size_t tac = 0, tcap = 0;
@@ -448,23 +447,6 @@ static void child_apply_redirs(const Stage *stage) {
             if (both < 0) child_fail(r->target, "redirect failed");
             if (dup2(both, 1) < 0 || dup2(both, 2) < 0) child_fail(r->target, "redirect failed");
             close(both);
-            continue;
-        }
-        if (r->op == 'h') {
-            char tmpl[] = "/tmp/idm_heredoc_XXXXXX";
-            int hf = mkstemp(tmpl);
-            if (hf < 0) child_fail("heredoc", "redirect failed");
-            unlink(tmpl);
-            size_t blen = strlen(r->target);
-            size_t off = 0;
-            while (off < blen) {
-                ssize_t w = write(hf, r->target + off, blen - off);
-                if (w < 0) child_fail("heredoc", "redirect failed");
-                off += (size_t)w;
-            }
-            if (lseek(hf, 0, SEEK_SET) < 0) child_fail("heredoc", "redirect failed");
-            if (dup2(hf, r->fd) < 0) child_fail("heredoc", "redirect failed");
-            close(hf);
             continue;
         }
         int flags = r->op == '<' ? O_RDONLY : (r->op == 'a' ? (O_WRONLY | O_CREAT | O_APPEND) : (O_WRONLY | O_CREAT | O_TRUNC));

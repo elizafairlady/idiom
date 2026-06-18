@@ -429,16 +429,15 @@ static void test_trait_identity_semantics(void) {
         "implement G on int\n"
         "gee 1\n",
         "2");
-    expect_runtime_error_contains(&rt, "<make-record-rejects-reserved-hash>",
-        "make-record \"x#1\" (dict)\n",
-        "make-record type must not contain '#'");
     check_value_written(&rt,
         "record Plain do\n"
         "  field v\n"
         "end\n"
         "raw = make-record \"Plain\" (dict :v 9)\n"
-        "{(Plain? (Plain 9)) (Plain? raw)}\n",
-        "{:true :false}");
+        "declared = Plain 9\n"
+        "same = make-record (record-type declared) (dict :v 9)\n"
+        "{(Plain? declared) (Plain? raw) (Plain? same) same.v}\n",
+        "{:true :false :true 9}");
     idm_runtime_destroy(&rt);
 }
 

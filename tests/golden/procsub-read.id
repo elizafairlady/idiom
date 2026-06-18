@@ -1,2 +1,2 @@
-activate std/shell
+activate app/ish
 cat <(echo procsub-golden)

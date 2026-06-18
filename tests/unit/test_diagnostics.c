@@ -134,7 +134,7 @@ static void test_expander_surface_introspection(void) {
         "gt? (probe x) 8\n",
         ":true");
     check_value_written(&rt,
-        "activate std/shell\n"
+        "activate app/ish\n"
         "defmacro probe2 stx do\n"
         "  defn count do\n"
         "    '() n -> n\n"

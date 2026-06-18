@@ -2,13 +2,6 @@ use std/test
 activate std/test
 
 suite do
-  test "interp-cmd" do
-    got = do
-      activate std/shell
-      "out:$(echo hi)"
-    end
-    assert-inspect got "\"out:hi\""
-  end
   test "interp-escape" do
     got = do
       "lit \$ \#"
@@ -17,7 +10,7 @@ suite do
   end
   test "interp-expr-sub" do
     got = do
-      "sum:$(add 1 2)"
+      "sum:${add 1 2}"
     end
     assert-inspect got "\"sum:3\""
   end

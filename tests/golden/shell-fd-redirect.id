@@ -1,4 +1,5 @@
-activate std/shell
+activate app/ish
 sh -c "echo out; echo err >&2" 2> /tmp/idiom_gold_fd_err
-println "err:$(cat /tmp/idiom_gold_fd_err)"
+printf "err:"
+cat /tmp/idiom_gold_fd_err
 rm /tmp/idiom_gold_fd_err

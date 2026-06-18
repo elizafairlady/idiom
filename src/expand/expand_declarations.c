@@ -924,7 +924,7 @@ static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_nam
             return NULL;
         }
     }
-    IdmCore *make = make_prim_call(IDM_PRIM_RECORD_NEW, span, err);
+    IdmCore *make = make_prim_call(IDM_PRIM_MAKE_RECORD, span, err);
     if (!make) { idm_core_free(dict); return NULL; }
     if (!core_call_add_or_oom(make, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span) ||
         !core_call_add_or_oom(make, dict, err, span)) {

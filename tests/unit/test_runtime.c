@@ -133,7 +133,7 @@ static void test_port_result_gc_rooted(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     check_sched_value_written(&rt,
-        "activate std/shell\n"
+        "activate app/ish\n"
         "p = echo hi &\n"
         "a = await p\n"
         "defn churn n do\n"
@@ -155,17 +155,17 @@ static void test_procsub_temp_cleanup(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     check_sched_value_written(&rt,
-        "activate std/shell\n"
+        "activate app/ish\n"
         "x = cat <(echo hello)\n"
         "x\n",
         "{:ok 0 \"hello\\n\" \"\"}");
     check_sched_value_written(&rt,
-        "activate std/shell\n"
+        "activate app/ish\n"
         "x = cat <(echo a) <(echo b)\n"
         "x\n",
         "{:ok 0 \"a\\nb\\n\" \"\"}");
     check_sched_value_written(&rt,
-        "activate std/shell\n"
+        "activate app/ish\n"
         "echo data > >(cat > /tmp/idm_d9_psw)\n"
         "y = cat /tmp/idm_d9_psw\n"
         "y\n",
@@ -173,21 +173,6 @@ static void test_procsub_temp_cleanup(void) {
     remove("/tmp/idm_d9_psw");
     idm_runtime_destroy(&rt);
     CHECK(count_procsub_temps() == before);
-}
-
-static void test_heredoc_leaves_no_files(void) {
-    size_t before = count_glob_matches("/tmp/idm_heredoc_*");
-    IdmRuntime rt;
-    idm_runtime_init(&rt);
-    check_sched_value_written(&rt,
-        "activate std/shell\n"
-        "x = cat <<E\n"
-        "hi\n"
-        "E\n"
-        "x\n",
-        "{:ok 0 \"hi\\n\" \"\"}");
-    idm_runtime_destroy(&rt);
-    CHECK(count_glob_matches("/tmp/idm_heredoc_*") == before);
 }
 
 static void test_temp_registry_backstop(void) {
@@ -263,7 +248,6 @@ void run_runtime_suite(void) {
     test_gc_recurring_collection();
     test_port_result_gc_rooted();
     test_procsub_temp_cleanup();
-    test_heredoc_leaves_no_files();
     test_temp_registry_backstop();
     test_actor_cwd_env_scoping();
     test_port_capture_limit();

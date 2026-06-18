@@ -1,4 +1,5 @@
-activate std/shell
+activate app/ish
 env-set "ISH_GOLD_VAR" "from-overlay"
-println "penv:$(printenv ISH_GOLD_VAR)"
+printf "penv:"
+printenv ISH_GOLD_VAR
 env-get "ISH_GOLD_VAR"

@@ -1,6 +1,6 @@
-{:operators ({:== 30 :left :infix} {:!= 30 :left :infix} {:< 30 :left :infix} {:> 30 :left :infix} {:<= 30 :left :infix} {:>= 30 :left :infix} {:+ 50 :left :infix} {:- 50 :left :infix} {:* 60 :left :infix} {:/ 60 :left :infix} {:% 60 :left :infix} {:// 60 :left :infix} {:%% 60 :left :infix} {:** 70 :right :infix} {:- 80 :left :prefix} {:|> 10 :left :infix} {:|>> 10 :left :infix})}
-{:macros (:operator :syntax-case :defrules :if :match :error :case :unless :not? :and :or :cd)}
+{:operators ({:== 30 :left :infix} {:!= 30 :left :infix} {:< 30 :left :infix} {:> 30 :left :infix} {:<= 30 :left :infix} {:>= 30 :left :infix} {:+ 50 :left :infix} {:- 50 :left :infix} {:* 60 :left :infix} {:/ 60 :left :infix} {:% 60 :left :infix} {:// 60 :left :infix} {:%% 60 :left :infix} {:** 70 :right :infix} {:- 80 :left :prefix} {:|> 10 :left :infix} {:|>> 10 :left :infix} {:| 20 :left :infix} {:&& 10 :left :infix} {:|| 10 :left :infix} {:& 5 :left :postfix} {:>> 30 :left :infix} {:>& 30 :left :infix} {:&> 30 :left :infix} {:&>> 30 :left :infix})}
+{:macros (:operator :syntax-case :defrules :if :match :error :case :unless :not? :and :or :jobs :fg :bg :cd)}
 {:protocols ()}
 {:resolvers (:resolver)}
 {:methods ()}
-{:active ({:std/kernel "<unknown>" 0 0} {:std/shell "<dump-surface>" 1 1})}
+{:active ({:std/kernel "<unknown>" 0 0} {:app/ish "<dump-surface>" 1 1})}

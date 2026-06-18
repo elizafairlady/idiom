@@ -188,7 +188,7 @@ static void test_session_windows_in_session(void) {
                      "end",
                      ":normal");
     check_eval_value(repl, "repl-compile \"do\"", ":incomplete");
-    check_eval_value(repl, "activate std/shell", ":nil");
+    check_eval_value(repl, "activate app/ish", ":nil");
     check_eval_value(repl, "repl-compile \"echo hi |\"", ":incomplete");
     IdmValue thunk = idm_nil();
     uint64_t token = 0;

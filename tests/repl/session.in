@@ -11,7 +11,7 @@ defn ff n -> add n 1
 ff x
 defmacro mm stx do syntax-case stx do (_ a) -> %`(dbl %,a) end end
 mm (ff 100)
-activate std/shell
+activate app/ish
 y = printf from-repl-shell
 y
 {p q} = tuple 5 6

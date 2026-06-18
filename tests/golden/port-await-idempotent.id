@@ -1,4 +1,4 @@
-activate std/shell
+activate app/ish
 p = printf hi &
 r1 = await p
 r2 = await p

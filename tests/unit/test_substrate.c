@@ -83,7 +83,17 @@ static void test_reader_shell_protocols(void) {
 
     s = dump_reader("wc $n - 1\n");
     CHECK(s != NULL);
-    CHECK_STR(s, "(%-package-begin (%-expr wc (%-shell-var n) - 1))");
+    CHECK_STR(s, "(%-package-begin (%-expr wc (%-word \"$n\") - 1))");
+    free(s);
+
+    s = dump_reader("echo $(printf hi)\n");
+    CHECK(s != NULL);
+    CHECK_STR(s, "(%-package-begin (%-expr echo (%-word \"$\") (%-group (%-expr printf hi))))");
+    free(s);
+
+    s = dump_reader("cat <(echo hi)\n");
+    CHECK(s != NULL);
+    CHECK_STR(s, "(%-package-begin (%-expr cat < (%-group (%-expr echo hi))))");
     free(s);
 }
 
@@ -585,7 +595,7 @@ static void test_source_expansion_capabilities(void) {
     idm_error_clear(&err);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<expand-test>", "activate std/shell\necho hello\n", &core, &err));
+    CHECK(idm_expand_string(&rt, "<expand-test>", "activate app/ish\necho hello\n", &core, &err));
     CHECK(!err.present);
     CHECK(core != NULL);
     {

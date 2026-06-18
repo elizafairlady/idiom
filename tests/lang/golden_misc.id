@@ -277,7 +277,7 @@ suite do
     got = do
       use tests/pkg/makedsl
       activate tests/pkg/makedsl
-      activate std/shell
+      activate app/ish
       rules = list (rule :prep do
           x = sh -c "printf prep"
           {:prep-out x}

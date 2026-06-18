@@ -509,7 +509,7 @@ static int build_sealed(const char *src_path, const char *out_path) {
     if (!idm_reader_read_string(file, source, &program, &err)) goto done;
     size_t src_len = strlen(src_path);
     if (src_len >= 4 && strcmp(src_path + src_len - 4, ".ish") == 0) {
-        wrapped = idm_syn_program_prepend_activate(program, "std/shell", file);
+        wrapped = idm_syn_program_prepend_activate(program, "app/ish", file);
         if (!wrapped) { idm_error_oom(&err, idm_span_unknown(file)); goto done; }
     }
     if (!idm_expand_syntax(&rt, wrapped ? wrapped : program, &core, &err)) goto done;
@@ -596,7 +596,7 @@ static int run_repl(void) {
     int status = 1;
     IdmRepl *repl = idm_repl_create(&rt, &err);
     IdmValue thunk = idm_nil();
-    if (repl && idm_repl_loop_thunk(repl, "use app/ish\nactivate app/ish\nmain :plain", &thunk, &err)) {
+    if (repl && idm_repl_loop_thunk(repl, "use app/ish\nmain :plain", &thunk, &err)) {
         if (rt.interactive) printf("idiom %s — :quit or ^D to exit\n", IDM_VERSION);
         IdmValue value = idm_nil();
         IdmValue reason = idm_nil();

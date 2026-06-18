@@ -435,10 +435,9 @@ static const char *name_value_text(IdmValue value, IdmError *err, const char *wh
     return NULL;
 }
 
-static bool prim_make_record(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err, bool raw) {
+static bool prim_make_record(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *type = name_value_text(args[0], err, "record type");
     if (!type) return false;
-    if (raw && strchr(type, '#')) return idm_error_set(err, idm_span_unknown(NULL), "make-record type must not contain '#' (reserved for declared records)");
     if (!idm_is_dict(args[1])) return idm_error_set(err, idm_span_unknown(NULL), "make-record fields must be a dict");
     *out = idm_record(rt, type, args[1], err);
     return !(err && err->present);
@@ -870,7 +869,8 @@ static bool value_is_a_name(IdmValue value, const char *name) {
 static bool prim_is_a(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *name = type_name_text(args[1]);
     if (!name) return type_error(rt, err, "is-a?", args[1], "a type name atom, word, or string");
-    *out = idm_bool(rt, value_is_a_name(args[0], name));
+    bool result = value_is_a_name(args[0], name) || idm_trait_implements(rt, name, idm_value_dispatch_type_name(args[0]));
+    *out = idm_bool(rt, result);
     return true;
 }
 
@@ -925,16 +925,6 @@ static bool prim_make_error(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmEr
     (void)err;
     *out = idm_error_value(rt, args[0]);
     return out->tag == IDM_VAL_TUPLE;
-}
-
-static bool prim_trait_implements(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    const char *trait = NULL;
-    if (args[1].tag == IDM_VAL_ATOM || args[1].tag == IDM_VAL_WORD) trait = idm_symbol_text(args[1].as.symbol);
-    else if (args[1].tag == IDM_VAL_STRING) trait = idm_string_bytes(args[1]);
-    if (!trait) return type_error(rt, err, "%trait-implements?", args[1], "a trait identity");
-    const char *type = idm_value_dispatch_type_name(args[0]);
-    *out = idm_bool(rt, idm_trait_implements(rt, trait, type));
-    return true;
 }
 
 static const char *kind_atom_text(IdmSyntaxKind kind) {
@@ -2808,7 +2798,6 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
             return prim_type_pred(rt, prim, args, out, err);
         case IDM_PRIM_ERROR_MESSAGE: return prim_error_message(rt, args, out, err);
         case IDM_PRIM_MAKE_ERROR: return prim_make_error(rt, args, out, err);
-        case IDM_PRIM_TRAIT_IMPLEMENTED_P: return prim_trait_implements(rt, args, out, err);
         case IDM_PRIM_SELF:
         case IDM_PRIM_SPAWN:
         case IDM_PRIM_SPAWN_LINK:
@@ -2839,8 +2828,7 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_ENV_SET: return prim_env_set(rt, args, out, err);
         case IDM_PRIM_WRITE_PROCSUB_TEMP: return prim_write_procsub_temp(rt, args, out, err);
         case IDM_PRIM_MAKE_PROCSUB_TEMP: return prim_make_procsub_temp(rt, args, out, err);
-        case IDM_PRIM_MAKE_RECORD: return prim_make_record(rt, args, out, err, true);
-        case IDM_PRIM_RECORD_NEW: return prim_make_record(rt, args, out, err, false);
+        case IDM_PRIM_MAKE_RECORD: return prim_make_record(rt, args, out, err);
         case IDM_PRIM_RECORD_PRED: return prim_record_pred(rt, args, out, err);
         case IDM_PRIM_RECORD_TYPE: return prim_record_type(rt, args, out, err);
         case IDM_PRIM_RECORD_FIELD: return prim_record_field(rt, args, out, err);

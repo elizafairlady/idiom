@@ -1,4 +1,4 @@
-activate std/shell
+activate app/ish
 mkdir -p build/shell-redir-golden
 cd "build/shell-redir-golden"
 env-set "RT" "tgt"

@@ -1,3 +1,5 @@
+package ish
+
 defn shell-ok? r -> eq? (tuple-get r 0) :ok
 
 defn shell-merge a b ->
@@ -7,6 +9,31 @@ defn shell-check do
   _ r when (shell-ok? r) -> :nil
   name r -> error :command name (tuple-get r 1)
 end
+
+defn shell-pipe-operator left right -> {:pipeline (list left right) {:stdio :inherit :inherit :inherit} :true}
+
+defn shell-and-operator left right -> cond (shell-ok? left) right left
+
+defn shell-or-operator left right -> cond (shell-ok? left) left right
+
+defn shell-background-operator port -> ish-notify-job port "<background>"
+
+defn shell-redir-append-operator left right -> {:redir ">>" left right}
+
+defn shell-redir-dup-operator left right -> {:dup left right}
+
+defn shell-redir-both-operator left right -> {:redir "&>" left right}
+
+defn shell-redir-both-append-operator left right -> {:redir "&>>" left right}
+
+operator | precedence: 20 assoc: left fixity: infix -> shell-pipe-operator
+operator && precedence: 10 assoc: left fixity: infix -> shell-and-operator
+operator || precedence: 10 assoc: left fixity: infix -> shell-or-operator
+operator & precedence: 5 assoc: left fixity: postfix -> shell-background-operator
+operator >> precedence: 30 assoc: left fixity: infix -> shell-redir-append-operator
+operator >& precedence: 30 assoc: left fixity: infix -> shell-redir-dup-operator
+operator &> precedence: 30 assoc: left fixity: infix -> shell-redir-both-operator
+operator &>> precedence: 30 assoc: left fixity: infix -> shell-redir-both-append-operator
 
 defn shell-cd path do
   chdir path
@@ -24,19 +51,20 @@ end
 
 export defmacro cd stx do
   defn head-is? do
-    node name when (syntax-list? node) ->
+    node name when (and (syntax? node) (syntax-list? node)) ->
       and (gt? (syntax-length node) 0) (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name)
     _ _ -> :false
   end
 
-  defn string-syntax? p -> eq? (syntax-kind p) :string
+  defn string-syntax? p -> and (syntax? p) (eq? (syntax-kind p) :string)
+  defn float-syntax? p -> and (syntax? p) (eq? (syntax-kind p) :float)
 
   defn render-static-part do
-    p when (syntax-word? p) -> syntax-word-text p
+    p when (and (syntax? p) (syntax-word? p)) -> syntax-word-text p
     p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
     p when (string-syntax? p) -> syntax-string-text p
-    p when (syntax-int? p) -> "#{syntax-int-value p}"
-    p when (eq? (syntax-kind p) :float) -> "#{syntax->datum p}"
+    p when (and (syntax? p) (syntax-int? p)) -> "#{syntax-int-value p}"
+    p when (float-syntax? p) -> "#{syntax->datum p}"
     _ -> :nil
   end
 
@@ -82,12 +110,26 @@ end
 
 resolver form do
   defn head-is? do
-    node name when (syntax-list? node) ->
+    node name when (and (syntax? node) (syntax-list? node)) ->
       and (gt? (syntax-length node) 0) (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name)
     _ _ -> :false
   end
 
-  defn word-is? node text -> and (syntax-word? node) (eq? (syntax-word-text node) text)
+  defn word-syntax? node -> and (syntax? node) (syntax-word? node)
+
+  defn int-syntax? node -> and (syntax? node) (syntax-int? node)
+
+  defn float-syntax? node -> and (syntax? node) (eq? (syntax-kind node) :float)
+
+  defn word-text do
+    node when (word-syntax? node) -> syntax-word-text node
+    node when (head-is? node "%-word") -> syntax-string-text (syntax-nth node 1)
+    _ -> :nil
+  end
+
+  defn word-is? node text -> and (word-syntax? node) (eq? (syntax-word-text node) text)
+
+  defn part-word-is? node text -> eq? (word-text node) text
 
   defn redir-op-text do
     ">" -> :true
@@ -98,7 +140,7 @@ resolver form do
     _ -> :false
   end
 
-  defn redir-op? node -> and (syntax-word? node) (redir-op-text (syntax-word-text node))
+  defn redir-op? node -> and (word-syntax? node) (redir-op-text (syntax-word-text node))
 
   defn dup-op? node -> word-is? node ">&"
 
@@ -108,29 +150,108 @@ resolver form do
   defn incomplete-command-tail? do
     '() -> :false
     (list h) -> or (command-continuation-op? h) (or (redir-op? h) (dup-op? h))
-    (list a b) when (and (syntax-int? a) (redir-op? b) (syntax-adjacent? b)) -> :true
-    (list a b) when (and (syntax-int? a) (dup-op? b) (syntax-adjacent? b)) -> :true
-    (list a b) when (and (dup-op? a) (syntax-int? b) (syntax-adjacent? b)) -> :false
+    (list a b) when (and (int-syntax? a) (redir-op? b) (syntax-adjacent? b)) -> :true
+    (list a b) when (and (int-syntax? a) (dup-op? b) (syntax-adjacent? b)) -> :true
+    (list a b) when (and (dup-op? a) (int-syntax? b) (syntax-adjacent? b)) -> :false
     (list _ . t) -> incomplete-command-tail? t
   end
 
   defn glob-text? t -> or (str-contains? t "*") (str-contains? t "?")
 
-  defn string-syntax? p -> eq? (syntax-kind p) :string
+  defn string-syntax? p -> and (syntax? p) (eq? (syntax-kind p) :string)
 
-  defn command-sub? p -> head-is? p "%-command-sub"
+  defn group-syntax? p -> head-is? p "%-group"
+
+  defn group-expr p -> syntax-nth p 1
+
+  defn command-sub? do
+    {:command-sub _ _} -> :true
+    _ -> :false
+  end
+
+  defn command-sub-expr do
+    {:command-sub sub _} -> sub
+  end
+
+  defn procsub-read? do
+    {:procsub-read _ _} -> :true
+    _ -> :false
+  end
+
+  defn procsub-write? do
+    {:procsub-write _ _} -> :true
+    _ -> :false
+  end
+
+  defn procsub-expr do
+    {:procsub-read sub _} -> sub
+    {:procsub-write sub _} -> sub
+  end
+
+  defn part-adjacent? do
+    {:command-sub _ adj} -> adj
+    {:procsub-read _ adj} -> adj
+    {:procsub-write _ adj} -> adj
+    p when (syntax? p) -> syntax-adjacent? p
+    _ -> :false
+  end
+
+  defn var-start-byte? b ->
+    or (and (gte? b 65) (lte? b 90)) (or (and (gte? b 97) (lte? b 122)) (eq? b 95))
+
+  defn var-part-byte? b ->
+    or (var-start-byte? b) (and (gte? b 48) (lte? b 57))
+
+  defn var-end do
+    text i n when (eq? i n) -> i
+    text i n when (var-part-byte? (str-byte text i)) -> var-end text (add i 1) n
+    _ i _ -> i
+  end
+
+  defn dollar-var-stop text do
+    n = str-len text
+    if (or (lte? n 1) (neq? (str-byte text 0) 36)) do
+      :nil
+    else do
+      cond (var-start-byte? (str-byte text 1)) (var-end text 2 n) :nil
+    end
+  end
+
+  defn var-text p -> match (word-text p) do
+    :nil -> :nil
+    text -> match (dollar-var-stop text) do
+      :nil -> :nil
+      stop -> str-slice text 1 stop
+    end
+  end
+
+  defn var-tail p -> match (word-text p) do
+    :nil -> ""
+    text -> match (dollar-var-stop text) do
+      :nil -> ""
+      stop -> str-slice text stop (str-len text)
+    end
+  end
+
+  defn var-seg? p -> neq? (var-text p) :nil
 
   defn command-sub-arg part ->
-    %`{:lit (capture-stdout (await (exec %,(form->graph (syntax-nth part 1) (make-syntax-atom form "true")))))}
+    %`{:lit (capture-stdout (await (exec %,(form->graph (command-sub-expr part) (make-syntax-atom form "true")))))}
+
+  defn var-arg part do
+    name = var-text part
+    tail = var-tail part
+    cond (eq? tail "") %`{:env %,(make-syntax-string form name)} %`{:cat (list {:env %,(make-syntax-string form name)} {:lit %,(make-syntax-string form tail)})}
+  end
 
   defn part->arg do
-    part when (head-is? part "%-procsub-write") -> %`{:lit __psw}
-    part when (head-is? part "%-procsub-read") ->
-      %`{:temp (write-procsub-temp (await (exec %,(form->graph (syntax-nth part 1) (make-syntax-atom form "true")))))}
+    part when (procsub-write? part) -> %`{:lit __psw}
+    part when (procsub-read? part) ->
+      %`{:temp (write-procsub-temp (await (exec %,(form->graph (procsub-expr part) (make-syntax-atom form "true")))))}
     part when (command-sub? part) -> command-sub-arg part
-    part when (syntax-word? part) -> %`{:lit %,(make-syntax-string form (syntax-word-text part))}
+    part when (var-seg? part) -> var-arg part
+    part when (word-syntax? part) -> %`{:lit %,(make-syntax-string form (syntax-word-text part))}
     part when (head-is? part "%-word") -> %`{:lit %,(make-syntax-string form (syntax-string-text (syntax-nth part 1)))}
-    part when (head-is? part "%-shell-var") -> %`{:env %,(make-syntax-string form (syntax-word-text (syntax-nth part 1)))}
     part -> %`{:lit "#{%,part}"}
   end
 
@@ -141,27 +262,23 @@ resolver form do
 
   defn mk-dup fdn ton -> %`{:dup %,(make-syntax-int form fdn) %,(make-syntax-int form ton)}
 
-  defn heredoc? part -> head-is? part "%-heredoc"
-
-  defn mk-heredoc part -> %`{:redir :heredoc 0 {:lit %,(syntax-nth part 1)}}
-
   defn drop-n do
     parts 0 -> parts
     (list _ . t) k -> drop-n t (sub k 1)
   end
 
   defn fd-redir? do
-    (list a b _ . _) -> and (syntax-int? a) (redir-op? b) (syntax-adjacent? b)
+    (list a b _ . _) -> and (int-syntax? a) (redir-op? b) (syntax-adjacent? b)
     _ -> :false
   end
 
   defn fd-dup3? do
-    (list a b c . _) -> and (syntax-int? a) (dup-op? b) (syntax-adjacent? b) (syntax-int? c) (syntax-adjacent? c)
+    (list a b c . _) -> and (int-syntax? a) (dup-op? b) (syntax-adjacent? b) (int-syntax? c) (syntax-adjacent? c)
     _ -> :false
   end
 
   defn dup2? do
-    (list a b . _) -> and (dup-op? a) (syntax-int? b) (syntax-adjacent? b)
+    (list a b . _) -> and (dup-op? a) (int-syntax? b) (syntax-adjacent? b)
     _ -> :false
   end
 
@@ -173,17 +290,19 @@ resolver form do
   defn static-seg? do
     p when (redir-op? p) -> :false
     p when (dup-op? p) -> :false
-    p -> or (syntax-word? p) (head-is? p "%-word") (string-syntax? p) (syntax-int? p)
+    p when (var-seg? p) -> :false
+    p when (command-sub? p) -> :false
+    p when (procsub-read? p) -> :false
+    p when (procsub-write? p) -> :false
+    p -> or (word-syntax? p) (head-is? p "%-word") (string-syntax? p) (int-syntax? p)
   end
-
-  defn var-seg? p -> head-is? p "%-shell-var"
 
   defn interp-seg? p -> head-is? p "%-string"
 
   defn seg? p -> or (static-seg? p) (var-seg? p) (interp-seg? p) (command-sub? p)
 
   defn seg-text do
-    p when (syntax-word? p) -> syntax-word-text p
+    p when (word-syntax? p) -> syntax-word-text p
     p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
     p when (string-syntax? p) -> syntax-string-text p
     p -> "#{syntax-int-value p}"
@@ -191,12 +310,12 @@ resolver form do
 
   defn seg-glob? do
     p when (head-is? p "%-word") -> glob-text? (syntax-string-text (syntax-nth p 1))
-    p when (syntax-word? p) -> glob-text? (syntax-word-text p)
+    p when (word-syntax? p) -> glob-text? (syntax-word-text p)
     _ -> :false
   end
 
   defn run-len do
-    (list _ n . t) when (and (syntax-adjacent? n) (seg? n)) -> add 1 (run-len (cons n t))
+    (list _ n . t) when (and (part-adjacent? n) (seg? n)) -> add 1 (run-len (cons n t))
     _ -> 1
   end
 
@@ -271,7 +390,6 @@ resolver form do
       {target n} = take-target (rest parts)
       {(mk-redir-fd op-word (redir-fd (syntax-word-text op-word)) target) (add 1 n)}
     end
-    (list h . _) when (heredoc? h) -> {(mk-heredoc h) 1}
   end
 
   defn redir-head? do
@@ -279,7 +397,6 @@ resolver form do
     parts when (fd-redir? parts) -> :true
     parts when (dup2? parts) -> :true
     parts when (plain-redir? parts) -> :true
-    (list h . _) when (heredoc? h) -> :true
     _ -> :false
   end
 
@@ -302,9 +419,9 @@ resolver form do
   defn eq-empty-word? p -> and (head-is? p "%-word") (eq? (syntax-string-text (syntax-nth p 1)) "=")
 
   defn env-entry do
-    (list a b . _) when (and (syntax-word? a) (syntax-adjacent? b) (eq-empty-word? b)) ->
+    (list a b . _) when (and (word-syntax? a) (syntax-adjacent? b) (eq-empty-word? b)) ->
       {(syntax-word-text a) %`{:lit ""} 2}
-    (list a b c . t) when (and (syntax-word? a) (word-is? b "=") (syntax-adjacent? b) (syntax-adjacent? c)) ->
+    (list a b c . t) when (and (word-syntax? a) (word-is? b "=") (syntax-adjacent? b) (part-adjacent? c)) ->
       env-entry-value (syntax-word-text a) (cons c t)
     _ -> :nil
   end
@@ -382,7 +499,18 @@ resolver form do
     stages cap -> %`{:pipeline (list %,@stages) %,(graph-stdio cap) :true}
   end
 
-  defn form->graph f cap -> build-graph (split-stages (collect-parts f 1 (syntax-length f)) '()) cap
+  defn normalize-parts do
+    '() -> '()
+    (list a b . t) when (and (part-word-is? a "$") (group-syntax? b) (syntax-adjacent? b)) ->
+      cons {:command-sub (group-expr b) (part-adjacent? a)} (normalize-parts t)
+    (list a b . t) when (and (word-is? a "<") (group-syntax? b) (syntax-adjacent? b)) ->
+      cons {:procsub-read (group-expr b) (part-adjacent? a)} (normalize-parts t)
+    (list a b . t) when (and (word-is? a ">") (group-syntax? b) (syntax-adjacent? b)) ->
+      cons {:procsub-write (group-expr b) (part-adjacent? a)} (normalize-parts t)
+    (list h . t) -> cons h (normalize-parts t)
+  end
+
+  defn form->graph f cap -> build-graph (split-stages (normalize-parts (collect-parts f 1 (syntax-length f))) '()) cap
 
   defn elem-graph parts cap -> build-graph (split-stages parts '()) cap
 
@@ -401,10 +529,10 @@ resolver form do
 
   defn head-name do
     '() -> "command"
-    (list h . _) when (syntax-word? h) -> syntax-word-text h
+    (list h . _) when (var-seg? h) -> word-text h
+    (list h . _) when (word-syntax? h) -> syntax-word-text h
     (list h . _) when (head-is? h "%-word") -> syntax-string-text (syntax-nth h 1)
     (list h . _) when (string-syntax? h) -> syntax-string-text h
-    (list h . _) when (head-is? h "%-shell-var") -> str "$" (syntax-word-text (syntax-nth h 1))
     _ -> "command"
   end
 
@@ -468,12 +596,12 @@ resolver form do
 
   defn find-pw do
     '() -> :nil
-    (list h . _) when (head-is? h "%-procsub-write") -> h
+    (list h . _) when (procsub-write? h) -> h
     (list _ . t) -> find-pw t
   end
 
   defn write-sub-graph sub do
-    sub-parts = collect-parts sub 1 (syntax-length sub)
+    sub-parts = normalize-parts (collect-parts sub 1 (syntax-length sub))
     {argv redirs} = scan-body sub-parts
     input-redir = %`{:redir %,(make-syntax-atom form "<") 0 {:temp __psw}}
     %`{:exec {:stage %,(graph-list argv) %,(graph-list (cons input-redir redirs)) '()} {:stdio :inherit :inherit :inherit}}
@@ -485,12 +613,15 @@ resolver form do
   end
 
   defn render-part do
-    p when (syntax-word? p) -> syntax-word-text p
+    p when (var-seg? p) -> word-text p
+    p when (command-sub? p) -> "$(...)"
+    p when (procsub-read? p) -> "<(...)"
+    p when (procsub-write? p) -> ">(...)"
+    p when (word-syntax? p) -> syntax-word-text p
     p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
     p when (string-syntax? p) -> syntax-string-text p
-    p when (syntax-int? p) -> "#{syntax-int-value p}"
-    p when (eq? (syntax-kind p) :float) -> "#{syntax->datum p}"
-    p when (head-is? p "%-shell-var") -> "$#{syntax-word-text (syntax-nth p 1)}"
+    p when (int-syntax? p) -> "#{syntax-int-value p}"
+    p when (float-syntax? p) -> "#{syntax->datum p}"
     _ -> "..."
   end
 
@@ -521,7 +652,7 @@ resolver form do
     %`(do
         __psw = make-procsub-temp
         __r = %,(elem-exec e cap checked)
-        (await (exec %,(write-sub-graph (syntax-nth pw 1))))
+        (await (exec %,(write-sub-graph (procsub-expr pw))))
         __r
       end)
 
@@ -532,7 +663,7 @@ resolver form do
 
   n = syntax-length form
   background = last-amp? n
-  parts = collect-parts form 1 n
+  parts = normalize-parts (collect-parts form 1 n)
   check-amp parts
   if (incomplete-command-tail? parts) do
     syntax-error form "unterminated command"

@@ -547,7 +547,6 @@ TypeDef *resolve_type_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmR
 
 bool ctx_seed(ExpandContext *ctx, IdmError *err) {
     for (size_t i = 0; i < idm_primitive_count(); i++) {
-        if ((IdmPrimitive)i == IDM_PRIM_RECORD_NEW) continue;
         const IdmPrimitiveInfo *info = idm_primitive_info((IdmPrimitive)i);
         if (info && !seed_primitive(ctx, info->name, (IdmPrimitive)i)) return idm_error_oom(err, idm_span_unknown(NULL));
     }

@@ -1,2 +1,2 @@
-activate std/shell
+activate app/ish
 echo phase9-foreground

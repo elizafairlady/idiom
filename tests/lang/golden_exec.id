@@ -4,29 +4,29 @@ activate std/test
 suite do
   test "exec-actor-cwd" do
     got = do
-      activate std/shell
+      activate app/ish
       cd "/tmp"
-      "in:$(env pwd)"
+      env pwd
     end
-    assert-inspect got "\"in:/tmp\""
+    assert-inspect got "{:ok 0 \"/tmp\\n\" \"\"}"
   end
   test "exec-capture" do
     got = do
-      activate std/shell
+      activate app/ish
       out = printf 42; out
     end
     assert-inspect got "{:ok 0 \"42\" \"\"}"
   end
   test "exec-error" do
     got = do
-      activate std/shell
+      activate app/ish
       out = ls /no/such/path/zzz 2> /dev/null; match out do {tag code so se} -> tag end
     end
     assert-inspect got ":error"
   end
   test "exec-pipeline" do
     got = do
-      activate std/shell
+      activate app/ish
       out = printf "a\nb\nc\n" | wc -l; match out do {tag code so se} -> so end
     end
     assert-inspect got "\"3\\n\""

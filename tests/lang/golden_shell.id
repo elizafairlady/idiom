@@ -24,7 +24,7 @@ suite do
     got = do
       start = pwd
       env-set "HOME" start
-      activate std/shell
+      activate app/ish
       cd tests
       here = pwd
       cd ..
@@ -44,7 +44,7 @@ suite do
   end
   test "shell-env-prefix" do
     got = do
-      activate std/shell
+      activate app/ish
       x = ISH_GOLD_PREFIX=hello printenv ISH_GOLD_PREFIX
       x
     end
@@ -52,7 +52,7 @@ suite do
   end
   test "shell-fd-dup" do
     got = do
-      activate std/shell
+      activate app/ish
       x = sh -c "echo oops >&2" 2>&1
       x
     end
@@ -60,7 +60,7 @@ suite do
   end
   test "shell-glob-nomatch" do
     got = do
-      activate std/shell
+      activate app/ish
       x = echo *.zzz-no-match
       x
     end
@@ -68,7 +68,7 @@ suite do
   end
   test "shell-glob-quoted" do
     got = do
-      activate std/shell
+      activate app/ish
       x = echo "*.zzz-no-match"
       x
     end
@@ -76,7 +76,7 @@ suite do
   end
   test "shell-word-join" do
     got = do
-      activate std/shell
+      activate app/ish
       x = echo a"b"c
       x
     end
@@ -84,7 +84,7 @@ suite do
   end
   test "shell-command-substitution" do
     got = do
-      activate std/shell
+      activate app/ish
       a = echo $(printf hi)
       b = echo pre$(printf hi)post
       c = echo $(printf a)$(printf b)
@@ -93,7 +93,7 @@ suite do
     end
     assert-inspect got "{{:ok 0 \"hi\\n\" \"\"} {:ok 0 \"prehipost\\n\" \"\"} {:ok 0 \"ab\\n\" \"\"} {:ok 0 \"env\\n\" \"\"}}"
   end
-  test "command-substitution-requires-shell-or-string-context" do
-    assert-expand-error "\$(echo hi)" "command substitution requires shell or string context"
+  test "word-syntax-requires-resolver" do
+    assert-expand-error "\$(echo hi)" "word syntax requires a resolver"
   end
 end
