@@ -1,5 +1,5 @@
 [J~ % [4C[J~ % a[5C[J~ % ad[6C[J~ % add[7C[J~ % add [8C[J~ % add 1[9C[J~ % add 1 [10C[J~ % add 1 2[11C
 3
-[J~ % [4C[J~ % f[5C[J~ % fi[6C[J~ % fil[7C[J~ % file[8C[J~ % file-[9C[J~ % file-r[10C[J~ % file-re[11C[J~ % file-rea[12C[J~ % file-read[13C[J~ % file-read [14C[J~ % file-read "[15C[J~ % file-read "h[16C[J~ % file-read "hi[17C[J~ % file-read "his[18C[J~ % file-read "hist[19C[J~ % file-read "hist"[20C
-{:ok "add 1 2\nfile-read \"hist\"\n"}
+[J~ % [4C[J~ % F[5C[J~ % Fi[6C[J~ % Fil[7C[J~ % File[8C[J~ % File.[9C[J~ % File.r[10C[J~ % File.re[11C[J~ % File.rea[12C[J~ % File.read[13C[J~ % File.read [14C[J~ % File.read "[15C[J~ % File.read "h[16C[J~ % File.read "hi[17C[J~ % File.read "his[18C[J~ % File.read "hist[19C[J~ % File.read "hist"[20C
+{:ok "add 1 2\nFile.read \"hist\"\n"}
 [J~ % [4C

@@ -1,3 +1,5 @@
+import std/string as Str
+
 defn imin do
   a b when (lt? a b) -> a
   _ b -> b
@@ -14,17 +16,17 @@ else do
   seed (add i 1) n "#{acc}line ${i} alpha beta gamma\n"
 end
 
-defn checksum s i acc -> if (gte? i (str-len s)) do
+defn checksum s i acc -> if (gte? i (Str.len s)) do
   acc
 else do
-  checksum s (add i 1) (mod (add (mul acc 33) (str-byte s i)) 1000000007)
+  checksum s (add i 1) (mod (add (mul acc 33) (Str.byte s i)) 1000000007)
 end
 
-defn insert-at b p text -> "#{str-slice b 0 p}${text}#{str-slice b p (str-len b)}"
+defn insert-at b p text -> "#{Str.slice b 0 p}${text}#{Str.slice b p (Str.len b)}"
 
 defn delete-at b p n do
-  e = imin (str-len b) (add p n)
-  "#{str-slice b 0 p}#{str-slice b e (str-len b)}"
+  e = imin (Str.len b) (add p n)
+  "#{Str.slice b 0 p}#{Str.slice b e (Str.len b)}"
 end
 
 defn op-pos i len -> mod (add (mul i 37) (div i 7)) (add len 1)
@@ -32,7 +34,7 @@ defn op-pos i len -> mod (add (mul i 37) (div i 7)) (add len 1)
 defn step i state do
   b = tuple-get state 0
   p = tuple-get state 1
-  n = str-len b
+  n = Str.len b
   op = mod i 8
   match op do
     0 -> do
@@ -46,7 +48,7 @@ defn step i state do
     2 -> {b (op-pos i n)}
     3 -> do
       b2 = cond (lt? p n) (delete-at b p 1) b
-      {b2 (imin p (str-len b2))}
+      {b2 (imin p (Str.len b2))}
     end
     4 -> do
       b2 = insert-at b p "()"
@@ -55,7 +57,7 @@ defn step i state do
     5 -> {b (imax 0 (sub p (add 1 (mod i 5))))}
     6 -> do
       b2 = cond (lt? p n) (delete-at b p 3) b
-      {b2 (imin p (str-len b2))}
+      {b2 (imin p (Str.len b2))}
     end
     _ -> {b (imin n (add p (add 1 (mod i 7))))}
   end
@@ -71,4 +73,4 @@ initial = seed 0 160 ""
 result = loop 0 2500 {initial 0}
 text = tuple-get result 0
 point = tuple-get result 1
-println (mod (add (checksum text 0 0) (add (mul (str-len text) 17) point)) 1000000007)
+println (mod (add (checksum text 0 0) (add (mul (Str.len text) 17) point)) 1000000007)

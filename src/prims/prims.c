@@ -476,7 +476,10 @@ static bool prim_write_procsub_temp(IdmRuntime *rt, IdmValue *args, IdmValue *ou
     size_t off = 0;
     while (off < len) {
         ssize_t w = write(fd, bytes + off, len - off);
-        if (w < 0) { close(fd); unlink(tmpl); return idm_error_set(err, idm_span_unknown(NULL), "process substitution: write failed: %s", strerror(errno)); }
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            close(fd); unlink(tmpl); return idm_error_set(err, idm_span_unknown(NULL), "process substitution: write failed: %s", strerror(errno));
+        }
         off += (size_t)w;
     }
     close(fd);
@@ -1366,20 +1369,20 @@ static int64_t clamp_index(int64_t i, size_t len) {
 static bool prim_str_len(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     (void)rt;
     const char *s; size_t len;
-    if (!require_string_arg(rt, args[0], &s, &len, "str-len", err)) return false;
+    if (!require_string_arg(rt, args[0], &s, &len, "len", err)) return false;
     *out = idm_int((int64_t)len);
     return true;
 }
 
 static bool prim_str_slice(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *s; size_t len;
-    if (!require_string_arg(rt, args[0], &s, &len, "str-slice", err)) return false;
-    if (args[1].tag != IDM_VAL_INT) return type_error(rt, err, "str-slice", args[1], "integer bounds");
-    if (args[2].tag != IDM_VAL_INT) return type_error(rt, err, "str-slice", args[2], "integer bounds");
+    if (!require_string_arg(rt, args[0], &s, &len, "slice", err)) return false;
+    if (args[1].tag != IDM_VAL_INT) return type_error(rt, err, "slice", args[1], "integer bounds");
+    if (args[2].tag != IDM_VAL_INT) return type_error(rt, err, "slice", args[2], "integer bounds");
     int64_t a = args[1].as.i;
     int64_t b = args[2].as.i;
     if (a < 0 || b < a || (uint64_t)b > len) {
-        idm_error_set(err, idm_span_unknown(NULL), "str-slice range %lld..%lld out of bounds for length %zu", (long long)a, (long long)b, len);
+        idm_error_set(err, idm_span_unknown(NULL), "slice range %lld..%lld out of bounds for length %zu", (long long)a, (long long)b, len);
         return idm_error_reason(rt, err, "slice-out-of-range", 3, args[1], args[2], idm_int((int64_t)len));
     }
     *out = idm_string_n(rt, s + a, (size_t)(b - a), err);
@@ -1390,9 +1393,9 @@ static bool prim_str_find(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErro
     (void)rt;
     const char *s; size_t len;
     const char *needle; size_t nlen;
-    if (!require_string_arg(rt, args[0], &s, &len, "str-find", err)) return false;
-    if (!require_string_arg(rt, args[1], &needle, &nlen, "str-find", err)) return false;
-    if (args[2].tag != IDM_VAL_INT) return type_error(rt, err, "str-find", args[2], "an integer start");
+    if (!require_string_arg(rt, args[0], &s, &len, "find", err)) return false;
+    if (!require_string_arg(rt, args[1], &needle, &nlen, "find", err)) return false;
+    if (args[2].tag != IDM_VAL_INT) return type_error(rt, err, "find", args[2], "an integer start");
     size_t from = (size_t)clamp_index(args[2].as.i, len);
     if (nlen == 0) { *out = idm_int((int64_t)from); return true; }
     for (size_t i = from; i + nlen <= len; i++) {
@@ -1408,8 +1411,8 @@ static bool prim_str_find(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErro
 static bool prim_str_byte(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     (void)rt;
     const char *s; size_t len;
-    if (!require_string_arg(rt, args[0], &s, &len, "str-byte", err)) return false;
-    if (args[1].tag != IDM_VAL_INT) return type_error(rt, err, "str-byte", args[1], "an integer index");
+    if (!require_string_arg(rt, args[0], &s, &len, "byte", err)) return false;
+    if (args[1].tag != IDM_VAL_INT) return type_error(rt, err, "byte", args[1], "an integer index");
     int64_t i = args[1].as.i;
     if (i < 0 || (size_t)i >= len) { *out = idm_nil(); return true; }
     *out = idm_int((int64_t)(unsigned char)s[i]);
@@ -1472,13 +1475,13 @@ static bool regex_offset_arg(IdmRuntime *rt, const char *name, IdmValue value, s
 
 static bool prim_regex_scan_at(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     size_t offset = 0;
-    if (!regex_offset_arg(rt, "regex-raw-scan-at", args[2], &offset, err)) return false;
+    if (!regex_offset_arg(rt, "raw-scan-at", args[2], &offset, err)) return false;
     return idm_regex_scan_at(rt, args[0], args[1], offset, out, err);
 }
 
 static bool prim_regex_scan_from(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     size_t offset = 0;
-    if (!regex_offset_arg(rt, "regex-raw-scan-from", args[2], &offset, err)) return false;
+    if (!regex_offset_arg(rt, "raw-scan-from", args[2], &offset, err)) return false;
     return idm_regex_scan_from(rt, args[0], args[1], offset, out, err);
 }
 
@@ -1536,7 +1539,7 @@ static const char *resolve_cwd_record(IdmRuntime *rt, const char *path, char *bu
 
 static bool prim_file_read(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-read", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "read", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd_record(rt, path, pb, sizeof(pb)))) return result_error(rt, out, err);
     char *data = NULL;
@@ -1556,8 +1559,8 @@ static bool prim_file_read(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 static bool prim_file_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     const char *data; size_t dlen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-write", err)) return false;
-    if (!require_string_arg(rt, args[1], &data, &dlen, "file-write", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "write", err)) return false;
+    if (!require_string_arg(rt, args[1], &data, &dlen, "write", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     FILE *f = fopen(path, "wb");
@@ -1604,8 +1607,8 @@ static bool prim_file_open(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
     const char *mode = NULL;
     bool readable = false;
     bool writable = false;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-open", err)) return false;
-    if (!file_port_mode(args[1], &mode, &readable, &writable)) return type_error(rt, err, "file-open", args[1], ":read, :write, :append, or :read-write");
+    if (!require_string_arg(rt, args[0], &path, &plen, "open", err)) return false;
+    if (!file_port_mode(args[1], &mode, &readable, &writable)) return type_error(rt, err, "open", args[1], ":read, :write, :append, or :read-write");
     char pb[PATH_MAX];
     const char *resolved = readable ? resolve_cwd_record(rt, path, pb, sizeof(pb)) : resolve_cwd(path, pb, sizeof(pb));
     if (!resolved) return result_error(rt, out, err);
@@ -1614,7 +1617,7 @@ static bool prim_file_open(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
         if (err && err->present) return false;
         return result_error(rt, out, err);
     }
-    IdmScheduler *sched = job_sched("file-open", err);
+    IdmScheduler *sched = job_sched("open", err);
     if (!sched) {
         idm_port_free(port);
         return false;
@@ -1629,7 +1632,7 @@ static bool prim_file_open(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 
 static bool prim_file_exists(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-exists?", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "exists?", err)) return false;
     char pb[PATH_MAX];
     path = resolve_cwd_record(rt, path, pb, sizeof(pb));
     *out = idm_bool(rt, path && access(path, F_OK) == 0);
@@ -1638,7 +1641,7 @@ static bool prim_file_exists(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmE
 
 static bool prim_file_stat(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-stat", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "stat", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd_record(rt, path, pb, sizeof(pb)))) return result_error(rt, out, err);
     struct stat st;
@@ -1655,7 +1658,7 @@ static bool prim_file_stat(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 
 static bool prim_file_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-list", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "list", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     DIR *dir = opendir(path);
@@ -1675,7 +1678,7 @@ static bool prim_file_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErr
 
 static bool prim_file_remove(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-remove", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "remove", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     if (remove(path) != 0) return result_error(rt, out, err);
@@ -2417,7 +2420,7 @@ static bool prim_parse_float(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmE
 
 static bool prim_file_mkdir(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-mkdir", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "mkdir", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     if (mkdir(path, 0777) != 0) return result_error(rt, out, err);
@@ -2428,8 +2431,8 @@ static bool prim_file_mkdir(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmEr
 static bool prim_file_append(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     const char *data; size_t dlen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "file-append", err)) return false;
-    if (!require_string_arg(rt, args[1], &data, &dlen, "file-append", err)) return false;
+    if (!require_string_arg(rt, args[0], &path, &plen, "append", err)) return false;
+    if (!require_string_arg(rt, args[1], &data, &dlen, "append", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     FILE *f = fopen(path, "ab");

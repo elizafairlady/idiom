@@ -2,7 +2,7 @@ package regex
 
 export defn compile do
   source -> compile source '()
-  source opts -> regex-raw-compile source opts
+  source opts -> raw-compile source opts
 end
 
 export defn compile! do
@@ -13,8 +13,8 @@ export defn compile! do
   end
 end
 
-export defn regex? value -> regex-raw-regex? value
-export defn result? value -> regex-raw-result? value
+export defn regex? value -> raw-regex? value
+export defn result? value -> raw-result? value
 
 export trait Pattern do
   method source-of rx
@@ -35,51 +35,51 @@ export trait Pattern do
 end
 
 implement Pattern on regex do
-  method source-of rx -> rx |> regex-raw-source
-  method options-of rx -> rx |> regex-raw-options
-  method group-count rx -> rx |> regex-raw-group-count
-  method group-names rx -> rx |> regex-raw-group-names
+  method source-of rx -> rx |> raw-source
+  method options-of rx -> rx |> raw-options
+  method group-count rx -> rx |> raw-group-count
+  method group-names rx -> rx |> raw-group-names
 
-  method scan rx s -> rx |> regex-raw-scan-from s 0
-  method scan-at rx s offset -> rx |> regex-raw-scan-at s offset
-  method scan-from rx s offset -> rx |> regex-raw-scan-from s offset
-  method scan-full rx s -> rx |> regex-raw-scan-full s
-  method test? rx s -> rx |> regex-raw-test? s
-  method scan-all rx s -> rx |> regex-raw-scan-all s
+  method scan rx s -> rx |> raw-scan-from s 0
+  method scan-at rx s offset -> rx |> raw-scan-at s offset
+  method scan-from rx s offset -> rx |> raw-scan-from s offset
+  method scan-full rx s -> rx |> raw-scan-full s
+  method test? rx s -> rx |> raw-test? s
+  method scan-all rx s -> rx |> raw-scan-all s
 
-  method sub rx s replacement -> rx |> regex-raw-replace s replacement
-  method sub-all rx s replacement -> rx |> regex-raw-replace-all s replacement
-  method split-on rx s -> rx |> regex-raw-split-on s
+  method sub rx s replacement -> rx |> raw-replace s replacement
+  method sub-all rx s replacement -> rx |> raw-replace-all s replacement
+  method split-on rx s -> rx |> raw-split-on s
 end
 
 implement Pattern on string do
-  method source-of source -> source |> compile! |> regex-raw-source
-  method options-of source -> source |> compile! |> regex-raw-options
-  method group-count source -> source |> compile! |> regex-raw-group-count
-  method group-names source -> source |> compile! |> regex-raw-group-names
+  method source-of source -> source |> compile! |> raw-source
+  method options-of source -> source |> compile! |> raw-options
+  method group-count source -> source |> compile! |> raw-group-count
+  method group-names source -> source |> compile! |> raw-group-names
 
-  method scan source s -> source |> compile! |> regex-raw-scan-from s 0
-  method scan-at source s offset -> source |> compile! |> regex-raw-scan-at s offset
-  method scan-from source s offset -> source |> compile! |> regex-raw-scan-from s offset
-  method scan-full source s -> source |> compile! |> regex-raw-scan-full s
-  method test? source s -> source |> compile! |> regex-raw-test? s
-  method scan-all source s -> source |> compile! |> regex-raw-scan-all s
+  method scan source s -> source |> compile! |> raw-scan-from s 0
+  method scan-at source s offset -> source |> compile! |> raw-scan-at s offset
+  method scan-from source s offset -> source |> compile! |> raw-scan-from s offset
+  method scan-full source s -> source |> compile! |> raw-scan-full s
+  method test? source s -> source |> compile! |> raw-test? s
+  method scan-all source s -> source |> compile! |> raw-scan-all s
 
-  method sub source s replacement -> source |> compile! |> regex-raw-replace s replacement
-  method sub-all source s replacement -> source |> compile! |> regex-raw-replace-all s replacement
-  method split-on source s -> source |> compile! |> regex-raw-split-on s
+  method sub source s replacement -> source |> compile! |> raw-replace s replacement
+  method sub-all source s replacement -> source |> compile! |> raw-replace-all s replacement
+  method split-on source s -> source |> compile! |> raw-split-on s
 end
 
 export trait MatchResult do
-  method start-of result -> regex-raw-result-start result
-  method end-of result -> regex-raw-result-end result
-  method text-of result -> regex-raw-result-text result
-  method capture result index -> regex-raw-capture result index
-  method capture-range result index -> regex-raw-capture-range result index
-  method capture-named result name -> regex-raw-capture-named result name
-  method captures result -> regex-raw-captures result
+  method start-of result -> raw-result-start result
+  method end-of result -> raw-result-end result
+  method text-of result -> raw-result-text result
+  method capture result index -> raw-capture result index
+  method capture-range result index -> raw-capture-range result index
+  method capture-named result name -> raw-capture-named result name
+  method captures result -> raw-captures result
 end
 
 implement MatchResult on regex-result
 
-export defn escape s -> regex-raw-escape s
+export defn escape s -> raw-escape s

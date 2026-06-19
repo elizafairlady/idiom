@@ -944,15 +944,33 @@ static bool call_direct(Vm *vm, const IdmBytecodeModule *module, size_t site, co
     idm_pattern_bindings_init(&selected_bindings);
     bool has_selected_bindings = false;
     bool matched = false;
-    if (!idm_pattern_selector_select(vm->rt, selector, &vm->stack[arg_base], argc, selector_guard, &guard_ctx, &function_index, &selected_bindings, &has_selected_bindings, &matched, err)) return false;
+    if (!idm_pattern_selector_select(vm->rt, selector, &vm->stack[arg_base], argc, selector_guard, &guard_ctx, &function_index, &selected_bindings, &has_selected_bindings, &matched, err)) {
+        idm_pattern_bindings_destroy(&selected_bindings);
+        return false;
+    }
     if (!matched) {
         const char *cname = entries[0] < module->function_count ? module->functions[entries[0]].name : NULL;
+        idm_pattern_bindings_destroy(&selected_bindings);
         if (guard_ctx.exhausted) return raise_guard_budget(cname, err);
         return raise_no_clause(vm, cname, &vm->stack[arg_base], argc, err);
     }
     bool entered = enter_direct_clause(vm, module, function_index, capture_base, capture_count, arg_base, argc, has_selected_bindings ? &selected_bindings : NULL, tail, ns, err);
-    if (has_selected_bindings) idm_pattern_bindings_destroy(&selected_bindings);
+    idm_pattern_bindings_destroy(&selected_bindings);
     return entered;
+}
+
+static bool closure_accepts_argc(Vm *vm, IdmValue closure, uint32_t argc) {
+    const IdmBytecodeModule *m = closure_module_or_current(vm, closure);
+    size_t n = idm_closure_entry_count(closure);
+    if (n == 0) {
+        uint32_t idx = idm_closure_function_index(closure);
+        return idx < m->function_count && m->functions[idx].arity == argc;
+    }
+    for (size_t i = 0; i < n; i++) {
+        uint32_t idx = idm_closure_entry(closure, i, NULL);
+        if (idx < m->function_count && m->functions[idx].arity == argc) return true;
+    }
+    return false;
 }
 
 static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err) {
@@ -960,6 +978,10 @@ static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err) {
     size_t closure_index = vm->sp - (size_t)argc - 1u;
     IdmValue callee = vm->stack[closure_index];
     if (callee.tag == IDM_VAL_PRIMITIVE) {
+        if (argc == 0) {
+            const IdmPrimitiveInfo *info = idm_primitive_info((IdmPrimitive)callee.as.id);
+            if (!info || info->min_arity != 0) return true;
+        }
         IdmValue *args = argc == 0 ? NULL : &vm->stack[closure_index + 1u];
         if ((IdmPrimitive)callee.as.id == IDM_PRIM_RAISE) {
             vm->sp = closure_index;
@@ -971,9 +993,11 @@ static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err) {
         return push(vm, out, err);
     }
     if (!idm_is_closure(callee)) {
+        if (argc == 0) return true;
         idm_error_set(err, idm_span_unknown(NULL), "attempted to call a non-closure");
         return idm_error_reason(vm->rt, err, "not-callable", 1, callee);
     }
+    if (argc == 0 && !closure_accepts_argc(vm, callee, 0)) return true;
     bool selected = false;
     uint32_t function_index = UINT32_MAX;
     if (!select_trivial_closure(vm, callee, argc, &function_index, &selected, err)) return false;
@@ -983,18 +1007,21 @@ static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err) {
     bool has_selected_bindings = false;
     bool matched = false;
     bool budget_exhausted = false;
-    if (!vm_select_clause(vm, callee, closure_index + 1u, argc, &function_index, &selected_bindings, &has_selected_bindings, &matched, &budget_exhausted, err)) return false;
+    if (!vm_select_clause(vm, callee, closure_index + 1u, argc, &function_index, &selected_bindings, &has_selected_bindings, &matched, &budget_exhausted, err)) {
+        idm_pattern_bindings_destroy(&selected_bindings);
+        return false;
+    }
     if (!matched) {
         const IdmBytecodeModule *cm = closure_module_or_current(vm, callee);
         const char *cname = NULL;
         uint32_t first_entry = idm_closure_entry_count(callee) != 0 ? idm_closure_entry(callee, 0, NULL) : idm_closure_function_index(callee);
         if (cm && first_entry < cm->function_count) cname = cm->functions[first_entry].name;
-        if (has_selected_bindings) idm_pattern_bindings_destroy(&selected_bindings);
+        idm_pattern_bindings_destroy(&selected_bindings);
         if (budget_exhausted) return raise_guard_budget(cname, err);
         return raise_no_clause(vm, cname, &vm->stack[closure_index + 1u], argc, err);
     }
     bool entered = enter_clause(vm, callee, function_index, closure_index, argc, has_selected_bindings ? &selected_bindings : NULL, tail, err);
-    if (has_selected_bindings) idm_pattern_bindings_destroy(&selected_bindings);
+    idm_pattern_bindings_destroy(&selected_bindings);
     return entered;
 }
 
@@ -1012,18 +1039,21 @@ static bool call_closure_at_args(Vm *vm, IdmValue callee, size_t arg_base, uint3
     bool has_selected_bindings = false;
     bool matched = false;
     bool budget_exhausted = false;
-    if (!vm_select_clause(vm, callee, arg_base, argc, &function_index, &selected_bindings, &has_selected_bindings, &matched, &budget_exhausted, err)) return false;
+    if (!vm_select_clause(vm, callee, arg_base, argc, &function_index, &selected_bindings, &has_selected_bindings, &matched, &budget_exhausted, err)) {
+        idm_pattern_bindings_destroy(&selected_bindings);
+        return false;
+    }
     if (!matched) {
         const IdmBytecodeModule *cm = closure_module_or_current(vm, callee);
         const char *cname = NULL;
         uint32_t first_entry = idm_closure_entry_count(callee) != 0 ? idm_closure_entry(callee, 0, NULL) : idm_closure_function_index(callee);
         if (cm && first_entry < cm->function_count) cname = cm->functions[first_entry].name;
-        if (has_selected_bindings) idm_pattern_bindings_destroy(&selected_bindings);
+        idm_pattern_bindings_destroy(&selected_bindings);
         if (budget_exhausted) return raise_guard_budget(cname, err);
         return raise_no_clause(vm, cname, &vm->stack[arg_base], argc, err);
     }
     bool entered = enter_closure_at_args(vm, callee, function_index, arg_base, argc, has_selected_bindings ? &selected_bindings : NULL, tail, err);
-    if (has_selected_bindings) idm_pattern_bindings_destroy(&selected_bindings);
+    idm_pattern_bindings_destroy(&selected_bindings);
     return entered;
 }
 

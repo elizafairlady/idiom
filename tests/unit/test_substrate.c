@@ -576,7 +576,7 @@ static void test_source_expansion_capabilities(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(bind-local x#0 40 ((prim add) (local x#0) 2))");
+    CHECK_STR(dump.data, "(bind-local x#0 40 ((prim add) ((local x#0)) 2))");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);

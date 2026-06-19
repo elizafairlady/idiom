@@ -2,29 +2,23 @@ package string
 
 use std/enum
 
-export defn length s -> s |> str-len
+export defn length s -> s |> len
 
-export defn empty? s -> s |> str-len |> eq? 0
+export defn empty? s -> s |> len |> eq? 0
 
-export defn slice s a b -> s |> str-slice a b
+export defn at s i -> s |> byte i
 
-export defn at s i -> s |> str-byte i
-
-export defn find-from s sub i -> s |> str-find sub i
-
-export defn contains? s sub -> s |> str-contains? sub
-
-export defn find s sub -> s |> str-find sub 0
+export defn find-from s sub i -> s |> find sub i
 
 export defn starts-with? s prefix -> do
-  n = prefix |> str-len
-  and (n |> lte? (s |> str-len)) (s |> str-slice 0 n |> eq? prefix)
+  n = prefix |> len
+  and (n |> lte? (s |> len)) (s |> slice 0 n |> eq? prefix)
 end
 
 export defn ends-with? s suffix -> do
-  n = suffix |> str-len
-  len = s |> str-len
-  and (n |> lte? len) (s |> str-slice (len - n) len |> eq? suffix)
+  n = suffix |> len
+  len = s |> len
+  and (n |> lte? len) (s |> slice (len - n) len |> eq? suffix)
 end
 
 defn space? do
@@ -37,34 +31,34 @@ end
 
 defn scan-left do
   s i n when (eq? i n) -> i
-  s i n -> cond (s |> str-byte i |> space?) (scan-left s (add i 1) n) i
+  s i n -> cond (s |> byte i |> space?) (scan-left s (add i 1) n) i
 end
 
 defn scan-right do
   s i when (eq? i 0) -> 0
-  s i -> cond (s |> str-byte (i - 1) |> space?) (scan-right s (sub i 1)) i
+  s i -> cond (s |> byte (i - 1) |> space?) (scan-right s (sub i 1)) i
 end
 
 defn blank-from do
   _ i n when (eq? i n) -> :true
-  s i n -> cond (s |> str-byte i |> space?) (blank-from s (add i 1) n) :false
+  s i n -> cond (s |> byte i |> space?) (blank-from s (add i 1) n) :false
 end
 
-export defn blank? s -> s |> blank-from 0 (s |> str-len)
+export defn blank? s -> s |> blank-from 0 (s |> len)
 
 export defn trim-left s -> do
-  n = s |> str-len
-  s |> str-slice (s |> scan-left 0 n) n
+  n = s |> len
+  s |> slice (s |> scan-left 0 n) n
 end
-export defn trim-right s -> s |> str-slice 0 (s |> scan-right (s |> str-len))
+export defn trim-right s -> s |> slice 0 (s |> scan-right (s |> len))
 export defn trim s -> s |> trim-left |> trim-right
 export defn trim-leading s -> s |> trim-left
 export defn trim-trailing s -> s |> trim-right
 
 defn split-from do
-  s sep i acc -> match (s |> str-find sep i) do
-    :nil -> cons (s |> str-slice i (s |> str-len)) acc
-    at -> split-from s sep (at + (sep |> str-len)) (cons (s |> str-slice i at) acc)
+  s sep i acc -> match (s |> find sep i) do
+    :nil -> cons (s |> slice i (s |> len)) acc
+    at -> split-from s sep (at + (sep |> len)) (cons (s |> slice i at) acc)
   end
 end
 
@@ -91,7 +85,7 @@ defn last-rune-from do
 end
 
 export defn split do
-  s sep when (sep |> str-len |> eq? 0) -> error {:split :empty-separator}
+  s sep when (sep |> len |> eq? 0) -> error {:split :empty-separator}
   s sep -> s |> split-from sep 0 '() |> rev '()
 end
 
@@ -114,13 +108,13 @@ export defn replace s old new ->
   s |> split old |> join new
 
 export defn repeat do
-  _s 0 -> ""
+  _s n when (lte? n 0) -> ""
   s n -> "${s}#{repeat s (sub n 1)}"
 end
 
 defn pad do
   s n ch left? -> do
-    gap = n - (s |> str-len)
+    gap = n - (s |> len)
     if (lte? gap 0) do
       s
     else do
@@ -135,14 +129,14 @@ export defn pad-right s n ch -> s |> pad n ch :false
 
 defn map-bytes do
   s i n f acc when (eq? i n) -> acc
-  s i n f acc -> map-bytes s (i + 1) n f "${acc}#{byte-str (f (s |> str-byte i))}"
+  s i n f acc -> map-bytes s (i + 1) n f "${acc}#{byte-str (f (s |> byte i))}"
 end
 
 defn upbyte b -> cond (and (gte? b 97) (lte? b 122)) (sub b 32) b
 defn downbyte b -> cond (and (gte? b 65) (lte? b 90)) (add b 32) b
 
-export defn upcase s -> s |> map-bytes 0 (s |> str-len) &upbyte ""
-export defn downcase s -> s |> map-bytes 0 (s |> str-len) &downbyte ""
+export defn upcase s -> s |> map-bytes 0 (s |> len) &upbyte ""
+export defn downcase s -> s |> map-bytes 0 (s |> len) &downbyte ""
 
 export defn capitalize do
   "" -> ""

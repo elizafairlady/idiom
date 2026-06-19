@@ -4,6 +4,7 @@ import std/tea as Tea
 use std/string
 use std/string/runes
 use std/term
+import std/file as File
 
 defn sget state k -> dict-get state k :nil
 defn sput state k v -> dict-put state k v
@@ -26,8 +27,8 @@ defn edited state -> {:render state}
 defn insert-text state text do
   b = buffer-of state
   c = cursor-of state
-  b2 = "#{str-slice b 0 c}${text}#{str-slice b c (str-len b)}"
-  edited (state |> sput :buffer b2 |> sput :cursor (add c (str-len text)))
+  b2 = "#{slice b 0 c}${text}#{slice b c (len b)}"
+  edited (state |> sput :buffer b2 |> sput :cursor (add c (len text)))
 end
 
 defn move-to state c -> edited (sput state :cursor c)
@@ -41,13 +42,13 @@ defn key-word-fwd state -> move-to state (word-fwd (buffer-of state) (cursor-of 
 
 defn delete-range state a z do
   b = buffer-of state
-  edited (state |> sput :buffer "#{str-slice b 0 a}#{str-slice b z (str-len b)}" |> sput :cursor a)
+  edited (state |> sput :buffer "#{slice b 0 a}#{slice b z (len b)}" |> sput :cursor a)
 end
 
 defn kill-range state a z do
   b = buffer-of state
   match (delete-range state a z) do
-    {:render st} -> edited (sput st :kill (str-slice b a z))
+    {:render st} -> edited (sput st :kill (slice b a z))
   end
 end
 
@@ -58,11 +59,11 @@ end
 
 defn key-delete state do
   c = cursor-of state
-  cond (eq? c (str-len (buffer-of state))) (edited state) (delete-range state c (rune-fwd (buffer-of state) c))
+  cond (eq? c (len (buffer-of state))) (edited state) (delete-range state c (rune-fwd (buffer-of state) c))
 end
 
 defn key-eof-or-delete do
-  state when (eq? (str-len (buffer-of state)) 0) -> {:eof state}
+  state when (eq? (len (buffer-of state)) 0) -> {:eof state}
   state -> key-delete state
 end
 
@@ -70,7 +71,7 @@ defn key-kill-line-end state do
   b = buffer-of state
   c = cursor-of state
   e = line-stop b c
-  cond (and (eq? c e) (lt? c (str-len b))) (kill-range state c (add c 1)) (kill-range state c e)
+  cond (and (eq? c e) (lt? c (len b))) (kill-range state c (add c 1)) (kill-range state c e)
 end
 
 defn key-kill-line-start state -> kill-range state (line-start (buffer-of state) (cursor-of state)) (cursor-of state)
@@ -98,7 +99,7 @@ defn nth-entry do
 end
 
 defn show-history state pos text ->
-  edited (state |> sput :hist-pos pos |> sput :buffer text |> sput :cursor (str-len text))
+  edited (state |> sput :hist-pos pos |> sput :buffer text |> sput :cursor (len text))
 
 defn key-history-back state do
   h = sget state :history
@@ -144,7 +145,7 @@ defn search-apply state from do
   else do
     match (search-scan (drop-entries (sget state :history) from) q from) do
       :nil -> edited state
-      {i text} -> edited (state |> sput :search-idx i |> sput :buffer text |> sput :cursor (str-len text))
+      {i text} -> edited (state |> sput :search-idx i |> sput :buffer text |> sput :cursor (len text))
     end
   end
 end
@@ -159,7 +160,7 @@ defn search-step state key -> match key do
   :c-r -> search-apply state (add (sget state :search-idx) 1)
   :backspace -> do
     q = sget state :search
-    q2 = cond (eq? q "") "" (str-slice q 0 (sub (str-len q) 1))
+    q2 = cond (eq? q "") "" (slice q 0 (sub (len q) 1))
     search-apply (state |> sput :search q2 |> sput :search-idx (sub 0 1)) 0
   end
   :enter -> {:submit (search-exit state)}
@@ -227,7 +228,7 @@ export defn reset state ->
 
 export defn continue state do
   b = "#{buffer-of state}\n"
-  state |> sput :buffer b |> sput :cursor (str-len b) |> sput :mode :edit
+  state |> sput :buffer b |> sput :cursor (len b) |> sput :mode :edit
 end
 
 export defn push-history do
@@ -239,7 +240,7 @@ export defn push-history do
 end
 
 defn locate do
-  (list h . t) c i when (gt? c (str-len h)) -> locate t (sub c (add (str-len h) 1)) (add i 1)
+  (list h . t) c i when (gt? c (len h)) -> locate t (sub c (add (len h) 1)) (add i 1)
   (list _ . _) c i -> {i c}
   '() c i -> {i c}
 end
@@ -273,7 +274,7 @@ export defn redraw state do
   {li lc} = locate lines (cursor-of state) 0
   line-li = nth-entry lines li
   pw = visible-len (prompt-for state li)
-  coff = add pw (width (str-slice line-li 0 lc))
+  coff = add pw (width (slice line-li 0 lc))
   cvis = add pw (width line-li)
   {cr cc} = cond (eq? coff cvis) (end-pos coff cols) {(div coff cols) (mod coff cols)}
   cursor-row = add (rows-upto state lines 0 cols li 0) cr

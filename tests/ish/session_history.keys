@@ -2,7 +2,7 @@ w ~ %
 s add 1 2
 s \r
 w 3
-s file-read "hist"
+s File.read "hist"
 s \r
 w :ok
 s \x04

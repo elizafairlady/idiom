@@ -1,4 +1,6 @@
 use std/test
+import std/string as Str
+use std/math
 activate std/test
 use std/enum
 
@@ -55,7 +57,7 @@ suite do
     assert-eq (assert-raises (fn do 1 % 0 end)) {:error {:div-by-zero :mod}}
     assert-eq (assert-raises (fn do first :nope end)) {:error {:type-error :first :nope}}
     assert-eq (assert-raises (fn do (list 1) |> apply 5 end)) {:error {:not-callable 5}}
-    assert-eq (assert-raises (fn do (list "a" "b") |> apply &str-len end)) {:error {:arity :str-len 2 1 1}}
+    assert-eq (assert-raises (fn do (list "a" "b") |> apply &Str.len end)) {:error {:arity :len 2 1 1}}
     assert-eq (assert-raises (fn do tuple-get {1 2} 5 end)) {:error {:index-out-of-range 5}}
     got = assert-raises (fn do
       defn just-one 1 -> :one
@@ -143,9 +145,9 @@ suite do
     assert-inspect (dict-put %{:a 1 :b 2} :a 9) "%{:a 9 :b 2}"
   end
   test "strings-byte-storage-rune-iteration" do
-    assert-eq (str-len "héllo") 6
-    assert-eq (str-byte "é" 0) 195
-    assert-eq (str-byte "é" 1) 169
+    assert-eq (Str.len "héllo") 6
+    assert-eq (Str.byte "é" 0) 195
+    assert-eq (Str.byte "é" 1) 169
     assert-eq "abc".to-list '(97 98 99)
     assert-eq "".to-list '()
     assert-inspect "é".to-list "(233)"
@@ -180,7 +182,7 @@ suite do
       pick 1
     end)
     match got do
-      {:error {:runtime msg}} -> assert (str-contains? msg "exceeded its budget")
+      {:error {:runtime msg}} -> assert (Str.contains? msg "exceeded its budget")
     end
   end
   test "guard-budget-falls-through" do

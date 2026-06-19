@@ -66,7 +66,7 @@ static IdmCore *zero_arity_call_if_known(IdmCore *callee, const IdmArity *arity,
         return NULL;
     }
     if (callee_position) return callee;
-    if (!arity || arity->kind == IDM_ARITY_UNKNOWN || !idm_arity_accepts(arity, 0u)) return callee;
+    if (arity && arity->kind != IDM_ARITY_UNKNOWN && !idm_arity_accepts(arity, 0u)) return callee;
     IdmCore *call = idm_core_call(callee, span);
     if (!call) {
         idm_core_free(callee);

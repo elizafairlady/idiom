@@ -1,4 +1,5 @@
 use app/ish
+import std/string as Str
 
 defn key-for do
   0 -> {:char "a"}
@@ -24,10 +25,10 @@ defn key-for do
   _ -> :c-u
 end
 
-defn checksum s i acc -> if (gte? i (str-len s)) do
+defn checksum s i acc -> if (gte? i (Str.len s)) do
   acc
 else do
-  checksum s (add i 1) (mod (add (mul acc 33) (str-byte s i)) 1000000007)
+  checksum s (add i 1) (mod (add (mul acc 33) (Str.byte s i)) 1000000007)
 end
 
 defn first-history state -> match (dict-get state :history '()) do

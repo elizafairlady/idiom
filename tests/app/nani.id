@@ -33,7 +33,7 @@ suite do
   end
 
   test "insert-motion-and-delete" do
-    e = feed (from-string "" "" 8 40) (list {:char "a"} {:char "b"} {:char "c"} :left {:char "X"} :backspace :delete)
+    e = feed (from-string "" "" 8 40) (list {:char "a"} {:char "b"} {:char "c"} :left :left {:char "X"} :backspace :delete)
     assert-eq (buffer-to-string e.buffer) "ac"
     assert-eq {e.row e.col e.dirty} {0 1 :true}
   end

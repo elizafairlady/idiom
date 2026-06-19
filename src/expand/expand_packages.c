@@ -57,6 +57,10 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
     const char *provider = art->name ? art->name : path;
     char provider_key[17];
     artifact_provider_key(art->src_hash, provider_key);
+    if (strcmp(provider, "kernel") != 0 && !seed_home_primitives(ctx, provider, qualifier, err)) {
+        idm_scope_set_destroy(&act_scopes);
+        return NULL;
+    }
 
     bool import_globals = art->global_count != 0 && !runtime_globals_imported(ctx, art);
     size_t import_count = art->export_count + (import_globals ? art->global_count : 0u);

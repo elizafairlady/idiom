@@ -315,13 +315,15 @@ static void test_phase_read_invalidation(void) {
     CHECK(write_text_file("build/readpkg-data.txt", "A"));
     CHECK(write_text_file("build/readpkg.id",
         "package readpkg\n"
+        "use std/file\n"
+        "use std/string\n"
         "for-syntax do\n"
         "  defn payload do\n"
         "    {:ok s} -> s\n"
         "    _ -> \"\"\n"
         "  end\n"
-        "  data = payload (file-read \"build/readpkg-data.txt\")\n"
-        "  defmacro bakedm stx -> make-syntax-int stx (str-byte data 0)\n"
+        "  data = payload (read \"build/readpkg-data.txt\")\n"
+        "  defmacro bakedm stx -> make-syntax-int stx (byte data 0)\n"
         "end\n"
         "export defn baked _ -> bakedm x\n"));
     check_pkg_value("use build/readpkg\nbaked 0\n", "65");
@@ -342,12 +344,13 @@ static void test_phase_read_invalidation(void) {
     remove("build/probe-target.txt");
     CHECK(write_text_file("build/probepkg.id",
         "package probepkg\n"
+        "use std/file\n"
         "for-syntax do\n"
         "  defn flag do\n"
         "    :true -> 1\n"
         "    _ -> 0\n"
         "  end\n"
-        "  seen = flag (file-exists? \"build/probe-target.txt\")\n"
+        "  seen = flag (exists? \"build/probe-target.txt\")\n"
         "  defmacro seenm stx -> make-syntax-int stx seen\n"
         "end\n"
         "export defn probed _ -> seenm x\n"));

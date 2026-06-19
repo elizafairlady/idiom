@@ -10,12 +10,23 @@ resolver form do
     _ -> :false
   end
 
+  defn attr-dict? do
+    p -> eq? (syntax-kind p) :dict
+  end
+
   defn body-children do
     b i n when (eq? i n) -> '()
     b i n -> cons (syntax-nth b i) (body-children b (add i 1) n)
   end
 
+  defn dict-attrs do
+    d i n when (eq? i n) -> '()
+    d i n ->
+      cons %`(str " " %,(make-syntax-string form (syntax-atom-text (syntax-nth d i))) "=\"" %,(syntax-nth d (add i 1)) "\"") (dict-attrs d (add i 2) n)
+  end
+
   defn attrs-of do
+    (list a . t) when (attr-dict? a) -> append (dict-attrs a 0 (syntax-length a)) (attrs-of t)
     (list a v . t) when (syntax-atom? a) ->
       cons %`(str " " %,(make-syntax-string form (syntax-atom-text a)) "=\"" %,v "\"") (attrs-of t)
     (list _ . t) -> attrs-of t
@@ -23,6 +34,7 @@ resolver form do
   end
 
   defn kids-of do
+    (list a . t) when (attr-dict? a) -> kids-of t
     (list a _ . t) when (syntax-atom? a) -> kids-of t
     (list b . t) when (body? b) -> append (body-children b 1 (syntax-length b)) (kids-of t)
     (list c . t) -> cons c (kids-of t)

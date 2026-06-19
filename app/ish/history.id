@@ -33,14 +33,14 @@ end
 
 defn last-slash-at do
   _p 0 -> :nil
-  p i when (eq? (str-byte p (sub i 1)) 47) -> sub i 1
+  p i when (eq? (byte p (sub i 1)) 47) -> sub i 1
   p i -> last-slash-at p (sub i 1)
 end
 
-defn dir-of p -> match (last-slash-at p (str-len p)) do
+defn dir-of p -> match (last-slash-at p (len p)) do
   :nil -> "."
   0 -> "/"
-  i -> str-slice p 0 i
+  i -> slice p 0 i
 end
 
 defn mkdirs do
@@ -49,7 +49,7 @@ defn mkdirs do
   "." -> :ok
   path -> do
     mkdirs (dir-of path)
-    file-mkdir path
+    File.mkdir path
     :ok
   end
 end
@@ -58,11 +58,11 @@ defn hist-escape s ->
   cond (or (contains? s "\\") (contains? s "\n")) (s |> replace "\\" "\\\\" |> replace "\n" "\\n") s
 
 defn unescape-scan do
-  s i acc when (eq? i (str-len s)) -> acc
+  s i acc when (eq? i (len s)) -> acc
   s i acc -> do
-    b = str-byte s i
-    if (and (eq? b 92) (lt? (add i 1) (str-len s))) do
-      n = str-byte s (add i 1)
+    b = byte s i
+    if (and (eq? b 92) (lt? (add i 1) (len s))) do
+      n = byte s (add i 1)
       ch = cond (eq? n 110) "\n" (byte-str n)
       unescape-scan s (add i 2) "${acc}${ch}"
     else do
@@ -103,7 +103,7 @@ defn history-load shell do
     p -> do
       mkdirs (dir-of p)
       cap = hist-cap
-      match (file-read p) do
+      match (File.read p) do
         {:ok data} -> do
           newest-first = parse-rev (split data "\n") '()
           {{p (list-len newest-first) cap} (take-n newest-first cap)}
@@ -124,11 +124,11 @@ end
 defn history-append do
   :nil _entries _text -> :nil
   {path count cap} entries text -> do
-    file-append path "#{hist-escape text}\n"
+    File.append path "#{hist-escape text}\n"
     n = add count 1
     if (gt? n (mul 2 cap)) do
       kept = take-n entries cap
-      file-write path (render-oldest-first (rev-app kept '()) "")
+      File.write path (render-oldest-first (rev-app kept '()) "")
       {path (list-len kept) cap}
     else do
       {path n cap}

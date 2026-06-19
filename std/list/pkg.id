@@ -5,6 +5,11 @@ defn rev-into do
   (list h . t) acc -> rev-into t (cons &h acc)
 end
 
+defn len-into do
+  acc '() -> &acc
+  acc (list _ . t) -> len-into (add acc 1) t
+end
+
 export defn empty? do
   '() -> :true
   _ -> :false
@@ -12,10 +17,7 @@ end
 
 export defn proper? xs -> xs |> list?
 
-export defn length do
-  '() -> 0
-  (list _ . t) -> add 1 (length t)
-end
+export defn length xs -> len-into 0 xs
 
 export defn reverse xs -> xs |> rev-into '()
 

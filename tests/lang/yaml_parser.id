@@ -15,7 +15,7 @@ suite do
 
   test "parse sequence of maps from dash payload indentation" do
     source = "servers:\n  - name: api\n    ports:\n      - 80\n      - 443\n  - name: web\n    ports:\n      - 8080\n"
-    expected = %{"servers" '(%{"name" "api" "ports" '(80 443)} %{"name" "web" "ports" '(8080)})}
+    expected = %{"servers" '(%{"name" "api" "ports" (80 443)} %{"name" "web" "ports" (8080)})}
     assert-eq (parse source) {:ok expected}
   end
 

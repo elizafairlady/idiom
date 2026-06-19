@@ -1,4 +1,5 @@
 use std/test
+use std/string
 activate std/test
 
 suite do
@@ -23,7 +24,7 @@ suite do
       rescue r -> r
     end
     match got do
-      {:error {:runtime msg}} -> assert (str-contains? msg "does not implement trait")
+      {:error {:runtime msg}} -> assert (contains? msg "does not implement trait")
     end
   end
   test "implement activates macros and operators" do

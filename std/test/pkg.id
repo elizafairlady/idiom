@@ -1,6 +1,7 @@
 package test
 
 use std/enum
+use std/string
 
 defn run-one do
   {:test name thunk} failures -> do
@@ -97,7 +98,7 @@ end
 export defn assert-expand-error do
   source expected -> match (expand-check source) do
     {:error {:expand msg}} ->
-      cond (str-contains? msg expected) :ok (error {:assert-expand-error :got msg :want expected})
+      cond (contains? msg expected) :ok (error {:assert-expand-error :got msg :want expected})
     :ok -> error {:assert-expand-error :compiled source}
   end
 end

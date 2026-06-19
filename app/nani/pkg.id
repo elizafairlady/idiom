@@ -221,7 +221,7 @@ defn replace-line-with-lines buffer row lines ->
 defn body-rows editor -> imax 1 (sub editor.rows 2)
 defn usable-cols editor -> imax 1 editor.cols
 
-defn visible-prefix line col -> width (str-slice line 0 col)
+defn visible-prefix line col -> width (slice line 0 col)
 
 defn rebuild editor buffer path row col top left dirty message mode prompt query cut save_exit ->
   Editor buffer path row col top left editor.rows editor.cols dirty message mode prompt query cut save_exit
@@ -255,7 +255,7 @@ defn with-top-left editor top left ->
 defn set-buffer-pos editor buffer row col do
   r = clamp row 0 (last-row buffer)
   line = line-at buffer r
-  c = clamp col 0 (str-len line)
+  c = clamp col 0 (len line)
   e = rebuild editor buffer editor.path r c editor.top editor.left editor.dirty editor.message editor.mode editor.prompt editor.query editor.cut editor.save_exit
   ensure-visible e
 end
@@ -293,7 +293,7 @@ export defn open path rows cols -> match (buffer-from-file path) do
   {:error reason} -> initial path rows cols |> with-message "open failed: #{inspect reason}"
 end
 
-defn line-insert line col text -> "#{str-slice line 0 col}${text}#{str-slice line col (str-len line)}"
+defn line-insert line col text -> "#{slice line 0 col}${text}#{slice line col (len line)}"
 
 defn append-suffix-last do
   '() suffix -> list suffix
@@ -302,8 +302,8 @@ defn append-suffix-last do
 end
 
 defn insert-lines-for current col parts do
-  before = str-slice current 0 col
-  after = str-slice current col (str-len current)
+  before = slice current 0 col
+  after = slice current col (len current)
   match parts do
     '() -> list current
     (list only) -> list "#{before}${only}${after}"
@@ -324,8 +324,8 @@ export defn insert-text editor text do
   b = replace-line-with-lines editor.buffer editor.row inserted
   row2 = add editor.row (sub (List.length parts) 1)
   col2 = match parts do
-    (list _only) -> add editor.col (str-len text)
-    _ -> str-len (last-piece parts)
+    (list _only) -> add editor.col (len text)
+    _ -> len (last-piece parts)
   end
   mark-edit editor b row2 col2
 end
@@ -334,30 +334,30 @@ defn insert-char editor c -> insert-text editor c
 
 defn split-line editor do
   line = line-at editor.buffer editor.row
-  before = str-slice line 0 editor.col
-  after = str-slice line editor.col (str-len line)
+  before = slice line 0 editor.col
+  after = slice line editor.col (len line)
   b = replace-line-with-lines editor.buffer editor.row (list before after)
   mark-edit editor b (add editor.row 1) 0
 end
 
 defn move-left editor do
   line = line-at editor.buffer editor.row
-  cond (gt? editor.col 0) (set-pos editor editor.row (rune-back line editor.col)) (cond (gt? editor.row 0) (set-pos editor (sub editor.row 1) (str-len (line-at editor.buffer (sub editor.row 1)))) editor)
+  cond (gt? editor.col 0) (set-pos editor editor.row (rune-back line editor.col)) (cond (gt? editor.row 0) (set-pos editor (sub editor.row 1) (len (line-at editor.buffer (sub editor.row 1)))) editor)
 end
 
 defn move-right editor do
   line = line-at editor.buffer editor.row
-  cond (lt? editor.col (str-len line)) (set-pos editor editor.row (rune-fwd line editor.col)) (cond (lt? editor.row (last-row editor.buffer)) (set-pos editor (add editor.row 1) 0) editor)
+  cond (lt? editor.col (len line)) (set-pos editor editor.row (rune-fwd line editor.col)) (cond (lt? editor.row (last-row editor.buffer)) (set-pos editor (add editor.row 1) 0) editor)
 end
 
 defn move-up editor -> set-pos editor (sub editor.row 1) editor.col
 defn move-down editor -> set-pos editor (add editor.row 1) editor.col
 defn move-home editor -> set-pos editor editor.row 0
-defn move-end editor -> set-pos editor editor.row (str-len (line-at editor.buffer editor.row))
+defn move-end editor -> set-pos editor editor.row (len (line-at editor.buffer editor.row))
 defn page-up editor -> set-pos editor (sub editor.row (body-rows editor)) editor.col
 defn page-down editor -> set-pos editor (add editor.row (body-rows editor)) editor.col
 
-defn delete-range line a z -> "#{str-slice line 0 a}#{str-slice line z (str-len line)}"
+defn delete-range line a z -> "#{slice line 0 a}#{slice line z (len line)}"
 
 defn backspace editor do
   line = line-at editor.buffer editor.row
@@ -370,7 +370,7 @@ defn backspace editor do
       prev = line-at editor.buffer (sub editor.row 1)
       joined = "#{prev}${line}"
       b = editor.buffer |> replace-line (sub editor.row 1) joined |> delete-line editor.row
-      mark-edit editor b (sub editor.row 1) (str-len prev)
+      mark-edit editor b (sub editor.row 1) (len prev)
     else do
       editor
     end
@@ -379,7 +379,7 @@ end
 
 defn delete-forward editor do
   line = line-at editor.buffer editor.row
-  if (lt? editor.col (str-len line)) do
+  if (lt? editor.col (len line)) do
     z = rune-fwd line editor.col
     b = replace-line editor.buffer editor.row (delete-range line editor.col z)
     mark-edit editor b editor.row editor.col
@@ -436,7 +436,7 @@ defn search-position editor query do
   if (eq? query "") do
     :nil
   else do
-    match (find-forward editor.buffer query editor.row (imin (str-len (line-at editor.buffer editor.row)) (add editor.col 1))) do
+    match (find-forward editor.buffer query editor.row (imin (len (line-at editor.buffer editor.row)) (add editor.col 1))) do
       :nil -> find-forward editor.buffer query 0 0
       found -> found
     end
@@ -449,7 +449,7 @@ defn start-quit editor -> with-mode (with-message editor "") :quit-prompt "Save 
 
 defn prompt-backspace editor do
   q = editor.query
-  q2 = cond (eq? q "") "" (str-slice q 0 (rune-back q (str-len q)))
+  q2 = cond (eq? q "") "" (slice q 0 (rune-back q (len q)))
   with-mode editor editor.mode editor.prompt q2 editor.save_exit
 end
 
@@ -691,9 +691,9 @@ implement Tea.Model on NaniModel do
   method init _model -> Tea.none
   method update model msg -> match msg do
     {:nani-key key} -> match (step model.editor key) do
-      {tag next} -> {NaniModel next (Tea.emit {:nani tag})}
+      {tag next} -> {(NaniModel next) (Tea.emit {:nani tag})}
     end
-    {:nani-resize rows cols} -> {NaniModel (with-size model.editor rows cols |> ensure-visible) (Tea.none)}
+    {:nani-resize rows cols} -> {(NaniModel (with-size model.editor rows cols |> ensure-visible)) (Tea.none)}
     _ -> {model (Tea.none)}
   end
   method view model -> render model.editor

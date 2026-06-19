@@ -30,7 +30,7 @@ TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(patsubst %.c,build/%.o,$(TEST_SRCS))
 DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
-.PHONY: all test sanitize tsan conformance release clean snapshots perf perf-compare perf-profile perf-editor
+.PHONY: all test sanitize tsan release clean snapshots perf perf-compare perf-profile perf-editor
 
 SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -108,10 +108,6 @@ tsan: build/tsan/idiomc
 	./build/tsan/idiomc test tests/lang
 	./build/tsan/idiomc test tests/app
 	./build/tsan/idiomc repl < tests/repl/session.in >/dev/null
-
-conformance: test sanitize tsan
-	@sh tools/conformance_check.sh
-	@echo "conformance suite passed"
 
 clean:
 	rm -rf build

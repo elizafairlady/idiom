@@ -1319,6 +1319,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             const char *interned = idm_symbol_text(idm_intern(&ctx->rt->intern, IDM_SYMBOL_WORD, declared));
             if (!interned) { idm_error_oom(err, form->span); failed = true; break; }
             ctx->package_name = interned;
+            if (strcmp(interned, "kernel") != 0 && !seed_home_primitives(ctx, interned, NULL, err)) { failed = true; break; }
             i++;
             continue;
         }

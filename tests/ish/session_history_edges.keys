@@ -17,7 +17,7 @@ w ...>
 s end
 s \r
 w 3
-s  file-read "hist"
+s  File.read "hist"
 s \r
 w add 1 1
 w do\\n  3\\nend

@@ -84,14 +84,11 @@ suite do
   end
 
   test "regex-scan-all-replace-split-escape" do
-    assert-inspect (texts (scan-all r"[0-9]+" "a12b3")) "(\"12\" \"3\")"
     assert-inspect (texts (r"[0-9]+".scan-all "a12b3")) "(\"12\" \"3\")"
-    assert-eq (sub r"[0-9]+" "a12b3" "#") "a#b3"
     assert-eq (r"[0-9]+".sub "a12b3" "#") "a#b3"
-    assert-eq (sub-all r"[0-9]+" "a12b3" "#") "a#b#"
-    assert-eq (sub r"([a-z]+)([0-9]+)" "ab12" "$2-$1") "12-ab"
-    assert-eq (sub r"(?<word>[a-z]+)" "abc" "\\k<word>!") "abc!"
-    assert-inspect (split-on r"," "a,b,,c") "(\"a\" \"b\" \"\" \"c\")"
+    assert-eq (r"[0-9]+".sub-all "a12b3" "#") "a#b#"
+    assert-eq (r"([a-z]+)([0-9]+)".sub "ab12" "$2-$1") "12-ab"
+    assert-eq (r"(?<word>[a-z]+)".sub "abc" "\\k<word>!") "abc!"
     assert-inspect (r",".split-on "a,b,,c") "(\"a\" \"b\" \"\" \"c\")"
     assert-eq (text-of (scan (compile! (escape "a+b")) "xxa+b")) "a+b"
   end

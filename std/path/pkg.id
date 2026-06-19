@@ -8,32 +8,32 @@ export defn join do
   a b -> "${a}/${b}"
 end
 
-defn last-slash p -> scan-slash p (str-len p)
+defn last-slash p -> scan-slash p (len p)
 
 defn scan-slash do
   _p 0 -> :nil
-  p i -> cond (eq? (str-byte p (sub i 1)) 47) (sub i 1) (scan-slash p (sub i 1))
+  p i -> cond (eq? (byte p (sub i 1)) 47) (sub i 1) (scan-slash p (sub i 1))
 end
 
 export defn dirname do
   p -> match (last-slash p) do
     :nil -> "."
     0 -> "/"
-    i -> str-slice p 0 i
+    i -> slice p 0 i
   end
 end
 
 export defn basename do
   p -> match (last-slash p) do
     :nil -> p
-    i -> str-slice p (add i 1) (str-len p)
+    i -> slice p (add i 1) (len p)
   end
 end
 
 defn last-dot do
   _p 0 -> :nil
   p i -> do
-    b = str-byte p (sub i 1)
+    b = byte p (sub i 1)
     if (eq? b 46) do
       sub i 1
     else if (eq? b 47) do
@@ -45,10 +45,10 @@ defn last-dot do
 end
 
 export defn extname do
-  p -> match (last-dot p (str-len p)) do
+  p -> match (last-dot p (len p)) do
     :nil -> ""
     0 -> ""
-    i -> str-slice p i (str-len p)
+    i -> slice p i (len p)
   end
 end
 

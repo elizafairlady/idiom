@@ -402,15 +402,10 @@ static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcod
     return true;
 }
 
-bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
-    if (module->function_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "bytecode module has no functions");
-    for (size_t i = 0; i < module->function_count; i++) {
-        if (module->functions[i].entry >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu entry is out of bounds", i);
-        if (module->functions[i].has_guard && module->functions[i].guard_function >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard function is out of bounds", i);
-        if (module->functions[i].has_guard && module->functions[module->functions[i].guard_function].arity != module->functions[i].arity) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard arity mismatch", i);
-    }
+static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start, size_t *targets, size_t *target_count, IdmError *err) {
     size_t ip = 0;
     while (ip < module->code_count) {
+        is_start[ip] = 1u;
         IdmOpcode op = (IdmOpcode)module->code[ip++];
         uint32_t operand = 0;
         switch (op) {
@@ -571,12 +566,37 @@ bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
             case IDM_OP_RESCUE_PUSH:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u out of bounds", idm_opcode_name(op), operand);
+                targets[(*target_count)++] = operand;
                 break;
             default:
                 return idm_error_set(err, idm_span_unknown(NULL), "invalid opcode %u at offset %zu", (unsigned)op, ip - 1u);
         }
     }
     return true;
+}
+
+bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
+    if (module->function_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "bytecode module has no functions");
+    for (size_t i = 0; i < module->function_count; i++) {
+        if (module->functions[i].entry >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu entry is out of bounds", i);
+        if (module->functions[i].has_guard && module->functions[i].guard_function >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard function is out of bounds", i);
+        if (module->functions[i].has_guard && module->functions[module->functions[i].guard_function].arity != module->functions[i].arity) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard arity mismatch", i);
+    }
+    size_t slots = module->code_count ? module->code_count : 1u;
+    unsigned char *is_start = calloc(slots, 1u);
+    size_t *targets = malloc(slots * sizeof(*targets));
+    if (!is_start || !targets) { free(is_start); free(targets); return idm_error_oom(err, idm_span_unknown(NULL)); }
+    size_t target_count = 0;
+    bool ok = verify_scan(module, is_start, targets, &target_count, err);
+    for (size_t i = 0; ok && i < module->function_count; i++) {
+        if (!is_start[module->functions[i].entry]) ok = idm_error_set(err, idm_span_unknown(NULL), "function %zu entry %zu is not an instruction boundary", i, module->functions[i].entry);
+    }
+    for (size_t i = 0; ok && i < target_count; i++) {
+        if (!is_start[targets[i]]) ok = idm_error_set(err, idm_span_unknown(NULL), "branch target %zu is not an instruction boundary", targets[i]);
+    }
+    free(is_start);
+    free(targets);
+    return ok;
 }
 
 static const char *name_note_at(const IdmBytecodeModule *module, size_t offset) {

@@ -1,6 +1,6 @@
 use std/test
 activate std/test
-use std/file
+import std/file as File
 use std/enum
 
 defn collect-chunk chunk acc -> "#{acc}${chunk}"
@@ -8,112 +8,112 @@ defn collect-chunk chunk acc -> "#{acc}${chunk}"
 suite do
   test "file-roundtrip" do
     p = "/tmp/idiom_test_file_rt"
-    assert-eq (write p "contents") :ok
-    assert-eq (read! p) "contents"
-    assert-eq (p |> write! "second") :ok
-    assert-eq (read p) {:ok "second"}
-    assert-eq (exists? p) :true
-    assert-eq (remove p) :ok
-    assert-eq (exists? p) :false
-    assert-inspect (remove p) "{:error :enoent}"
+    assert-eq (File.write p "contents") :ok
+    assert-eq (File.read! p) "contents"
+    assert-eq (p |> File.write! "second") :ok
+    assert-eq (File.read p) {:ok "second"}
+    assert-eq (File.exists? p) :true
+    assert-eq (File.remove p) :ok
+    assert-eq (File.exists? p) :false
+    assert-inspect (File.remove p) "{:error :enoent}"
   end
   test "file-errors-tagged" do
-    assert-inspect (read "/tmp/idiom_no_such_file") "{:error :enoent}"
-    r = assert-raises (fn do read! "/tmp/idiom_no_such_file" end)
+    assert-inspect (File.read "/tmp/idiom_no_such_file") "{:error :enoent}"
+    r = assert-raises (fn do File.read! "/tmp/idiom_no_such_file" end)
     assert-eq (r |> tuple-get 0) :error
-    r2 = assert-raises (fn do write! "/tmp/idiom_no_such_parent/x" "data" end)
+    r2 = assert-raises (fn do File.write! "/tmp/idiom_no_such_parent/x" "data" end)
     assert-eq r2 {:error {:file-write "/tmp/idiom_no_such_parent/x" :enoent}}
   end
-  test "file-stat" do
+  test "stat" do
     p = "/tmp/idiom_test_stat"
-    write! p "12345"
-    s = match (stat p) do
+    File.write! p "12345"
+    s = match (File.stat p) do
       {:ok st} -> st
     end
     assert-eq (s |> tuple-get 1) :file
     assert-eq (s |> tuple-get 2) 5
-    assert (gte? (mtime! p) 0)
-    assert-eq (dir? "/tmp") :true
-    assert-eq (dir? p) :false
-    remove p
+    assert (gte? (File.mtime! p) 0)
+    assert-eq (File.dir? "/tmp") :true
+    assert-eq (File.dir? p) :false
+    File.remove p
   end
-  test "file-mkdir" do
+  test "mkdir" do
     d = "/tmp/idiom_test_mkdir"
-    remove d
-    assert-eq (mkdir d) :ok
-    assert-eq (dir? d) :true
-    assert-inspect (mkdir d) "{:error :eexist}"
-    assert-eq (remove d) :ok
-    assert-eq (d |> mkdir!) :ok
-    r = assert-raises (fn do mkdir! d end)
+    File.remove d
+    assert-eq (File.mkdir d) :ok
+    assert-eq (File.dir? d) :true
+    assert-inspect (File.mkdir d) "{:error :eexist}"
+    assert-eq (File.remove d) :ok
+    assert-eq (d |> File.mkdir!) :ok
+    r = assert-raises (fn do File.mkdir! d end)
     assert-eq r {:error {:file-mkdir d :eexist}}
-    assert-inspect (mkdir "/tmp/idiom_no_such_parent/x") "{:error :enoent}"
-    remove d
+    assert-inspect (File.mkdir "/tmp/idiom_no_such_parent/x") "{:error :enoent}"
+    File.remove d
   end
   test "file-mkdir-p" do
     base = "/tmp/idiom_test_mkdir_p"
-    assert-eq (mkdir-p (str base "/a/b/c")) :ok
-    assert-eq (dir? (str base "/a/b/c")) :true
-    assert-eq (mkdir-p (str base "/a/b/c")) :ok
-    assert-eq (mkdir-p! (str base "/a/b")) :ok
+    assert-eq (File.mkdir-p (str base "/a/b/c")) :ok
+    assert-eq (File.dir? (str base "/a/b/c")) :true
+    assert-eq (File.mkdir-p (str base "/a/b/c")) :ok
+    assert-eq (File.mkdir-p! (str base "/a/b")) :ok
     f = str base "/a/file"
-    write! f "x"
-    assert-inspect (mkdir-p f) "{:error :eexist}"
-    r = assert-raises (fn do mkdir-p! f end)
+    File.write! f "x"
+    assert-inspect (File.mkdir-p f) "{:error :eexist}"
+    r = assert-raises (fn do File.mkdir-p! f end)
     assert-eq r {:error {:file-mkdir f :eexist}}
-    remove f
-    remove (str base "/a/b/c")
-    remove (str base "/a/b")
-    remove (str base "/a")
-    assert-eq (remove base) :ok
+    File.remove f
+    File.remove (str base "/a/b/c")
+    File.remove (str base "/a/b")
+    File.remove (str base "/a")
+    assert-eq (File.remove base) :ok
   end
-  test "file-append" do
+  test "append" do
     p = "/tmp/idiom_test_append"
-    remove p
-    assert-eq (append p "one") :ok
-    assert-eq (p |> append "-two") :ok
-    assert-eq (read! p) "one-two"
-    assert-eq (append! p "-three") :ok
-    assert-eq (read! p) "one-two-three"
-    assert-inspect (append "/tmp/idiom_no_such_parent/x" "data") "{:error :enoent}"
-    r = assert-raises (fn do append! "/tmp/idiom_no_such_parent/x" "data" end)
+    File.remove p
+    assert-eq (File.append p "one") :ok
+    assert-eq (p |> File.append "-two") :ok
+    assert-eq (File.read! p) "one-two"
+    assert-eq (File.append! p "-three") :ok
+    assert-eq (File.read! p) "one-two-three"
+    assert-inspect (File.append "/tmp/idiom_no_such_parent/x" "data") "{:error :enoent}"
+    r = assert-raises (fn do File.append! "/tmp/idiom_no_such_parent/x" "data" end)
     assert-eq r {:error {:file-append "/tmp/idiom_no_such_parent/x" :enoent}}
-    assert-eq (remove p) :ok
+    assert-eq (File.remove p) :ok
   end
-  test "file-list" do
+  test "list" do
     p = "/tmp/idiom_test_dir_probe"
-    write! p "x"
-    names = match (ls "/tmp") do
+    File.write! p "x"
+    names = match (File.ls "/tmp") do
       {:ok ns} -> ns
     end
     assert-eq (names.member? "idiom_test_dir_probe") :true
-    remove p
+    File.remove p
   end
   test "file-port-read-fold-and-write" do
     p = "/tmp/idiom_test_chunks"
-    remove p
-    out = open! p :write
+    File.remove p
+    out = File.open! p :write
     assert (port? out)
-    assert-eq (write-port-all out "abcdef") {:ok 6}
-    assert-eq (close out) :ok
+    assert-eq (File.write-port-all out "abcdef") {:ok 6}
+    assert-eq (File.close out) :ok
     assert-eq (port-status out) :done
-    inp = open! p :read
+    inp = File.open! p :read
     assert (port? inp)
-    assert-eq (read-port inp 2) {:data "ab"}
-    assert-eq (read-port inp 3) {:data "cde"}
-    assert-eq (read-port inp 4) {:data "f"}
-    assert-eq (read-port inp 4) :eof
-    assert-eq (close inp) :ok
+    assert-eq (File.read-port inp 2) {:data "ab"}
+    assert-eq (File.read-port inp 3) {:data "cde"}
+    assert-eq (File.read-port inp 4) {:data "f"}
+    assert-eq (File.read-port inp 4) :eof
+    assert-eq (File.close inp) :ok
     assert-eq (port-status inp) :done
-    folded = match (fold-chunks p 2 "" &collect-chunk) do
+    folded = match (File.fold-chunks p 2 "" &collect-chunk) do
       {:ok data} -> data
     end
     assert-eq folded "abcdef"
-    out2 = open! p :write
-    assert-eq (write-port-all! out2 "z") {:ok 1}
-    assert-eq (close out2) :ok
-    assert-eq (read! p) "z"
-    assert-inspect (open "/tmp/idiom_missing_chunk" :read) "{:error :enoent}"
-    assert-eq (remove p) :ok
+    out2 = File.open! p :write
+    assert-eq (File.write-port-all! out2 "z") {:ok 1}
+    assert-eq (File.close out2) :ok
+    assert-eq (File.read! p) "z"
+    assert-inspect (File.open "/tmp/idiom_missing_chunk" :read) "{:error :enoent}"
+    assert-eq (File.remove p) :ok
   end
 end

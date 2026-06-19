@@ -1,57 +1,50 @@
 package file
 
 use std/path
+use std/string
 
-export defn read path -> file-read path
-export defn write path data -> file-write path data
-export defn exists? path -> file-exists? path
-export defn stat path -> file-stat path
-export defn ls path -> file-list path
-export defn remove path -> file-remove path
-export defn mkdir path -> file-mkdir path
-export defn append path data -> file-append path data
-export defn open path mode -> file-open path mode
+export defn ls path -> list path
 export defn read-port port max -> port-read port :stdout max
 export defn write-port port data -> port-write port data
 export defn close port -> port-close-input port
 
 export defn read! do
-  path -> match (file-read path) do
+  path -> match (read path) do
     {:ok data} -> data
     {:error reason} -> error {:file-read path reason}
   end
 end
 
 export defn write! do
-  path data -> match (file-write path data) do
+  path data -> match (write path data) do
     :ok -> :ok
     {:error reason} -> error {:file-write path reason}
   end
 end
 
 export defn mtime! do
-  path -> match (file-stat path) do
+  path -> match (stat path) do
     {:ok {:stat _kind _size m}} -> m
     {:error reason} -> error {:file-stat path reason}
   end
 end
 
 export defn dir? do
-  path -> match (file-stat path) do
+  path -> match (stat path) do
     {:ok {:stat :dir _ _}} -> :true
     _ -> :false
   end
 end
 
 export defn mkdir! do
-  path -> match (file-mkdir path) do
+  path -> match (mkdir path) do
     :ok -> :ok
     {:error reason} -> error {:file-mkdir path reason}
   end
 end
 
 export defn append! do
-  path data -> match (file-append path data) do
+  path data -> match (append path data) do
     :ok -> :ok
     {:error reason} -> error {:file-append path reason}
   end
@@ -87,7 +80,7 @@ end
 
 defn write-port-all-from do
   port data offset len when (gte? offset len) -> {:ok offset}
-  port data offset len -> match (write-port port (str-slice data offset len)) do
+  port data offset len -> match (write-port port (slice data offset len)) do
     {:ok count} when (gt? count 0) -> write-port-all-from port data (add offset count) len
     {:ok _count} -> {:error :short-write}
     :closed -> {:error :closed}
@@ -97,7 +90,7 @@ defn write-port-all-from do
   end
 end
 
-export defn write-port-all port data -> write-port-all-from port data 0 (str-len data)
+export defn write-port-all port data -> write-port-all-from port data 0 (len data)
 
 export defn write-port-all! do
   port data -> match (write-port-all port data) do
@@ -107,7 +100,7 @@ export defn write-port-all! do
 end
 
 defn mkdir-step do
-  path -> match (file-mkdir path) do
+  path -> match (mkdir path) do
     {:error :eexist} when (dir? path) -> :ok
     {:error :eexist} -> {:error :eexist}
     r -> r

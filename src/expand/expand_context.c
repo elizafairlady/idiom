@@ -3,7 +3,6 @@
 static void capture_bindings_destroy(CaptureBinding *captures, size_t count);
 static void method_surface_def_destroy(MethodSurfaceDef *method);
 static void resolver_def_destroy(ResolverDef *resolver);
-static bool seed_primitive(ExpandContext *ctx, const char *name, IdmPrimitive primitive);
 static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap);
 static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity);
 static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, const IdmBinding *b);
@@ -281,10 +280,28 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->pat_binders);
 }
 
-static bool seed_primitive(ExpandContext *ctx, const char *name, IdmPrimitive primitive) {
-    const IdmPrimitiveInfo *info = idm_primitive_info(primitive);
-    IdmArity arity = info ? idm_arity_range(info->min_arity, info->max_arity) : idm_arity_unknown();
-    return idm_binding_table_add_with_arity(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_VALUE, &ctx->empty_scopes, (uint32_t)primitive, IDM_FRAME_GLOBAL, arity, NULL);
+bool seed_home_primitives(ExpandContext *ctx, const char *home, const char *qualifier, IdmError *err) {
+    for (size_t i = 0; i < idm_primitive_count(); i++) {
+        const IdmPrimitiveInfo *info = idm_primitive_info((IdmPrimitive)i);
+        if (!info || strcmp(idm_primitive_home((IdmPrimitive)i), home) != 0) continue;
+        IdmArity arity = idm_arity_range(info->min_arity, info->max_arity);
+        const char *name = info->name;
+        char *qualified = NULL;
+        if (qualifier) {
+            IdmBuffer qb;
+            idm_buf_init(&qb);
+            if (!idm_buf_append(&qb, qualifier) || !idm_buf_append_char(&qb, '.') || !idm_buf_append(&qb, info->name)) {
+                idm_buf_destroy(&qb);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            qualified = idm_buf_take(&qb);
+            name = qualified;
+        }
+        bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_VALUE, &ctx->empty_scopes, (uint32_t)i, IDM_FRAME_GLOBAL, arity, NULL);
+        free(qualified);
+        if (!ok) return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
 }
 
 IdmCore *expand_primitive_call(IdmPrimitive primitive, IdmSpan span, IdmError *err) {
@@ -448,11 +465,7 @@ static const IdmBinding *resolve_surface_binding(const ExpandContext *ctx, const
 }
 
 bool ctx_seed(ExpandContext *ctx, IdmError *err) {
-    for (size_t i = 0; i < idm_primitive_count(); i++) {
-        const IdmPrimitiveInfo *info = idm_primitive_info((IdmPrimitive)i);
-        if (info && !seed_primitive(ctx, info->name, (IdmPrimitive)i)) return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    return true;
+    return seed_home_primitives(ctx, "kernel", NULL, err);
 }
 
 char *scoped_identity(ExpandContext *ctx, const char *name, const IdmSyntax *form, unsigned char out_hash[32], IdmError *err) {

@@ -1,4 +1,5 @@
 use std/test
+use std/string
 use std/string/runes
 activate std/test
 

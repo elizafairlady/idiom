@@ -1,6 +1,7 @@
 package range
 
 use std/enum
+use std/math
 
 export record Range do
   field start

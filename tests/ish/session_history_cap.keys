@@ -14,7 +14,7 @@ w 8
 s add 5 5
 s \r
 w 10
-s  file-read "hist"
+s  File.read "hist"
 s \r
 w add 4 4
 w add 5 5

@@ -9,8 +9,8 @@ end
 implement Model on Counter do
   method init _model -> emit :started
   method update model msg -> match msg do
-    :inc -> {Counter (model.n + 1) (none)}
-    {:add k} -> {Counter (model.n + k) (emit {:added k})}
+    :inc -> {(Counter (model.n + 1)) (none)}
+    {:add k} -> {(Counter (model.n + k)) (emit {:added k})}
     :many -> {model (batch (list (emit :a) (emit :b)))}
     :ordered -> {model (sequence (list (emit :first) (emit :second)))}
     :done -> {model (quit)}

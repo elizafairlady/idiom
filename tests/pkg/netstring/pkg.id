@@ -1,6 +1,6 @@
 package netstring
 
-use std/list
+import std/list as L
 use std/string
 
 defn digit? b -> and (gte? b 48) (lte? b 57)
@@ -8,7 +8,7 @@ defn digit-value b -> sub b 48
 
 defn read-length do
   _ i n acc _seen when (eq? i n) -> {:error {:netstring :missing-colon i}}
-  s i n acc seen -> match (str-byte s i) do
+  s i n acc seen -> match (byte s i) do
     58 -> cond seen {:ok {acc (add i 1)}} {:error {:netstring :empty-length i}}
     b -> cond (digit? b)
       (read-length s (add i 1) n (add (mul acc 10) (digit-value b)) :true)
@@ -17,36 +17,36 @@ defn read-length do
 end
 
 export defn parse-one-at s start -> do
-  n = str-len s
+  n = len s
   match (read-length s start n 0 :false) do
     {:error reason} -> {:error reason}
     {:ok {len payload-start}} -> do
       payload-end = add payload-start len
       cond (gt? payload-end n)
         {:error {:netstring :truncated payload-start len n}}
-        (cond (neq? (str-byte s payload-end) 44)
+        (cond (neq? (byte s payload-end) 44)
           {:error {:netstring :missing-comma payload-end}}
-          {:ok {(str-slice s payload-start payload-end) (add payload-end 1)}})
+          {:ok {(slice s payload-start payload-end) (add payload-end 1)}})
     end
   end
 end
 
 export defn parse-one s -> match (parse-one-at s 0) do
   {:error reason} -> {:error reason}
-  {:ok {value next}} -> cond (eq? next (str-len s)) {:ok value} {:error {:netstring :trailing next}}
+  {:ok {value next}} -> cond (eq? next (len s)) {:ok value} {:error {:netstring :trailing next}}
 end
 
 defn parse-all-at do
-  _ i n acc when (eq? i n) -> {:ok (reverse acc)}
+  _ i n acc when (eq? i n) -> {:ok (L.reverse acc)}
   s i n acc -> match (parse-one-at s i) do
     {:error reason} -> {:error reason}
     {:ok {value next}} -> parse-all-at s next n (cons value acc)
   end
 end
 
-export defn parse-all s -> parse-all-at s 0 (str-len s) '()
+export defn parse-all s -> parse-all-at s 0 (len s) '()
 
-export defn emit s -> "#{str-len s}:#{s},"
+export defn emit s -> "#{len s}:#{s},"
 
 defn emit-all-into do
   '() acc -> acc

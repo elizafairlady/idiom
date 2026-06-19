@@ -4,7 +4,7 @@ defn home-abbrev cwd do
     if (eq? cwd h) do
       "~"
     else if (starts-with? cwd "${h}/") do
-      "~#{str-slice cwd (str-len h) (str-len cwd)}"
+      "~#{slice cwd (len h) (len cwd)}"
     else do
       cwd
     end
@@ -188,11 +188,11 @@ defn rc-file do
     :nil -> :nil
     c -> "${c}/ish/rc.ish"
   end
-  cond (and (neq? primary :nil) (eq? (file-exists? primary) :true)) primary
+  cond (and (neq? primary :nil) (eq? (File.exists? primary) :true)) primary
     (match (env-get "HOME") do
       h when (present? h) -> do
         fallback = "${h}/.ishrc"
-        cond (eq? (file-exists? fallback) :true) fallback :nil
+        cond (eq? (File.exists? fallback) :true) fallback :nil
       end
       _ -> :nil
     end)
@@ -200,7 +200,7 @@ end
 
 defn run-rc -> match rc-file do
   :nil -> 0
-  path -> match (file-read path) do
+  path -> match (File.read path) do
     {:ok src} -> eval-text src :false
     {:error r} -> do
       "ish: cannot read ${path}: #{inspect r}" |> eprintln
@@ -412,7 +412,7 @@ defn shell-source-status source do
   status-code (eval-text source :false)
 end
 
-defn shell-file-status path -> match (file-read path) do
+defn shell-file-status path -> match (File.read path) do
   {:ok source} -> shell-source-status source
   {:error reason} -> do
     "ish: cannot read ${path}: #{inspect reason}" |> eprintln

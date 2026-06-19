@@ -291,6 +291,7 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err);
 void ctx_destroy(ExpandContext *ctx);
 void ctx_init(ExpandContext *ctx, IdmRuntime *rt);
 bool ctx_seed(ExpandContext *ctx, IdmError *err);
+bool seed_home_primitives(ExpandContext *ctx, const char *home, const char *qualifier, IdmError *err);
 void end_clause_context(ExpandContext *ctx, SavedClauseContext *saved);
 void end_function_context(ExpandContext *ctx, SavedFunctionContext *saved);
 IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t index, size_t count, bool def_scope, IdmError *err);

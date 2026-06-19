@@ -1909,10 +1909,13 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
         case IDM_OBJ_SYNTAX:
             dst->as.syntax = idm_syn_clone(src->as.syntax);
             if (!dst->as.syntax && src->as.syntax) return idm_error_oom(err, idm_span_unknown(NULL));
+            heap_account_unlocked(target, dst, syn_footprint(dst->as.syntax));
             return true;
         case IDM_OBJ_REGEX:
             dst->as.regex = idm_regex_clone(src->as.regex, err);
-            return !(err && err->present);
+            if (err && err->present) return false;
+            heap_account_unlocked(target, dst, idm_regex_footprint(dst->as.regex));
+            return true;
         case IDM_OBJ_REGEX_RESULT:
             dst->as.regex_result = idm_regex_result_clone(src->as.regex_result);
             if (!dst->as.regex_result && src->as.regex_result) return idm_error_oom(err, idm_span_unknown(NULL));

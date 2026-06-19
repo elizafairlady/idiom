@@ -1,4 +1,5 @@
 use std/test
+use std/string
 activate std/test
 
 defmacro pair-sum stx do syntax-case stx do
@@ -141,7 +142,7 @@ suite do
     match got do
       {:error {:no-clause :fn args}} -> do
         assert-eq args {{1 2 3}}
-        assert (str-contains? (error-message got) "no clause of '<fn>'")
+        assert (contains? (error-message got) "no clause of '<fn>'")
       end
     end
     got2 = assert-raises (fn do
@@ -151,7 +152,7 @@ suite do
     match got2 do
       {:error {:no-clause :fn args}} -> do
         assert-eq args {{:error :enoent}}
-        assert (str-contains? (error-message got2) "no clause of '<fn>'")
+        assert (contains? (error-message got2) "no clause of '<fn>'")
       end
     end
   end
@@ -178,7 +179,7 @@ suite do
     match got do
       {:error {:no-clause :fn args}} -> do
         assert-eq args {{1 2}}
-        assert (str-contains? (error-message got) "no clause of '<fn>'")
+        assert (contains? (error-message got) "no clause of '<fn>'")
       end
     end
   end

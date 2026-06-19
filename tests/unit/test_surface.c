@@ -159,7 +159,7 @@ static void test_source_fn(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(bind-local inc#0 (fn <lambda>/1 ((prim add) (arg x#0) 1)) ((local inc#0) 41))");
+    CHECK_STR(dump.data, "(bind-local inc#0 (fn <lambda>/1 ((prim add) ((arg x#0)) 1)) ((local inc#0) 41))");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
@@ -230,7 +230,7 @@ static void test_source_defn_letrec(void) {
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(letrec ((inc#0 (fn inc/1 ((prim add) (arg x#0) 1)))) ((global inc#0) 41))");
+    CHECK_STR(dump.data, "(letrec ((inc#0 (fn inc/1 ((prim add) ((arg x#0)) 1)))) ((global inc#0) 41))");
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);

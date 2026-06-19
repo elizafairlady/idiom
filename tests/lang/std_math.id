@@ -1,113 +1,113 @@
 use std/test
 activate std/test
-import std/math as Math
+use std/math
 
-defn close? a b -> (Math.abs (a - b)) < 0.000001
+defn close? a b -> (abs (a - b)) < 0.000001
 
 suite do
   test "stdlib-math-constants-and-classifiers" do
-    assert (close? (Math.pi) 3.141592653589793)
-    assert (close? (Math.tau) 6.283185307179586)
-    assert (close? (Math.e) 2.718281828459045)
-    assert-eq (Math.nan) :nan
-    assert-eq (Math.inf) :inf
-    assert-eq ((Math.nan) |> Math.nan?) :true
-    assert-eq ((Math.inf) |> Math.nan?) :false
-    assert-eq ((Math.inf) |> Math.infinite?) :true
-    assert-eq ((Math.nan) |> Math.infinite?) :false
-    assert-eq (42 |> Math.finite?) :true
-    assert-eq ((Math.inf) |> Math.finite?) :false
-    assert-eq ((Math.nan) |> Math.finite?) :false
-    assert-eq (2 |> Math.asin) :nan
-    assert-eq ((2 |> Math.asin) |> Math.nan?) :true
-    assert-eq (0.0 |> Math.log) :inf
-    assert-eq ((0.0 |> Math.log) |> Math.infinite?) :true
-    assert-eq (Math.pow (neg 1.0) 0.5) :nan
+    assert (close? (pi) 3.141592653589793)
+    assert (close? (tau) 6.283185307179586)
+    assert (close? (e) 2.718281828459045)
+    assert-eq (nan) :nan
+    assert-eq (inf) :inf
+    assert-eq ((nan) |> nan?) :true
+    assert-eq ((inf) |> nan?) :false
+    assert-eq ((inf) |> infinite?) :true
+    assert-eq ((nan) |> infinite?) :false
+    assert-eq (42 |> finite?) :true
+    assert-eq ((inf) |> finite?) :false
+    assert-eq ((nan) |> finite?) :false
+    assert-eq (2 |> asin) :nan
+    assert-eq ((2 |> asin) |> nan?) :true
+    assert-eq (0.0 |> log) :inf
+    assert-eq ((0.0 |> log) |> infinite?) :true
+    assert-eq (pow (neg 1.0) 0.5) :nan
   end
   test "stdlib-math-libm-surface" do
-    assert-eq (Math.abs -5) 5
-    assert-eq (Math.floor 2.7) 2.0
-    assert-eq (Math.ceil 2.1) 3.0
-    assert-eq (Math.truncate (neg 2.9)) -2.0
-    assert-eq (Math.round 2.5) 3.0
-    assert-eq (Math.sqrt 9) 3.0
-    assert-eq (Math.pow 2 10) 1024
-    assert (close? (Math.sin 0) 0.0)
-    assert (close? (Math.cos 0) 1.0)
-    assert (close? (Math.tan 0) 0.0)
-    assert (close? (Math.asin 1) ((Math.pi) / 2.0))
-    assert (close? (Math.acos 1) 0.0)
-    assert (close? (Math.atan 1) ((Math.pi) / 4.0))
-    assert (close? (Math.atan2 1 1) ((Math.pi) / 4.0))
-    assert (close? (Math.exp 1) (Math.e))
-    assert (close? (Math.log (Math.e)) 1.0)
-    assert (close? (Math.log2 8) 3.0)
-    assert (close? (Math.log10 1000) 3.0)
-    assert (close? (Math.hypot 3 4) 5.0)
+    assert-eq (abs -5) 5
+    assert-eq (floor 2.7) 2.0
+    assert-eq (ceil 2.1) 3.0
+    assert-eq (truncate (neg 2.9)) -2.0
+    assert-eq (round 2.5) 3.0
+    assert-eq (sqrt 9) 3.0
+    assert-eq (pow 2 10) 1024
+    assert (close? (sin 0) 0.0)
+    assert (close? (cos 0) 1.0)
+    assert (close? (tan 0) 0.0)
+    assert (close? (asin 1) ((pi) / 2.0))
+    assert (close? (acos 1) 0.0)
+    assert (close? (atan 1) ((pi) / 4.0))
+    assert (close? (atan2 1 1) ((pi) / 4.0))
+    assert (close? (exp 1) (e))
+    assert (close? (log (e)) 1.0)
+    assert (close? (log2 8) 3.0)
+    assert (close? (log10 1000) 3.0)
+    assert (close? (hypot 3 4) 5.0)
   end
   test "stdlib-math-division-and-conversion-surface" do
-    assert-eq (Math.quot -7 2) -3
-    assert-eq (Math.rem -7 2) -1
-    assert-eq (Math.quot-rem -7 2) {-3 -1}
-    assert-eq (Math.floor-div -7 2) -4
-    assert-eq (Math.floor-mod -7 2) 1
-    assert-eq (Math.divmod -7 2) {-4 1}
-    assert-eq (Math.divmod -7.5 2) {-4.0 0.5}
-    assert-eq (Math.to-int 2.9) 2
-    assert-eq (Math.to-int (neg 2.9)) -2
-    assert-eq (Math.to-float 2) 2.0
-    assert-eq (assert-raises (fn do Math.divmod 1 0 end)) {:error {:div-by-zero :divmod}}
-    assert-eq (assert-raises (fn do Math.to-int (Math.inf) end)) {:error {:type-error :to-int :inf}}
-    assert-eq (assert-raises (fn do Math.to-float :x end)) {:error {:type-error :to-float :x}}
+    assert-eq (quot -7 2) -3
+    assert-eq (rem -7 2) -1
+    assert-eq (quot-rem -7 2) {-3 -1}
+    assert-eq (floor-div -7 2) -4
+    assert-eq (floor-mod -7 2) 1
+    assert-eq (divmod -7 2) {-4 1}
+    assert-eq (divmod -7.5 2) {-4.0 0.5}
+    assert-eq (to-int 2.9) 2
+    assert-eq (to-int (neg 2.9)) -2
+    assert-eq (to-float 2) 2.0
+    assert-eq (assert-raises (fn do divmod 1 0 end)) {:error {:div-by-zero :divmod}}
+    assert-eq (assert-raises (fn do to-int (inf) end)) {:error {:type-error :to-int :inf}}
+    assert-eq (assert-raises (fn do to-float :x end)) {:error {:type-error :to-float :x}}
   end
   test "stdlib-math-bit-surface" do
-    assert-eq (Math.bit-and 6 3) 2
-    assert-eq (Math.bit-or 6 3) 7
-    assert-eq (Math.bit-xor 6 3) 5
-    assert-eq (Math.bit-not 0) -1
-    assert-eq (Math.shift-left 3 4) 48
-    assert-eq (Math.shift-right 32 3) 4
-    assert-eq (Math.shift-right -8 1) -4
-    assert-eq (Math.bit-count 0) 0
-    assert-eq (Math.bit-count 11) 3
-    assert-eq (Math.bit-length 0) 0
-    assert-eq (Math.bit-length 8) 4
-    assert-eq (assert-raises (fn do Math.bit-count -1 end)) {:error {:type-error :bit-count -1}}
-    assert-eq (assert-raises (fn do Math.shift-left 1 -1 end)) {:error {:type-error :shift-left -1}}
+    assert-eq (bit-and 6 3) 2
+    assert-eq (bit-or 6 3) 7
+    assert-eq (bit-xor 6 3) 5
+    assert-eq (bit-not 0) -1
+    assert-eq (shift-left 3 4) 48
+    assert-eq (shift-right 32 3) 4
+    assert-eq (shift-right -8 1) -4
+    assert-eq (bit-count 0) 0
+    assert-eq (bit-count 11) 3
+    assert-eq (bit-length 0) 0
+    assert-eq (bit-length 8) 4
+    assert-eq (assert-raises (fn do bit-count -1 end)) {:error {:type-error :bit-count -1}}
+    assert-eq (assert-raises (fn do shift-left 1 -1 end)) {:error {:type-error :shift-left -1}}
   end
   test "stdlib-math-predicates-and-bounds" do
-    assert-eq (Math.zero? 0) :true
-    assert-eq (Math.zero? 1) :false
-    assert-eq (Math.positive? 2) :true
-    assert-eq (Math.positive? 0) :false
-    assert-eq (Math.negative? -2) :true
-    assert-eq (Math.negative? 0) :false
-    assert-eq (Math.nonnegative? 0) :true
-    assert-eq (Math.nonpositive? 0) :true
-    assert-eq (Math.even? -4) :true
-    assert-eq (Math.odd? -3) :true
-    assert-eq (Math.min 2 9) 2
-    assert-eq (Math.max 2 9) 9
-    assert-eq (Math.clamp -4 0 10) 0
-    assert-eq (Math.clamp 14 0 10) 10
-    assert-eq (Math.clamp 4 0 10) 4
-    assert-eq (Math.between? 0 0 10) :true
-    assert-eq (Math.between? 11 0 10) :false
-    assert-eq {(Math.sign -9) (Math.sign 0) (Math.sign 9)} {(neg 1) 0 1}
+    assert-eq (zero? 0) :true
+    assert-eq (zero? 1) :false
+    assert-eq (positive? 2) :true
+    assert-eq (positive? 0) :false
+    assert-eq (negative? -2) :true
+    assert-eq (negative? 0) :false
+    assert-eq (nonnegative? 0) :true
+    assert-eq (nonpositive? 0) :true
+    assert-eq (even? -4) :true
+    assert-eq (odd? -3) :true
+    assert-eq (min 2 9) 2
+    assert-eq (max 2 9) 9
+    assert-eq (clamp -4 0 10) 0
+    assert-eq (clamp 14 0 10) 10
+    assert-eq (clamp 4 0 10) 4
+    assert-eq (between? 0 0 10) :true
+    assert-eq (between? 11 0 10) :false
+    assert-eq {(sign -9) (sign 0) (sign 9)} {(neg 1) 0 1}
   end
   test "stdlib-math-integer-functions" do
-    assert-eq (Math.gcd -54 24) 6
-    assert-eq (Math.gcd 0 9) 9
-    assert-eq (Math.lcm 6 8) 24
-    assert-eq (Math.lcm 0 8) 0
-    assert-eq (Math.square -7) 49
-    assert-eq (Math.cube -3) (neg 27)
-    assert-eq (Math.pow-int 3 4) 81
-    assert-eq (Math.pow-int 9 0) 1
-    assert-eq (Math.factorial 6) 720
-    assert-eq (Math.factorial 0) 1
-    assert-eq (assert-raises (fn do Math.pow-int 2 (neg 1) end)) {:error {:negative-exponent (neg 1)}}
-    assert-eq (assert-raises (fn do Math.factorial (neg 1) end)) {:error {:negative-factorial (neg 1)}}
+    assert-eq (gcd -54 24) 6
+    assert-eq (gcd 0 9) 9
+    assert-eq (lcm 6 8) 24
+    assert-eq (lcm 0 8) 0
+    assert-eq (square -7) 49
+    assert-eq (cube -3) (neg 27)
+    assert-eq (pow-int 3 4) 81
+    assert-eq (pow-int 9 0) 1
+    assert-eq (factorial 6) 720
+    assert-eq (factorial 0) 1
+    assert-eq (assert-raises (fn do pow-int 2 (neg 1) end)) {:error {:negative-exponent (neg 1)}}
+    assert-eq (assert-raises (fn do factorial (neg 1) end)) {:error {:negative-factorial (neg 1)}}
   end
   test "abs" do
     assert-eq (abs 5) 5

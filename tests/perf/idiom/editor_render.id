@@ -1,3 +1,5 @@
+import std/string as Str
+
 defn imin do
   a b when (lt? a b) -> a
   _ b -> b
@@ -11,14 +13,14 @@ end
 defn checksum s i n acc -> if (gte? i n) do
   acc
 else do
-  checksum s (add i 1) n (mod (add (mul acc 131) (str-byte s i)) 1000000007)
+  checksum s (add i 1) n (mod (add (mul acc 131) (Str.byte s i)) 1000000007)
 end
 
 defn line-text i -> "line ${i} :: alpha beta gamma ${(mod i 17)}"
 
 defn render-line row width acc do
   text = line-text row
-  n = imin width (str-len text)
+  n = imin width (Str.len text)
   mod (add (mul acc 17) (checksum text 0 n 0)) 1000000007
 end
 

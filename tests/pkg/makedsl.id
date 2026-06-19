@@ -2,8 +2,14 @@ package makedsl
 
 export defmacro rule stx do
   n = syntax-length stx
+  defn dict-get do
+    d i n key when (eq? i n) -> %`'()
+    d i n key when (eq? (syntax-atom-text (syntax-nth d i)) key) -> syntax-nth d (add i 1)
+    d i n key -> dict-get d (add i 2) n key
+  end
   defn deps-of do
-    _ when (gt? n 5) -> syntax-nth stx 4
+    _ when (eq? (syntax-kind (syntax-nth stx 3)) :dict) ->
+      dict-get (syntax-nth stx 3) 0 (syntax-length (syntax-nth stx 3)) "deps"
     _ -> %`'()
   end
   %`{:rule %,(syntax-nth stx 2) %,(deps-of 0) (fn %,(syntax-nth stx (sub n 1)))}

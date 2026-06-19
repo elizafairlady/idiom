@@ -51,7 +51,10 @@ suite do
     assert-eq (cap-two q) 42
   end
   test "exported-defmacro-capture-rejected" do
-    assert-expand-error "protocol CapP do\n  for-syntax do\n    y = 1\n    export defmacro capm stx -> make-syntax-int stx y\n  end\nend\n" "cannot capture for-syntax locals"
+    assert-expand-error "for-syntax do\n  y = 1\n  export defmacro capm stx -> make-syntax-int stx y\nend\n" "cannot capture for-syntax locals"
+  end
+  test "exported-defmacro-references-package-for-syntax-global" do
+    assert-compiles "protocol CapP do\n  for-syntax do\n    y = 1\n    export defmacro capm stx -> make-syntax-int stx y\n  end\nend\n"
   end
   test "runtime-absent-at-phase-one" do
     assert-expand-error "defn rt x -> x\ndefmacro mm stx -> rt stx\nmm 1\n" "unbound identifier 'rt'"

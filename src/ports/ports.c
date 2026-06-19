@@ -391,8 +391,19 @@ static void stage_destroy(Stage *stage) {
     free(stage->env_values);
 }
 
+static void port_reap_stages(IdmPort *port) {
+    for (size_t i = 0; i < port->stage_count; i++) {
+        Stage *stage = &port->stages[i];
+        if (stage->reaped || stage->pid <= 0) continue;
+        kill(stage->pid, SIGKILL);
+        waitpid(stage->pid, NULL, 0);
+        stage->reaped = true;
+    }
+}
+
 void idm_port_free(IdmPort *port) {
     if (!port) return;
+    port_reap_stages(port);
     if (port->file) fclose(port->file);
     for (size_t i = 0; i < port->stage_count; i++) stage_destroy(&port->stages[i]);
     free(port->stages);
@@ -667,9 +678,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
     }
     if (!failed && port->in_fd >= 0) set_nonblocking(port->in_fd);
     if (failed) {
-        for (size_t i = 0; i < port->stage_count; i++) {
-            if (port->stages[i].pid > 0) { kill(port->stages[i].pid, SIGKILL); waitpid(port->stages[i].pid, NULL, 0); port->stages[i].reaped = true; }
-        }
+        port_reap_stages(port);
         if (port->owns_terminal && g_job_tty >= 0 && g_shell_pgid > 0) tcsetpgrp(g_job_tty, g_shell_pgid);
         idm_port_free(port);
         return NULL;

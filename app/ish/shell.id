@@ -12,7 +12,7 @@ end
 
 defn write-heredoc-temp data do
   path = make-procsub-temp
-  match (file-write path data) do
+  match (File.write path data) do
     :ok -> path
     {:error reason} -> error {:heredoc path reason}
   end
@@ -194,7 +194,7 @@ resolver form do
     (list _ . t) -> incomplete-command-tail? t
   end
 
-  defn glob-text? t -> or (str-contains? t "*") (str-contains? t "?")
+  defn glob-text? t -> or (contains? t "*") (contains? t "?")
 
   defn string-syntax? p -> and (syntax? p) (eq? (syntax-kind p) :string)
 
@@ -242,16 +242,16 @@ resolver form do
 
   defn var-end do
     text i n when (eq? i n) -> i
-    text i n when (var-part-byte? (str-byte text i)) -> var-end text (add i 1) n
+    text i n when (var-part-byte? (byte text i)) -> var-end text (add i 1) n
     _ i _ -> i
   end
 
   defn dollar-var-stop text do
-    n = str-len text
-    if (or (lte? n 1) (neq? (str-byte text 0) 36)) do
+    n = len text
+    if (or (lte? n 1) (neq? (byte text 0) 36)) do
       :nil
     else do
-      cond (var-start-byte? (str-byte text 1)) (var-end text 2 n) :nil
+      cond (var-start-byte? (byte text 1)) (var-end text 2 n) :nil
     end
   end
 
@@ -259,7 +259,7 @@ resolver form do
     :nil -> :nil
     text -> match (dollar-var-stop text) do
       :nil -> :nil
-      stop -> str-slice text 1 stop
+      stop -> slice text 1 stop
     end
   end
 
@@ -267,7 +267,7 @@ resolver form do
     :nil -> ""
     text -> match (dollar-var-stop text) do
       :nil -> ""
-      stop -> str-slice text stop (str-len text)
+      stop -> slice text stop (len text)
     end
   end
 

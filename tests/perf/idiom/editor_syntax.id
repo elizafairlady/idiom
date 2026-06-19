@@ -1,4 +1,5 @@
 use std/regex
+import std/string as Str
 
 rx-comment = compile! "#[^\n]*"
 rx-string = compile! "\"[^\"]*\""
@@ -31,7 +32,7 @@ defn scan-one text pos do
   choose b3 (scan-from rx-word text pos) 4
 end
 
-defn scan-loop text pos acc -> if (gte? pos (str-len text)) do
+defn scan-loop text pos acc -> if (gte? pos (Str.len text)) do
   acc
 else do
   match (scan-one text pos) do

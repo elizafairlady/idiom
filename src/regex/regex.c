@@ -144,6 +144,7 @@ typedef struct {
     char **group_names;
     size_t group_count;
     IdmError *err;
+    size_t depth;
 } RxParser;
 
 typedef struct {
@@ -175,6 +176,7 @@ typedef struct {
 } RxMatch;
 
 enum { RX_STACK_CAPTURE_LIMIT = 16 };
+enum { RX_MAX_CLOSURE_DEPTH = 10000 };
 
 static void node_free(RxNode *node);
 static bool parse_alt(RxParser *p, RxNode **out);
@@ -213,7 +215,7 @@ static bool parse_options_list(IdmRuntime *rt, IdmValue options, uint32_t *flags
         if (err && err->present) return false;
         if (item.tag != IDM_VAL_ATOM && item.tag != IDM_VAL_STRING) {
             idm_error_set(err, idm_span_unknown(NULL), "regex option must be an atom or string");
-            return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "regex-raw-compile"), item);
+            return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "raw-compile"), item);
         }
         const char *text = item.tag == IDM_VAL_ATOM ? idm_symbol_text(item.as.symbol) : idm_string_bytes(item);
         if (!parse_flag_atom(text, flags)) return idm_error_set(err, idm_span_unknown(NULL), "unknown regex option '%s'", text);
@@ -804,7 +806,7 @@ static bool parse_concat(RxParser *p, RxNode **out) {
     return true;
 }
 
-static bool parse_alt(RxParser *p, RxNode **out) {
+static bool parse_alt_body(RxParser *p, RxNode **out) {
     RxNodeVec seq = {0};
     for (;;) {
         RxNode *node = NULL;
@@ -833,6 +835,14 @@ static bool parse_alt(RxParser *p, RxNode **out) {
     node->as.seq = seq;
     *out = node;
     return true;
+}
+
+static bool parse_alt(RxParser *p, RxNode **out) {
+    if (p->depth >= IDM_IC_MAX_DEPTH) return parser_error(p, "regex nested too deeply");
+    p->depth++;
+    bool ok = parse_alt_body(p, out);
+    p->depth--;
+    return ok;
 }
 
 #define RX_REPEAT_COMPILE_LIMIT 100000u
@@ -885,31 +895,35 @@ static bool prog_patch_split(RxProg *prog, size_t inst_index, size_t first, size
 
 static bool compile_node(RxProg *prog, const RxNode *node, IdmError *err);
 static bool prog_build_test_closures(RxProg *prog, IdmError *err);
+static bool size_vec_push(size_t **vec, size_t *count, size_t *cap, size_t value, IdmError *err);
 
 static bool compile_alt_from(RxProg *prog, RxNode **items, size_t index, size_t count, IdmError *err) {
     if (index >= count) return true;
-    if (index + 1u == count) return compile_node(prog, items[index], err);
-
-    RxInst split;
-    memset(&split, 0, sizeof(split));
-    split.kind = RXI_SPLIT;
-    size_t split_index = 0;
-    if (!prog_emit(prog, split, &split_index, err)) return false;
-
-    size_t first = prog->count;
-    if (!compile_node(prog, items[index], err)) return false;
-
-    RxInst jump;
-    memset(&jump, 0, sizeof(jump));
-    jump.kind = RXI_JUMP;
-    size_t jump_index = 0;
-    if (!prog_emit(prog, jump, &jump_index, err)) return false;
-
-    size_t second = prog->count;
-    if (!prog_patch_split(prog, split_index, first, second, err)) return false;
-    if (!compile_alt_from(prog, items, index + 1u, count, err)) return false;
-
-    return prog_patch_target(prog, jump_index, prog->count, err);
+    size_t *jumps = NULL;
+    size_t jump_count = 0;
+    size_t jump_cap = 0;
+    bool ok = true;
+    for (size_t i = index; ok && i + 1u < count; i++) {
+        RxInst split;
+        memset(&split, 0, sizeof(split));
+        split.kind = RXI_SPLIT;
+        size_t split_index = 0;
+        if (!prog_emit(prog, split, &split_index, err)) { ok = false; break; }
+        size_t first = prog->count;
+        if (!compile_node(prog, items[i], err)) { ok = false; break; }
+        RxInst jump;
+        memset(&jump, 0, sizeof(jump));
+        jump.kind = RXI_JUMP;
+        size_t jump_index = 0;
+        if (!prog_emit(prog, jump, &jump_index, err)) { ok = false; break; }
+        size_t second = prog->count;
+        if (!prog_patch_split(prog, split_index, first, second, err)) { ok = false; break; }
+        if (!size_vec_push(&jumps, &jump_count, &jump_cap, jump_index, err)) { ok = false; break; }
+    }
+    if (ok) ok = compile_node(prog, items[count - 1u], err);
+    for (size_t i = 0; ok && i < jump_count; i++) ok = prog_patch_target(prog, jumps[i], prog->count, err);
+    free(jumps);
+    return ok;
 }
 
 static bool compile_star(RxProg *prog, const RxNode *child, IdmError *err) {
@@ -1033,15 +1047,15 @@ static bool test_closure_append(RxTestClosure *closure, size_t pc, IdmError *err
     return true;
 }
 
-static bool test_closure_push(size_t **stack, size_t *count, size_t *cap, size_t pc, IdmError *err) {
+static bool size_vec_push(size_t **vec, size_t *count, size_t *cap, size_t value, IdmError *err) {
     if (*count == *cap) {
         size_t next_cap = *cap ? *cap * 2u : 16u;
-        size_t *next = realloc(*stack, next_cap * sizeof(*next));
+        size_t *next = realloc(*vec, next_cap * sizeof(*next));
         if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-        *stack = next;
+        *vec = next;
         *cap = next_cap;
     }
-    (*stack)[(*count)++] = pc;
+    (*vec)[(*count)++] = value;
     return true;
 }
 
@@ -1051,7 +1065,7 @@ static bool build_test_closure_one(const RxProg *prog, size_t start, RxTestClosu
     size_t *stack = NULL;
     size_t stack_count = 0;
     size_t stack_cap = 0;
-    bool ok = test_closure_push(&stack, &stack_count, &stack_cap, start, err);
+    bool ok = size_vec_push(&stack, &stack_count, &stack_cap, start, err);
     while (ok && stack_count != 0) {
         size_t pc = stack[--stack_count];
         if (pc >= prog->count) {
@@ -1063,14 +1077,14 @@ static bool build_test_closure_one(const RxProg *prog, size_t start, RxTestClosu
         const RxInst *inst = &prog->insts[pc];
         switch (inst->kind) {
             case RXI_JUMP:
-                ok = test_closure_push(&stack, &stack_count, &stack_cap, inst->as.target, err);
+                ok = size_vec_push(&stack, &stack_count, &stack_cap, inst->as.target, err);
                 break;
             case RXI_SPLIT:
-                ok = test_closure_push(&stack, &stack_count, &stack_cap, inst->as.split.second, err)
-                    && test_closure_push(&stack, &stack_count, &stack_cap, inst->as.split.first, err);
+                ok = size_vec_push(&stack, &stack_count, &stack_cap, inst->as.split.second, err)
+                    && size_vec_push(&stack, &stack_count, &stack_cap, inst->as.split.first, err);
                 break;
             case RXI_SAVE:
-                ok = test_closure_push(&stack, &stack_count, &stack_cap, pc + 1u, err);
+                ok = size_vec_push(&stack, &stack_count, &stack_cap, pc + 1u, err);
                 break;
             case RXI_MATCH:
                 closure->has_match = true;
@@ -1520,19 +1534,20 @@ static bool nfa_test_search(const RxProg *prog, const char *s, size_t len, size_
     return ok;
 }
 
-static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char *seen, const char *s, size_t len, size_t pc, size_t pos, const RxCapture *captures, IdmError *err) {
+static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char *seen, const char *s, size_t len, size_t pc, size_t pos, const RxCapture *captures, unsigned depth, IdmError *err) {
     size_t key = 0;
     if (!nfa_seen_key(prog, len, pc, pos, &key, err)) return false;
     if (seen[key]) return true;
     seen[key] = 1u;
+    if (depth > RX_MAX_CLOSURE_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "regex too complex to evaluate");
 
     const RxInst *inst = &prog->insts[pc];
     switch (inst->kind) {
         case RXI_JUMP:
-            return nfa_add_closure(prog, vec, seen, s, len, inst->as.target, pos, captures, err);
+            return nfa_add_closure(prog, vec, seen, s, len, inst->as.target, pos, captures, depth + 1u, err);
         case RXI_SPLIT:
-            return nfa_add_closure(prog, vec, seen, s, len, inst->as.split.first, pos, captures, err)
-                && nfa_add_closure(prog, vec, seen, s, len, inst->as.split.second, pos, captures, err);
+            return nfa_add_closure(prog, vec, seen, s, len, inst->as.split.first, pos, captures, depth + 1u, err)
+                && nfa_add_closure(prog, vec, seen, s, len, inst->as.split.second, pos, captures, depth + 1u, err);
         case RXI_SAVE: {
             RxCapture stack_next[RX_STACK_CAPTURE_LIMIT];
             RxCapture *next = prog->capture_count <= RX_STACK_CAPTURE_LIMIT ? stack_next : malloc(prog->capture_count * sizeof(*next));
@@ -1548,17 +1563,17 @@ static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char
                     next[capture].end = pos;
                 }
             }
-            bool ok = nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, next, err);
+            bool ok = nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, next, depth + 1u, err);
             if (next != stack_next) free(next);
             return ok;
         }
         case RXI_ASSERT_START:
             if (pos == 0 || ((prog->flags & IDM_REGEX_MULTILINE) != 0 && at_line_start(s, pos)))
-                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, err);
+                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, depth + 1u, err);
             return true;
         case RXI_ASSERT_END:
             if (pos == len || ((prog->flags & IDM_REGEX_MULTILINE) != 0 && at_line_end(s, len, pos)))
-                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, err);
+                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, depth + 1u, err);
             return true;
         case RXI_LOOK: {
             bool matched = false;
@@ -1574,7 +1589,7 @@ static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char
             }
             if (err && err->present) return false;
             bool pass = (inst->as.look.kind == RX_LOOK_AHEAD_POS || inst->as.look.kind == RX_LOOK_BEHIND_POS) ? matched : !matched;
-            if (pass) return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, err);
+            if (pass) return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, depth + 1u, err);
             return true;
         }
         case RXI_MATCH:
@@ -1608,7 +1623,7 @@ static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset
 
     RxVmStateVec active = { .capture_count = prog->capture_count };
     RxVmStateVec next = { .capture_count = prog->capture_count };
-    bool ok = nfa_add_closure(prog, &active, seen, s, len, 0, offset, initial, err);
+    bool ok = nfa_add_closure(prog, &active, seen, s, len, 0, offset, initial, 0u, err);
     if (initial != initial_stack) free(initial);
     while (ok && active.count != 0) {
         state_vec_clear(&next);
@@ -1622,15 +1637,15 @@ static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset
                     break;
                 case RXI_CHAR:
                     if (state->pos < len && char_eq((unsigned char)s[state->pos], inst->as.literal, prog->flags))
-                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, err);
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, 0u, err);
                     break;
                 case RXI_DOT:
                     if (state->pos < len && ((prog->flags & IDM_REGEX_DOTALL) != 0 || s[state->pos] != '\n'))
-                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, err);
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, 0u, err);
                     break;
                 case RXI_CLASS:
                     if (state->pos < len && cls_has(&inst->as.cls, (unsigned char)s[state->pos]))
-                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, err);
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, 0u, err);
                     break;
                 case RXI_JUMP:
                 case RXI_SPLIT:
@@ -1728,7 +1743,7 @@ bool idm_regex_compile(const char *source, size_t source_len, uint32_t flags, Id
     rx->source_len = source_len;
     rx->flags = flags;
 
-    RxParser p = { source, source_len, 0, flags, NULL, 0, err };
+    RxParser p = { source, source_len, 0, flags, NULL, 0, err, 0 };
     p.group_names = calloc(1u, sizeof(*p.group_names));
     if (!p.group_names) {
         idm_regex_free(rx);
@@ -1853,7 +1868,7 @@ size_t idm_regex_result_footprint(const IdmRegexResult *result) {
 bool idm_regex_compile_value(IdmRuntime *rt, IdmValue source, IdmValue options, IdmValue *out, IdmError *err) {
     const char *s = NULL;
     size_t len = 0;
-    if (!require_string_arg(rt, "regex-raw-compile", source, &s, &len, err)) return false;
+    if (!require_string_arg(rt, "raw-compile", source, &s, &len, err)) return false;
     uint32_t flags = 0;
     if (!parse_options(rt, options, &flags, err)) return false;
     IdmError inner;
@@ -1911,7 +1926,7 @@ bool idm_regex_scan_at(IdmRuntime *rt, IdmValue regex, IdmValue input, size_t of
     IdmRegex *rx = NULL;
     const char *s = NULL;
     size_t len = 0;
-    if (!regex_and_input(rt, "regex-raw-scan-at", regex, input, &rx, &s, &len, err)) return false;
+    if (!regex_and_input(rt, "raw-scan-at", regex, input, &rx, &s, &len, err)) return false;
     IdmRegexResult *result = NULL;
     if (!scan_at_raw(rx, s, len, offset, false, &result, err)) return false;
     return wrap_result_or_nil(rt, result, out, err);
@@ -1921,7 +1936,7 @@ bool idm_regex_scan_from(IdmRuntime *rt, IdmValue regex, IdmValue input, size_t 
     IdmRegex *rx = NULL;
     const char *s = NULL;
     size_t len = 0;
-    if (!regex_and_input(rt, "regex-raw-scan-from", regex, input, &rx, &s, &len, err)) return false;
+    if (!regex_and_input(rt, "raw-scan-from", regex, input, &rx, &s, &len, err)) return false;
     if (offset > len) offset = len;
     for (size_t pos = offset; pos <= len; pos++) {
         IdmRegexResult *result = NULL;
@@ -1936,7 +1951,7 @@ bool idm_regex_scan_full(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValu
     IdmRegex *rx = NULL;
     const char *s = NULL;
     size_t len = 0;
-    if (!regex_and_input(rt, "regex-raw-scan-full", regex, input, &rx, &s, &len, err)) return false;
+    if (!regex_and_input(rt, "raw-scan-full", regex, input, &rx, &s, &len, err)) return false;
     IdmRegexResult *result = NULL;
     if (!scan_at_raw(rx, s, len, 0, true, &result, err)) return false;
     return wrap_result_or_nil(rt, result, out, err);
@@ -1946,7 +1961,7 @@ bool idm_regex_test(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue *ou
     IdmRegex *rx = NULL;
     const char *s = NULL;
     size_t len = 0;
-    if (!regex_and_input(rt, "regex-raw-test?", regex, input, &rx, &s, &len, err)) return false;
+    if (!regex_and_input(rt, "raw-test?", regex, input, &rx, &s, &len, err)) return false;
     bool matched = false;
     if (!nfa_test_search(rx->prog, s, len, 0, &matched, err)) return false;
     *out = idm_bool(rt, matched);
@@ -1957,7 +1972,7 @@ bool idm_regex_scan_all(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue
     IdmRegex *rx = NULL;
     const char *s = NULL;
     size_t len = 0;
-    if (!regex_and_input(rt, "regex-raw-scan-all", regex, input, &rx, &s, &len, err)) return false;
+    if (!regex_and_input(rt, "raw-scan-all", regex, input, &rx, &s, &len, err)) return false;
     IdmValue acc = idm_empty_list();
     size_t pos = 0;
     while (pos <= len) {
@@ -2155,10 +2170,10 @@ bool idm_regex_replace(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue 
     IdmRegex *rx = NULL;
     const char *s = NULL;
     size_t len = 0;
-    if (!regex_and_input(rt, "regex-raw-replace", regex, input, &rx, &s, &len, err)) return false;
+    if (!regex_and_input(rt, "raw-replace", regex, input, &rx, &s, &len, err)) return false;
     const char *repl = NULL;
     size_t repl_len = 0;
-    if (!require_string_arg(rt, "regex-raw-replace", replacement, &repl, &repl_len, err)) return false;
+    if (!require_string_arg(rt, "raw-replace", replacement, &repl, &repl_len, err)) return false;
     IdmBuffer buf;
     idm_buf_init(&buf);
     size_t pos = 0;
@@ -2212,7 +2227,7 @@ bool idm_regex_split_on(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue
     IdmRegex *rx = NULL;
     const char *s = NULL;
     size_t len = 0;
-    if (!regex_and_input(rt, "regex-raw-split-on", regex, input, &rx, &s, &len, err)) return false;
+    if (!regex_and_input(rt, "raw-split-on", regex, input, &rx, &s, &len, err)) return false;
     IdmValue acc = idm_empty_list();
     size_t segment_start = 0;
     size_t scan_pos = 0;
@@ -2255,7 +2270,7 @@ bool idm_regex_split_on(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue
 bool idm_regex_escape(IdmRuntime *rt, IdmValue input, IdmValue *out, IdmError *err) {
     const char *s = NULL;
     size_t len = 0;
-    if (!require_string_arg(rt, "regex-raw-escape", input, &s, &len, err)) return false;
+    if (!require_string_arg(rt, "raw-escape", input, &s, &len, err)) return false;
     IdmBuffer buf;
     idm_buf_init(&buf);
     for (size_t i = 0; i < len; i++) {

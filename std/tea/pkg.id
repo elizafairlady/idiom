@@ -85,8 +85,8 @@ end
 defn append-list xs ys -> reverse-list (reverse-list xs '()) ys
 
 defn messages-from-list do
-  '() acc -> reverse-list acc '()
-  (list h . t) acc -> messages-from-list t (append-list (command-messages h) acc)
+  '() acc -> acc
+  (list h . t) acc -> messages-from-list t (append-list acc (command-messages h))
 end
 
 defn command-result-messages do

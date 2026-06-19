@@ -1,4 +1,5 @@
 use std/test
+use std/result
 activate std/test
 
 suite do

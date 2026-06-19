@@ -9,8 +9,8 @@ suite do
     assert-eq ("hello" |> empty?) :false
     assert-eq ("hello" |> slice 1 4) "ell"
     assert-eq ("hello" |> at 1) 101
-    assert-eq ("banana" |> find "na") 2
-    assert-eq ("banana" |> find "zz") :nil
+    assert-eq ("banana" |> find "na" 0) 2
+    assert-eq ("banana" |> find "zz" 0) :nil
     assert-eq ("banana" |> contains? "nan") :true
     assert-eq ("banana" |> contains? "zz") :false
     assert-eq ("idiom" |> starts-with? "idi") :true
@@ -89,14 +89,14 @@ suite do
     assert-eq "héllo".to-list '(104 233 108 108 111)
     assert-eq (byte-str 233).to-list '(65533)
     assert-eq "#{byte-str 233}a".to-list '(65533 97)
-    assert-eq ("héllo" |> str-len) 6
-    assert-eq ("héllo" |> str-byte 1) 195
+    assert-eq ("héllo" |> len) 6
+    assert-eq ("héllo" |> byte 1) 195
   end
   test "rune-string-conversions" do
     assert-eq (ord->str 233) "é"
     assert-eq (ord->str 97) "a"
     assert-eq (ord->str 128512 |> str->ord) 128512
-    assert-eq (ord->str 128512 |> str-len) 4
+    assert-eq (ord->str 128512 |> len) 4
     assert-eq (str->ord "héllo") 104
     assert-eq (str->ord "é") 233
     assert-eq (str->ord "") :nil

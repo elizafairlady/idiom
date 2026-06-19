@@ -57,6 +57,7 @@ end
 
 defn restart? do
   :permanent _ -> :true
+  :temporary _ -> :false
   :transient :normal -> :false
   :transient _ -> :true
 end

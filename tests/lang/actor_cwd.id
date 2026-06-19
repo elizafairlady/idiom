@@ -1,4 +1,5 @@
 use std/test
+import std/file as File
 activate std/test
 use std/enum
 
@@ -8,30 +9,30 @@ suite do
       activate app/ish
       cd "/"
       cd "tmp"
-      w = file-write "idiom_actor_cwd_inner.txt" "inner"
-      r = file-read "/tmp/idiom_actor_cwd_inner.txt"
-      e = file-exists? "idiom_actor_cwd_inner.txt"
+      w = File.write "idiom_actor_cwd_inner.txt" "inner"
+      r = File.read "/tmp/idiom_actor_cwd_inner.txt"
+      e = File.exists? "idiom_actor_cwd_inner.txt"
       c = cat idiom_actor_cwd_inner.txt
-      rm = file-remove "idiom_actor_cwd_inner.txt"
-      g = file-exists? "/tmp/idiom_actor_cwd_inner.txt"
+      rm = File.remove "idiom_actor_cwd_inner.txt"
+      g = File.exists? "/tmp/idiom_actor_cwd_inner.txt"
       {w r e c rm g (pwd)}
     end
     assert-inspect got "{:ok {:ok \"inner\"} :true {:ok 0 \"inner\" \"\"} :ok :false \"/tmp\"}"
   end
   test "cwd-isolated-under-load" do
     got = do
-      file-write "/tmp/idiom_actor_cwd_marker.txt" "m"
+      File.write "/tmp/idiom_actor_cwd_marker.txt" "m"
       parent = self
       spawn (fn do
         cd "/tmp"
-        results = (range 0 300).map (fn _i -> file-exists? "idiom_actor_cwd_marker.txt")
+        results = (range 0 300).map (fn _i -> File.exists? "idiom_actor_cwd_marker.txt")
         misses = (results.filter (fn r -> eq? r :false)).length
         send parent misses
       end)
       cd "/"
       (range 0 100).map (fn _i -> await (exec {:exec {:stage (list {:lit "true"}) '() '()} {:stdio :inherit :inherit :inherit}}))
       misses = receive do m -> m end
-      file-remove "/tmp/idiom_actor_cwd_marker.txt"
+      File.remove "/tmp/idiom_actor_cwd_marker.txt"
       misses
     end
     assert-inspect got "0"

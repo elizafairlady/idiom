@@ -301,8 +301,9 @@ bool idm_syn_origin_push_tree(IdmSyntax *syn, const char *origin) {
     return true;
 }
 
-IdmSyntax *idm_syn_clone(const IdmSyntax *syn) {
+static IdmSyntax *syn_clone_at(const IdmSyntax *syn, unsigned depth) {
     if (!syn) return NULL;
+    if (depth > IDM_IC_MAX_DEPTH) return NULL;
     IdmSyntax *clone = NULL;
     switch (syn->kind) {
         case IDM_SYN_NIL:
@@ -360,7 +361,7 @@ IdmSyntax *idm_syn_clone(const IdmSyntax *syn) {
     }
     if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT) {
         for (size_t i = 0; i < syn->as.seq.count; i++) {
-            IdmSyntax *item = idm_syn_clone(syn->as.seq.items[i]);
+            IdmSyntax *item = syn_clone_at(syn->as.seq.items[i], depth + 1u);
             if (!item || !idm_syn_append(clone, item)) {
                 idm_syn_free(item);
                 idm_syn_free(clone);
@@ -369,6 +370,10 @@ IdmSyntax *idm_syn_clone(const IdmSyntax *syn) {
         }
     }
     return clone;
+}
+
+IdmSyntax *idm_syn_clone(const IdmSyntax *syn) {
+    return syn_clone_at(syn, 0);
 }
 
 void idm_syn_free(IdmSyntax *syn) {

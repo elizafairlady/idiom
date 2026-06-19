@@ -193,6 +193,28 @@ static bool add_token(TokenVec *vec, Lexer *lx, TokenKind kind, size_t start, un
     return true;
 }
 
+static size_t scan_interp_end(const char *s, size_t start, size_t len) {
+    size_t j = start;
+    int depth = 1;
+    while (j < len && s[j] != '\0') {
+        char c = s[j];
+        if (c == '"') {
+            j++;
+            while (j < len && s[j] != '\0' && s[j] != '"') {
+                if (s[j] == '\\' && j + 1u < len && s[j + 1u] != '\0') j++;
+                j++;
+            }
+            if (j >= len || s[j] != '"') return len;
+            j++;
+            continue;
+        }
+        if (c == '{') depth++;
+        else if (c == '}' && --depth == 0) return j;
+        j++;
+    }
+    return len;
+}
+
 static bool read_string_token(TokenVec *vec, Lexer *lx, size_t start, unsigned line, unsigned column, bool leading_space, IdmError *err) {
     (void)advance(lx);
     IdmBuffer decoded;
@@ -202,27 +224,23 @@ static bool read_string_token(TokenVec *vec, Lexer *lx, size_t start, unsigned l
         char ch = peek(lx);
         if ((ch == '$' && peek_n(lx, 1) == '{') || (ch == '#' && peek_n(lx, 1) == '{')) {
             interpolation_seen = true;
-            char open = peek_n(lx, 1);
-            char close = '}';
-            if (!idm_buf_append_char(&decoded, ch) || !idm_buf_append_char(&decoded, open)) {
+            if (!idm_buf_append_char(&decoded, ch) || !idm_buf_append_char(&decoded, peek_n(lx, 1))) {
                 idm_buf_destroy(&decoded);
                 return idm_error_oom(err, (IdmSpan){lx->file, start, lx->pos, line, column});
             }
             advance(lx);
             advance(lx);
-            int depth = 1;
-            while (peek(lx) != '\0' && depth > 0) {
+            size_t interp_end = scan_interp_end(lx->src, lx->pos, lx->len);
+            if (interp_end >= lx->len) {
+                idm_buf_destroy(&decoded);
+                return idm_error_set(err, (IdmSpan){lx->file, start, lx->pos, line, column}, "unterminated string interpolation");
+            }
+            while (lx->pos <= interp_end) {
                 char c = advance(lx);
-                if (c == open) depth++;
-                else if (c == close) depth--;
                 if (!idm_buf_append_char(&decoded, c)) {
                     idm_buf_destroy(&decoded);
                     return idm_error_oom(err, (IdmSpan){lx->file, start, lx->pos, line, column});
                 }
-            }
-            if (depth != 0) {
-                idm_buf_destroy(&decoded);
-                return idm_error_set(err, (IdmSpan){lx->file, start, lx->pos, line, column}, "unterminated string interpolation");
             }
             continue;
         }
@@ -473,7 +491,11 @@ static bool lex_source_from(const char *file, const char *source, size_t len, un
     eof.span = (IdmSpan){file, lx.pos, lx.pos, lx.line, lx.column};
     eof.leading_space = leading_space;
     eof.adjacent_previous = lx.pos == lx.previous_end;
-    return tokens_push(out, eof) || idm_error_oom(err, eof.span);
+    if (!tokens_push(out, eof)) {
+        free(eof.lexeme);
+        return idm_error_oom(err, eof.span);
+    }
+    return true;
 }
 
 static Token *cur(Parser *p) { return &p->tokens[p->pos]; }
@@ -535,6 +557,7 @@ static IdmSyntax *parse_string_interp(Parser *p, const char *body, IdmSpan span)
     }
     IdmBuffer chunk;
     idm_buf_init(&chunk);
+    size_t body_len = strlen(body);
     size_t i = 0;
     while (body[i] != '\0') {
         char ch = body[i];
@@ -546,21 +569,13 @@ static IdmSyntax *parse_string_interp(Parser *p, const char *body, IdmSpan span)
                 idm_buf_destroy(&chunk);
                 idm_buf_init(&chunk);
             }
-            char open = '{';
-            char close = '}';
-            size_t j = i + 2u;
-            int depth = 1;
-            while (body[j] != '\0' && depth > 0) {
-                if (body[j] == open) depth++;
-                else if (body[j] == close) { depth--; if (depth == 0) break; }
-                j++;
-            }
+            size_t j = scan_interp_end(body, i + 2u, body_len);
             char *inner = idm_strndup(body + i + 2u, j - (i + 2u));
             if (!inner) { idm_error_oom(p->err, span); goto fail; }
             IdmSyntax *part = read_interp_inner(p->file, inner, span, p->err);
             free(inner);
             if (!part || !idm_syn_append(result, part)) { idm_syn_free(part); goto fail; }
-            i = body[j] == '\0' ? j : j + 1u;
+            i = j < body_len ? j + 1u : j;
         } else {
             if (!idm_buf_append_char(&chunk, ch)) { idm_error_oom(p->err, span); goto fail; }
             i++;
@@ -818,7 +833,17 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
         }
         case TOK_FN_VALUE: {
             take(p);
-            return form1("%-expression", idm_syn_word(tok->lexeme, tok->span), tok->span);
+            IdmBuffer name;
+            idm_buf_init(&name);
+            bool ok = idm_buf_append(&name, tok->lexeme);
+            while (ok && at(p, TOK_DOT) && p->tokens[p->pos + 1u].kind == TOK_IDENT) {
+                take(p);
+                Token *member = take(p);
+                ok = idm_buf_append_char(&name, '.') && idm_buf_append(&name, member->lexeme);
+            }
+            IdmSyntax *w = ok ? idm_syn_word(name.data ? name.data : "", tok->span) : NULL;
+            idm_buf_destroy(&name);
+            return w ? form1("%-expression", w, tok->span) : NULL;
         }
         case TOK_PIN: {
             take(p);

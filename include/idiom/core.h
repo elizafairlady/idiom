@@ -477,5 +477,6 @@ bool idm_checked_mul(int64_t a, int64_t b, int64_t *out);
 bool idm_checked_pow(int64_t base, int64_t exponent, int64_t *out);
 size_t idm_primitive_count(void);
 const IdmPrimitiveInfo *idm_primitive_info(IdmPrimitive primitive);
+const char *idm_primitive_home(IdmPrimitive primitive);
 
 #endif
