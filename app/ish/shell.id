@@ -18,39 +18,39 @@ defn write-heredoc-temp data do
   end
 end
 
-operator | precedence: 20 assoc: left capture: infix do
+operator | precedence: 20 assoc: left capture: :infix do
   left right -> {:pipeline (list left right) {:stdio :inherit :inherit :inherit} :true}
 end
 
-operator && precedence: 10 assoc: left capture: infix do
+operator && precedence: 10 assoc: left capture: :infix do
   left right -> cond (shell-ok? left) right left
 end
 
-operator || precedence: 10 assoc: left capture: infix do
+operator || precedence: 10 assoc: left capture: :infix do
   left right -> cond (shell-ok? left) left right
 end
 
-operator & precedence: 5 assoc: left capture: postfix do
+operator & precedence: 5 assoc: left capture: :postfix do
   port -> ish-notify-job port "<background>"
 end
 
-operator >> precedence: 30 assoc: left capture: infix do
+operator >> precedence: 30 assoc: left capture: :infix do
   left right -> {:redir ">>" left right}
 end
 
-operator << precedence: 30 assoc: left capture: {infix sentinel} do
+operator << precedence: 30 assoc: left capture: {:infix :sentinel} do
   left _sent body -> {:heredoc left body}
 end
 
-operator >& precedence: 30 assoc: left capture: infix do
+operator >& precedence: 30 assoc: left capture: :infix do
   left right -> {:dup left right}
 end
 
-operator &> precedence: 30 assoc: left capture: infix do
+operator &> precedence: 30 assoc: left capture: :infix do
   left right -> {:redir "&>" left right}
 end
 
-operator &>> precedence: 30 assoc: left capture: infix do
+operator &>> precedence: 30 assoc: left capture: :infix do
   left right -> {:redir "&>>" left right}
 end
 

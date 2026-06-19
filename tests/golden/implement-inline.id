@@ -1,7 +1,8 @@
 r = do
   protocol Ops do
-    defn opbump a b -> add (add a b) 1
-    operator <+!> precedence: 50 assoc: left capture: infix -> opbump
+    operator <+!> precedence: 50 assoc: left capture: :infix do
+      a b -> add (add a b) 1
+    end
   end
   trait Size do
     method size x
@@ -14,8 +15,9 @@ r = do
 end
 s = do
   protocol Ops do
-    defn opbump a b -> mul a b
-    operator <+!> precedence: 50 assoc: left capture: infix -> opbump
+    operator <+!> precedence: 50 assoc: left capture: :infix do
+      a b -> mul a b
+    end
   end
   trait Size do
     method size x

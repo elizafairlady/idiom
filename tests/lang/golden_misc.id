@@ -402,7 +402,7 @@ suite do
   test "protocol-operator" do
     got = do
       protocol arith do
-        operator <+> precedence: 6 assoc: left capture: infix -> add
+        operator <+> precedence: 6 assoc: left capture: :infix -> add
       end
       activate arith
       3 <+> 4
@@ -586,7 +586,7 @@ suite do
   end
   test "user-operator" do
     got = do
-      operator plus precedence: 50 assoc: left capture: infix -> add; 40 plus 2
+      operator plus precedence: 50 assoc: left capture: :infix -> add; 40 plus 2
     end
     assert-inspect got "42"
   end

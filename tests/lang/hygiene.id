@@ -4,7 +4,7 @@ activate std/test
 defn kadd a b -> add a b
 defmacro twice stx do syntax-case stx do (_ e) -> %`(kadd %,e %,e) end end
 defn myadd a b -> add a b
-operator <+> precedence: 50 assoc: left capture: infix -> myadd
+operator <+> precedence: 50 assoc: left capture: :infix -> myadd
 
 defmacro defmm stx do
   syntax-case stx do

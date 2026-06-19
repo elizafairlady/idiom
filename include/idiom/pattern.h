@@ -66,7 +66,7 @@ struct IdmPattern {
         struct { IdmPattern *left; IdmPattern *right; } pair;
         struct { IdmPattern **items; size_t count; } seq;
         struct { IdmPattern **items; size_t count; IdmPattern *rest; } seq_rest;
-        struct { IdmDictPatternEntry *entries; size_t count; } dict;
+        struct { IdmDictPatternEntry *entries; size_t count; IdmPattern *rest; } dict;
     } as;
 };
 
@@ -77,7 +77,7 @@ IdmPattern *idm_pat_literal(IdmValue value, IdmSpan span);
 IdmPattern *idm_pat_pair(IdmPattern *left, IdmPattern *right, IdmSpan span);
 IdmPattern *idm_pat_sequence(IdmPatternKind kind, IdmPattern **items, size_t count, IdmSpan span);
 IdmPattern *idm_pat_sequence_rest(IdmPatternKind kind, IdmPattern **items, size_t count, IdmPattern *rest, IdmSpan span);
-IdmPattern *idm_pat_dict(IdmDictPatternEntry *entries, size_t count, IdmSpan span);
+IdmPattern *idm_pat_dict(IdmDictPatternEntry *entries, size_t count, IdmPattern *rest, IdmSpan span);
 IdmPattern *idm_pat_clone(const IdmPattern *pat);
 void idm_pat_free(IdmPattern *pat);
 

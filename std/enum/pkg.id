@@ -1,12 +1,5 @@
 package enum
 
-defn foldl-list do
-  '() acc _ -> &acc
-  (list h . t) acc f -> foldl-list t (f &h &acc) f
-end
-
-defn reverse-list xs -> xs |> foldl-list '() &cons
-
 export trait Iter do
   method foldl xs acc f
   method fold xs acc f -> xs.foldl acc f
@@ -17,24 +10,28 @@ implement Iter on empty-list do
 end
 
 implement Iter on pair do
-  method foldl xs acc f -> foldl-list xs acc f
+  method foldl do
+    (list h . t) acc f -> t.foldl (f &h &acc) f
+  end
 end
 
 implement Iter on vector do
-  method foldl xs acc f -> xs |> vector-to-list |> foldl-list acc f
+  method foldl xs acc f -> (xs |> vector-to-list).foldl acc f
 end
 
 implement Iter on tuple do
-  method foldl xs acc f -> xs |> tuple-to-list |> foldl-list acc f
+  method foldl xs acc f -> (xs |> tuple-to-list).foldl acc f
 end
 
 implement Iter on dict do
-  method foldl xs acc f -> xs |> dict-to-list |> foldl-list acc f
+  method foldl xs acc f -> (xs |> dict-to-list).foldl acc f
 end
 
 implement Iter on string do
-  method foldl xs acc f -> xs |> str-to-list |> foldl-list acc f
+  method foldl xs acc f -> (xs |> str-to-list).foldl acc f
 end
+
+defn reverse-list xs -> xs.foldl '() &cons
 
 defn member-list? do
   '() _ -> :false
@@ -151,15 +148,15 @@ end
 defn compare-lt? a b -> a |> compare b |> eq? :lt
 
 defn min-of-list do
-  (list h . t) -> t |> foldl-list &h (fn x best -> cond (lt? x best) &x &best)
+  (list h . t) -> t.foldl &h (fn x best -> cond (lt? x best) &x &best)
 end
 
 defn max-of-list do
-  (list h . t) -> t |> foldl-list &h (fn x best -> cond (gt? x best) &x &best)
+  (list h . t) -> t.foldl &h (fn x best -> cond (gt? x best) &x &best)
 end
 
 defn min-max-list do
-  (list h . t) -> t |> foldl-list {&h &h} (fn x best -> match best do
+  (list h . t) -> t.foldl {&h &h} (fn x best -> match best do
     {lo hi} -> {(cond (lt? x lo) &x &lo) (cond (gt? x hi) &x &hi)}
   end)
 end
@@ -202,8 +199,8 @@ export trait Enum do
     xs.foldl :ok (fn x _acc -> do f &x; :ok end)
     :ok
   end
-  method concat xs ys -> xs.to-list |> reverse-list |> foldl-list (ys.to-list) &cons
-  method flat-map xs f -> xs.foldl '() (fn x acc -> (f &x).to-list |> foldl-list acc &cons) |> reverse-list
+  method concat xs ys -> (xs.to-list |> reverse-list).foldl (ys.to-list) &cons
+  method flat-map xs f -> xs.foldl '() (fn x acc -> ((f &x).to-list).foldl acc &cons) |> reverse-list
   method length xs -> xs.foldl 0 (fn _x acc -> add acc 1)
   method count xs -> xs.length
   method count-matching xs f -> xs.foldl 0 (fn x acc -> cond (f &x) (add acc 1) acc)

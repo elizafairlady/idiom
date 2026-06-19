@@ -1,6 +1,7 @@
 protocol OpCarrier do
-  defn opmul a b -> mul a b
-  operator <%%> precedence: 50 assoc: left capture: infix -> opmul
+  operator <%%> precedence: 50 assoc: left capture: :infix do
+    a b -> mul a b
+  end
 end
 protocol UsesOp do
   export defmacro squarish stx do syntax-case stx do

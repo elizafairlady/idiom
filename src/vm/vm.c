@@ -1140,6 +1140,17 @@ static const char *module_const_text(const IdmBytecodeModule *module, uint32_t i
     return NULL;
 }
 
+static IdmArity read_arity_operands(const IdmBytecodeModule *module, Frame *frame) {
+    IdmArity arity;
+    arity.kind = (IdmArityKind)module->code[frame->ip++];
+    arity.min = module->code[frame->ip++];
+    arity.max = module->code[frame->ip++];
+    uint64_t lo = module->code[frame->ip++];
+    uint64_t hi = module->code[frame->ip++];
+    arity.mask = lo | (hi << 32);
+    return arity;
+}
+
 static bool op_define_trait(Vm *vm, Frame *frame, IdmError *err) {
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     uint32_t trait_const = module->code[frame->ip++];
@@ -1164,7 +1175,7 @@ static bool op_define_trait(Vm *vm, Frame *frame, IdmError *err) {
     }
     for (uint32_t i = 0; i < method_count && ok; i++) {
         uint32_t method_const = module->code[frame->ip++];
-        uint32_t arity = module->code[frame->ip++];
+        IdmArity arity = read_arity_operands(module, frame);
         uint32_t has_default = module->code[frame->ip++];
         const char *method = module_const_text(module, method_const, "DEFINE_TRAIT method", err);
         if (!method) { ok = false; break; }
@@ -1206,7 +1217,7 @@ static bool op_implement_trait(Vm *vm, Frame *frame, IdmError *err) {
     bool ok = true;
     for (uint32_t i = 0; i < impl_count && ok; i++) {
         uint32_t method_const = module->code[frame->ip++];
-        uint32_t arity = module->code[frame->ip++];
+        IdmArity arity = read_arity_operands(module, frame);
         const char *method = module_const_text(module, method_const, "IMPLEMENT_TRAIT method", err);
         if (!method) { ok = false; break; }
         specs[i].name = method;

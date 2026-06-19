@@ -76,6 +76,15 @@ static IdmCore *zero_arity_call_if_known(IdmCore *callee, const IdmArity *arity,
     return call;
 }
 
+static IdmCore *method_arity_error(IdmError *err, IdmSpan span, const MethodSurfaceDef *method, size_t got) {
+    IdmBuffer expected;
+    idm_buf_init(&expected);
+    bool ok = idm_arity_describe(&expected, &method->arity);
+    expand_error(err, span, "method '%s.%s' expects %s argument(s), got %zu", method->trait, method->name, ok ? expected.data : "?", got);
+    idm_buf_destroy(&expected);
+    return NULL;
+}
+
 static bool word_has_subtraction_shape(const char *text) {
     if (!text) return false;
     for (size_t i = 1; text[i] != '\0' && text[i + 1u] != '\0'; i++) {
@@ -446,10 +455,10 @@ static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word) {
 
 static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const MethodSurfaceDef *method, IdmCore *receiver, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err) {
     size_t argc = (receiver ? 1u : 0u) + arg_count;
-    if (argc != method->arity) {
+    if (argc > UINT32_MAX || !idm_arity_accepts(&method->arity, (uint32_t)argc)) {
         idm_core_free(receiver);
         core_args_free(args, arg_count);
-        return expand_error(err, span, "method '%s.%s' expects %u argument(s), got %zu", method->trait, method->name, method->arity, argc);
+        return method_arity_error(err, span, method, argc);
     }
     IdmCore *call = idm_core_method_call(idm_atom(ctx->rt, method->trait), idm_atom(ctx->rt, method->name), receiver ? receiver->span : span);
     if (!call) {
@@ -502,27 +511,30 @@ static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size
             if (!receiver) return NULL;
             continue;
         }
-        if (method->arity == 0) {
+        uint32_t dot_arity = 0;
+        if (!idm_arity_max_accepting_at_least(&method->arity, 1u, &dot_arity)) {
             idm_core_free(receiver);
             return expand_error(err, items[dot + 1u]->span, "method '%s.%s' cannot be used with dot dispatch because it takes no receiver", method->trait, method->name);
         }
-        size_t extra_count = (size_t)method->arity - 1u;
-        IdmCore **args = extra_count ? calloc(extra_count, sizeof(*args)) : NULL;
-        if (extra_count && !args) {
+        size_t max_extra_count = (size_t)dot_arity - 1u;
+        IdmCore **args = max_extra_count ? calloc(max_extra_count, sizeof(*args)) : NULL;
+        if (max_extra_count && !args) {
             idm_core_free(receiver);
             return (IdmCore *)(uintptr_t)idm_error_oom(err, items[dot + 1u]->span);
         }
         *pos = dot + 2u;
-        for (size_t i = 0; i < extra_count; i++) {
+        size_t extra_count = 0;
+        for (; extra_count < max_extra_count; extra_count++) {
             if (arg_parse_at_stop(ctx, items, *pos, end, stop_at_operator)) {
-                core_args_free(args, i);
+                if (idm_arity_accepts(&method->arity, (uint32_t)(extra_count + 1u))) break;
+                core_args_free(args, extra_count);
                 free(args);
                 idm_core_free(receiver);
-                return expand_error(err, items[dot + 1u]->span, "method '%s.%s' expects %u argument(s), got %zu", method->trait, method->name, method->arity, i + 1u);
+                return method_arity_error(err, items[dot + 1u]->span, method, extra_count + 1u);
             }
-            args[i] = parse_postfix_expr(ctx, items, pos, end, stop_at_operator, err);
-            if (!args[i]) {
-                core_args_free(args, i);
+            args[extra_count] = parse_postfix_expr(ctx, items, pos, end, stop_at_operator, err);
+            if (!args[extra_count]) {
+                core_args_free(args, extra_count);
                 free(args);
                 idm_core_free(receiver);
                 return NULL;
@@ -891,7 +903,7 @@ static IdmCore *operator_callee(ExpandContext *ctx, const IdmOperatorDef *op, co
     const IdmBinding *binding = resolve_default(ctx, word, &status);
     if (status == IDM_RESOLVE_OK && binding->kind == IDM_BIND_TRANSFORMER) {
         idm_syn_free(word);
-        return expand_error(err, span, "operator target '%s' is phase syntax; use a syntax capture such as capture: {infix expression}", op->target_name);
+        return expand_error(err, span, "operator target '%s' is phase syntax; use a syntax capture such as capture: {:infix :expression}", op->target_name);
     }
     IdmCore *callee = expand_word_callee(ctx, word, err);
     idm_syn_free(word);

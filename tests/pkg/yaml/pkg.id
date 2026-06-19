@@ -1,0 +1,158 @@
+package yaml
+
+use std/list
+use std/string
+
+defn leading-spaces do
+  _ i n _line when (eq? i n) -> {:ok i}
+  s i n line -> match (str-byte s i) do
+    32 -> leading-spaces s (add i 1) n line
+    9 -> {:error {:yaml :tab-indent line}}
+    _ -> {:ok i}
+  end
+end
+
+defn comment-line? text -> starts-with? (trim text) "#"
+
+defn prepare-lines-from do
+  '() _ acc -> {:ok (reverse acc)}
+  (list raw . rest) line acc -> do
+    trimmed = trim-right raw
+    cond (blank? trimmed)
+      (prepare-lines-from rest (add line 1) acc)
+      (match (leading-spaces trimmed 0 (str-len trimmed) line) do
+        {:error reason} -> {:error reason}
+        {:ok indent} -> do
+          text = str-slice trimmed indent (str-len trimmed)
+          cond (comment-line? text)
+            (prepare-lines-from rest (add line 1) acc)
+            (prepare-lines-from rest (add line 1) (cons {line indent text} acc))
+        end
+      end)
+  end
+end
+
+defn prepare-lines source -> prepare-lines-from (split-lines source) 1 '()
+
+defn wrapped? s first last -> do
+  n = str-len s
+  and (gte? n 2) (and (eq? (str-byte s 0) first) (eq? (str-byte s (sub n 1)) last))
+end
+
+defn unwrap s -> str-slice s 1 (sub (str-len s) 1)
+
+defn parse-key s -> cond (or (wrapped? s 34 34) (wrapped? s 39 39)) (unwrap s) s
+
+defn parse-scalar do
+  "true" -> :true
+  "false" -> :false
+  "null" -> :nil
+  "~" -> :nil
+  s -> match (parse-int s) do
+    {:ok n} -> n
+    {:error _} -> cond (or (wrapped? s 34 34) (wrapped? s 39 39)) (unwrap s) s
+  end
+end
+
+defn seq-entry? text -> or (eq? text "-") (starts-with? text "- ")
+
+defn seq-entry-text text -> cond (eq? text "-") "" (trim (str-slice text 2 (str-len text)))
+
+defn mapping-entry? text -> neq? (str-find text ":" 0) :nil
+
+defn split-entry line text -> match (str-find text ":" 0) do
+  :nil -> {:error {:yaml :expected-colon line}}
+  at -> do
+    key = trim (str-slice text 0 at)
+    value = trim (str-slice text (add at 1) (str-len text))
+    cond (eq? (str-len key) 0)
+      {:error {:yaml :empty-key line}}
+      {:ok {(parse-key key) value}}
+  end
+end
+
+defn parse-child do
+  '() _parent-indent line -> {:error {:yaml :missing-child line}}
+  (list {_line child-indent _text} . _rest) parent-indent line when (lte? child-indent parent-indent) -> {:error {:yaml :missing-child line}}
+  lines _parent-indent _line -> match lines do
+    (list {_ child-indent _} . _) -> parse-node lines child-indent
+  end
+end
+
+defn parse-map-value value rest indent line -> cond (eq? (str-len value) 0)
+  (parse-child rest indent line)
+  {:ok {(parse-scalar value) rest}}
+
+defn parse-map-items do
+  '() _indent acc -> {:ok {acc '()}}
+  lines indent acc -> match lines do
+    (list {line current text} . rest) -> cond (lt? current indent)
+      {:ok {acc lines}}
+      (cond (gt? current indent)
+        {:error {:yaml :unexpected-indent line current text}}
+        (cond (mapping-entry? text)
+          (match (split-entry line text) do
+            {:error reason} -> {:error reason}
+            {:ok {key value-text}} -> match (parse-map-value value-text rest indent line) do
+              {:error reason} -> {:error reason}
+              {:ok {value next}} -> parse-map-items next indent (dict-put acc &key &value)
+            end
+          end)
+          {:ok {acc lines}}))
+  end
+end
+
+defn parse-map lines indent -> parse-map-items lines indent %{}
+
+defn parse-seq-item line text rest indent -> do
+  item = seq-entry-text text
+  child-indent = add indent 2
+  cond (eq? (str-len item) 0)
+    (parse-child rest indent line)
+    (cond (or (seq-entry? item) (mapping-entry? item))
+      (parse-node (cons {line child-indent item} rest) child-indent)
+      {:ok {(parse-scalar item) rest}})
+end
+
+defn parse-seq-items do
+  '() _indent acc -> {:ok {(reverse acc) '()}}
+  lines indent acc -> match lines do
+    (list {line current text} . rest) -> cond (lt? current indent)
+      {:ok {(reverse acc) lines}}
+      (cond (gt? current indent)
+        {:error {:yaml :unexpected-indent line current text}}
+        (cond (seq-entry? text)
+          (match (parse-seq-item line text rest indent) do
+            {:error reason} -> {:error reason}
+            {:ok {value next}} -> parse-seq-items next indent (cons value acc)
+          end)
+          {:ok {(reverse acc) lines}}))
+  end
+end
+
+defn parse-seq lines indent -> parse-seq-items lines indent '()
+
+defn parse-node do
+  '() _expected -> {:error {:yaml :empty}}
+  lines expected -> match lines do
+    (list {line indent text} . _rest) -> cond (lt? indent expected)
+      {:error {:yaml :missing-node line expected indent}}
+      (cond (gt? indent expected)
+        {:error {:yaml :unexpected-indent line indent text}}
+        (cond (seq-entry? text)
+          (parse-seq lines indent)
+          (cond (mapping-entry? text)
+            (parse-map lines indent)
+            {:ok {(parse-scalar text) '()}})))
+  end
+end
+
+export defn parse source -> match (prepare-lines source) do
+  {:error reason} -> {:error reason}
+  {:ok '()} -> {:ok :nil}
+  {:ok lines} -> match (parse-node lines 0) do
+    {:error reason} -> {:error reason}
+    {:ok {value '()}} -> {:ok value}
+    {:ok {_value (list {line indent text} . _rest)}} -> {:error {:yaml :trailing line indent text}}
+  end
+end

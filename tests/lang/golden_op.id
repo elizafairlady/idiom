@@ -11,7 +11,7 @@ suite do
   test "op-func-target" do
     got = do
       defn combine a b -> add (mul a 10) b
-      operator glue precedence: 50 assoc: left capture: infix -> combine
+      operator glue precedence: 50 assoc: left capture: :infix -> combine
       4 glue 2
     end
     assert-inspect got "42"
@@ -73,8 +73,9 @@ suite do
   end
   test "op-symbolic-name" do
     got = do
-      defn combine a b -> add (mul a 10) b
-      operator <+> precedence: 50 assoc: left capture: infix -> combine
+      operator <+> precedence: 50 assoc: left capture: :infix do
+        a b -> add (mul a 10) b
+      end
       1 <+> 2 <+> 3
     end
     assert-inspect got "123"

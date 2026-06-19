@@ -380,11 +380,12 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
     return true;
 }
 
-bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
+static bool install_imported_macro_impl(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, bool hidden, IdmError *err) {
     MacroDef *macro = macro_slot(ctx, name, idm_span_unknown(NULL), err);
     if (!macro) return false;
     phase_syntax_fn_import(ctx, &macro->fn, module, function_index, phase_ns, phase_env);
     macro->exported = false;
+    macro->hidden = hidden;
     uint32_t payload = (uint32_t)ctx->macro_count;
     int bound = surface_bind_payload(ctx, provider, provider_key, name, name, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, scopes ? scopes : &ctx->empty_scopes, payload, idm_span_unknown(NULL), err);
     if (bound <= 0) {
@@ -393,6 +394,10 @@ bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScope
     }
     ctx->macro_count++;
     return true;
+}
+
+bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
+    return install_imported_macro_impl(ctx, name, scopes, module, function_index, phase_ns, phase_env, provider, provider_key, false, err);
 }
 
 bool install_imported_resolver(ExpandContext *ctx, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
@@ -419,7 +424,15 @@ bool install_imported_resolver(ExpandContext *ctx, const IdmScopeSet *scopes, Id
 }
 
 bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err) {
-    return register_operator(ctx, op->name, op->capture ? op->capture : "infix", op->precedence, op->assoc, op->target_name, &op->scopes, binding_scopes ? binding_scopes : &ctx->empty_scopes, provider, provider_key, false, err);
+    SurfaceCheckpoint checkpoint;
+    surface_checkpoint(ctx, &checkpoint);
+    bool ok = true;
+    if (op->target_module) {
+        ok = install_imported_macro_impl(ctx, op->target_name, &op->scopes, op->target_module, op->target_function_index, op->target_phase_ns, op->target_phase_env, provider, provider_key, true, err);
+    }
+    ok = ok && register_operator(ctx, op->name, op->capture ? op->capture : "infix", op->precedence, op->assoc, op->target_name, &op->scopes, binding_scopes ? binding_scopes : &ctx->empty_scopes, provider, provider_key, false, err);
+    if (!ok) surface_rollback(ctx, &checkpoint);
+    return ok;
 }
 
 static const char *operator_decl_token_text(const IdmSyntax *syn) {
@@ -434,7 +447,7 @@ bool register_operator_callback(void *user, IdmRuntime *rt, const IdmSyntax *nam
     ExpandContext *ctx = user;
     const char *name = operator_decl_token_text(name_syntax);
     if (!name) return idm_error_set(err, name_syntax->span, "operator name must be a symbol");
-    if (!capture_text || !*capture_text) return idm_error_set(err, name_syntax->span, "operator capture must be a non-empty identifier");
+    if (!capture_text || !*capture_text) return idm_error_set(err, name_syntax->span, "operator capture must be non-empty");
     if (precedence < 0 || precedence > 255) return idm_error_set(err, name_syntax->span, "operator precedence must be an integer 0..255");
     IdmOpAssoc assoc;
     if (strcmp(assoc_text, "left") == 0) assoc = IDM_OP_ASSOC_LEFT;

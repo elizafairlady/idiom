@@ -10,12 +10,19 @@ export defmacro operator stx do
     _ _ -> :false
   end
 
+  defn word-is? do
+    node name when (syntax-word? node) -> eq? (syntax-word-text node) name
+    _ _ -> :false
+  end
+
   defn body-form? node -> head-is? node "%-body"
 
   defn find-decl-end do
     i when (eq? i n) -> syntax-error stx "operator declaration requires '-> target' or an operator body"
-    i when (and (syntax-word? (syntax-nth stx i)) (eq? (syntax-word-text (syntax-nth stx i)) "->")) -> {:arrow i}
-    i when (body-form? (syntax-nth stx i)) -> cond (eq? (add i 1) n) {:body i} (syntax-error stx "operator body must be the final operator form")
+    i when (word-is? (syntax-nth stx i) "->") -> {:arrow i}
+    i when (body-form? (syntax-nth stx i)) ->
+      cond (neq? (add i 1) n) (syntax-error stx "operator body must be the final operator form")
+        (cond (and (gt? i 4) (word-is? (syntax-nth stx (sub i 2)) "macro")) {:macro-body i} {:body i})
     i -> find-decl-end (add i 1)
   end
 
@@ -33,12 +40,13 @@ export defmacro operator stx do
 
   defn syntax-tuple? v -> eq? (syntax-kind v) :tuple
 
+  defn syntax-dict? v -> eq? (syntax-kind v) :dict
+
   defn capture-part-text do
-    v when (syntax-word? v) -> syntax-word-text v
     v when (syntax-atom? v) -> syntax-atom-text v
     v when (syntax-string? v) -> syntax-string-text v
     v when (syntax-int? v) -> "#{syntax-int-value v}"
-    _ -> syntax-error stx "operator capture must be an identifier, string, integer, tuple, or grouped expression"
+    _ -> syntax-error stx "operator capture must use atoms, strings, integers, tuples, or grouped expressions"
   end
 
   defn capture-join do
@@ -62,22 +70,59 @@ export defmacro operator stx do
     other _ _ -> syntax-error stx "unknown operator keyword '${other}'"
   end
 
+  defn parse-opt-dict do
+    opts i len acc when (eq? i len) -> acc
+    opts i len acc when (eq? (add i 1) len) -> syntax-error stx "operator option dict requires key/value pairs"
+    opts i len acc -> parse-opt-dict opts (add i 2) len (apply-opt (kw-text (syntax-nth opts i)) (syntax-nth opts (add i 1)) acc)
+  end
+
   defn parse-opts do
     i stop acc when (eq? i stop) -> acc
-    i stop acc when (eq? (add i 1) stop) -> syntax-error stx "operator keyword '#{kw-text (syntax-nth stx i)}' requires a value"
-    i stop acc -> parse-opts (add i 2) stop (apply-opt (kw-text (syntax-nth stx i)) (syntax-nth stx (add i 1)) acc)
+    i stop acc when (eq? (add i 1) stop) -> do
+      opts = syntax-nth stx i
+      cond (syntax-dict? opts) (parse-opt-dict opts 0 (syntax-length opts) acc) (syntax-error stx "operator declaration expects keyword option dict")
+    end
+    _ _ _ -> syntax-error stx "operator declaration expects keyword option dict"
   end
 
   defn target-of do
     a when (eq? (add a 1) n) -> syntax-error stx "operator declaration requires '-> target'"
+    a when (neq? (add a 2) n) -> syntax-error stx "operator declaration expects a single target after '->'"
     a -> syntax-nth stx (add a 1)
   end
 
   defn emit do
+    {:arrow arrow} when (word-is? (syntax-nth stx (add arrow 1)) "macro") -> do
+      if (or (neq? (add arrow 4) n) (eq? (body-form? (syntax-nth stx (add arrow 3))) :false)) do
+        syntax-error stx "operator macro target expects '-> macro stx do ... end'"
+      end
+      target = make-syntax-word stx "__operator_target__"
+      {p a c} = parse-opts 3 arrow {50 "left" "infix"}
+      param = syntax-nth stx (add arrow 2)
+      body = syntax-nth stx (add arrow 3)
+      %`do
+        defmacro %,target %,param %,body
+        for-syntax do
+          expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
+        end
+      end
+    end
     {:arrow arrow} -> do
       {p a c} = parse-opts 3 arrow {50 "left" "infix"}
       target = target-of arrow
       %`do
+        for-syntax do
+          expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
+        end
+      end
+    end
+    {:macro-body bodyi} -> do
+      target = make-syntax-word stx "__operator_target__"
+      {p a c} = parse-opts 3 (sub bodyi 2) {50 "left" "infix"}
+      param = syntax-nth stx (sub bodyi 1)
+      body = syntax-nth stx bodyi
+      %`do
+        defmacro %,target %,param %,body
         for-syntax do
           expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
         end

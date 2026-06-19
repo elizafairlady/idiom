@@ -30,6 +30,10 @@ typedef struct {
     uint8_t precedence;
     IdmOpAssoc assoc;
     char *target_name;
+    IdmModuleRef *target_module;
+    uint32_t target_function_index;
+    IdmNamespace *target_phase_ns;
+    IdmPhaseEnv *target_phase_env;
     IdmScopeSet scopes;
     bool exported;
 } IdmOperatorDef;
@@ -38,7 +42,7 @@ typedef struct IdmCore IdmCore;
 
 typedef struct {
     char *name;
-    uint32_t arity;
+    IdmArity arity;
     bool has_default;
     bool seen_decl;
     IdmCore *default_fn;

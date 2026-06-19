@@ -169,7 +169,7 @@ IdmArity idm_arity_range(uint32_t min, uint32_t max) {
 
 IdmArity idm_arity_exact(uint32_t exact) {
     IdmArity arity;
-    arity.kind = IDM_ARITY_SET;
+    arity.kind = exact < 64u ? IDM_ARITY_SET : IDM_ARITY_RANGE;
     arity.min = exact;
     arity.max = exact;
     arity.mask = exact < 64u ? (UINT64_C(1) << exact) : 0;
@@ -200,6 +200,42 @@ bool idm_arity_accepts(const IdmArity *arity, uint32_t argc) {
     if (arity->kind == IDM_ARITY_RANGE) return true;
     if (argc >= 64u) return false;
     return (arity->mask & (UINT64_C(1) << argc)) != 0;
+}
+
+bool idm_arity_equal(const IdmArity *a, const IdmArity *b) {
+    if (!a || !b) return false;
+    return a->kind == b->kind && a->min == b->min && a->max == b->max && a->mask == b->mask;
+}
+
+bool idm_arity_max_accepting_at_least(const IdmArity *arity, uint32_t min, uint32_t *out) {
+    if (!arity || arity->kind == IDM_ARITY_UNKNOWN || arity->max < min) return false;
+    if (arity->kind == IDM_ARITY_RANGE) {
+        if (out) *out = arity->max;
+        return true;
+    }
+    for (uint32_t argc = arity->max;; argc--) {
+        if (argc >= min && idm_arity_accepts(arity, argc)) {
+            if (out) *out = argc;
+            return true;
+        }
+        if (argc == 0) break;
+    }
+    return false;
+}
+
+bool idm_arity_describe(IdmBuffer *buf, const IdmArity *arity) {
+    if (!arity) return idm_buf_append(buf, "<null>");
+    if (arity->kind == IDM_ARITY_UNKNOWN) return idm_buf_append(buf, "?");
+    if (arity->kind == IDM_ARITY_RANGE) return idm_buf_appendf(buf, "%u..%u", arity->min, arity->max);
+    bool first = true;
+    for (uint32_t argc = arity->min; argc <= arity->max; argc++) {
+        if (!idm_arity_accepts(arity, argc)) continue;
+        if (!first && !idm_buf_append_char(buf, '|')) return false;
+        if (!idm_buf_appendf(buf, "%u", argc)) return false;
+        first = false;
+        if (argc == UINT32_MAX) break;
+    }
+    return first ? idm_buf_append(buf, "<empty>") : true;
 }
 
 bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id) {

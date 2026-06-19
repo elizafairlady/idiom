@@ -703,7 +703,7 @@ IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, Idm
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
     }
-    obj->as.dict.count = count;
+    obj->as.dict.count = 0;
     obj->as.dict.entries = NULL;
     if (count != 0) {
         obj->as.dict.entries = malloc(count * sizeof(*obj->as.dict.entries));
@@ -711,7 +711,19 @@ IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, Idm
             idm_error_oom(err, idm_span_unknown(NULL));
             return idm_nil();
         }
-        memcpy(obj->as.dict.entries, entries, count * sizeof(*entries));
+        for (size_t i = 0; i < count; i++) {
+            bool replaced = false;
+            for (size_t j = 0; j < obj->as.dict.count; j++) {
+                if (idm_value_equal(obj->as.dict.entries[j].key, entries[i].key)) {
+                    obj->as.dict.entries[j].value = entries[i].value;
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                obj->as.dict.entries[obj->as.dict.count++] = entries[i];
+            }
+        }
         heap_account(idm_active_heap(rt), obj, count * sizeof(*entries));
     }
     IdmValue v;
@@ -1068,9 +1080,30 @@ static bool runtime_trait_contract_compatible(IdmRuntime *rt, const char *trait,
     if (runtime_trait_method_count_for(rt, trait) != method_count) return false;
     for (size_t i = 0; i < method_count; i++) {
         IdmRuntimeTraitMethod *existing = runtime_trait_find_method(rt, trait, methods[i].name);
-        if (!existing || existing->arity != methods[i].arity) return false;
+        if (!existing || !idm_arity_equal(&existing->arity, &methods[i].arity)) return false;
     }
     return true;
+}
+
+static bool trait_arity_mismatch(IdmError *err, const char *trait, const char *method, const IdmArity *expected, const IdmArity *got) {
+    IdmBuffer expected_buf;
+    IdmBuffer got_buf;
+    idm_buf_init(&expected_buf);
+    idm_buf_init(&got_buf);
+    bool described = idm_arity_describe(&expected_buf, expected) && idm_arity_describe(&got_buf, got);
+    bool ok = idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %s got %s", trait, method, described ? expected_buf.data : "?", described ? got_buf.data : "?");
+    idm_buf_destroy(&expected_buf);
+    idm_buf_destroy(&got_buf);
+    return ok;
+}
+
+static bool trait_call_arity_mismatch(IdmError *err, const char *trait, const char *method, const IdmArity *expected, uint32_t got) {
+    IdmBuffer expected_buf;
+    idm_buf_init(&expected_buf);
+    bool described = idm_arity_describe(&expected_buf, expected);
+    bool ok = idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %s got %u", trait, method, described ? expected_buf.data : "?", got);
+    idm_buf_destroy(&expected_buf);
+    return ok;
 }
 
 static bool runtime_trait_requires(IdmRuntime *rt, const char *trait, const char *required) {
@@ -1225,7 +1258,7 @@ bool idm_trait_implement(IdmRuntime *rt, const char *trait, const char *type, co
         if (!impls[i].name || !*impls[i].name) return idm_error_set(err, idm_span_unknown(NULL), "implement for trait '%s' has an unnamed method", trait);
         IdmRuntimeTraitMethod *method = runtime_trait_find_method(rt, trait, impls[i].name);
         if (!method) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' has no method '%s'", trait, impls[i].name);
-        if (method->arity != impls[i].arity) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %u got %u", trait, impls[i].name, method->arity, impls[i].arity);
+        if (!idm_arity_equal(&method->arity, &impls[i].arity)) return trait_arity_mismatch(err, trait, impls[i].name, &method->arity, &impls[i].arity);
         if (!idm_is_closure(impls[i].impl)) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' implementation is not a function", trait, impls[i].name);
         for (size_t j = i + 1u; j < impl_count; j++) {
             if (strcmp(impls[i].name, impls[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "implement for '%s' provides method '%s' more than once", trait, impls[i].name);
@@ -1286,7 +1319,7 @@ bool idm_trait_implements(IdmRuntime *rt, const char *trait, const char *type) {
 bool idm_trait_lookup(IdmRuntime *rt, const char *trait, const char *method, const char *type, uint32_t argc, IdmValue *out_impl, IdmError *err) {
     IdmRuntimeTraitMethod *contract = runtime_trait_find_method(rt, trait, method);
     if (!contract) return idm_error_set(err, idm_span_unknown(NULL), "trait method '%s.%s' is not defined", trait, method);
-    if (contract->arity != argc) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %u got %u", trait, method, contract->arity, argc);
+    if (!idm_arity_accepts(&contract->arity, argc)) return trait_call_arity_mismatch(err, trait, method, &contract->arity, argc);
     IdmRuntimeTraitImpl *impl = runtime_trait_find_impl(rt, trait, method, type);
     if (impl) {
         *out_impl = impl->impl;

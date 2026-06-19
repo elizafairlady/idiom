@@ -22,6 +22,29 @@ static void test_kernel_runtime_exports(void) {
     }
 }
 
+static void test_kernel_uses_package_declaration_prep(void) {
+    const char *old = getenv("IDIOMROOT");
+    char *saved = old ? idm_strdup(old) : NULL;
+    CHECK(mkdir("build/orderlesskernel", 0755) == 0 || errno == EEXIST);
+    CHECK(mkdir("build/orderlesskernel/kernel", 0755) == 0 || errno == EEXIST);
+    remove("build/orderlesskernel/kernel.ic");
+    CHECK(write_text_file("build/orderlesskernel/kernel/a_use.id",
+        "export defn kernel-answer x -> later-kernel x\n"));
+    CHECK(write_text_file("build/orderlesskernel/kernel/z_surface.id",
+        "defn later-kernel x -> add x 1\n"));
+    setenv("IDIOMROOT", "build/orderlesskernel", 1);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    check_value_written(&rt, "kernel-answer 41\n", "42");
+    idm_runtime_destroy(&rt);
+    if (saved) {
+        setenv("IDIOMROOT", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("IDIOMROOT");
+    }
+}
+
 static void test_surface_forms_are_kernel_sourced(void) {
     const char *old = getenv("IDIOMROOT");
     char *saved = old ? idm_strdup(old) : NULL;
@@ -158,6 +181,55 @@ static void test_ishc_std_root_identity(void) {
         "nmac x\n",
         "unbound identifier 'nmac'");
     idm_runtime_destroy(&rt);
+}
+
+static void test_directory_package_declaration_prep(void) {
+    CHECK(mkdir("build/orderlesspkg", 0755) == 0 || errno == EEXIST);
+    remove("build/orderlessdep.ic");
+    remove("build/orderlesspkg.ic");
+    CHECK(write_text_file("build/orderlessdep.id",
+        "package orderlessdep\n"
+        "export defn depadd x -> add x 10\n"));
+    CHECK(write_text_file("build/orderlesspkg/a_use.id",
+        "package orderlesspkg\n"
+        "export defn run x -> add (bump x) (later-macro y)\n"
+        "export defn makep x -> Point x\n"
+        "export defn labelp p -> p.v\n"
+        "export defn use-forward-op x -> x <++> 1\n"
+        "export defn makeb x -> Box x\n"
+        "export defn call-label b -> label b\n"
+        "export defn call-base b -> label-base b\n"
+        "export defn use-forward-proto x -> x <!!> 1\n"
+        "export defn use-dep x -> depadd x\n"));
+    CHECK(write_text_file("build/orderlesspkg/z_surface.id",
+        "package orderlesspkg\n"
+        "use build/orderlessdep\n"
+        "defn bump x -> add x 1\n"
+        "defmacro later-macro stx -> make-syntax-int stx 40\n"
+        "operator <++> precedence: 50 assoc: left capture: :infix -> add\n"
+        "protocol LocalOps do\n"
+        "  defn jump a b -> add a b\n"
+        "  operator <!!> precedence: 50 assoc: left capture: :infix -> jump\n"
+        "end\n"
+        "activate LocalOps\n"
+        "export record Point do\n"
+        "  field v\n"
+        "end\n"
+        "export record Box do\n"
+        "  field v\n"
+        "end\n"
+        "export trait Label do\n"
+        "  require BaseLabel\n"
+        "  method label x -> label-base x\n"
+        "end\n"
+        "export trait BaseLabel do\n"
+        "  method label-base x\n"
+        "end\n"
+        "implement Label on Box\n"
+        "implement BaseLabel on Box do\n"
+        "  method label-base b -> add b.v 1\n"
+        "end\n"));
+    check_pkg_value("use build/orderlesspkg\n{(run 1) (labelp (makep 9)) (use-forward-op 41) (call-label (makeb 9)) (call-base (makeb 9)) (use-forward-proto 41) (use-dep 32)}\n", "{42 9 42 10 10 42 42}");
 }
 
 static void test_stale_cache_runs_no_phase_init(void) {
@@ -384,10 +456,12 @@ static void test_idiompath_lookup(void) {
 
 void run_package_suite(void) {
     test_kernel_runtime_exports();
+    test_kernel_uses_package_declaration_prep();
     test_surface_forms_are_kernel_sourced();
     test_artifact_cache_relocation();
     test_ishc_cache_invalidation();
     test_ishc_std_root_identity();
+    test_directory_package_declaration_prep();
     test_stale_cache_runs_no_phase_init();
     test_phase_read_invalidation();
     test_read_set_roundtrip();

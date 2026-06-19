@@ -12,6 +12,18 @@ static IdmCore *core_alloc(IdmCoreKind kind, IdmSpan span) {
     return core;
 }
 
+static bool emit_arity(IdmBytecodeModule *module, IdmArity arity) {
+    return idm_bc_emit(module, (uint32_t)arity.kind, NULL) &&
+           idm_bc_emit(module, arity.min, NULL) &&
+           idm_bc_emit(module, arity.max, NULL) &&
+           idm_bc_emit(module, (uint32_t)(arity.mask & UINT32_MAX), NULL) &&
+           idm_bc_emit(module, (uint32_t)(arity.mask >> 32), NULL);
+}
+
+static bool append_arity(IdmBuffer *buf, const IdmArity *arity) {
+    return idm_buf_append_char(buf, '/') && idm_arity_describe(buf, arity);
+}
+
 IdmCore *idm_core_literal(IdmValue value, IdmSpan span) {
     IdmCore *core = core_alloc(IDM_CORE_LITERAL, span);
     if (!core) return NULL;
@@ -316,7 +328,7 @@ bool idm_core_define_trait_add_requirement(IdmCore *core, IdmValue requirement) 
     return true;
 }
 
-bool idm_core_define_trait_add_method(IdmCore *core, IdmValue method, uint32_t arity, IdmCore *default_fn) {
+bool idm_core_define_trait_add_method(IdmCore *core, IdmValue method, IdmArity arity, IdmCore *default_fn) {
     if (!core || core->kind != IDM_CORE_DEFINE_TRAIT) return false;
     if (core->as.define_trait.count == core->as.define_trait.cap) {
         size_t cap = core->as.define_trait.cap ? core->as.define_trait.cap * 2u : 4u;
@@ -343,7 +355,7 @@ IdmCore *idm_core_implement_trait(IdmValue trait, IdmValue type, IdmValue provid
     return core;
 }
 
-bool idm_core_implement_trait_add_impl(IdmCore *core, IdmValue method, uint32_t arity, IdmCore *impl_fn) {
+bool idm_core_implement_trait_add_impl(IdmCore *core, IdmValue method, IdmArity arity, IdmCore *impl_fn) {
     if (!core || core->kind != IDM_CORE_IMPLEMENT_TRAIT || !impl_fn) return false;
     if (core->as.implement_trait.count == core->as.implement_trait.cap) {
         size_t cap = core->as.implement_trait.cap ? core->as.implement_trait.cap * 2u : 4u;
@@ -1212,6 +1224,7 @@ static const IdmPrimitiveInfo PRIMITIVES[] = {
     [IDM_PRIM_MAKE_SYNTAX_LIST] = {"make-syntax-list", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_VECTOR] = {"make-syntax-vector", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_TUPLE] = {"make-syntax-tuple", 2, 2},
+    [IDM_PRIM_MAKE_SYNTAX_DICT] = {"make-syntax-dict", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_EXPR] = {"make-syntax-expr", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_BODY] = {"make-syntax-body", 2, 2},
     [IDM_PRIM_MAKE_SYNTAX_GROUP] = {"make-syntax-group", 2, 2},
@@ -1912,7 +1925,7 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, co
                 uint32_t method_const = 0;
                 if (!add_const_value(module, method->name, &method_const, err, core->span)) return false;
                 if (!idm_bc_emit(module, method_const, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit(module, method->arity, NULL)) return idm_error_oom(err, core->span);
+                if (!emit_arity(module, method->arity)) return idm_error_oom(err, core->span);
                 if (!idm_bc_emit(module, method->has_default ? 1u : 0u, NULL)) return idm_error_oom(err, core->span);
             }
             return true;
@@ -1940,7 +1953,7 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, co
                 uint32_t method_const = 0;
                 if (!add_const_value(module, impl->name, &method_const, err, core->span)) return false;
                 if (!idm_bc_emit(module, method_const, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit(module, impl->arity, NULL)) return idm_error_oom(err, core->span);
+                if (!emit_arity(module, impl->arity)) return idm_error_oom(err, core->span);
             }
             return true;
         }
@@ -2127,7 +2140,7 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
             }
             for (size_t i = 0; i < core->as.define_trait.count; i++) {
                 const IdmCoreTraitMethod *method = &core->as.define_trait.methods[i];
-                if (!idm_buf_append(buf, " (method ") || !dump_value(buf, method->name) || !idm_buf_appendf(buf, "/%u", method->arity)) return false;
+                if (!idm_buf_append(buf, " (method ") || !dump_value(buf, method->name) || !append_arity(buf, &method->arity)) return false;
                 if (method->has_default) {
                     if (!idm_buf_append(buf, " default=") || !idm_core_dump(buf, method->default_fn)) return false;
                 }
@@ -2139,7 +2152,7 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
                 !idm_buf_append(buf, " type=") || !dump_value(buf, core->as.implement_trait.type)) return false;
             for (size_t i = 0; i < core->as.implement_trait.count; i++) {
                 const IdmCoreTraitImpl *impl = &core->as.implement_trait.impls[i];
-                if (!idm_buf_append(buf, " (impl ") || !dump_value(buf, impl->name) || !idm_buf_appendf(buf, "/%u ", impl->arity) || !idm_core_dump(buf, impl->impl_fn) || !idm_buf_append_char(buf, ')')) return false;
+                if (!idm_buf_append(buf, " (impl ") || !dump_value(buf, impl->name) || !append_arity(buf, &impl->arity) || !idm_buf_append_char(buf, ' ') || !idm_core_dump(buf, impl->impl_fn) || !idm_buf_append_char(buf, ')')) return false;
             }
             return idm_buf_append_char(buf, ')');
         case IDM_CORE_METHOD_CALL:
@@ -2206,7 +2219,7 @@ static bool letrec_bindings_compact(IdmBuffer *buf, const IdmCore *core) {
 }
 
 static bool trait_method_compact(IdmBuffer *buf, const IdmCoreTraitMethod *method) {
-    if (!idm_buf_append(buf, "(method ") || !dump_value(buf, method->name) || !idm_buf_appendf(buf, "/%u", method->arity)) return false;
+    if (!idm_buf_append(buf, "(method ") || !dump_value(buf, method->name) || !append_arity(buf, &method->arity)) return false;
     if (method->has_default) {
         if (!idm_buf_append(buf, " default=") || !idm_core_dump(buf, method->default_fn)) return false;
     }
@@ -2214,7 +2227,7 @@ static bool trait_method_compact(IdmBuffer *buf, const IdmCoreTraitMethod *metho
 }
 
 static bool trait_impl_compact(IdmBuffer *buf, const IdmCoreTraitImpl *impl) {
-    if (!idm_buf_append(buf, "(impl ") || !dump_value(buf, impl->name) || !idm_buf_appendf(buf, "/%u ", impl->arity)) return false;
+    if (!idm_buf_append(buf, "(impl ") || !dump_value(buf, impl->name) || !append_arity(buf, &impl->arity) || !idm_buf_append_char(buf, ' ')) return false;
     if (!idm_core_dump(buf, impl->impl_fn)) return false;
     return idm_buf_append_char(buf, ')');
 }
@@ -2399,7 +2412,7 @@ static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent) {
                     continue;
                 }
                 idm_buf_destroy(&mc);
-                if (!idm_buf_append(buf, "(method ") || !dump_value(buf, method->name) || !idm_buf_appendf(buf, "/%u", method->arity)) return false;
+                if (!idm_buf_append(buf, "(method ") || !dump_value(buf, method->name) || !append_arity(buf, &method->arity)) return false;
                 if (method->has_default) {
                     if (!pretty_newline(buf, ci + 2) || !pretty_marker_child(buf, ci + 2, "default=", method->default_fn)) return false;
                 }
@@ -2422,7 +2435,7 @@ static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent) {
                     continue;
                 }
                 idm_buf_destroy(&ic);
-                if (!idm_buf_append(buf, "(impl ") || !dump_value(buf, impl->name) || !idm_buf_appendf(buf, "/%u", impl->arity)) return false;
+                if (!idm_buf_append(buf, "(impl ") || !dump_value(buf, impl->name) || !append_arity(buf, &impl->arity)) return false;
                 if (!pretty_newline(buf, ci + 2) || !core_pretty(buf, impl->impl_fn, ci + 2)) return false;
                 if (!idm_buf_append_char(buf, ')')) return false;
             }

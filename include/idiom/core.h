@@ -78,6 +78,7 @@ typedef enum {
     IDM_PRIM_MAKE_SYNTAX_LIST,
     IDM_PRIM_MAKE_SYNTAX_VECTOR,
     IDM_PRIM_MAKE_SYNTAX_TUPLE,
+    IDM_PRIM_MAKE_SYNTAX_DICT,
     IDM_PRIM_MAKE_SYNTAX_EXPR,
     IDM_PRIM_MAKE_SYNTAX_BODY,
     IDM_PRIM_MAKE_SYNTAX_GROUP,
@@ -272,14 +273,14 @@ typedef struct {
 
 typedef struct {
     IdmValue name;
-    uint32_t arity;
+    IdmArity arity;
     bool has_default;
     IdmCore *default_fn;
 } IdmCoreTraitMethod;
 
 typedef struct {
     IdmValue name;
-    uint32_t arity;
+    IdmArity arity;
     IdmCore *impl_fn;
 } IdmCoreTraitImpl;
 
@@ -457,9 +458,9 @@ IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, I
 IdmCore *idm_core_use_package(IdmValue name, IdmBytecodeModule *module, uint32_t init_fn, uint32_t *export_src, uint32_t *export_dst, char **export_names, size_t export_count, IdmCore *cont, IdmSpan span);
 IdmCore *idm_core_define_trait(IdmValue name, IdmSpan span);
 bool idm_core_define_trait_add_requirement(IdmCore *core, IdmValue requirement);
-bool idm_core_define_trait_add_method(IdmCore *core, IdmValue method, uint32_t arity, IdmCore *default_fn);
+bool idm_core_define_trait_add_method(IdmCore *core, IdmValue method, IdmArity arity, IdmCore *default_fn);
 IdmCore *idm_core_implement_trait(IdmValue trait, IdmValue type, IdmValue provider, IdmValue provider_key, IdmSpan span);
-bool idm_core_implement_trait_add_impl(IdmCore *core, IdmValue method, uint32_t arity, IdmCore *impl_fn);
+bool idm_core_implement_trait_add_impl(IdmCore *core, IdmValue method, IdmArity arity, IdmCore *impl_fn);
 IdmCore *idm_core_method_call(IdmValue trait, IdmValue method, IdmSpan span);
 bool idm_core_method_call_add_arg(IdmCore *core, IdmCore *arg);
 void idm_core_free(IdmCore *core);

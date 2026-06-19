@@ -33,7 +33,7 @@ struct SelPat {
         struct { SelPat *left; SelPat *right; } pair;
         struct { SelPat **items; size_t count; } seq;
         struct { SelPat **items; size_t count; SelPat *rest; } seq_rest;
-        struct { SelDictEntry *entries; size_t count; } dict;
+        struct { SelDictEntry *entries; size_t count; SelPat *rest; } dict;
     } as;
 };
 
@@ -211,11 +211,12 @@ IdmPattern *idm_pat_sequence_rest(IdmPatternKind kind, IdmPattern **items, size_
     return pat;
 }
 
-IdmPattern *idm_pat_dict(IdmDictPatternEntry *entries, size_t count, IdmSpan span) {
+IdmPattern *idm_pat_dict(IdmDictPatternEntry *entries, size_t count, IdmPattern *rest, IdmSpan span) {
     IdmPattern *pat = pat_alloc(IDM_PAT_DICT, span);
     if (!pat) return NULL;
     pat->as.dict.entries = entries;
     pat->as.dict.count = count;
+    pat->as.dict.rest = rest;
     return pat;
 }
 
@@ -245,6 +246,7 @@ void idm_pat_free(IdmPattern *pat) {
         case IDM_PAT_DICT:
             for (size_t i = 0; i < pat->as.dict.count; i++) idm_pat_free(pat->as.dict.entries[i].pattern);
             free(pat->as.dict.entries);
+            idm_pat_free(pat->as.dict.rest);
             break;
         default:
             break;
@@ -329,7 +331,16 @@ IdmPattern *idm_pat_clone(const IdmPattern *pat) {
                     }
                 }
             }
-            return idm_pat_dict(entries, pat->as.dict.count, pat->span);
+            IdmPattern *rest = NULL;
+            if (pat->as.dict.rest) {
+                rest = idm_pat_clone(pat->as.dict.rest);
+                if (!rest) {
+                    for (size_t i = 0; i < pat->as.dict.count; i++) idm_pat_free(entries[i].pattern);
+                    free(entries);
+                    return NULL;
+                }
+            }
+            return idm_pat_dict(entries, pat->as.dict.count, rest, pat->span);
         }
     }
     return NULL;
@@ -446,6 +457,66 @@ static void bindings_truncate(IdmPatternBindings *bindings, size_t count) {
     bindings->count = count;
 }
 
+static bool dict_key_in_entries(IdmValue key, const IdmDictPatternEntry *entries, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (idm_value_equal(key, entries[i].key)) return true;
+    }
+    return false;
+}
+
+static bool dict_rest_value(IdmRuntime *rt, IdmValue value, const IdmDictPatternEntry *entries, size_t count, IdmValue *out, IdmError *err, IdmSpan span) {
+    if (!rt) return idm_error_set(err, span, "runtime required for dict rest pattern");
+    size_t n = idm_dict_count(value);
+    IdmDictEntry *rest = n == 0 ? NULL : calloc(n, sizeof(*rest));
+    if (n != 0 && !rest) return idm_error_oom(err, span);
+    size_t rest_count = 0;
+    for (size_t i = 0; i < n; i++) {
+        IdmValue key = idm_nil();
+        IdmValue val = idm_nil();
+        if (!idm_dict_entry(value, i, &key, &val)) {
+            free(rest);
+            return idm_error_set(err, span, "dict rest pattern failed to read entry");
+        }
+        if (dict_key_in_entries(key, entries, count)) continue;
+        rest[rest_count].key = key;
+        rest[rest_count].value = val;
+        rest_count++;
+    }
+    *out = idm_dict(rt, rest, rest_count, err);
+    free(rest);
+    return !(err && err->present);
+}
+
+static bool sel_dict_key_in_entries(IdmValue key, const SelDictEntry *entries, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        if (idm_value_equal(key, entries[i].key)) return true;
+    }
+    return false;
+}
+
+static bool sel_dict_rest_value(IdmRuntime *rt, IdmValue value, const SelDictEntry *entries, size_t count, IdmValue *out, IdmError *err, IdmSpan span) {
+    if (!rt) return idm_error_set(err, span, "runtime required for dict rest pattern");
+    size_t n = idm_dict_count(value);
+    IdmDictEntry *rest = n == 0 ? NULL : calloc(n, sizeof(*rest));
+    if (n != 0 && !rest) return idm_error_oom(err, span);
+    size_t rest_count = 0;
+    for (size_t i = 0; i < n; i++) {
+        IdmValue key = idm_nil();
+        IdmValue val = idm_nil();
+        if (!idm_dict_entry(value, i, &key, &val)) {
+            free(rest);
+            return idm_error_set(err, span, "dict rest pattern failed to read entry");
+        }
+        if (sel_dict_key_in_entries(key, entries, count)) continue;
+        rest[rest_count].key = key;
+        rest[rest_count].value = val;
+        rest_count++;
+    }
+    *out = idm_dict(rt, rest, rest_count, err);
+    free(rest);
+    return !(err && err->present);
+}
+
 bool idm_pattern_match(IdmRuntime *rt, IdmPattern *pat, IdmValue value, IdmPatternBindings *bindings, IdmError *err) {
     if (!pat) return idm_error_set(err, idm_span_unknown(NULL), "cannot match null pattern");
     size_t checkpoint = bindings->count;
@@ -551,6 +622,11 @@ bool idm_pattern_match(IdmRuntime *rt, IdmPattern *pat, IdmValue value, IdmPatte
                 if (!idm_dict_get(value, pat->as.dict.entries[i].key, &item)) { ok = false; break; }
                 if (!idm_pattern_match(rt, pat->as.dict.entries[i].pattern, item, bindings, err)) { ok = false; break; }
             }
+            if (ok && pat->as.dict.rest) {
+                IdmValue rest = idm_nil();
+                if (!dict_rest_value(rt, value, pat->as.dict.entries, pat->as.dict.count, &rest, err, pat->span)) return false;
+                ok = idm_pattern_match(rt, pat->as.dict.rest, rest, bindings, err);
+            }
             break;
         }
     }
@@ -597,6 +673,7 @@ static void sel_pat_free(SelPat *pat) {
         case SEL_PAT_DICT:
             for (size_t i = 0; i < pat->as.dict.count; i++) sel_pat_free(pat->as.dict.entries[i].pattern);
             free(pat->as.dict.entries);
+            sel_pat_free(pat->as.dict.rest);
             break;
         case SEL_PAT_WILDCARD:
         case SEL_PAT_LITERAL:
@@ -698,6 +775,10 @@ static SelPat *sel_pat_from_idm(const IdmPattern *pat, const IdmPatternLocal *lo
                 out->as.dict.entries[i].key = pat->as.dict.entries[i].key;
                 out->as.dict.entries[i].pattern = sel_pat_from_idm(pat->as.dict.entries[i].pattern, locals, local_count, err);
                 if (!out->as.dict.entries[i].pattern) { sel_pat_free(out); return NULL; }
+            }
+            if (pat->as.dict.rest) {
+                out->as.dict.rest = sel_pat_from_idm(pat->as.dict.rest, locals, local_count, err);
+                if (!out->as.dict.rest) { sel_pat_free(out); return NULL; }
             }
             return out;
         }
@@ -902,6 +983,7 @@ static bool sel_pat_ctor(const SelPat *pat, SelCtor *out) {
             out->count = (uint32_t)pat->as.seq_rest.count;
             return pat->as.seq_rest.count <= UINT32_MAX;
         case SEL_PAT_DICT:
+            if (pat->as.dict.rest) return false;
             out->kind = SEL_CTOR_DICT;
             out->count = 0;
             return true;
@@ -1440,6 +1522,11 @@ static bool selector_match_value(IdmRuntime *rt, IdmValue value, const SelPat *p
                 IdmValue item = idm_nil();
                 if (!idm_dict_get(value, pat->as.dict.entries[i].key, &item)) return false;
                 if (!selector_match_value(rt, item, pat->as.dict.entries[i].pattern, bindings, err)) return false;
+            }
+            if (pat->as.dict.rest) {
+                IdmValue rest = idm_nil();
+                if (!sel_dict_rest_value(rt, value, pat->as.dict.entries, pat->as.dict.count, &rest, err, pat->span)) return false;
+                return selector_match_value(rt, rest, pat->as.dict.rest, bindings, err);
             }
             return true;
     }

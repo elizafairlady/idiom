@@ -49,6 +49,7 @@ typedef struct {
     char *name;
     PhaseSyntaxFn fn;
     bool exported;
+    bool hidden;
 } MacroDef;
 typedef struct {
     IdmScopeSet scopes;
@@ -67,7 +68,7 @@ typedef struct SavedFunctionContext_s {
 typedef struct {
     char *trait;
     char *name;
-    uint32_t arity;
+    IdmArity arity;
     bool is_field;
     IdmScopeSet scopes;
 } MethodSurfaceDef;
@@ -236,7 +237,7 @@ typedef struct {
 } EnforestParser;
 typedef struct {
     char *name;
-    uint32_t arity;
+    IdmArity arity;
     IdmCore *fn;
 } TraitMethodImpl;
 typedef struct {
@@ -293,10 +294,12 @@ bool ctx_seed(ExpandContext *ctx, IdmError *err);
 void end_clause_context(ExpandContext *ctx, SavedClauseContext *saved);
 void end_function_context(ExpandContext *ctx, SavedFunctionContext *saved);
 IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t index, size_t count, bool def_scope, IdmError *err);
+IdmCore *expand_package_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t index, size_t count, IdmError *err);
 IdmCore *expand_error(IdmError *err, IdmSpan span, const char *fmt, ...);
 IdmCore *expand_activate(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmSyntax *const *items, size_t index, size_t count, IdmSpan span, IdmError *err);
 IdmCore *expand_fn_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmError *err);
+bool function_literal_arity(const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmArity *out_arity, IdmError *err);
 IdmCore *expand_implement_trait_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err);
 IdmCore *expand_macro_use(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmError *err);
 IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t payload, IdmError *err);
@@ -323,7 +326,7 @@ bool install_imported_resolver(ExpandContext *ctx, const IdmScopeSet *scopes, Id
 bool install_artifact_traits(ExpandContext *ctx, const IdmPkgTrait *traits, size_t trait_count, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err);
 bool install_artifact_types(ExpandContext *ctx, const IdmPkgType *types, size_t type_count, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err);
 bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err);
-bool install_method_surface(ExpandContext *ctx, const char *trait, const char *name, uint32_t arity, bool is_field, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err);
+bool install_method_surface(ExpandContext *ctx, const char *trait, const char *name, IdmArity arity, bool is_field, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err);
 IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const char *field, IdmSpan span, IdmError *err);
 bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err);
 IdmCore *literal_from_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);

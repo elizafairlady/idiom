@@ -6,13 +6,14 @@ static bool trait_requirement_seen(const IdmTraitRequirementDef *requirements, s
 static bool trait_requirements_push(IdmTraitRequirementDef **requirements, size_t *count, size_t *cap, const char *name, IdmError *err, IdmSpan span);
 static void trait_requirements_destroy(IdmTraitRequirementDef *requirements, size_t count);
 static bool install_required_trait_methods(ExpandContext *ctx, const TraitDef *required, const IdmSyntax *name_syntax, IdmError *err);
-static bool method_signature_arity(const IdmSyntax *form, uint32_t *out_arity, IdmError *err);
+static bool method_signature_arity(const IdmSyntax *form, IdmArity *out_arity, IdmError *err);
+static bool method_arity_mismatch(IdmError *err, IdmSpan span, const char *trait, const char *name, const IdmArity *expected, const IdmArity *got);
 static IdmTraitMethodDef *find_decl_method(ExpandContext *ctx, const char *name);
-static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, uint32_t arity, IdmError *err);
+static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmArity arity, IdmError *err);
 static void trait_impls_destroy(TraitMethodImpl *impls, size_t count);
 static const IdmTraitMethodDef *find_trait_method_def(const IdmTraitMethodDef *methods, size_t count, const char *name);
 static bool trait_has_impl(const TraitMethodImpl *impls, size_t count, const char *name);
-static bool trait_impls_push(TraitMethodImpl **impls, size_t *count, size_t *cap, const char *name, uint32_t arity, IdmCore *fn, IdmError *err, IdmSpan span);
+static bool trait_impls_push(TraitMethodImpl **impls, size_t *count, size_t *cap, const char *name, IdmArity arity, IdmCore *fn, IdmError *err, IdmSpan span);
 static IdmCore *build_trait_implement_core(ExpandContext *ctx, const char *trait, const char *type, const IdmTraitMethodDef *methods, size_t method_count, const IdmSyntax *body, IdmSpan span, IdmError *err);
 static IdmCore *sequence_two(IdmCore *first, IdmCore *second, IdmSpan span, IdmError *err);
 static bool record_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, const IdmSyntax **out_body, bool *out_exported);
@@ -113,21 +114,23 @@ static bool install_required_trait_methods(ExpandContext *ctx, const TraitDef *r
     return ok;
 }
 
-static bool method_signature_arity(const IdmSyntax *form, uint32_t *out_arity, IdmError *err) {
+static bool method_signature_arity(const IdmSyntax *form, IdmArity *out_arity, IdmError *err) {
     const IdmSyntax *name = NULL;
     size_t param_start = 0;
-    bool has_body = false;
-    if (!method_form_parts(form, &name, &param_start, &has_body, err)) return false;
-    (void)name;
-    size_t arity = 0;
-    for (size_t i = param_start; i < form->as.seq.count; i++) {
-        const IdmSyntax *item = form->as.seq.items[i];
-        if (syn_is_word(item, "->") || syn_is_form(item, "%-body")) break;
-        arity++;
-    }
-    if (arity > UINT32_MAX) return idm_error_set(err, form->span, "method arity is too large");
-    *out_arity = (uint32_t)arity;
-    return true;
+    if (!method_form_parts(form, &name, &param_start, NULL, err)) return false;
+    return function_literal_arity(name, form->as.seq.items, param_start, form->as.seq.count, out_arity, err);
+}
+
+static bool method_arity_mismatch(IdmError *err, IdmSpan span, const char *trait, const char *name, const IdmArity *expected, const IdmArity *got) {
+    IdmBuffer expected_buf;
+    IdmBuffer got_buf;
+    idm_buf_init(&expected_buf);
+    idm_buf_init(&got_buf);
+    bool described = idm_arity_describe(&expected_buf, expected) && idm_arity_describe(&got_buf, got);
+    bool ok = idm_error_set(err, span, "method '%s.%s' arity mismatch: expected %s got %s", trait, name, described ? expected_buf.data : "?", described ? got_buf.data : "?");
+    idm_buf_destroy(&expected_buf);
+    idm_buf_destroy(&got_buf);
+    return ok;
 }
 
 static IdmTraitMethodDef *find_decl_method(ExpandContext *ctx, const char *name) {
@@ -135,7 +138,7 @@ static IdmTraitMethodDef *find_decl_method(ExpandContext *ctx, const char *name)
     return NULL;
 }
 
-static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, uint32_t arity, IdmError *err) {
+static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmArity arity, IdmError *err) {
     if (find_decl_method(ctx, name_syntax->as.text)) return idm_error_set(err, name_syntax->span, "trait '%s' declares method '%s' more than once", ctx->trait_name ? ctx->trait_name : "<anonymous>", name_syntax->as.text);
     if (ctx->decl_method_count == ctx->decl_method_cap) {
         size_t cap = ctx->decl_method_cap ? ctx->decl_method_cap * 2u : 4u;
@@ -166,7 +169,7 @@ bool predeclare_trait_methods(ExpandContext *ctx, IdmSyntax *const *items, size_
         if (!method_form_parts(items[i], &name, &param_start, &has_body, NULL)) continue;
         (void)param_start;
         (void)has_body;
-        uint32_t arity = 0;
+        IdmArity arity = idm_arity_unknown();
         if (!method_signature_arity(items[i], &arity, err)) return false;
         if (!add_decl_method(ctx, name, arity, err)) return false;
     }
@@ -179,7 +182,7 @@ IdmCore *expand_method_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     size_t param_start = 0;
     bool has_body = false;
     if (!method_form_parts(form, &name, &param_start, &has_body, err)) return NULL;
-    uint32_t arity = 0;
+    IdmArity arity = idm_arity_unknown();
     if (!method_signature_arity(form, &arity, err)) return NULL;
     IdmTraitMethodDef *method = find_decl_method(ctx, name->as.text);
     if (!method) {
@@ -188,7 +191,7 @@ IdmCore *expand_method_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     }
     if (!method) return (IdmCore *)(uintptr_t)idm_error_oom(err, name->span);
     if (method->seen_decl) return expand_error(err, name->span, "trait '%s' declares method '%s' more than once", ctx->trait_name, name->as.text);
-    if (method->arity != arity) return expand_error(err, name->span, "method '%s.%s' arity changed during declaration", ctx->trait_name, name->as.text);
+    if (!idm_arity_equal(&method->arity, &arity)) return expand_error(err, name->span, "method '%s.%s' arity changed during declaration", ctx->trait_name, name->as.text);
     method->seen_decl = true;
     if (has_body) {
         IdmCore *fn = expand_function_literal(ctx, name->as.text, form->as.seq.items[1], form->as.seq.items, param_start, form->as.seq.count, err);
@@ -217,7 +220,7 @@ static bool trait_has_impl(const TraitMethodImpl *impls, size_t count, const cha
     return false;
 }
 
-static bool trait_impls_push(TraitMethodImpl **impls, size_t *count, size_t *cap, const char *name, uint32_t arity, IdmCore *fn, IdmError *err, IdmSpan span) {
+static bool trait_impls_push(TraitMethodImpl **impls, size_t *count, size_t *cap, const char *name, IdmArity arity, IdmCore *fn, IdmError *err, IdmSpan span) {
     if (*count == *cap) {
         size_t next_cap = *cap ? *cap * 2u : 4u;
         TraitMethodImpl *next = realloc(*impls, next_cap * sizeof(*next));
@@ -262,11 +265,11 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, const char *trait
             break;
         }
         if (!has_body) { expand_error(err, stmt->span, "implement method '%s' requires an implementation body", name->as.text); ok = false; break; }
-        uint32_t arity = 0;
+        IdmArity arity = idm_arity_unknown();
         if (!method_signature_arity(stmt, &arity, err)) { ok = false; break; }
         const IdmTraitMethodDef *contract = find_trait_method_def(methods, method_count, name->as.text);
         if (!contract) { expand_error(err, name->span, "trait '%s' has no method '%s'", trait, name->as.text); ok = false; break; }
-        if (contract->arity != arity) { expand_error(err, name->span, "method '%s.%s' expects %u argument(s), got %u", trait, name->as.text, contract->arity, arity); ok = false; break; }
+        if (!idm_arity_equal(&contract->arity, &arity)) { method_arity_mismatch(err, name->span, trait, name->as.text, &contract->arity, &arity); ok = false; break; }
         if (trait_has_impl(impls, impl_count, name->as.text)) { expand_error(err, name->span, "implement for '%s' provides method '%s' more than once", trait, name->as.text); ok = false; break; }
         IdmCore *fn = expand_function_literal(ctx, name->as.text, stmt->as.seq.items[1], stmt->as.seq.items, param_start, stmt->as.seq.count, err);
         if (!fn) { ok = false; break; }
@@ -490,12 +493,12 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
             ok = false;
             break;
         }
-        uint32_t arity = 0;
+        IdmArity arity = idm_arity_unknown();
         if (!method_signature_arity(stmt, &arity, err)) { ok = false; break; }
         IdmTraitMethodDef *method = find_decl_method(ctx, method_name->as.text);
         if (!method) { ok = false; idm_error_oom(err, method_name->span); break; }
         if (method->seen_decl) { expand_error(err, method_name->span, "trait '%s' declares method '%s' more than once", identity, method_name->as.text); ok = false; break; }
-        if (method->arity != arity) { expand_error(err, method_name->span, "method '%s.%s' arity changed during declaration", identity, method_name->as.text); ok = false; break; }
+        if (!idm_arity_equal(&method->arity, &arity)) { expand_error(err, method_name->span, "method '%s.%s' arity changed during declaration", identity, method_name->as.text); ok = false; break; }
         method->seen_decl = true;
         if (has_body) {
             IdmCore *fn = expand_function_literal(ctx, method_name->as.text, stmt->as.seq.items[1], stmt->as.seq.items, param_start, stmt->as.seq.count, err);
@@ -966,7 +969,7 @@ static bool register_record_type_surface(ExpandContext *ctx, const IdmSyntax *na
             type_def_destroy(type);
             return idm_error_oom(err, span);
         }
-        if (!install_method_surface(ctx, identity, fields[i], 1u, true, &method_scopes, ctx->unit, ctx->unit_key, err)) {
+        if (!install_method_surface(ctx, identity, fields[i], idm_arity_exact(1u), true, &method_scopes, ctx->unit, ctx->unit_key, err)) {
             idm_core_free(define);
             idm_core_free(implement);
             idm_scope_set_destroy(&method_scopes);
@@ -1021,6 +1024,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         record_field_names_destroy(fields, field_count);
         return NULL;
     }
+    owned_identity = NULL;
 
     bool top_level = ctx->frame == IDM_FRAME_TOP;
     size_t saved_count = ctx->bindings.count;

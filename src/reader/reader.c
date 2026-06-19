@@ -588,6 +588,81 @@ static bool ident_is(Parser *p, const char *text) {
     return cur(p)->kind == TOK_IDENT && strcmp(cur(p)->lexeme, text) == 0;
 }
 
+static bool keyword_value_missing(Parser *p) {
+    switch (cur(p)->kind) {
+        case TOK_EOF:
+        case TOK_NEWLINE:
+        case TOK_SEMI:
+        case TOK_RPAREN:
+        case TOK_RBRACKET:
+        case TOK_RBRACE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static IdmSyntax *keyword_key_syntax(Parser *p, Token *tok) {
+    size_t len = strlen(tok->lexeme);
+    char *name = idm_strndup(tok->lexeme, len > 0 ? len - 1u : 0);
+    if (!name) {
+        idm_error_oom(p->err, tok->span);
+        return NULL;
+    }
+    IdmSyntax *key = idm_syn_atom(name, tok->span);
+    free(name);
+    if (!key) {
+        idm_error_oom(p->err, tok->span);
+        return NULL;
+    }
+    idm_syn_set_token(key, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+    return key;
+}
+
+static bool keyword_after_newlines(Parser *p) {
+    size_t i = p->pos;
+    while (i < p->count && p->tokens[i].kind == TOK_NEWLINE) i++;
+    return i < p->count && p->tokens[i].kind == TOK_KEYWORD;
+}
+
+static bool parse_keyword_pair_into(Parser *p, IdmSyntax *dict) {
+    Token *tok = take(p);
+    IdmSyntax *key = keyword_key_syntax(p, tok);
+    if (!key) return false;
+    if (keyword_value_missing(p)) {
+        idm_syn_free(key);
+        idm_error_set(p->err, tok->span, "keyword '%s' requires a value", tok->lexeme);
+        return false;
+    }
+    IdmSyntax *value = parse_primary(p);
+    if (!value || !idm_syn_append(dict, key) || !idm_syn_append(dict, value)) {
+        idm_syn_free(key);
+        idm_syn_free(value);
+        return false;
+    }
+    return true;
+}
+
+static IdmSyntax *parse_keyword_dict(Parser *p) {
+    IdmSyntax *dict = idm_syn_dict(cur(p)->span);
+    if (!dict) {
+        idm_error_oom(p->err, cur(p)->span);
+        return NULL;
+    }
+    while (at(p, TOK_KEYWORD)) {
+        if (!parse_keyword_pair_into(p, dict)) {
+            idm_syn_free(dict);
+            return NULL;
+        }
+        if (at(p, TOK_NEWLINE) && keyword_after_newlines(p)) {
+            while (at(p, TOK_NEWLINE)) p->pos++;
+            continue;
+        }
+        if (!at(p, TOK_KEYWORD)) break;
+    }
+    return dict;
+}
+
 
 
 
@@ -600,6 +675,14 @@ static IdmSyntax *parse_container(Parser *p, IdmSyntaxKind kind, TokenKind close
     if (!seq) return NULL;
     skip_separators(p);
     while (!at(p, close) && !at(p, TOK_EOF)) {
+        if (kind == IDM_SYN_DICT && at(p, TOK_KEYWORD)) {
+            if (!parse_keyword_pair_into(p, seq)) {
+                idm_syn_free(seq);
+                return NULL;
+            }
+            skip_separators(p);
+            continue;
+        }
         IdmSyntax *item = parse_primary(p);
         if (!item || !idm_syn_append(seq, item)) {
             idm_syn_free(seq);
@@ -685,14 +768,7 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
             return syn;
         }
         case TOK_KEYWORD: {
-            take(p);
-            size_t len = strlen(tok->lexeme);
-            char *name = idm_strndup(tok->lexeme, len > 0 ? len - 1u : 0);
-            if (!name) { idm_error_oom(p->err, tok->span); return NULL; }
-            IdmSyntax *syn = idm_syn_atom(name, tok->span);
-            free(name);
-            if (syn) idm_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
-            return syn;
+            return parse_keyword_dict(p);
         }
         case TOK_INT: {
             take(p);

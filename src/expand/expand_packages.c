@@ -547,7 +547,7 @@ bool install_artifact_types(ExpandContext *ctx, const IdmPkgType *types, size_t 
         ctx->type_count++;
         if (!qualifier) {
             for (size_t f = 0; f < entry->field_count; f++) {
-                if (!install_method_surface(ctx, entry->identity, entry->fields[f], 1u, true, scopes, provider, provider_key, err)) {
+                if (!install_method_surface(ctx, entry->identity, entry->fields[f], idm_arity_exact(1u), true, scopes, provider, provider_key, err)) {
                     surface_rollback(ctx, &checkpoint);
                     free(qualified);
                     return false;
@@ -846,11 +846,49 @@ static bool install_relocated_operator(ExpandContext *ctx, const IdmOperatorDef 
     if (delta == 0) return install_imported_operator(ctx, op, binding_scopes, provider, provider_key, err);
     IdmOperatorDef local = *op;
     idm_scope_set_init(&local.scopes);
+    IdmModuleRef *target_module = NULL;
     if (!idm_scope_set_copy(&local.scopes, &op->scopes)) return idm_error_oom(err, idm_span_unknown(NULL));
     idm_scope_set_relocate(&local.scopes, min_id, delta);
+    if (op->target_module) {
+        target_module = relocated_module_ref(ctx, op->target_module, min_id, delta, err);
+        if (!target_module) {
+            idm_scope_set_destroy(&local.scopes);
+            return false;
+        }
+        local.target_module = target_module;
+    }
     bool ok = install_imported_operator(ctx, &local, binding_scopes, provider, provider_key, err);
+    idm_module_ref_release(target_module);
     idm_scope_set_destroy(&local.scopes);
     return ok;
+}
+
+static bool copy_operator_target_macro(ExpandContext *ctx, IdmOperatorDef *dst, const IdmOperatorDef *src, IdmError *err) {
+    if (!src->target_name) return true;
+    IdmSyntax *word = idm_syn_word(src->target_name, idm_span_unknown(NULL));
+    if (!word) return idm_error_oom(err, idm_span_unknown(NULL));
+    bool scoped = true;
+    for (size_t i = 0; scoped && i < src->scopes.count; i++) scoped = idm_syn_scope_add(word, 0, src->scopes.items[i]);
+    if (!scoped) {
+        idm_syn_free(word);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
+    const IdmBinding *binding = resolve_default(ctx, word, &status);
+    idm_syn_free(word);
+    if (status != IDM_RESOLVE_OK || !binding || binding->kind != IDM_BIND_TRANSFORMER) return true;
+    if (binding->payload >= ctx->macro_count) {
+        return idm_error_set(err, idm_span_unknown(NULL), "operator target macro payload %u is out of bounds", binding->payload);
+    }
+    MacroDef *macro = &ctx->macros[binding->payload];
+    if (macro->fn.closure_backed || !macro->fn.module) {
+        return idm_error_set(err, idm_span_unknown(NULL), "exported operator '%s' target macro '%s' cannot be serialized", src->name, src->target_name);
+    }
+    dst->target_module = idm_module_ref_retain(macro->fn.module);
+    dst->target_function_index = macro->fn.function_index;
+    dst->target_phase_ns = macro->fn.phase_ns;
+    dst->target_phase_env = idm_phase_env_retain(macro->fn.phase_env);
+    return true;
 }
 
 bool activate_artifact(ExpandContext *ctx, const char *activation_name, const IdmArtifact *art, IdmScopeId base, const IdmScopeSet *act_scopes, IdmSpan span, IdmError *err) {
@@ -946,7 +984,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             }
         }
     }
-    IdmCore *body = ok ? expand_body_items(&ctx, scoped_pkg->as.seq.items, 1, scoped_pkg->as.seq.count, false, err) : NULL;
+    IdmCore *body = ok ? expand_package_body_items(&ctx, scoped_pkg->as.seq.items, 1, scoped_pkg->as.seq.count, err) : NULL;
     idm_syn_free(scoped_pkg);
     rt->phase_reads = old_reads;
     if (body && reads.failed) {
@@ -1110,7 +1148,8 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                 d->exported = true;
                 idm_scope_set_init(&d->scopes);
                 bool sok = idm_scope_set_copy(&d->scopes, &ctx.operators[i].scopes);
-                if (!d->name || (ctx.operators[i].capture && !d->capture) || (ctx.operators[i].target_name && !d->target_name) || !sok) { copy_ok = false; break; }
+                if (!d->name || (ctx.operators[i].capture && !d->capture) || (ctx.operators[i].target_name && !d->target_name) || !sok ||
+                    !copy_operator_target_macro(&ctx, d, &ctx.operators[i], err)) { copy_ok = false; break; }
                 k++;
             }
         }
@@ -1158,7 +1197,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
         if (exports) { for (size_t i = 0; i < export_count; i++) free(exports[i].name); free(exports); }
         if (globals) { for (size_t i = 0; i < global_count; i++) idm_pkg_global_destroy(&globals[i]); free(globals); }
         if (macros) { for (size_t i = 0; i < macro_count; i++) idm_pkg_macro_destroy(&macros[i]); free(macros); }
-        if (operators) { for (size_t i = 0; i < op_count; i++) { free(operators[i].name); free(operators[i].target_name); idm_scope_set_destroy(&operators[i].scopes); } free(operators); }
+        if (operators) { for (size_t i = 0; i < op_count; i++) idm_operator_def_destroy(&operators[i]); free(operators); }
         if (types) { for (size_t i = 0; i < type_count; i++) idm_pkg_type_destroy(&types[i]); free(types); }
         if (pkg_traits) { for (size_t i = 0; i < pkg_trait_count; i++) idm_pkg_trait_destroy(&pkg_traits[i]); free(pkg_traits); }
         idm_module_ref_release(res_module);

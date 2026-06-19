@@ -1,20 +1,20 @@
-operator == precedence: 30 assoc: left capture: infix -> eq?
-operator != precedence: 30 assoc: left capture: infix -> neq?
-operator < precedence: 30 assoc: left capture: infix -> lt?
-operator > precedence: 30 assoc: left capture: infix -> gt?
-operator <= precedence: 30 assoc: left capture: infix -> lte?
-operator >= precedence: 30 assoc: left capture: infix -> gte?
-operator + precedence: 50 assoc: left capture: infix -> add
-operator - precedence: 50 assoc: left capture: infix -> sub
-operator * precedence: 60 assoc: left capture: infix -> mul
-operator / precedence: 60 assoc: left capture: infix -> div
-operator % precedence: 60 assoc: left capture: infix -> mod
-operator // precedence: 60 assoc: left capture: infix -> floor-div
-operator %% precedence: 60 assoc: left capture: infix -> floor-mod
-operator ** precedence: 70 assoc: right capture: infix -> pow
-operator - precedence: 80 capture: prefix -> neg
+operator == precedence: 30 assoc: left capture: :infix -> eq?
+operator != precedence: 30 assoc: left capture: :infix -> neq?
+operator < precedence: 30 assoc: left capture: :infix -> lt?
+operator > precedence: 30 assoc: left capture: :infix -> gt?
+operator <= precedence: 30 assoc: left capture: :infix -> lte?
+operator >= precedence: 30 assoc: left capture: :infix -> gte?
+operator + precedence: 50 assoc: left capture: :infix -> add
+operator - precedence: 50 assoc: left capture: :infix -> sub
+operator * precedence: 60 assoc: left capture: :infix -> mul
+operator / precedence: 60 assoc: left capture: :infix -> div
+operator % precedence: 60 assoc: left capture: :infix -> mod
+operator // precedence: 60 assoc: left capture: :infix -> floor-div
+operator %% precedence: 60 assoc: left capture: :infix -> floor-mod
+operator ** precedence: 70 assoc: right capture: :infix -> pow
+operator - precedence: 80 capture: :prefix -> neg
 
-export defmacro thread-first stx do
+operator |> precedence: 10 assoc: left capture: {:infix :expression} macro stx do
   defn collect_from do
     i n _syn when (i == n) -> '()
     i n syn -> cons (syntax-nth syn i) (collect_from (i + 1) n syn)
@@ -34,7 +34,7 @@ export defmacro thread-first stx do
   end
 end
 
-export defmacro thread-last stx do
+operator |>> precedence: 10 assoc: left capture: {:infix :expression} macro stx do
   defn collect_with_last do
     i n _syn last when (i == n) -> list last
     i n syn last -> cons (syntax-nth syn i) (collect_with_last (i + 1) n syn last)
@@ -53,6 +53,3 @@ export defmacro thread-last stx do
     make-syntax-expr stx (list right left)
   end
 end
-
-operator |> precedence: 10 assoc: left capture: {infix expression} -> thread-first
-operator |>> precedence: 10 assoc: left capture: {infix expression} -> thread-last

@@ -1,5 +1,5 @@
 CC ?= cc
-VERSION := 0.34.0-dev
+VERSION := 0.44.0-dev
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -g -D_POSIX_C_SOURCE=200809L -Iinclude -DIDM_VERSION=\"$(VERSION)\"
 DEPFLAGS ?= -MMD -MP
 LDFLAGS ?= -lpthread -lm
@@ -115,6 +115,7 @@ conformance: test sanitize tsan
 
 clean:
 	rm -rf build
+	find . -iname "*.ic" -delete
 
 -include $(DEPS)
 

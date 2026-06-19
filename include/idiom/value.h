@@ -74,14 +74,14 @@ typedef struct {
 
 typedef struct {
     const char *name;
-    uint32_t arity;
+    IdmArity arity;
     bool has_default;
     IdmValue default_impl;
 } IdmTraitMethodSpec;
 
 typedef struct {
     const char *name;
-    uint32_t arity;
+    IdmArity arity;
     IdmValue impl;
 } IdmTraitImplSpec;
 
@@ -94,7 +94,7 @@ typedef struct {
 typedef struct {
     char *trait;
     char *method;
-    uint32_t arity;
+    IdmArity arity;
     bool has_default;
     IdmValue default_impl;
 } IdmRuntimeTraitMethod;

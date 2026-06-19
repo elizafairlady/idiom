@@ -418,13 +418,13 @@ static void test_compile_time_surface_scoping(void) {
         false);
     expect_expand_result("<surface-scope-ok-operator>",
         "do\n"
-        "  operator <+> precedence: 6 assoc: left capture: infix -> add\n"
+        "  operator <+> precedence: 6 assoc: left capture: :infix -> add\n"
         "  3 <+> 4\n"
         "end\n",
         true);
     expect_expand_result("<surface-scope-leak-operator>",
         "do\n"
-        "  operator <+> precedence: 6 assoc: left capture: infix -> add\n"
+        "  operator <+> precedence: 6 assoc: left capture: :infix -> add\n"
         "end\n"
         "3 <+> 4\n",
         false);

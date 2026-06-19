@@ -1,4 +1,4 @@
 package exporter2
-operator <+> precedence: 6 assoc: left capture: infix -> sub
+operator <+> precedence: 6 assoc: left capture: :infix -> sub
 export defmacro answer s -> (make-syntax-int s 7)
 export defn who x -> :second

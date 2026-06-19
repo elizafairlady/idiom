@@ -5,8 +5,9 @@ suite do
   test "protocol activation and trait implementation compose" do
     got = do
       protocol QOps do
-        defn qmul a b -> mul a b
-        operator <*!> precedence: 50 assoc: left capture: infix -> qmul
+        operator <*!> precedence: 50 assoc: left capture: :infix do
+          a b -> mul a b
+        end
       end
       trait QSize do
         method qsize x
@@ -41,6 +42,34 @@ suite do
     implement DirectMethod on int
     assert-eq (show 42) "m:42"
   end
+  test "trait method default accepts direct multi-clause body" do
+    trait DirectMultiMethod do
+      method pick do
+        x -> x
+        _x y -> y
+      end
+    end
+    implement DirectMultiMethod on int
+    assert-inspect {(pick 4) (pick 4 9) (4.pick) (4.pick 9)} "{4 9 4 9}"
+  end
+  test "implement method accepts direct multi-clause body" do
+    trait ImplMultiMethod do
+      method pick do
+        x -> x
+        x y -> x + y
+      end
+    end
+    implement ImplMultiMethod on int do
+      method pick do
+        x -> x
+        x y -> x * y
+      end
+    end
+    assert-inspect {(pick 4) (pick 4 9) (4.pick) (4.pick 9)} "{4 36 4 36}"
+  end
+  test "implement method arity set must match trait contract" do
+    assert-expand-error "trait NarrowImpl do\n  method pick do\n    x -> x\n    x y -> y\n  end\nend\nimplement NarrowImpl on int do\n  method pick x -> x\nend" "arity mismatch"
+  end
   test "implements? resolves trait names hygienically" do
     got = do
       trait R do
@@ -61,7 +90,7 @@ suite do
   end
   test "trait and protocol declarations roll back outside their block" do
     assert-expand-error "do\n  trait S do\n    method sz x\n  end\n  :ok\nend\nsz 1" "unbound identifier 'sz'"
-    assert-expand-error "do\n  protocol Shellp do\n    defn shelp a -> a\n    operator <!!> precedence: 50 assoc: left capture: infix -> shelp\n  end\n  :ok\nend\n1 <!!> 2" "unbound identifier"
+    assert-expand-error "do\n  protocol Shellp do\n    operator <!!> precedence: 50 assoc: left capture: :infix do\n      a b -> a\n    end\n  end\n  :ok\nend\n1 <!!> 2" "unbound identifier"
   end
   test "dispatch-cache-does-not-misserve-across-types" do
     trait Tag do method tag x end

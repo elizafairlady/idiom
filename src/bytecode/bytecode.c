@@ -10,6 +10,31 @@
 
 static IdmIntern g_span_files;
 
+static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err);
+
+static bool verify_arity_operands(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, IdmError *err) {
+    uint32_t ignored = 0;
+    for (size_t i = 0; i < 5u; i++) {
+        if (!verify_operand(module, ip, op, &ignored, err)) return false;
+    }
+    return true;
+}
+
+static bool append_arity_operands(IdmBuffer *buf, const IdmBytecodeModule *module, size_t *ip) {
+    if (*ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+    for (size_t i = 0; i < 5u; i++) {
+        if (!idm_buf_appendf(buf, " %u", module->code[(*ip)++])) return false;
+    }
+    return true;
+}
+
+static bool copy_arity_operands(const IdmBytecodeModule *src, IdmBytecodeModule *dst, size_t *ip, IdmError *err) {
+    for (size_t i = 0; i < 5u; i++) {
+        if (!idm_bc_emit(dst, src->code[(*ip)++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
+}
+
 static bool span_file_index(IdmBytecodeModule *module, const char *file, uint32_t *out_index) {
     const IdmSymbol *sym = idm_intern(&g_span_files, IDM_SYMBOL_WORD, file);
     if (!sym) return false;
@@ -192,7 +217,7 @@ static bool intern_pattern_literals(IdmRuntime *rt, IdmPattern *pat, IdmError *e
                 if (err->present) return false;
                 if (!intern_pattern_literals(rt, pat->as.dict.entries[i].pattern, err)) return false;
             }
-            return true;
+            return intern_pattern_literals(rt, pat->as.dict.rest, err);
         default:
             return true;
     }
@@ -433,7 +458,7 @@ bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
                     uint32_t ignored = 0;
                     if (!verify_operand(module, &ip, op, &method_const, err)) return false;
                     if (method_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "DEFINE_TRAIT method constant %u out of bounds", method_const);
-                    if (!verify_operand(module, &ip, op, &ignored, err)) return false;
+                    if (!verify_arity_operands(module, &ip, op, err)) return false;
                     if (!verify_operand(module, &ip, op, &ignored, err)) return false;
                     if (ignored > 1u) return idm_error_set(err, idm_span_unknown(NULL), "DEFINE_TRAIT default flag must be 0 or 1");
                 }
@@ -456,10 +481,9 @@ bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
                 if (!verify_operand(module, &ip, op, &method_count, err)) return false;
                 for (uint32_t i = 0; i < method_count; i++) {
                     uint32_t method_const = 0;
-                    uint32_t ignored = 0;
                     if (!verify_operand(module, &ip, op, &method_const, err)) return false;
                     if (method_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "IMPLEMENT_TRAIT method constant %u out of bounds", method_const);
-                    if (!verify_operand(module, &ip, op, &ignored, err)) return false;
+                    if (!verify_arity_operands(module, &ip, op, err)) return false;
                 }
                 break;
             }
@@ -672,9 +696,11 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                     if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
                 }
                 for (uint32_t i = 0; i < method_count; i++) {
-                    if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    if (!idm_buf_appendf(buf, " %u %u %u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
-                    ip += 3u;
+                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
+                    if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
+                    if (!append_arity_operands(buf, module, &ip)) return false;
+                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
+                    if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
                 }
                 break;
             }
@@ -687,9 +713,9 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 uint32_t method_count = module->code[ip++];
                 if (!idm_buf_appendf(buf, " %u %u %u %u %u", trait_const, type_const, provider_const, provider_key_const, method_count)) return false;
                 for (uint32_t i = 0; i < method_count; i++) {
-                    if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    if (!idm_buf_appendf(buf, " %u %u", module->code[ip], module->code[ip + 1u])) return false;
-                    ip += 2u;
+                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
+                    if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
+                    if (!append_arity_operands(buf, module, &ip)) return false;
                 }
                 break;
             }
@@ -804,6 +830,8 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned de
                 if (!serialize_value(out, pat->as.dict.entries[i].key, depth + 1u, err)) return false;
                 if (!serialize_pattern(out, pat->as.dict.entries[i].pattern, depth + 1u, err)) return false;
             }
+            if (!idm_buf_put_u8(out, pat->as.dict.rest ? 1u : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (pat->as.dict.rest && !serialize_pattern(out, pat->as.dict.rest, depth + 1u, err)) return false;
             return true;
         }
         default:
@@ -812,7 +840,7 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned de
 }
 
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err) {
-    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, 11u)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, 12u)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u32(out, (uint32_t)module->const_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->const_count; i++) if (!serialize_value(out, module->constants[i], 0u, err)) return false;
     if (!idm_buf_put_u32(out, (uint32_t)module->function_count)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -978,9 +1006,14 @@ static IdmPattern *deserialize_pattern(IdmRuntime *rt, IdmByteReader *r, unsigne
                 if (!deserialize_value(rt, r, &entries[i].key, depth + 1u, err)) ok = false;
                 else { entries[i].pattern = deserialize_pattern(rt, r, depth + 1u, err); if (!entries[i].pattern) ok = false; }
             }
-            if (!ok) { for (uint32_t i = 0; i < n; i++) if (entries[i].pattern) idm_pat_free(entries[i].pattern); free(entries); return NULL; }
-            IdmPattern *p = idm_pat_dict(entries, n, span);
-            if (!p) { for (uint32_t i = 0; i < n; i++) idm_pat_free(entries[i].pattern); free(entries); idm_error_oom(err, span); }
+            uint8_t has_rest = ok ? idm_rd_u8(r) : 0u;
+            if (ok && !r->ok) { idm_error_set(err, span, "truncated pattern dict rest"); ok = false; }
+            IdmPattern *rest = NULL;
+            if (ok && has_rest > 1u) { idm_error_set(err, span, "invalid pattern dict rest flag"); ok = false; }
+            if (ok && has_rest) { rest = deserialize_pattern(rt, r, depth + 1u, err); if (!rest) ok = false; }
+            if (!ok) { for (uint32_t i = 0; i < n; i++) if (entries[i].pattern) idm_pat_free(entries[i].pattern); free(entries); idm_pat_free(rest); return NULL; }
+            IdmPattern *p = idm_pat_dict(entries, n, rest, span);
+            if (!p) { for (uint32_t i = 0; i < n; i++) idm_pat_free(entries[i].pattern); free(entries); idm_pat_free(rest); idm_error_oom(err, span); }
             return p;
         }
         default:
@@ -995,7 +1028,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     if (len < 8u || memcmp(data, "IDMC", 4u) != 0) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "not an .ic module"); }
     r.pos = 4u;
     uint32_t version = idm_rd_u32(&r);
-    if (version != 11u) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
+    if (version != 12u) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
     uint32_t const_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < const_count && r.ok; i++) {
         IdmValue v;
@@ -1143,9 +1176,9 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
                 }
                 for (uint32_t i = 0; i < method_count; i++) {
                     uint32_t method_const = src->code[ip++];
-                    uint32_t arity = src->code[ip++];
+                    if (!idm_bc_emit(dst, method_const + const_off, NULL) || !copy_arity_operands(src, dst, &ip, err)) return false;
                     uint32_t has_default = src->code[ip++];
-                    if (!idm_bc_emit(dst, method_const + const_off, NULL) || !idm_bc_emit(dst, arity, NULL) || !idm_bc_emit(dst, has_default, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                    if (!idm_bc_emit(dst, has_default, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 }
                 break;
             }
@@ -1160,8 +1193,7 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
                     !idm_bc_emit(dst, method_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 for (uint32_t i = 0; i < method_count; i++) {
                     uint32_t method_const = src->code[ip++];
-                    uint32_t arity = src->code[ip++];
-                    if (!idm_bc_emit(dst, method_const + const_off, NULL) || !idm_bc_emit(dst, arity, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                    if (!idm_bc_emit(dst, method_const + const_off, NULL) || !copy_arity_operands(src, dst, &ip, err)) return false;
                 }
                 break;
             }
@@ -1406,7 +1438,7 @@ static bool pattern_relocate_syntax(IdmRuntime *rt, IdmPattern *pat, IdmScopeId 
                 if (!value_relocate_syntax(rt, pat->as.dict.entries[i].key, min_id, delta, &pat->as.dict.entries[i].key, &changed, err)) return false;
                 if (!pattern_relocate_syntax(rt, pat->as.dict.entries[i].pattern, min_id, delta, err)) return false;
             }
-            return true;
+            return pattern_relocate_syntax(rt, pat->as.dict.rest, min_id, delta, err);
         default:
             return true;
     }

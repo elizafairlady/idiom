@@ -29,6 +29,42 @@ static void test_trait_methods_runtime_dispatch(void) {
         "42.show\n",
         "\"dot:42\"");
     check_value_written(&rt,
+        "trait MultiDefault do\n"
+        "  method pick do\n"
+        "    x -> x\n"
+        "    x y -> y\n"
+        "  end\n"
+        "end\n"
+        "implement MultiDefault on int\n"
+        "{(pick 4) (pick 4 9) (4.pick) (4.pick 9)}\n",
+        "{4 9 4 9}");
+    check_value_written(&rt,
+        "trait MultiImpl do\n"
+        "  method pick do\n"
+        "    x -> x\n"
+        "    x y -> y\n"
+        "  end\n"
+        "end\n"
+        "implement MultiImpl on int do\n"
+        "  method pick do\n"
+        "    x -> x\n"
+        "    x y -> add x y\n"
+        "  end\n"
+        "end\n"
+        "{(pick 4) (pick 4 9) (4.pick) (4.pick 9)}\n",
+        "{4 13 4 13}");
+    expect_expand_result("<trait-method-arity-set-mismatch>",
+        "trait MultiContract do\n"
+        "  method pick do\n"
+        "    x -> x\n"
+        "    x y -> y\n"
+        "  end\n"
+        "end\n"
+        "implement MultiContract on int do\n"
+        "  method pick x -> x\n"
+        "end\n",
+        false);
+    check_value_written(&rt,
         "trait Eqish do\n"
         "  method same a b -> eq? a b\n"
         "end\n"
@@ -170,12 +206,18 @@ static void test_trait_requirements(void) {
 static void test_trait_bytecode_roundtrip(void) {
     const char *src =
         "trait RoundShow do\n"
-        "  method show x -> str \"default:\" x\n"
+        "  method show do\n"
+        "    x -> str \"default:\" x\n"
+        "    x y -> str \"default:\" (add x y)\n"
+        "  end\n"
         "end\n"
         "implement RoundShow on int do\n"
-        "  method show x -> str \"round:\" x\n"
+        "  method show do\n"
+        "    x -> str \"round:\" x\n"
+        "    x y -> str \"round:\" (add x y)\n"
+        "  end\n"
         "end\n"
-        "show 5\n";
+        "{(show 5) (show 5 6)}\n";
     IdmRuntime rt1;
     idm_runtime_init(&rt1);
     IdmError err;
@@ -201,7 +243,7 @@ static void test_trait_bytecode_roundtrip(void) {
     IdmBuffer written;
     idm_buf_init(&written);
     CHECK(idm_value_write(&written, out1));
-    CHECK_STR(written.data, "\"round:5\"");
+    CHECK_STR(written.data, "{\"round:5\" \"round:11\"}");
     idm_buf_destroy(&written);
     IdmBuffer blob;
     idm_buf_init(&blob);
@@ -219,7 +261,7 @@ static void test_trait_bytecode_roundtrip(void) {
     CHECK(!err.present);
     idm_buf_init(&written);
     CHECK(idm_value_write(&written, out2));
-    CHECK_STR(written.data, "\"round:5\"");
+    CHECK_STR(written.data, "{\"round:5\" \"round:11\"}");
     idm_buf_destroy(&written);
 
     idm_bc_destroy(&m2);
@@ -407,8 +449,8 @@ static void test_trait_identity_semantics(void) {
         "\"pkg:7\"");
     IdmError err;
     idm_error_init(&err);
-    IdmTraitMethodSpec contract_v1 = {"m", 1u, false, idm_nil()};
-    IdmTraitMethodSpec contract_v2 = {"m", 2u, false, idm_nil()};
+    IdmTraitMethodSpec contract_v1 = {"m", idm_arity_exact(1u), false, idm_nil()};
+    IdmTraitMethodSpec contract_v2 = {"m", idm_arity_exact(2u), false, idm_nil()};
     CHECK(idm_trait_define(&rt, "redef/X#1", NULL, 0, &contract_v1, 1u, &err));
     CHECK(!err.present);
     CHECK(!idm_trait_define(&rt, "redef/X#1", NULL, 0, &contract_v2, 1u, &err));

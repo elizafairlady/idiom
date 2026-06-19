@@ -407,7 +407,7 @@ suite do
     assert-expand-error "defmacro emit stx -> %`(blockm q)\ndo\n  defmacro blockm stx -> make-syntax-int stx 5\n  blockm q\nend\nemit x" "unbound identifier 'blockm'"
   end
   test "block operator invisible outside its block" do
-    assert-expand-error "do\n  operator <**> precedence: 50 assoc: left capture: infix -> add\n  1 <**> 2\nend\n1 <**> 2" "unbound identifier '<**>'"
+    assert-expand-error "do\n  operator <**> precedence: 50 assoc: left capture: :infix -> add\n  1 <**> 2\nend\n1 <**> 2" "unbound identifier '<**>'"
   end
   test "macro-introduced names not visible after splice" do
     assert-expand-error "defmacro m stx -> %`(do\n    defn hidden-fn v -> v\n  end)\nm x\nhidden-fn 1\n" "unbound identifier 'hidden-fn'"

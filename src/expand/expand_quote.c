@@ -120,10 +120,13 @@ static IdmCore *quasisyntax_template(ExpandContext *ctx, const IdmSyntax *templa
         if (!core_call_add_arg_or_free(call, idm_core_literal(idm_nil(), template->span), err, template->span)) return NULL;
         return call;
     }
-    if (template->kind == IDM_SYN_LIST || template->kind == IDM_SYN_VECTOR || template->kind == IDM_SYN_TUPLE) {
+    if (template->kind == IDM_SYN_LIST || template->kind == IDM_SYN_VECTOR || template->kind == IDM_SYN_TUPLE || template->kind == IDM_SYN_DICT) {
         IdmCore *items = quasisyntax_items_list(ctx, template->as.seq.items, template->as.seq.count, template_ctx, err);
         if (!items) return NULL;
-        IdmPrimitive prim = template->kind == IDM_SYN_LIST ? IDM_PRIM_MAKE_SYNTAX_LIST : (template->kind == IDM_SYN_VECTOR ? IDM_PRIM_MAKE_SYNTAX_VECTOR : IDM_PRIM_MAKE_SYNTAX_TUPLE);
+        IdmPrimitive prim = template->kind == IDM_SYN_LIST ? IDM_PRIM_MAKE_SYNTAX_LIST :
+                            template->kind == IDM_SYN_VECTOR ? IDM_PRIM_MAKE_SYNTAX_VECTOR :
+                            template->kind == IDM_SYN_TUPLE ? IDM_PRIM_MAKE_SYNTAX_TUPLE :
+                            IDM_PRIM_MAKE_SYNTAX_DICT;
         IdmCore *call = syntax_constructor_call(ctx, prim, template_ctx, err);
         if (!call) { idm_core_free(items); return NULL; }
         if (!core_call_add_arg_or_free(call, items, err, template->span)) return NULL;

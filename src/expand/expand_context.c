@@ -373,7 +373,7 @@ bool register_operator(ExpandContext *ctx, const char *name, const char *capture
     return true;
 }
 
-bool install_method_surface(ExpandContext *ctx, const char *trait, const char *name, uint32_t arity, bool is_field, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err) {
+bool install_method_surface(ExpandContext *ctx, const char *trait, const char *name, IdmArity arity, bool is_field, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err) {
     const IdmScopeSet *check_scopes = scopes ? scopes : &ctx->empty_scopes;
     for (size_t i = 0; i < ctx->method_surface_count; i++) {
         const MethodSurfaceDef *e = &ctx->method_surfaces[i];
@@ -771,6 +771,28 @@ static const char *assoc_atom_name(IdmOpAssoc assoc) {
     return "none";
 }
 
+static const char *arity_kind_atom_name(IdmArityKind kind) {
+    switch (kind) {
+        case IDM_ARITY_UNKNOWN: return "unknown";
+        case IDM_ARITY_RANGE: return "range";
+        case IDM_ARITY_SET: return "set";
+    }
+    return "unknown";
+}
+
+static IdmValue arity_surface_value(IdmRuntime *rt, IdmArity arity, IdmError *err) {
+    IdmDictEntry entries[4];
+    entries[0].key = idm_atom(rt, "kind");
+    entries[0].value = idm_atom(rt, arity_kind_atom_name(arity.kind));
+    entries[1].key = idm_atom(rt, "min");
+    entries[1].value = idm_int((int64_t)arity.min);
+    entries[2].key = idm_atom(rt, "max");
+    entries[2].value = idm_int((int64_t)arity.max);
+    entries[3].key = idm_atom(rt, "mask");
+    entries[3].value = idm_int((int64_t)arity.mask);
+    return idm_dict(rt, entries, 4u, err);
+}
+
 bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, IdmValue *out, IdmError *err) {
     ExpandContext *ctx = user;
     IdmValue acc = idm_empty_list();
@@ -790,6 +812,7 @@ bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, Idm
         }
     } else if (strcmp(kind, "macros") == 0) {
         for (size_t i = ctx->macro_count; i > 0; i--) {
+            if (ctx->macros[i - 1u].hidden) continue;
             const char *name = ctx->macros[i - 1u].name;
             acc = idm_cons(rt, idm_atom(rt, name), acc, err);
             if (err && err->present) return false;
@@ -823,7 +846,8 @@ bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, Idm
             IdmValue items[3];
             items[0] = idm_atom(rt, m->trait);
             items[1] = idm_atom(rt, m->name);
-            items[2] = idm_int((int64_t)m->arity);
+            items[2] = arity_surface_value(rt, m->arity, err);
+            if (err && err->present) return false;
             IdmValue entry = idm_tuple(rt, items, 3u, err);
             if (err && err->present) return false;
             acc = idm_cons(rt, entry, acc, err);

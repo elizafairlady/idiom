@@ -112,6 +112,9 @@ IdmArity idm_arity_range(uint32_t min, uint32_t max);
 IdmArity idm_arity_exact(uint32_t arity);
 bool idm_arity_add_exact(IdmArity *arity, uint32_t exact);
 bool idm_arity_accepts(const IdmArity *arity, uint32_t argc);
+bool idm_arity_equal(const IdmArity *a, const IdmArity *b);
+bool idm_arity_max_accepting_at_least(const IdmArity *arity, uint32_t min, uint32_t *out);
+bool idm_arity_describe(IdmBuffer *buf, const IdmArity *arity);
 
 const char *idm_binding_space_name(IdmBindingSpace space);
 const char *idm_binding_kind_name(IdmBindingKind kind);
