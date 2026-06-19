@@ -1,0 +1,9 @@
+w READY
+s one\\
+s \r
+s two\\
+s \r
+s three
+s \r
+w GOT
+s \x04

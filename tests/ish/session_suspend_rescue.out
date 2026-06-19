@@ -21,7 +21,7 @@
 ...>   sh -c "kill -TSTP[24C[1A[J~ % try do
 ...>   sh -c "kill -TSTP [25C[1A[J~ % try do
 ...>   sh -c "kill -TSTP 0[26C[1A[J~ % try do
-...>   sh -c "kill -TSTP 0"[27C[J~ % try do
+...>   sh -c "kill -TSTP 0"[27C[1A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...> [5C[2A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
@@ -39,7 +39,7 @@
 ...>   sh -c "kill -TSTP 0"
 ...>   :afte[12C[2A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
-...>   :after[13C[J~ % try do
+...>   :after[13C[2A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
 ...> [5C[3A[J~ % try do
@@ -114,7 +114,7 @@
 ...>   rescue r -> match r d[28C[3A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
-...>   rescue r -> match r do[29C[J~ % try do
+...>   rescue r -> match r do[29C[3A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
 ...>   rescue r -> match r do
@@ -250,7 +250,7 @@
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
 ...>   rescue r -> match r do
-...>     {:error {:suspended p}} -> do[38C[J~ % try do
+...>     {:error {:suspended p}} -> do[38C[4A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
 ...>   rescue r -> match r do
@@ -365,7 +365,7 @@
 ...>   :after
 ...>   rescue r -> match r do
 ...>     {:error {:suspended p}} -> do
-...>       job-resume p :bg[27C[J~ % try do
+...>       job-resume p :bg[27C[5A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
 ...>   rescue r -> match r do
@@ -503,7 +503,7 @@
 ...>   rescue r -> match r do
 ...>     {:error {:suspended p}} -> do
 ...>       job-resume p :bg
-...>       str "resc" "ued"[27C[J~ % try do
+...>       str "resc" "ued"[27C[6A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
 ...>   rescue r -> match r do
@@ -559,7 +559,7 @@
 ...>     {:error {:suspended p}} -> do
 ...>       job-resume p :bg
 ...>       str "resc" "ued"
-...>     end[12C[J~ % try do
+...>     end[12C[7A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
 ...>   rescue r -> match r do
@@ -607,7 +607,7 @@
 ...>       job-resume p :bg
 ...>       str "resc" "ued"
 ...>     end
-...>   end[10C[J~ % try do
+...>   end[10C[8A[J~ % try do
 ...>   sh -c "kill -TSTP 0"
 ...>   :after
 ...>   rescue r -> match r do

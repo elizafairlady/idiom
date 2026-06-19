@@ -300,7 +300,7 @@ defn to-block-end state ->
 
 defn finish-line state do
   to-block-end state
-  {:line (buffer-of state) (state |> sput :row 0 |> sput :below 0)}
+  {:line (buffer-of state) (state |> sput :row (add (sget state :row) (sget state :below)) |> sput :below 0)}
 end
 
 defn finish-cancel state do
