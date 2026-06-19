@@ -1,56 +1,65 @@
 package netstring
 
-import std/list as L
 use std/string
+import std/list as L
 
-defn digit? b -> and (gte? b 48) (lte? b 57)
-defn digit-value b -> sub b 48
-
-defn read-length do
-  _ i n acc _seen when (eq? i n) -> {:error {:netstring :missing-colon i}}
-  s i n acc seen -> match (byte s i) do
-    58 -> cond seen {:ok {acc (add i 1)}} {:error {:netstring :empty-length i}}
-    b -> cond (digit? b)
-      (read-length s (add i 1) n (add (mul acc 10) (digit-value b)) :true)
-      {:error {:netstring :bad-length-byte i b}}
-  end
+export trait Codec do
+  method encode value
+  method decode framed
 end
 
-export defn parse-one-at s start -> do
-  n = len s
-  match (read-length s start n 0 :false) do
-    {:error reason} -> {:error reason}
-    {:ok {len payload-start}} -> do
-      payload-end = add payload-start len
-      cond (gt? payload-end n)
-        {:error {:netstring :truncated payload-start len n}}
-        (cond (neq? (byte s payload-end) 44)
-          {:error {:netstring :missing-comma payload-end}}
-          {:ok {(slice s payload-start payload-end) (add payload-end 1)}})
+defn digit? b -> and (gte? b 48) (lte? b 57)
+
+defn read-length do
+  _s i n _acc _seen when (eq? i n) -> {:error {:netstring :missing-colon i}}
+  s i n acc seen -> do
+    b = byte s i
+    if (eq? b 58) do
+      if seen do {:ok {acc (add i 1)}} else do {:error {:netstring :empty-length i}} end
+    else if (digit? b) do
+      read-length s (add i 1) n (add (mul acc 10) (sub b 48)) :true
+    else do
+      {:error {:netstring :bad-length-byte i b}}
     end
   end
 end
 
-export defn parse-one s -> match (parse-one-at s 0) do
-  {:error reason} -> {:error reason}
-  {:ok {value next}} -> cond (eq? next (len s)) {:ok value} {:error {:netstring :trailing next}}
-end
-
-defn parse-all-at do
-  _ i n acc when (eq? i n) -> {:ok (L.reverse acc)}
-  s i n acc -> match (parse-one-at s i) do
+export defn decode-at s start -> do
+  n = len s
+  match (read-length s start n 0 :false) do
     {:error reason} -> {:error reason}
-    {:ok {value next}} -> parse-all-at s next n (cons value acc)
+    {:ok {count payload-start}} -> do
+      payload-end = add payload-start count
+      if (gt? payload-end n) do
+        {:error {:netstring :truncated payload-start count n}}
+      else if (neq? (byte s payload-end) 44) do
+        {:error {:netstring :missing-comma payload-end}}
+      else do
+        {:ok {(slice s payload-start payload-end) (add payload-end 1)}}
+      end
+    end
   end
 end
 
-export defn parse-all s -> parse-all-at s 0 (len s) '()
-
-export defn emit s -> "#{len s}:#{s},"
-
-defn emit-all-into do
-  '() acc -> acc
-  (list h . t) acc -> emit-all-into t "#{acc}#{emit &h}"
+defn decode-stream do
+  _s i n acc when (eq? i n) -> {:ok (L.reverse acc)}
+  s i n acc -> match (decode-at s i) do
+    {:error reason} -> {:error reason}
+    {:ok {value next}} -> decode-stream s next n (cons value acc)
+  end
 end
 
-export defn emit-all values -> emit-all-into values ""
+export defn decode-all s -> decode-stream s 0 (len s) '()
+
+implement Codec on string do
+  method encode s -> "#{len s}:#{s},"
+  method decode s -> match (decode-at s 0) do
+    {:error reason} -> {:error reason}
+    {:ok {value next}} ->
+      if (eq? next (len s)) do {:ok value} else do {:error {:netstring :trailing next}} end
+  end
+end
+
+defn frame acc value -> "#{acc}#{value |> encode}"
+
+operator << precedence: 25 assoc: left capture: :infix -> frame

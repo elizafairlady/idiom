@@ -634,22 +634,31 @@ static IdmSyntax *keyword_key_syntax(Parser *p, Token *tok) {
     return key;
 }
 
-static bool keyword_after_newlines(Parser *p) {
+static unsigned next_keyword_column(Parser *p) {
     size_t i = p->pos;
     while (i < p->count && p->tokens[i].kind == TOK_NEWLINE) i++;
-    return i < p->count && p->tokens[i].kind == TOK_KEYWORD;
+    return (i < p->count && p->tokens[i].kind == TOK_KEYWORD) ? p->tokens[i].span.column : 0u;
 }
+
+static IdmSyntax *parse_keyword_dict_at(Parser *p, unsigned base_column);
 
 static bool parse_keyword_pair_into(Parser *p, IdmSyntax *dict) {
     Token *tok = take(p);
     IdmSyntax *key = keyword_key_syntax(p, tok);
     if (!key) return false;
+    IdmSyntax *value = NULL;
     if (keyword_value_missing(p)) {
-        idm_syn_free(key);
-        idm_error_set(p->err, tok->span, "keyword '%s' requires a value", tok->lexeme);
-        return false;
+        unsigned child_column = next_keyword_column(p);
+        if (child_column <= tok->span.column) {
+            idm_syn_free(key);
+            idm_error_set(p->err, tok->span, "keyword '%s' requires a value", tok->lexeme);
+            return false;
+        }
+        while (at(p, TOK_NEWLINE)) p->pos++;
+        value = parse_keyword_dict_at(p, child_column);
+    } else {
+        value = parse_primary(p);
     }
-    IdmSyntax *value = parse_primary(p);
     if (!value || !idm_syn_append(dict, key) || !idm_syn_append(dict, value)) {
         idm_syn_free(key);
         idm_syn_free(value);
@@ -658,7 +667,7 @@ static bool parse_keyword_pair_into(Parser *p, IdmSyntax *dict) {
     return true;
 }
 
-static IdmSyntax *parse_keyword_dict(Parser *p) {
+static IdmSyntax *parse_keyword_dict_at(Parser *p, unsigned base_column) {
     IdmSyntax *dict = idm_syn_dict(cur(p)->span);
     if (!dict) {
         idm_error_oom(p->err, cur(p)->span);
@@ -669,13 +678,18 @@ static IdmSyntax *parse_keyword_dict(Parser *p) {
             idm_syn_free(dict);
             return NULL;
         }
-        if (at(p, TOK_NEWLINE) && keyword_after_newlines(p)) {
+        if (at(p, TOK_KEYWORD)) continue;
+        if (at(p, TOK_NEWLINE) && next_keyword_column(p) == base_column) {
             while (at(p, TOK_NEWLINE)) p->pos++;
             continue;
         }
-        if (!at(p, TOK_KEYWORD)) break;
+        break;
     }
     return dict;
+}
+
+static IdmSyntax *parse_keyword_dict(Parser *p) {
+    return parse_keyword_dict_at(p, cur(p)->span.column);
 }
 
 

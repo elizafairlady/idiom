@@ -1,0 +1,43 @@
+use std/test
+activate std/test
+
+suite do
+  test "scalars coerce: string, int, bool, null" do
+    got = do
+      activate tests/pkg/yaml
+      yaml
+        name: "api"
+        replicas: 3
+        enabled: true
+        empty: null
+        plain: hello
+    end
+    assert-eq got %{:name "api" :replicas 3 :enabled :true :empty :nil :plain "hello"}
+  end
+
+  test "nested mappings and sequences" do
+    got = do
+      activate tests/pkg/yaml
+      yaml
+        name: "api"
+        ports: [80 443]
+        metadata:
+          owner: "platform"
+          active: false
+    end
+    assert-eq got %{:name "api" :ports '(80 443) :metadata %{:owner "platform" :active :false}}
+  end
+
+  test "sequence of mappings" do
+    got = do
+      activate tests/pkg/yaml
+      yaml
+        servers: [%{ name: "api" ports: [80 443] } %{ name: "web" ports: [8080] }]
+    end
+    assert-eq got %{:servers '(%{:name "api" :ports (80 443)} %{:name "web" :ports (8080)})}
+  end
+
+  test "the body is read by idiom, validated by the resolver" do
+    assert-expand-error "activate tests/pkg/yaml\nyaml\n" "yaml expects a single mapping body"
+  end
+end
