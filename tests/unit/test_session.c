@@ -68,6 +68,64 @@ static void test_session_persistent_bindings(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_session_destroy_restores_hooks(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmRepl *repl = idm_repl_create(&rt, &err);
+    CHECK(repl != NULL);
+    if (!repl) {
+        idm_error_clear(&err);
+        idm_runtime_destroy(&rt);
+        return;
+    }
+    CHECK(rt.local_expand_user != NULL);
+    CHECK(rt.local_expand != NULL);
+    CHECK(rt.free_identifier_eq_user != NULL);
+    CHECK(rt.free_identifier_eq != NULL);
+    CHECK(rt.register_operator_user != NULL);
+    CHECK(rt.register_operator != NULL);
+    CHECK(rt.register_macro_user != NULL);
+    CHECK(rt.register_macro != NULL);
+    CHECK(rt.expander_surface_user != NULL);
+    CHECK(rt.expander_surface != NULL);
+    idm_repl_destroy(repl);
+    CHECK(rt.repl == NULL);
+    CHECK(rt.local_expand_user == NULL);
+    CHECK(rt.local_expand == NULL);
+    CHECK(rt.free_identifier_eq_user == NULL);
+    CHECK(rt.free_identifier_eq == NULL);
+    CHECK(rt.register_operator_user == NULL);
+    CHECK(rt.register_operator == NULL);
+    CHECK(rt.register_macro_user == NULL);
+    CHECK(rt.register_macro == NULL);
+    CHECK(rt.expander_surface_user == NULL);
+    CHECK(rt.expander_surface == NULL);
+    idm_runtime_destroy(&rt);
+    idm_error_clear(&err);
+}
+
+static void test_session_qualified_import_trait_methods(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmRepl *repl = idm_repl_create(&rt, &err);
+    CHECK(repl != NULL);
+    if (!repl) {
+        idm_error_clear(&err);
+        idm_runtime_destroy(&rt);
+        return;
+    }
+    check_eval_value(repl, "import std/enum as Enum", ":nil");
+    check_eval_value(repl, "[1 2 3].reduce 0 &add", "6");
+    check_eval_value(repl, "reduce [1 2 3] 0 &add", "6");
+    check_eval_value(repl, "Enum.range 1 4", "(1 2 3)");
+    idm_repl_destroy(repl);
+    idm_runtime_destroy(&rt);
+}
+
 static void test_session_rollback_on_down(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
@@ -204,6 +262,8 @@ static void test_session_windows_in_session(void) {
 
 void run_session_suite(void) {
     test_session_persistent_bindings();
+    test_session_destroy_restores_hooks();
+    test_session_qualified_import_trait_methods();
     test_session_rollback_on_down();
     test_session_actors_survive_between_evals();
     test_session_interrupt_under_load();

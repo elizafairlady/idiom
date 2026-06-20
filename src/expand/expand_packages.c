@@ -616,13 +616,11 @@ bool install_artifact_traits(ExpandContext *ctx, const IdmPkgTrait *traits, size
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
         ctx->trait_count++;
-        if (!qualifier) {
-            for (size_t m = 0; m < entry->method_count; m++) {
-                if (!install_method_surface(ctx, entry->identity, entry->methods[m].name, entry->methods[m].arity, false, scopes, provider, provider_key, err)) {
-                    surface_rollback(ctx, &checkpoint);
-                    free(qualified);
-                    return false;
-                }
+        for (size_t m = 0; m < entry->method_count; m++) {
+            if (!install_method_surface(ctx, entry->identity, entry->methods[m].name, entry->methods[m].arity, false, scopes, provider, provider_key, err)) {
+                surface_rollback(ctx, &checkpoint);
+                free(qualified);
+                return false;
             }
         }
         free(qualified);

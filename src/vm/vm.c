@@ -1494,6 +1494,50 @@ static const char *module_const_text(const IdmBytecodeModule *module, uint32_t i
     return NULL;
 }
 
+static bool module_const_value(const IdmBytecodeModule *module, uint32_t index, const char *what, IdmValue *out, IdmError *err) {
+    if (index >= module->const_count) {
+        return idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", what, index);
+    }
+    *out = module->constants[index];
+    return true;
+}
+
+static bool trait_name_value_text(IdmValue value, const char **out) {
+    if (value.tag == IDM_VAL_ATOM || value.tag == IDM_VAL_WORD) {
+        *out = idm_symbol_text(value.as.symbol);
+        return true;
+    }
+    if (value.tag == IDM_VAL_STRING) {
+        *out = idm_string_bytes(value);
+        return true;
+    }
+    return false;
+}
+
+static size_t trait_candidate_count(IdmValue traits) {
+    if (traits.tag == IDM_VAL_TUPLE || traits.tag == IDM_VAL_VECTOR) return idm_sequence_count(traits);
+    return 1u;
+}
+
+static bool trait_candidate_at(IdmValue traits, size_t index, const char **out, IdmError *err) {
+    IdmValue value = traits;
+    if (traits.tag == IDM_VAL_TUPLE || traits.tag == IDM_VAL_VECTOR) value = idm_sequence_item(traits, index, err);
+    if (err && err->present) return false;
+    if (trait_name_value_text(value, out)) return true;
+    return idm_error_set(err, idm_span_unknown(NULL), "CALL_METHOD trait candidate must be a name");
+}
+
+static bool append_trait_candidates(IdmBuffer *buf, IdmValue traits, IdmError *err) {
+    size_t count = trait_candidate_count(traits);
+    for (size_t i = 0; i < count; i++) {
+        const char *trait = NULL;
+        if (!trait_candidate_at(traits, i, &trait, err)) return false;
+        if (i != 0 && !idm_buf_append(buf, ", ")) return false;
+        if (!idm_buf_append(buf, trait)) return false;
+    }
+    return true;
+}
+
 static IdmArity read_arity_operands(const IdmBytecodeModule *module, Frame *frame) {
     IdmArity arity;
     arity.kind = (IdmArityKind)module->code[frame->ip++];
@@ -1589,6 +1633,70 @@ static bool op_implement_trait(Vm *vm, Frame *frame, IdmError *err) {
     return push(vm, idm_atom(vm->rt, "ok"), err);
 }
 
+static bool lookup_method_candidates(Vm *vm, IdmValue traits, const char *method, const char *type, uint32_t argc, IdmValue *out_impl, IdmError *err) {
+    size_t count = trait_candidate_count(traits);
+    if (count == 0) return idm_error_set(err, idm_span_unknown(NULL), "method '%s' has no trait candidates", method);
+    if (count == 1u) {
+        const char *trait = NULL;
+        if (!trait_candidate_at(traits, 0, &trait, err)) return false;
+        return idm_trait_lookup(vm->rt, trait, method, type, argc, out_impl, err);
+    }
+
+    IdmValue match = idm_nil();
+    size_t match_count = 0;
+    IdmBuffer matching;
+    idm_buf_init(&matching);
+    for (size_t i = 0; i < count; i++) {
+        const char *trait = NULL;
+        if (!trait_candidate_at(traits, i, &trait, err)) {
+            idm_buf_destroy(&matching);
+            return false;
+        }
+        IdmError probe;
+        idm_error_init(&probe);
+        IdmValue impl = idm_nil();
+        if (idm_trait_lookup(vm->rt, trait, method, type, argc, &impl, &probe)) {
+            if (match_count != 0 && !idm_buf_append(&matching, ", ")) {
+                idm_error_clear(&probe);
+                idm_buf_destroy(&matching);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            if (!idm_buf_append(&matching, trait)) {
+                idm_error_clear(&probe);
+                idm_buf_destroy(&matching);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            if (match_count == 0) match = impl;
+            match_count++;
+        }
+        idm_error_clear(&probe);
+    }
+
+    if (match_count == 1u) {
+        *out_impl = match;
+        idm_buf_destroy(&matching);
+        return true;
+    }
+    if (match_count > 1u) {
+        bool ok = idm_error_set(err, idm_span_unknown(NULL), "ambiguous method '%s' on type '%s'; matching traits: %s", method, type, matching.data ? matching.data : "?");
+        idm_buf_destroy(&matching);
+        return ok;
+    }
+    IdmBuffer candidates;
+    idm_buf_init(&candidates);
+    bool listed = append_trait_candidates(&candidates, traits, err);
+    if (!listed && !(err && err->present)) idm_error_oom(err, idm_span_unknown(NULL));
+    if (!listed) {
+        idm_buf_destroy(&matching);
+        idm_buf_destroy(&candidates);
+        return false;
+    }
+    bool ok = idm_error_set(err, idm_span_unknown(NULL), "method '%s' is available via %s but is not implemented on type '%s'", method, candidates.data ? candidates.data : "?", type);
+    idm_buf_destroy(&matching);
+    idm_buf_destroy(&candidates);
+    return ok;
+}
+
 static bool op_call_method(Vm *vm, Frame *frame, bool tail, IdmError *err) {
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     size_t site = frame->ip;
@@ -1606,10 +1714,11 @@ static bool op_call_method(Vm *vm, Frame *frame, bool tail, IdmError *err) {
     bool direct = false;
     uint32_t function_index = UINT32_MAX;
     if (!method_cache_lookup(vm, module, site, argc, trait_phase, trait_version, type, &impl, &direct, &function_index)) {
-        const char *trait = module_const_text(module, trait_const, "CALL_METHOD trait", err);
-        const char *method = trait ? module_const_text(module, method_const, "CALL_METHOD method", err) : NULL;
-        if (!trait || !method) return false;
-        if (!idm_trait_lookup(vm->rt, trait, method, type, argc, &impl, err)) return false;
+        IdmValue traits = idm_nil();
+        if (!module_const_value(module, trait_const, "CALL_METHOD trait", &traits, err)) return false;
+        const char *method = module_const_text(module, method_const, "CALL_METHOD method", err);
+        if (!method) return false;
+        if (!lookup_method_candidates(vm, traits, method, type, argc, &impl, err)) return false;
         if (idm_is_closure(impl)) {
             bool selected = false;
             if (!select_trivial_closure(vm, impl, argc, &function_index, &selected, err)) return false;

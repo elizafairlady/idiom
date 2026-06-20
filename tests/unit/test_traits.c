@@ -161,8 +161,15 @@ static void test_trait_method_expansion_boundaries(void) {
         "end\n"
         "show 1\n",
         false);
-    expect_expand_result("<import-does-not-activate-methods>",
+    expect_expand_result("<qualified-import-activates-method-surfaces>",
         "import tests/pkg/protomethod as P\n"
+        "describe 1\n",
+        true);
+    expect_expand_result("<qualified-import-method-surfaces-are-scoped>",
+        "do\n"
+        "  import tests/pkg/protomethod as P\n"
+        "  describe 1\n"
+        "end\n"
         "describe 1\n",
         false);
 }
@@ -207,12 +214,49 @@ static void test_trait_requirements(void) {
         "import std/enum as E\n"
         "{(implements? E.Iter (list 1)) (implements? E.Iter 1)}\n",
         "{:true :false}");
+    check_value_written(&rt,
+        "import std/enum as E\n"
+        "{([1 2 3].reduce 0 &add) (reduce [1 2 3] 0 &add)}\n",
+        "{6 6}");
+    expect_expand_error_rt(&rt, "<qualified-import-method-not-qualified-value>",
+        "import std/enum as E\n"
+        "E.reduce [1 2 3] 0 &add\n",
+        "unbound identifier 'E'");
     expect_expand_result("<trait-requirement-unknown>",
         "trait MissingReq do\n"
         "  require NopeReq\n"
         "  method missing x -> x\n"
         "end\n",
         false);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_trait_method_candidate_dispatch(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    check_value_written(&rt,
+        "import tests/pkg/sizea as A\n"
+        "import tests/pkg/sizeb as B\n"
+        "implement A.Size on int\n"
+        "implement B.Size on string\n"
+        "{(size 1) (size \"s\") (1.size) (\"s\".size)}\n",
+        "{111 222 111 222}");
+    expect_runtime_error_contains(&rt, "<candidate-method-no-matching-type>",
+        "import tests/pkg/sizea as A\n"
+        "import tests/pkg/sizeb as B\n"
+        "size :atom\n",
+        "method 'size' is available via");
+    expect_runtime_error_contains(&rt, "<candidate-method-no-matching-type-detail>",
+        "import tests/pkg/sizea as A\n"
+        "import tests/pkg/sizeb as B\n"
+        "size :atom\n",
+        "not implemented on type 'atom'");
+    expect_runtime_error_contains(&rt, "<candidate-method-ambiguous-type>",
+        "import tests/pkg/sizea as A\n"
+        "import tests/pkg/sizeb as B\n"
+        "implement B.Size on int\n"
+        "size 1\n",
+        "ambiguous method 'size' on type 'int'");
     idm_runtime_destroy(&rt);
 }
 
@@ -521,6 +565,7 @@ void run_traits_suite(void) {
     test_trait_methods_runtime_dispatch();
     test_trait_method_expansion_boundaries();
     test_trait_requirements();
+    test_trait_method_candidate_dispatch();
     test_trait_bytecode_roundtrip();
     test_records_on_trait_dispatch();
     test_record_expansion_boundaries();

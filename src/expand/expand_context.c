@@ -101,6 +101,8 @@ static void method_surface_def_destroy(MethodSurfaceDef *method) {
     if (!method) return;
     free(method->trait);
     free(method->name);
+    free(method->provider);
+    free(method->provider_key);
     idm_scope_set_destroy(&method->scopes);
     memset(method, 0, sizeof(*method));
 }
@@ -430,8 +432,16 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *n
     const IdmScopeSet *check_scopes = scopes ? scopes : &ctx->empty_scopes;
     for (size_t i = 0; i < ctx->method_surface_count; i++) {
         const MethodSurfaceDef *e = &ctx->method_surfaces[i];
-        if (e->is_field != is_field && strcmp(e->name, name) == 0 && idm_scope_set_equal(&e->scopes, check_scopes)) {
+        if (strcmp(e->name, name) != 0 || !idm_scope_set_equal(&e->scopes, check_scopes)) continue;
+        if (e->is_field != is_field) {
             return idm_error_set(err, idm_span_unknown(NULL), "'%s' is declared as both a record field and a trait method in the same scope; dot access would be ambiguous — rename one", name);
+        }
+        if (is_field) return true;
+        if (strcmp(e->trait, trait) == 0) {
+            if (!idm_arity_equal(&e->arity, &arity)) {
+                return idm_error_set(err, idm_span_unknown(NULL), "method surface '%s.%s' arity changed while activating this scope", trait, name);
+            }
+            return true;
         }
     }
     if (ctx->method_surface_count == ctx->method_surface_cap) {
@@ -445,26 +455,16 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *n
     memset(method, 0, sizeof(*method));
     method->trait = idm_strdup(trait);
     method->name = idm_strdup(name);
+    method->provider = idm_strdup(provider ? provider : "");
+    method->provider_key = idm_strdup(provider_key ? provider_key : "");
     method->arity = arity;
     method->is_field = is_field;
-    if (!method->trait || !method->name || !idm_scope_set_copy(&method->scopes, scopes ? scopes : &ctx->empty_scopes)) {
+    if (!method->trait || !method->name || !method->provider || !method->provider_key || !idm_scope_set_copy(&method->scopes, scopes ? scopes : &ctx->empty_scopes)) {
         method_surface_def_destroy(method);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
-    uint32_t payload = (uint32_t)ctx->method_surface_count;
-    int bound = surface_bind_payload(ctx, provider, provider_key, name, name, IDM_BIND_SPACE_METHOD, IDM_BIND_METHOD, &method->scopes, payload, idm_span_unknown(NULL), err);
-    if (bound <= 0) {
-        method_surface_def_destroy(method);
-        return bound == 0;
-    }
     ctx->method_surface_count++;
     return true;
-}
-
-const MethodSurfaceDef *resolve_method_surface(ExpandContext *ctx, const IdmSyntax *word, IdmResolveStatus *out_status) {
-    const IdmBinding *binding = resolve_surface_binding(ctx, word, IDM_BIND_SPACE_METHOD, IDM_BIND_METHOD, out_status);
-    if (!binding || binding->payload >= ctx->method_surface_count) return NULL;
-    return &ctx->method_surfaces[binding->payload];
 }
 
 ProtocolDef *resolve_protocol_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status) {

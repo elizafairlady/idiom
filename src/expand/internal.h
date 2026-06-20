@@ -68,6 +68,8 @@ typedef struct SavedFunctionContext_s {
 typedef struct {
     char *trait;
     char *name;
+    char *provider;
+    char *provider_key;
     IdmArity arity;
     bool is_field;
     IdmScopeSet scopes;
@@ -378,7 +380,6 @@ bool register_grammar(ExpandContext *ctx, IdmCore *fn, IdmSpan span, IdmError *e
 IdmBytecodeModule *relocated_module_copy(ExpandContext *ctx, const IdmBytecodeModule *src, IdmScopeId min_id, int64_t delta, uint32_t *out_fn_off, IdmError *err);
 const IdmBinding *resolve_default(const ExpandContext *ctx, const IdmSyntax *word, IdmResolveStatus *out_status);
 bool resolve_head_grammar(ExpandContext *ctx, const IdmSyntax *head, uint32_t *out_grammar_index, IdmError *err);
-const MethodSurfaceDef *resolve_method_surface(ExpandContext *ctx, const IdmSyntax *word, IdmResolveStatus *out_status);
 ProtocolDef *resolve_protocol_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status);
 TraitDef *resolve_trait_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status);
 TypeDef *resolve_type_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status);
