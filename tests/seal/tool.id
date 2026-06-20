@@ -1,6 +1,7 @@
 use std/string
 use std/enum
-activate app/ish
+use app/ish
+activate Shell
 
 greeting = args |> join " "
 counted = sh -c "printf abc | wc -c"

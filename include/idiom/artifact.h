@@ -12,6 +12,8 @@ typedef struct {
     IdmRuntime *rt;
 } IdmModuleRef;
 
+typedef struct IdmArtifact IdmArtifact;
+
 typedef struct {
     IdmRuntime *rt;
     IdmNamespace *ns;
@@ -113,6 +115,12 @@ typedef struct {
 } IdmPkgType;
 
 typedef struct {
+    char *name;
+    char *identity;
+    IdmArtifact *art;
+} IdmPkgProtocol;
+
+struct IdmArtifact {
     IdmBytecodeModule *module;
     uint32_t init_fn;
     char *name;
@@ -120,25 +128,29 @@ typedef struct {
     size_t export_count;
     IdmPkgGlobal *globals;
     size_t global_count;
+    IdmPkgGlobal *imports;
+    size_t import_count;
     IdmPkgMacro *macros;
     size_t macro_count;
     IdmOperatorDef *operators;
     size_t operator_count;
-    IdmModuleRef *resolver_module;
-    uint32_t resolver_fn;
-    IdmNamespace *resolver_phase_ns;
-    IdmPhaseEnv *resolver_phase_env;
+    IdmModuleRef *grammar_module;
+    uint32_t grammar_fn;
+    IdmNamespace *grammar_phase_ns;
+    IdmPhaseEnv *grammar_phase_env;
     IdmPkgType *types;
     size_t type_count;
     IdmPkgTrait *traits;
     size_t trait_count;
+    IdmPkgProtocol *protocols;
+    size_t protocol_count;
     IdmScopeId scope_base;
     IdmScopeId scope_end;
     IdmPhaseEnv *phase_env;
     unsigned char src_hash[32];
     IdmArtifactDep *deps;
     size_t dep_count;
-} IdmArtifact;
+};
 
 IdmModuleRef *idm_module_ref_create(IdmRuntime *rt);
 IdmModuleRef *idm_module_ref_retain(IdmModuleRef *ref);
@@ -157,6 +169,7 @@ void idm_pkg_macro_destroy(IdmPkgMacro *macro);
 void idm_pkg_global_destroy(IdmPkgGlobal *global);
 void idm_pkg_trait_destroy(IdmPkgTrait *trait);
 void idm_pkg_type_destroy(IdmPkgType *type);
+void idm_pkg_protocol_destroy(IdmPkgProtocol *protocol);
 bool idm_trait_method_defs_copy(const IdmTraitMethodDef *src, size_t count, IdmTraitMethodDef **out);
 bool idm_trait_requirement_defs_copy(const IdmTraitRequirementDef *src, size_t count, IdmTraitRequirementDef **out);
 void idm_artifact_destroy(IdmArtifact *art);

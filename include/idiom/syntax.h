@@ -88,7 +88,7 @@ bool idm_syn_property_set(IdmSyntax *syn, const char *key, const char *value);
 const char *idm_syn_property_get(const IdmSyntax *syn, const char *key);
 bool idm_syn_origin_push(IdmSyntax *syn, const char *origin);
 bool idm_syn_origin_push_tree(IdmSyntax *syn, const char *origin);
-IdmSyntax *idm_syn_program_prepend_activate(const IdmSyntax *program, const char *activation, const char *file);
+IdmSyntax *idm_syn_program_prepend_program(const IdmSyntax *program, const IdmSyntax *prelude, const char *file);
 IdmSyntax *idm_syn_clone(const IdmSyntax *syn);
 void idm_syn_free(IdmSyntax *syn);
 bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn);

@@ -1,59 +1,59 @@
 use std/test
 use std/string
-activate std/test
+activate Test
 
 defn kadd2 a b -> add a b
-defmacro twice2 stx do syntax-case stx do (_ e) -> %`(kadd2 %,e %,e) end end
+defmacro twice2 %`(twice2 %,e) -> %`(kadd2 %,e %,e)
 
-defmacro my-or stx do syntax-case stx do
-  (_ a b) -> %`(do
+defmacro my-or do
+  %`(my-or %,a %,b) -> %`(do
     tmp = %,a
     cond tmp tmp %,b
   end)
-end end
+end
 
-defmacro destr-pair stx do syntax-case stx do
-  (_ e) -> %`(do
+defmacro destr-pair do
+  %`(destr-pair %,e) -> %`(do
     {hxa hxb} = %,e
     add hxa hxb
   end)
-end end
+end
 
-defmacro destr-list stx do syntax-case stx do
-  (_ e) -> %`(do
+defmacro destr-list do
+  %`(destr-list %,e) -> %`(do
     (list lha . lht) = %,e
     {lha lht}
   end)
-end end
+end
 
-defmacro destr-vec stx do syntax-case stx do
-  (_ e) -> %`(do
+defmacro destr-vec do
+  %`(destr-vec %,e) -> %`(do
     (list lva lvb) = vector-to-list %,e
     add lva lvb
   end)
-end end
+end
 
-defmacro defmm2 stx do syntax-case stx do
-  (_ n) -> do
-    expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ a) -> %`(add %,a 1) end end)
+defmacro defmm2 do
+  %`(defmm2 %,n) -> do
+    expander-register-macro n (fn do %`(_ %,a) -> %`(add %,a 1) end)
     %`:nil
   end
-end end
+end
 defmm2 inc2
 
-defmacro gen3 stx do syntax-case stx do
-  (_ a) -> %`do
+defmacro gen3 do
+  %`(gen3 %,a) -> %`do
     defmacro %,a s2 do
       expander-register-macro (syntax-nth s2 2) (fn s3 -> make-syntax-int s3 7)
       make-syntax-int s2 0
     end
   end
-end end
+end
 gen3 mk3
 mk3 leaf3
 
-defmacro nest3 stx do syntax-case stx do
-  (_ n) -> do
+defmacro nest3 do
+  %`(nest3 %,n) -> do
     v = syntax-int-value n
     if (eq? v 0) do
       %`0
@@ -64,10 +64,10 @@ defmacro nest3 stx do syntax-case stx do
       end)
     end
   end
-end end
+end
 
-defmacro ping2 stx do syntax-case stx do
-  (_ n) -> do
+defmacro ping2 do
+  %`(ping2 %,n) -> do
     v = syntax-int-value n
     if (eq? v 0) do
       %`:done
@@ -78,9 +78,9 @@ defmacro ping2 stx do syntax-case stx do
       end)
     end
   end
-end end
-defmacro pong2 stx do syntax-case stx do
-  (_ n) -> do
+end
+defmacro pong2 do
+  %`(pong2 %,n) -> do
     v = syntax-int-value n
     if (eq? v 0) do
       %`:done
@@ -91,29 +91,29 @@ defmacro pong2 stx do syntax-case stx do
       end)
     end
   end
-end end
+end
 
-defmacro with-it2 stx do syntax-case stx do
-  (_ v b) -> do
-    it = bind! stx "it"
+defmacro with-it2 do
+  %`(with-it2 %,v %,b) -> do
+    it = bind! v "it"
     %`(do
       %,it = %,v
       %,b
     end)
   end
-end end
-
-defrules swapif do
-  (_ c a b) when (syntax-int? c) -> %`(cond (gt? %,c 0) %,a %,b)
-  (_ c a b) -> %`(cond %,c %,a %,b)
 end
 
-defmacro defproto2 stx do syntax-case stx do (_ n b) -> %`do
+defmacro swapif do
+  %`(swapif %,c %,a %,b) when (syntax-int? c) -> %`(cond (gt? %,c 0) %,a %,b)
+  %`(swapif %,c %,a %,b) -> %`(cond %,c %,a %,b)
+end
+
+defmacro defproto2 %`(defproto2 %,n %,b) -> %`do
   protocol %,n %,b
-end end end
-defmacro deftrait2 stx do syntax-case stx do (_ n b) -> %`do
+end
+defmacro deftrait2 %`(deftrait2 %,n %,b) -> %`do
   trait %,n %,b
-end end end
+end
 defproto2 Greets2 do
   export defmacro answer2 s -> (make-syntax-int s 99)
 end
@@ -121,44 +121,45 @@ deftrait2 Sized2 do
   method size-of2 x -> mul x 10
 end
 
-defmacro defrec2 stx do syntax-case stx do (_ n b) -> %`do
+defmacro defrec2 %`(defrec2 %,n %,b) -> %`do
   record %,n %,b
-end end end
+end
 defrec2 Pt2 do
   field x
 end
 
-defmacro bring stx do syntax-case stx do
-  (_ v) -> %`(do
-    activate tests/pkg/exporter
+defmacro bring do
+  %`(bring %,v) -> %`(do
+    use tests/pkg/exporter
+    activate Exporter
     {(answer q) (%,v <+> 1)}
   end)
-end end
+end
 
-defmacro letpair stx do syntax-case stx do
-  (_ a b body) -> %`do
+defmacro letpair do
+  %`(letpair %,a %,b %,body) -> %`do
     %,a = 10
     %,b = 20
     %,body
   end
-end end
+end
 
-defmacro defsz stx do syntax-case stx do
-  (_ p m) -> %`do
+defmacro defsz do
+  %`(defsz %,p %,m) -> %`do
     trait %,p do
       method %,m x -> mul x 10
     end
   end
-end end
+end
 defsz Sz3 szof3
 
-defmacro defext stx do syntax-case stx do
-  (_ t p m) -> %`do
+defmacro defext do
+  %`(defext %,t %,p %,m) -> %`do
     implement %,p on %,t do
       method %,m x -> :spliced-impl
     end
   end
-end end
+end
 trait Zp do
   method zz x
 end
@@ -250,7 +251,8 @@ suite do
   end
   test "package macro template uses sibling exported macro" do
     got = do
-      activate tests/pkg/sibmac
+      use tests/pkg/sibmac
+      activate SibMac
       doubled q
     end
     assert-eq got 42
@@ -272,14 +274,14 @@ suite do
   test "import alias bindings stay in the importing block" do
     assert-expand-error "do\n  import tests/pkg/exporter as E\n  E.answer x\nend\nE.answer x\n" "unbound identifier 'E'"
   end
-  test "defrules guard sees library predicate not caller shadow" do
+  test "macro clause guard sees library predicate not caller shadow" do
     got = do
       defn gt? a b -> :false
       swapif 5 :pos :nonpos
     end
     assert-eq got :pos
   end
-  test "defrules runtime branch on non-literal" do
+  test "macro clause runtime branch on non-literal" do
     got = do
       c = :nil
       swapif c :t :f
@@ -314,13 +316,15 @@ suite do
   end
   test "sibling diamond activations stay independent" do
     got = do
-      activate tests/pkg/exporter
+      use tests/pkg/exporter
+      use tests/pkg/exporter2
+      activate Exporter
       a = do
-        activate tests/pkg/exporter2
+        activate Exporter2
         {(answer x) (3 <+> 4)}
       end
       b = do
-        activate tests/pkg/exporter2
+        activate Exporter2
         {(answer x) (3 <+> 4)}
       end
       {a b (answer x) (3 <+> 4)}
@@ -355,40 +359,45 @@ suite do
   end
   test "provider operator target unaffected by caller shadow" do
     got = do
-      activate tests/pkg/exporter
+      use tests/pkg/exporter
+      activate Exporter
       defn add a b -> :nope
       3 <+> 4
     end
     assert-eq got 7
   end
-  test "package defrules expands ignoring caller mul shadow" do
+  test "package macro clauses expand ignoring caller mul shadow" do
     got = do
-      activate tests/pkg/rulespkg
+      use tests/pkg/rulespkg
+      activate RulesPkg
       defn mul a b -> :shadow
       twice-of 21
     end
     assert-eq got 42
   end
-  test "package resolver ignores caller str/append shadows" do
+  test "package grammar ignores caller str/append shadows" do
     got = do
-      activate tests/pkg/htmldsl
+      use tests/pkg/htmldsl
+      activate HtmlDsl
       defn str a -> :shadow
       defn append a b -> :shadow
       span :class "x" "hi"
     end
     assert-eq got "<span class=\"x\">hi</span>"
   end
-  test "import alias qualifies macros without activation" do
+  test "import alias qualifies protocols without activation" do
     got = do
       import tests/pkg/exporter as E
-      E.answer x
+      activate E.Exporter
+      answer x
     end
     assert-eq got 99
   end
   test "implement inside fn body active for its runtime extent" do
     got = do
       mk = fn do
-        activate tests/pkg/exporter
+        use tests/pkg/exporter
+        activate Exporter
         fn x -> x <+> (answer q)
       end
       f = mk
@@ -398,8 +407,9 @@ suite do
   end
   test "re-implement is idempotent" do
     got = do
-      activate tests/pkg/exporter
-      activate tests/pkg/exporter
+      use tests/pkg/exporter
+      activate Exporter
+      activate Exporter
       answer x
     end
     assert-eq got 99
@@ -414,7 +424,7 @@ suite do
     assert-expand-error "defmacro m stx -> %`(do\n    defn hidden-fn v -> v\n  end)\nm x\nhidden-fn 1\n" "unbound identifier 'hidden-fn'"
   end
   test "two providers of one surface in one context collide" do
-    assert-expand-error "activate tests/pkg/exporter\nactivate tests/pkg/exporter2\nanswer x" "already active in this context"
+    assert-expand-error "use tests/pkg/exporter\nuse tests/pkg/exporter2\nactivate Exporter\nactivate Exporter2\nanswer x" "already active in this context"
   end
   test "two same-named traits from packages collide on use" do
     assert-expand-error "use tests/pkg/sizea\nuse tests/pkg/sizeb\nsize 5" "already active in this context"

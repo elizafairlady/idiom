@@ -1,6 +1,6 @@
 use std/test
 use std/result
-activate std/test
+activate Test
 
 suite do
   test "if-chain" do

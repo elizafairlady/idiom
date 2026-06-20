@@ -1,5 +1,5 @@
-defmacro defop stx -> %`(do
-  operator %,(syntax-nth stx 2) precedence: 50 assoc: left capture: :infix do
+defmacro defop %`(defop %,name) -> %`(do
+  operator %,name precedence: 50 assoc: left capture: :infix do
     a b -> mul a b
   end
 end)

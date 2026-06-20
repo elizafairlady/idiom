@@ -1,7 +1,7 @@
 use std/test
 import std/string as Str
 use std/math
-activate std/test
+activate Test
 use std/enum
 
 suite do

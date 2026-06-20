@@ -1725,43 +1725,16 @@ static bool prim_dict_get(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmErro
     return true;
 }
 
-static bool dict_rebuild(IdmRuntime *rt, IdmValue d, IdmValue key, bool put, IdmValue val, IdmValue *out, IdmError *err) {
-    size_t n = idm_dict_count(d);
-    size_t cap = n + (put ? 1u : 0u);
-    IdmDictEntry *entries = cap ? calloc(cap, sizeof(*entries)) : NULL;
-    if (cap && !entries) return idm_error_oom(err, idm_span_unknown(NULL));
-    size_t count = 0;
-    bool replaced = false;
-    for (size_t i = 0; i < n; i++) {
-        IdmValue k, v;
-        if (!idm_dict_entry(d, i, &k, &v)) continue;
-        if (idm_value_equal(k, key)) {
-            if (!put) continue;
-            v = val;
-            replaced = true;
-        }
-        entries[count].key = k;
-        entries[count].value = v;
-        count++;
-    }
-    if (put && !replaced) {
-        entries[count].key = key;
-        entries[count].value = val;
-        count++;
-    }
-    *out = idm_dict(rt, entries, count, err);
-    free(entries);
-    return !(err && err->present);
-}
-
 static bool prim_dict_put(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_dict(rt, "dict-put", args[0], err)) return false;
-    return dict_rebuild(rt, args[0], args[1], true, args[2], out, err);
+    *out = idm_dict_put(rt, args[0], args[1], args[2], err);
+    return !(err && err->present);
 }
 
 static bool prim_dict_del(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_dict(rt, "dict-del", args[0], err)) return false;
-    return dict_rebuild(rt, args[0], args[1], false, idm_nil(), out, err);
+    *out = idm_dict_del(rt, args[0], args[1], err);
+    return !(err && err->present);
 }
 
 static bool prim_dict_keys(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {

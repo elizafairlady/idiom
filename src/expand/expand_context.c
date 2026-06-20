@@ -2,7 +2,7 @@
 
 static void capture_bindings_destroy(CaptureBinding *captures, size_t count);
 static void method_surface_def_destroy(MethodSurfaceDef *method);
-static void resolver_def_destroy(ResolverDef *resolver);
+static void grammar_def_destroy(GrammarDef *grammar);
 static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap);
 static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity);
 static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, const IdmBinding *b);
@@ -90,11 +90,11 @@ void phase_syntax_fn_destroy(PhaseSyntaxFn *fn) {
     memset(fn, 0, sizeof(*fn));
 }
 
-static void resolver_def_destroy(ResolverDef *resolver) {
-    if (!resolver) return;
-    idm_scope_set_destroy(&resolver->scopes);
-    phase_syntax_fn_destroy(&resolver->fn);
-    memset(resolver, 0, sizeof(*resolver));
+static void grammar_def_destroy(GrammarDef *grammar) {
+    if (!grammar) return;
+    idm_scope_set_destroy(&grammar->scopes);
+    phase_syntax_fn_destroy(&grammar->fn);
+    memset(grammar, 0, sizeof(*grammar));
 }
 
 static void method_surface_def_destroy(MethodSurfaceDef *method) {
@@ -108,6 +108,7 @@ static void method_surface_def_destroy(MethodSurfaceDef *method) {
 void protocol_def_destroy(ProtocolDef *protocol) {
     if (!protocol) return;
     free(protocol->name);
+    free(protocol->public_name);
     idm_artifact_destroy(&protocol->art);
     memset(protocol, 0, sizeof(*protocol));
 }
@@ -130,6 +131,41 @@ void type_def_destroy(TypeDef *type) {
     for (size_t i = 0; i < type->field_count; i++) free(type->fields[i]);
     free(type->fields);
     memset(type, 0, sizeof(*type));
+}
+
+void use_package_transfer_init(UsePackageTransfer *transfer) {
+    memset(transfer, 0, sizeof(*transfer));
+}
+
+void use_package_transfer_destroy(UsePackageTransfer *transfer) {
+    if (!transfer) return;
+    free(transfer->src);
+    free(transfer->dst);
+    for (size_t i = 0; i < transfer->count; i++) free(transfer->names[i]);
+    free(transfer->names);
+    memset(transfer, 0, sizeof(*transfer));
+}
+
+bool use_package_transfer_add(UsePackageTransfer *transfer, uint32_t src, uint32_t dst, const char *name, IdmSpan span, IdmError *err) {
+    if (transfer->count == transfer->cap) {
+        size_t cap = transfer->cap ? transfer->cap * 2u : 4u;
+        uint32_t *next_src = realloc(transfer->src, cap * sizeof(*next_src));
+        if (!next_src) return idm_error_oom(err, span);
+        transfer->src = next_src;
+        uint32_t *next_dst = realloc(transfer->dst, cap * sizeof(*next_dst));
+        if (!next_dst) return idm_error_oom(err, span);
+        transfer->dst = next_dst;
+        char **next_names = realloc(transfer->names, cap * sizeof(*next_names));
+        if (!next_names) return idm_error_oom(err, span);
+        transfer->names = next_names;
+        transfer->cap = cap;
+    }
+    transfer->src[transfer->count] = src;
+    transfer->dst[transfer->count] = dst;
+    transfer->names[transfer->count] = idm_strdup(name);
+    if (!transfer->names[transfer->count]) return idm_error_oom(err, span);
+    transfer->count++;
+    return true;
 }
 
 bool record_activation(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err) {
@@ -203,14 +239,14 @@ int surface_bind_payload(ExpandContext *ctx, const char *provider, const char *p
 void surface_checkpoint(ExpandContext *ctx, SurfaceCheckpoint *checkpoint) {
     checkpoint->binding_count = ctx->bindings.count;
     checkpoint->macro_count = ctx->macro_count;
-    checkpoint->resolver_count = ctx->resolver_count;
+    checkpoint->grammar_count = ctx->grammar_count;
     checkpoint->operator_count = ctx->operator_count;
     checkpoint->protocol_count = ctx->protocol_count;
     checkpoint->trait_count = ctx->trait_count;
     checkpoint->type_count = ctx->type_count;
     checkpoint->method_surface_count = ctx->method_surface_count;
     checkpoint->decl_method_count = ctx->decl_method_count;
-    checkpoint->decl_resolver = ctx->decl_resolver;
+    checkpoint->decl_grammar = ctx->decl_grammar;
     checkpoint->activation_count = ctx->activation_count;
     checkpoint->surface_install_count = ctx->surface_install_count;
     checkpoint->artifact_base_count = ctx->artifact_base_count;
@@ -222,7 +258,7 @@ void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint) {
     while (ctx->surface_install_count > checkpoint->surface_install_count) surface_install_destroy(&ctx->surface_installs[--ctx->surface_install_count]);
     if (ctx->artifact_base_count > checkpoint->artifact_base_count) ctx->artifact_base_count = checkpoint->artifact_base_count;
     if (ctx->runtime_import_count > checkpoint->runtime_import_count) ctx->runtime_import_count = checkpoint->runtime_import_count;
-    while (ctx->resolver_count > checkpoint->resolver_count) resolver_def_destroy(&ctx->resolvers[--ctx->resolver_count]);
+    while (ctx->grammar_count > checkpoint->grammar_count) grammar_def_destroy(&ctx->grammars[--ctx->grammar_count]);
     while (ctx->macro_count > checkpoint->macro_count) macro_def_destroy(&ctx->macros[--ctx->macro_count]);
     while (ctx->operator_count > checkpoint->operator_count) idm_operator_def_destroy(&ctx->operators[--ctx->operator_count]);
     while (ctx->protocol_count > checkpoint->protocol_count) protocol_def_destroy(&ctx->protocols[--ctx->protocol_count]);
@@ -230,9 +266,9 @@ void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint) {
     while (ctx->type_count > checkpoint->type_count) type_def_destroy(&ctx->types[--ctx->type_count]);
     while (ctx->method_surface_count > checkpoint->method_surface_count) method_surface_def_destroy(&ctx->method_surfaces[--ctx->method_surface_count]);
     while (ctx->decl_method_count > checkpoint->decl_method_count) idm_trait_method_def_destroy(&ctx->decl_methods[--ctx->decl_method_count]);
-    if (!checkpoint->decl_resolver && ctx->decl_resolver) {
-        phase_syntax_fn_destroy(&ctx->decl_resolver_impl);
-        ctx->decl_resolver = false;
+    if (!checkpoint->decl_grammar && ctx->decl_grammar) {
+        phase_syntax_fn_destroy(&ctx->decl_grammar_impl);
+        ctx->decl_grammar = false;
     }
     idm_binding_table_truncate(&ctx->bindings, checkpoint->binding_count);
 }
@@ -251,8 +287,8 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->package_globals);
     for (size_t i = 0; i < ctx->macro_count; i++) macro_def_destroy(&ctx->macros[i]);
     free(ctx->macros);
-    for (size_t i = 0; i < ctx->resolver_count; i++) resolver_def_destroy(&ctx->resolvers[i]);
-    free(ctx->resolvers);
+    for (size_t i = 0; i < ctx->grammar_count; i++) grammar_def_destroy(&ctx->grammars[i]);
+    free(ctx->grammars);
     for (size_t i = 0; i < ctx->operator_count; i++) idm_operator_def_destroy(&ctx->operators[i]);
     free(ctx->operators);
     for (size_t i = 0; i < ctx->protocol_count; i++) protocol_def_destroy(&ctx->protocols[i]);
@@ -265,7 +301,7 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->method_surfaces);
     for (size_t i = 0; i < ctx->decl_method_count; i++) idm_trait_method_def_destroy(&ctx->decl_methods[i]);
     free(ctx->decl_methods);
-    phase_syntax_fn_destroy(&ctx->decl_resolver_impl);
+    phase_syntax_fn_destroy(&ctx->decl_grammar_impl);
     idm_phase_env_release(ctx->phase_env);
     free(ctx->kernel_import_src);
     free(ctx->kernel_import_dst);
@@ -830,14 +866,15 @@ bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, Idm
             acc = idm_cons(rt, idm_atom(rt, name), acc, err);
             if (err && err->present) return false;
         }
-    } else if (strcmp(kind, "resolvers") == 0) {
-        for (size_t i = ctx->resolver_count; i > 0; i--) {
-            acc = idm_cons(rt, idm_atom(rt, "resolver"), acc, err);
+    } else if (strcmp(kind, "grammars") == 0) {
+        for (size_t i = ctx->grammar_count; i > 0; i--) {
+            acc = idm_cons(rt, idm_atom(rt, "grammar"), acc, err);
             if (err && err->present) return false;
         }
     } else if (strcmp(kind, "protocols") == 0) {
         for (size_t i = ctx->protocol_count; i > 0; i--) {
-            acc = idm_cons(rt, idm_atom(rt, ctx->protocols[i - 1u].name), acc, err);
+            const ProtocolDef *p = &ctx->protocols[i - 1u];
+            acc = idm_cons(rt, idm_atom(rt, p->public_name ? p->public_name : p->name), acc, err);
             if (err && err->present) return false;
         }
     } else if (strcmp(kind, "active") == 0) {
@@ -867,7 +904,7 @@ bool expander_surface_callback(void *user, IdmRuntime *rt, const char *kind, Idm
             if (err && err->present) return false;
         }
     } else {
-        return idm_error_set(err, idm_span_unknown(NULL), "expander-surface kind must be :operators, :macros, :protocols, :resolvers, :methods, or :active");
+        return idm_error_set(err, idm_span_unknown(NULL), "expander-surface kind must be :operators, :macros, :protocols, :grammars, :methods, or :active");
     }
     *out = acc;
     return true;

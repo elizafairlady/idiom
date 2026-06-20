@@ -1,4 +1,5 @@
-activate app/ish
+use app/ish
+activate Shell
 if (sh -c "exit 1") do
   println "cmd-true"
 else do

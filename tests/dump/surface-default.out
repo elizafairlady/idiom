@@ -1,6 +1,6 @@
 {:operators ({:== 30 :left "infix"} {:!= 30 :left "infix"} {:< 30 :left "infix"} {:> 30 :left "infix"} {:<= 30 :left "infix"} {:>= 30 :left "infix"} {:+ 50 :left "infix"} {:- 50 :left "infix"} {:* 60 :left "infix"} {:/ 60 :left "infix"} {:% 60 :left "infix"} {:// 60 :left "infix"} {:%% 60 :left "infix"} {:** 70 :right "infix"} {:- 80 :left "prefix"} {:|> 10 :left "infix expression"} {:|>> 10 :left "infix expression"})}
-{:macros (:defrules :operator :syntax-case :if :match :error :case :unless :not? :and :or)}
+{:macros (:if :match :error :case :unless :not? :and :or :operator)}
 {:protocols ()}
-{:resolvers ()}
+{:grammars ()}
 {:methods ()}
 {:active ({:std/kernel "<unknown>" 0 0})}

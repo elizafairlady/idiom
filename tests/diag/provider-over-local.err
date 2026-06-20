@@ -1,2 +1,2 @@
-tests/diag/provider-over-local.id:2:1: error: surface '<+>' from 'tests/diag/provider-over-local.id' is already active in this context; activating 'tests/pkg/exporter' would conflict
-  while activating 'tests/pkg/exporter' (tests/diag/provider-over-local.id:2:1)
+tests/diag/provider-over-local.id:3:1: error: surface '<+>' from 'tests/diag/provider-over-local.id' is already active in this context; activating 'Exporter#39893da74fc02e0e' would conflict
+  while activating 'Exporter' (tests/diag/provider-over-local.id:3:1)

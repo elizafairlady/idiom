@@ -123,7 +123,8 @@ static bool is_ident_part(char ch) {
 }
 
 static bool is_operator_char(char ch) {
-    return ch == '>' || ch == '<' || ch == '=' || ch == '|' || ch == '+' || ch == '-' || ch == '*' || ch == '/' || ch == '%' || ch == '!' || ch == '&';
+    return ch == '>' || ch == '<' || ch == '=' || ch == '|' || ch == '+' || ch == '-' || ch == '*' || ch == '/' ||
+           ch == '%' || ch == '!' || ch == '&' || ch == '@' || ch == '?';
 }
 
 static bool is_delim(char ch) {
@@ -533,6 +534,51 @@ static IdmSyntax *form1(const char *head, IdmSyntax *a, IdmSpan span) {
     return list;
 }
 
+static IdmSyntax *set_form_token(IdmSyntax *syn, const Token *tok) {
+    if (syn) idm_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
+    return syn;
+}
+
+static bool syntax_is_reader_form(const IdmSyntax *syn, const char *head) {
+    return syn && syn->kind == IDM_SYN_LIST && syn->as.seq.count > 0 &&
+           syn->as.seq.items[0]->kind == IDM_SYN_WORD &&
+           strcmp(syn->as.seq.items[0]->as.text, head) == 0;
+}
+
+static bool sequence_has_reader_head(const IdmSyntax *seq) {
+    return seq && seq->kind == IDM_SYN_LIST && seq->as.seq.count > 0 &&
+           seq->as.seq.items[0]->kind == IDM_SYN_WORD &&
+           strncmp(seq->as.seq.items[0]->as.text, "%-", 2u) == 0;
+}
+
+static bool append_reader_part(IdmSyntax *seq, IdmSyntax *part) {
+    if (!seq || !part) return false;
+    size_t min_count = sequence_has_reader_head(seq) ? 2u : 1u;
+    if (part->token_adjacent_previous && seq->as.seq.count >= min_count) {
+        IdmSyntax *last = seq->as.seq.items[seq->as.seq.count - 1u];
+        if (syntax_is_reader_form(last, "%-adjacent")) {
+            return idm_syn_append(last, part);
+        }
+        if (!last->token_raw) return idm_syn_append(seq, part);
+
+        IdmSyntax *run = idm_syn_list(last->span);
+        IdmSyntax *head = idm_syn_word("%-adjacent", last->span);
+        if (!run || !head || !idm_syn_append(run, head)) {
+            idm_syn_free(run);
+            idm_syn_free(head);
+            return false;
+        }
+        if (!idm_syn_append(run, last)) {
+            idm_syn_free(run);
+            return false;
+        }
+        seq->as.seq.items[seq->as.seq.count - 1u] = run;
+        if (!idm_syn_append(run, part)) return false;
+        return true;
+    }
+    return idm_syn_append(seq, part);
+}
+
 
 static IdmSyntax *read_interp_inner(const char *file, const char *inner, IdmSpan span, IdmError *err) {
     IdmSyntax *pkg = NULL;
@@ -713,7 +759,7 @@ static IdmSyntax *parse_container(Parser *p, IdmSyntaxKind kind, TokenKind close
             continue;
         }
         IdmSyntax *item = parse_primary(p);
-        if (!item || !idm_syn_append(seq, item)) {
+        if (!item || !append_reader_part(seq, item)) {
             idm_syn_free(seq);
             idm_syn_free(item);
             return NULL;
@@ -831,7 +877,7 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
         }
         case TOK_STRING_INTERP: {
             take(p);
-            return parse_string_interp(p, tok->lexeme, tok->span);
+            return set_form_token(parse_string_interp(p, tok->lexeme, tok->span), tok);
         }
         case TOK_REGEX: {
             take(p);
@@ -857,11 +903,11 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
             }
             IdmSyntax *w = ok ? idm_syn_word(name.data ? name.data : "", tok->span) : NULL;
             idm_buf_destroy(&name);
-            return w ? form1("%-expression", w, tok->span) : NULL;
+            return set_form_token(w ? form1("%-expression", w, tok->span) : NULL, tok);
         }
         case TOK_PIN: {
             take(p);
-            return form1("%-pin", parse_primary(p), tok->span);
+            return set_form_token(form1("%-pin", parse_primary(p), tok->span), tok);
         }
         case TOK_LPAREN: {
             take(p);
@@ -877,25 +923,25 @@ static IdmSyntax *parse_primary_at_depth(Parser *p) {
             if (syn) idm_syn_set_token(syn, tok->lexeme, tok->leading_space, tok->adjacent_previous);
             return syn;
         }
-        case TOK_LBRACKET: take(p); return parse_container(p, IDM_SYN_VECTOR, TOK_RBRACKET, tok->span);
-        case TOK_LBRACE: take(p); return parse_container(p, IDM_SYN_TUPLE, TOK_RBRACE, tok->span);
-        case TOK_PERCENT_LBRACE: take(p); return parse_container(p, IDM_SYN_DICT, TOK_RBRACE, tok->span);
+        case TOK_LBRACKET: take(p); return set_form_token(parse_container(p, IDM_SYN_VECTOR, TOK_RBRACKET, tok->span), tok);
+        case TOK_LBRACE: take(p); return set_form_token(parse_container(p, IDM_SYN_TUPLE, TOK_RBRACE, tok->span), tok);
+        case TOK_PERCENT_LBRACE: take(p); return set_form_token(parse_container(p, IDM_SYN_DICT, TOK_RBRACE, tok->span), tok);
         case TOK_QUOTE: {
             take(p);
             if (at(p, TOK_LPAREN) && p->pos + 1u < p->count && p->tokens[p->pos + 1u].kind == TOK_RPAREN) {
                 take(p);
                 take(p);
-                return form1("%-quote", idm_syn_list(tok->span), tok->span);
+                return set_form_token(form1("%-quote", idm_syn_list(tok->span), tok->span), tok);
             }
-            return form1("%-quote", parse_primary(p), tok->span);
+            return set_form_token(form1("%-quote", parse_primary(p), tok->span), tok);
         }
-        case TOK_QUASIQUOTE: take(p); return form1("%-quasiquote", parse_primary(p), tok->span);
-        case TOK_COMMA: take(p); return form1("%-unquote", parse_primary(p), tok->span);
-        case TOK_COMMA_AT: take(p); return form1("%-unquote-splicing", parse_primary(p), tok->span);
-        case TOK_PERCENT_QUOTE: take(p); return form1("%-syntax", parse_primary(p), tok->span);
-        case TOK_PERCENT_QUASIQUOTE: take(p); return form1("%-quasisyntax", parse_primary(p), tok->span);
-        case TOK_PERCENT_COMMA: take(p); return form1("%-unsyntax", parse_primary(p), tok->span);
-        case TOK_PERCENT_COMMA_AT: take(p); return form1("%-unsyntax-splicing", parse_primary(p), tok->span);
+        case TOK_QUASIQUOTE: take(p); return set_form_token(form1("%-quasiquote", parse_primary(p), tok->span), tok);
+        case TOK_COMMA: take(p); return set_form_token(form1("%-unquote", parse_primary(p), tok->span), tok);
+        case TOK_COMMA_AT: take(p); return set_form_token(form1("%-unquote-splicing", parse_primary(p), tok->span), tok);
+        case TOK_PERCENT_QUOTE: take(p); return set_form_token(form1("%-syntax", parse_primary(p), tok->span), tok);
+        case TOK_PERCENT_QUASIQUOTE: take(p); return set_form_token(form1("%-quasisyntax", parse_primary(p), tok->span), tok);
+        case TOK_PERCENT_COMMA: take(p); return set_form_token(form1("%-unsyntax", parse_primary(p), tok->span), tok);
+        case TOK_PERCENT_COMMA_AT: take(p); return set_form_token(form1("%-unsyntax-splicing", parse_primary(p), tok->span), tok);
         default:
             idm_error_set(p->err, tok->span, "expected syntax item");
             return NULL;
@@ -926,7 +972,7 @@ static IdmSyntax *parse_expr_impl(Parser *p, TokenKind end1, TokenKind end2, Tok
             continue;
         }
         IdmSyntax *part = parse_primary(p);
-        if (!part || !idm_syn_append(expr, part)) {
+        if (!part || !append_reader_part(expr, part)) {
             idm_syn_free(part);
             idm_syn_free(expr);
             return NULL;

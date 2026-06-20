@@ -73,12 +73,17 @@ static void test_reader_basic(void) {
     CHECK(s != NULL);
     CHECK_STR(s, "(%-package-begin (%-expr i > count))");
     free(s);
+
+    s = dump_reader("config:\n  retries: 3\n  nested:\n    flag: true\nname: app\n");
+    CHECK(s != NULL);
+    CHECK_STR(s, "(%-package-begin (%-expr %{:config %{:retries 3 :nested %{:flag true}} :name app}))");
+    free(s);
 }
 
 static void test_reader_shell_protocols(void) {
     char *s = dump_reader("grep -c *.c > out.txt\n");
     CHECK(s != NULL);
-    CHECK_STR(s, "(%-package-begin (%-expr grep (%-word \"-c\") (%-word \"*.c\") > out . txt))");
+    CHECK_STR(s, "(%-package-begin (%-expr grep (%-word \"-c\") (%-word \"*.c\") > (%-adjacent out . txt)))");
     free(s);
 
     s = dump_reader("wc $n - 1\n");
@@ -88,12 +93,12 @@ static void test_reader_shell_protocols(void) {
 
     s = dump_reader("echo $(printf hi)\n");
     CHECK(s != NULL);
-    CHECK_STR(s, "(%-package-begin (%-expr echo (%-word \"$\") (%-group (%-expr printf hi))))");
+    CHECK_STR(s, "(%-package-begin (%-expr echo (%-adjacent (%-word \"$\") (%-group (%-expr printf hi)))))");
     free(s);
 
     s = dump_reader("cat <(echo hi)\n");
     CHECK(s != NULL);
-    CHECK_STR(s, "(%-package-begin (%-expr cat < (%-group (%-expr echo hi))))");
+    CHECK_STR(s, "(%-package-begin (%-expr cat (%-adjacent < (%-group (%-expr echo hi)))))");
     free(s);
 }
 
@@ -595,7 +600,7 @@ static void test_source_expansion_capabilities(void) {
     idm_error_clear(&err);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<expand-test>", "activate app/ish\necho hello\n", &core, &err));
+    CHECK(idm_expand_string(&rt, "<expand-test>", "use app/ish\nactivate Shell\necho hello\n", &core, &err));
     CHECK(!err.present);
     CHECK(core != NULL);
     {

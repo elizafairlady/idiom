@@ -1,3 +1,4 @@
 operator <+> precedence: 50 assoc: left capture: :infix -> sub
-activate tests/pkg/exporter
+use tests/pkg/exporter
+activate Exporter
 3 <+> 4

@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static IdmIntern g_span_files;
+#define IDM_IC_VERSION 15u
 
 static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err);
 
@@ -36,22 +36,21 @@ static bool copy_arity_operands(const IdmBytecodeModule *src, IdmBytecodeModule 
 }
 
 static bool span_file_index(IdmBytecodeModule *module, const char *file, uint32_t *out_index) {
-    const IdmSymbol *sym = idm_intern(&g_span_files, IDM_SYMBOL_WORD, file);
-    if (!sym) return false;
-    const char *name = idm_symbol_text(sym);
     for (size_t i = 0; i < module->span_file_count; i++) {
-        if (module->span_files[i] == name) {
+        if (strcmp(module->span_files[i], file) == 0) {
             *out_index = (uint32_t)i;
             return true;
         }
     }
     if (module->span_file_count == module->span_file_cap) {
         size_t cap = module->span_file_cap ? module->span_file_cap * 2u : 4u;
-        const char **grown = realloc(module->span_files, cap * sizeof(*grown));
+        char **grown = realloc(module->span_files, cap * sizeof(*grown));
         if (!grown) return false;
         module->span_files = grown;
         module->span_file_cap = cap;
     }
+    char *name = idm_strdup(file);
+    if (!name) return false;
     module->span_files[module->span_file_count] = name;
     *out_index = (uint32_t)module->span_file_count;
     module->span_file_count++;
@@ -161,6 +160,7 @@ void idm_bc_destroy(IdmBytecodeModule *module) {
     if (!module) return;
     free(module->code);
     free(module->constants);
+    for (size_t i = 0; i < module->span_file_count; i++) free(module->span_files[i]);
     free(module->span_files);
     free(module->spans);
     for (size_t i = 0; i < module->name_note_count; i++) free(module->name_notes[i].name);
@@ -218,6 +218,8 @@ static bool intern_pattern_literals(IdmRuntime *rt, IdmPattern *pat, IdmError *e
                 if (!intern_pattern_literals(rt, pat->as.dict.entries[i].pattern, err)) return false;
             }
             return intern_pattern_literals(rt, pat->as.dict.rest, err);
+        case IDM_PAT_SYNTAX:
+            return true;
         default:
             return true;
     }
@@ -386,7 +388,7 @@ const char *idm_opcode_name(IdmOpcode op) {
         case IDM_OP_AWAIT: return "AWAIT";
         case IDM_OP_APPLY: return "APPLY";
         case IDM_OP_ENTER_NAMESPACE: return "ENTER_NAMESPACE";
-        case IDM_OP_IMPORT_GLOBAL: return "IMPORT_GLOBAL";
+        case IDM_OP_TRANSFER_NAMESPACE: return "TRANSFER_NAMESPACE";
         case IDM_OP_LEAVE_NAMESPACE: return "LEAVE_NAMESPACE";
         case IDM_OP_DEFINE_TRAIT: return "DEFINE_TRAIT";
         case IDM_OP_IMPLEMENT_TRAIT: return "IMPLEMENT_TRAIT";
@@ -394,6 +396,19 @@ const char *idm_opcode_name(IdmOpcode op) {
         case IDM_OP_TAIL_CALL_METHOD: return "TAIL_CALL_METHOD";
     }
     return "<bad-op>";
+}
+
+static const char *namespace_transfer_direction_name(uint32_t direction) {
+    switch ((IdmNamespaceTransferDirection)direction) {
+        case IDM_NS_TRANSFER_PARENT_TO_CHILD: return "parent->child";
+        case IDM_NS_TRANSFER_CHILD_TO_PARENT: return "child->parent";
+    }
+    return "<bad-direction>";
+}
+
+static bool verify_namespace_transfer_direction(uint32_t direction, IdmError *err) {
+    if (direction == (uint32_t)IDM_NS_TRANSFER_PARENT_TO_CHILD || direction == (uint32_t)IDM_NS_TRANSFER_CHILD_TO_PARENT) return true;
+    return idm_error_set(err, idm_span_unknown(NULL), "TRANSFER_NAMESPACE direction %u is invalid", direction);
 }
 
 static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err) {
@@ -507,6 +522,19 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "ENTER_NAMESPACE index %u out of bounds", operand);
                 break;
+            case IDM_OP_TRANSFER_NAMESPACE: {
+                uint32_t direction = 0;
+                uint32_t count = 0;
+                if (!verify_operand(module, &ip, op, &direction, err)) return false;
+                if (!verify_namespace_transfer_direction(direction, err)) return false;
+                if (!verify_operand(module, &ip, op, &count, err)) return false;
+                if (count == 0) return idm_error_set(err, idm_span_unknown(NULL), "TRANSFER_NAMESPACE requires at least one transfer");
+                for (uint32_t i = 0; i < count; i++) {
+                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                }
+                break;
+            }
             case IDM_OP_MAKE_CLOSURE:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_CLOSURE function %u out of bounds", operand);
@@ -536,10 +564,6 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
                 }
                 break;
             }
-            case IDM_OP_IMPORT_GLOBAL:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
             case IDM_OP_MAKE_MULTI_CLOSURE: {
                 uint32_t entry_count = 0;
                 uint32_t capture_count = 0;
@@ -657,7 +681,6 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
             case IDM_OP_LOAD_GLOBAL:
             case IDM_OP_STORE_GLOBAL:
             case IDM_OP_ENTER_NAMESPACE:
-            case IDM_OP_IMPORT_GLOBAL:
                 if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                 uint32_t operand = module->code[ip++];
                 if (op == IDM_OP_MAKE_CLOSURE || op == IDM_OP_MAKE_CLOSURE_CAPTURES) {
@@ -665,10 +688,7 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 } else {
                     if (!idm_buf_appendf(buf, " %u", operand)) return false;
                 }
-                if (op == IDM_OP_IMPORT_GLOBAL) {
-                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
-                } else if (op == IDM_OP_MAKE_CLOSURE_CAPTURES) {
+                if (op == IDM_OP_MAKE_CLOSURE_CAPTURES) {
                     if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                     if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
                 } else if (op == IDM_OP_PRIM_CALL) {
@@ -691,6 +711,19 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 for (uint32_t i = 0; i < entry_count; i++) {
                     if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                     if (!append_function_ref(buf, module, module->code[ip++])) return false;
+                }
+                break;
+            }
+            case IDM_OP_TRANSFER_NAMESPACE: {
+                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                uint32_t direction = module->code[ip++];
+                uint32_t count = module->code[ip++];
+                if (!idm_buf_appendf(buf, " %s %u", namespace_transfer_direction_name(direction), count)) return false;
+                for (uint32_t i = 0; i < count; i++) {
+                    if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                    uint32_t src = module->code[ip++];
+                    uint32_t dst = module->code[ip++];
+                    if (!idm_buf_appendf(buf, " %u->%u", src, dst)) return false;
                 }
                 break;
             }
@@ -822,6 +855,41 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
     }
 }
 
+static bool serialize_syntax_pattern(IdmBuffer *out, const IdmSyntaxPattern *pat, unsigned depth, IdmError *err) {
+    if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "syntax pattern nested too deeply for .ic");
+    if (!idm_buf_put_u8(out, (uint8_t)pat->kind)) return idm_error_oom(err, idm_span_unknown(NULL));
+    switch (pat->kind) {
+        case IDM_SYN_PAT_WILDCARD:
+            return true;
+        case IDM_SYN_PAT_BIND:
+            return idm_buf_put_str(out, pat->as.bind.name, strlen(pat->as.bind.name)) ? true : idm_error_oom(err, idm_span_unknown(NULL));
+        case IDM_SYN_PAT_LITERAL:
+            return idm_syn_serialize(out, pat->as.literal, err);
+        case IDM_SYN_PAT_SEQUENCE: {
+            bool has_rest = pat->as.seq.rest_index != IDM_SYN_PAT_NO_REST;
+            if (!idm_buf_put_u8(out, (uint8_t)pat->as.seq.kind) ||
+                !idm_buf_put_u32(out, (uint32_t)pat->as.seq.count) ||
+                !idm_buf_put_u8(out, has_rest ? 1u : 0u)) {
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            if (has_rest) {
+                if (!idm_buf_put_u32(out, (uint32_t)pat->as.seq.rest_index) ||
+                    !idm_buf_put_u8(out, pat->as.seq.rest_name ? 1u : 0u)) {
+                    return idm_error_oom(err, idm_span_unknown(NULL));
+                }
+                if (pat->as.seq.rest_name && !idm_buf_put_str(out, pat->as.seq.rest_name, strlen(pat->as.seq.rest_name))) {
+                    return idm_error_oom(err, idm_span_unknown(NULL));
+                }
+            }
+            for (size_t i = 0; i < pat->as.seq.count; i++) {
+                if (!serialize_syntax_pattern(out, pat->as.seq.items[i], depth + 1u, err)) return false;
+            }
+            return true;
+        }
+    }
+    return idm_error_set(err, idm_span_unknown(NULL), "syntax pattern kind cannot be serialized to .ic");
+}
+
 static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned depth, IdmError *err) {
     if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "pattern nested too deeply for .ic");
     if (!idm_buf_put_u8(out, (uint8_t)pat->kind)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -854,13 +922,15 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned de
             if (pat->as.dict.rest && !serialize_pattern(out, pat->as.dict.rest, depth + 1u, err)) return false;
             return true;
         }
+        case IDM_PAT_SYNTAX:
+            return serialize_syntax_pattern(out, pat->as.syntax, depth + 1u, err);
         default:
             return idm_error_set(err, idm_span_unknown(NULL), "pattern kind cannot be serialized to .ic");
     }
 }
 
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err) {
-    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, 12u)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, IDM_IC_VERSION)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u32(out, (uint32_t)module->const_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->const_count; i++) if (!serialize_value(out, module->constants[i], 0u, err)) return false;
     if (!idm_buf_put_u32(out, (uint32_t)module->function_count)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -977,6 +1047,95 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
     }
 }
 
+static IdmSyntaxPattern *deserialize_syntax_pattern(IdmRuntime *rt, IdmByteReader *r, unsigned depth, IdmError *err) {
+    if (depth > IDM_IC_MAX_DEPTH) {
+        idm_error_set(err, idm_span_unknown(NULL), ".ic syntax pattern nested too deeply");
+        return NULL;
+    }
+    uint8_t kind = idm_rd_u8(r);
+    if (!r->ok) {
+        idm_error_set(err, idm_span_unknown(NULL), "truncated .ic syntax pattern");
+        return NULL;
+    }
+    IdmSpan span = idm_span_unknown(NULL);
+    switch (kind) {
+        case IDM_SYN_PAT_WILDCARD:
+            return idm_syn_pat_wildcard(span);
+        case IDM_SYN_PAT_BIND: {
+            char *name = idm_rd_string(r, NULL);
+            if (!name) { idm_error_set(err, span, "truncated syntax pattern name"); return NULL; }
+            IdmSyntaxPattern *pat = idm_syn_pat_bind(name, span);
+            free(name);
+            if (!pat) idm_error_oom(err, span);
+            return pat;
+        }
+        case IDM_SYN_PAT_LITERAL: {
+            IdmSyntax *literal = idm_syn_deserialize(rt, r, err);
+            if (!literal) return NULL;
+            IdmSyntaxPattern *pat = idm_syn_pat_literal_take(literal, span);
+            if (!pat) { idm_syn_free(literal); idm_error_oom(err, span); }
+            return pat;
+        }
+        case IDM_SYN_PAT_SEQUENCE: {
+            uint8_t seq_kind = idm_rd_u8(r);
+            uint32_t count = idm_rd_u32(r);
+            uint8_t has_rest = idm_rd_u8(r);
+            if (!r->ok || has_rest > 1u || seq_kind > (uint8_t)IDM_SYN_DICT) {
+                idm_error_set(err, span, "truncated or invalid syntax sequence pattern");
+                return NULL;
+            }
+            size_t rest_index = IDM_SYN_PAT_NO_REST;
+            char *rest_name = NULL;
+            if (has_rest) {
+                rest_index = idm_rd_u32(r);
+                uint8_t has_name = idm_rd_u8(r);
+                if (!r->ok || has_name > 1u) {
+                    idm_error_set(err, span, "truncated syntax rest pattern");
+                    return NULL;
+                }
+                if (has_name) {
+                    rest_name = idm_rd_string(r, NULL);
+                    if (!rest_name) {
+                        idm_error_set(err, span, "truncated syntax rest pattern name");
+                        return NULL;
+                    }
+                }
+                if (rest_index > count) {
+                    free(rest_name);
+                    idm_error_set(err, span, "invalid syntax rest pattern index");
+                    return NULL;
+                }
+            }
+            IdmSyntaxPattern **items = count == 0 ? NULL : calloc(count, sizeof(*items));
+            if (count != 0 && !items) {
+                free(rest_name);
+                idm_error_oom(err, span);
+                return NULL;
+            }
+            for (uint32_t i = 0; i < count; i++) {
+                items[i] = deserialize_syntax_pattern(rt, r, depth + 1u, err);
+                if (!items[i]) {
+                    for (uint32_t j = 0; j < i; j++) idm_syn_pat_free(items[j]);
+                    free(items);
+                    free(rest_name);
+                    return NULL;
+                }
+            }
+            IdmSyntaxPattern *pat = idm_syn_pat_sequence((IdmSyntaxKind)seq_kind, items, count, rest_index, rest_name, span);
+            free(rest_name);
+            if (!pat) {
+                for (uint32_t i = 0; i < count; i++) idm_syn_pat_free(items[i]);
+                free(items);
+                idm_error_oom(err, span);
+            }
+            return pat;
+        }
+        default:
+            idm_error_set(err, span, "unknown .ic syntax pattern kind %u", kind);
+            return NULL;
+    }
+}
+
 static IdmPattern *deserialize_pattern(IdmRuntime *rt, IdmByteReader *r, unsigned depth, IdmError *err) {
     if (depth > IDM_IC_MAX_DEPTH) { idm_error_set(err, idm_span_unknown(NULL), ".ic pattern nested too deeply"); return NULL; }
     uint8_t kind = idm_rd_u8(r);
@@ -1036,6 +1195,13 @@ static IdmPattern *deserialize_pattern(IdmRuntime *rt, IdmByteReader *r, unsigne
             if (!p) { for (uint32_t i = 0; i < n; i++) idm_pat_free(entries[i].pattern); free(entries); idm_pat_free(rest); idm_error_oom(err, span); }
             return p;
         }
+        case IDM_PAT_SYNTAX: {
+            IdmSyntaxPattern *syntax = deserialize_syntax_pattern(rt, r, depth + 1u, err);
+            if (!syntax) return NULL;
+            IdmPattern *p = idm_pat_syntax_take(syntax, span);
+            if (!p) { idm_syn_pat_free(syntax); idm_error_oom(err, span); }
+            return p;
+        }
         default:
             idm_error_set(err, span, "unknown .ic pattern kind %u", kind);
             return NULL;
@@ -1048,7 +1214,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     if (len < 8u || memcmp(data, "IDMC", 4u) != 0) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "not an .ic module"); }
     r.pos = 4u;
     uint32_t version = idm_rd_u32(&r);
-    if (version != 12u) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
+    if (version != IDM_IC_VERSION) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
     uint32_t const_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < const_count && r.ok; i++) {
         IdmValue v;
@@ -1225,6 +1391,15 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
             case IDM_OP_ENTER_NAMESPACE:
                 if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
+            case IDM_OP_TRANSFER_NAMESPACE: {
+                uint32_t direction = src->code[ip++];
+                uint32_t count = src->code[ip++];
+                if (!idm_bc_emit(dst, direction, NULL) || !idm_bc_emit(dst, count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (uint32_t i = 0; i < count; i++) {
+                    if (!idm_bc_emit(dst, src->code[ip++], NULL) || !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                }
+                break;
+            }
             case IDM_OP_MAKE_CLOSURE:
                 if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
@@ -1245,7 +1420,6 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
                 }
                 break;
             }
-            case IDM_OP_IMPORT_GLOBAL:
             case IDM_OP_PRIM_CALL:
                 if (!idm_bc_emit(dst, src->code[ip++], NULL) || !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
@@ -1459,6 +1633,28 @@ static bool pattern_relocate_syntax(IdmRuntime *rt, IdmPattern *pat, IdmScopeId 
                 if (!pattern_relocate_syntax(rt, pat->as.dict.entries[i].pattern, min_id, delta, err)) return false;
             }
             return pattern_relocate_syntax(rt, pat->as.dict.rest, min_id, delta, err);
+        case IDM_PAT_SYNTAX: {
+            IdmSyntaxPattern *sp = pat->as.syntax;
+            if (!sp) return true;
+            switch (sp->kind) {
+                case IDM_SYN_PAT_LITERAL:
+                    idm_syn_scope_relocate_tree(sp->as.literal, min_id, delta);
+                    return true;
+                case IDM_SYN_PAT_SEQUENCE:
+                    for (size_t i = 0; i < sp->as.seq.count; i++) {
+                        IdmPattern wrapper;
+                        memset(&wrapper, 0, sizeof(wrapper));
+                        wrapper.kind = IDM_PAT_SYNTAX;
+                        wrapper.as.syntax = sp->as.seq.items[i];
+                        if (!pattern_relocate_syntax(rt, &wrapper, min_id, delta, err)) return false;
+                    }
+                    return true;
+                case IDM_SYN_PAT_WILDCARD:
+                case IDM_SYN_PAT_BIND:
+                    return true;
+            }
+            return true;
+        }
         default:
             return true;
     }

@@ -1,6 +1,9 @@
 package splicemak
-export defmacro defdouble stx do
-  %`(do
-      defn %,(syntax-nth stx 2) v -> mul v 2
-    end)
+
+export protocol SpliceMak do
+  export defmacro defdouble %`(defdouble %,name) -> do
+    %`(do
+        defn %,name v -> mul v 2
+      end)
+  end
 end

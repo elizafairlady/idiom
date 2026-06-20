@@ -1,56 +1,44 @@
-export defmacro if stx do
-  syntax-case stx do
-    (_ condition then_body) -> %`(cond %,condition %,then_body :nil)
-    (_ condition then_body else_word else_body) ->
-      if (eq? (syntax-word-text else_word) "else") do
-        %`(cond %,condition %,then_body %,else_body)
-      else do
-        syntax-error stx "if requires else before the else body"
-      end
-    (_ condition then_body else_word if_word condition2 then_body2 else_word2 else_body2) ->
-      if (and (eq? (syntax-word-text else_word) "else") (eq? (syntax-word-text if_word) "if") (eq? (syntax-word-text else_word2) "else")) do
-        %`(cond %,condition %,then_body (if %,condition2 %,then_body2 %,else_word2 %,else_body2))
-      else do
-        syntax-error stx "if else-chain must use 'else if' and end with a final else"
-      end
-  end
+export defmacro if do
+  %`(if %,condition %,then_body) -> %`(cond %,condition %,then_body :nil)
+  %`(if %,condition %,then_body else %,else_body) -> %`(cond %,condition %,then_body %,else_body)
+  %`(if %,condition %,then_body else if %,condition2 %,then_body2 else %,else_body2) ->
+    %`(cond %,condition %,then_body (if %,condition2 %,then_body2 else %,else_body2))
+  stx -> syntax-error stx "if expects: if COND BODY [else BODY]"
 end
 
-export defrules match do
-  (_ scrutinee body) -> %`((fn %,body) %,scrutinee)
+export defmacro match do
+  %`(match %,scrutinee %,body) -> %`((fn %,body) %,scrutinee)
 end
 
-export defrules error do
-  (_ value) -> %`(raise (make-error %,value))
-  (_ first rest ...) -> %`(raise (make-error {%,first %,@rest}))
+export defmacro error do
+  %`(error %,value) -> %`(raise (make-error %,value))
+  %`(error %,first %,@rest) -> %`(raise (make-error {%,first %,@rest}))
 end
 
-export defrules case do
-  (_ scrutinee clauses) -> %`(match %,scrutinee %,clauses)
+export defmacro case do
+  %`(case %,scrutinee %,clauses) -> %`(match %,scrutinee %,clauses)
 end
 
-export defrules unless do
-  (_ condition body) -> %`(cond %,condition :nil %,body)
+export defmacro unless do
+  %`(unless %,condition %,body) -> %`(cond %,condition :nil %,body)
 end
 
-export defrules not? do
-  (_ value) -> %`(cond (ok? %,value) :false :true)
+export defmacro not? do
+  %`(not? %,value) -> %`(cond (ok? %,value) :false :true)
 end
 
-export defrules and do
-  (_ last) -> last
-  (_ first rest ...) -> %`(cond %,first (and %,@rest) :false)
+export defmacro and do
+  %`(and %,last) -> last
+  %`(and %,first %,@rest) -> %`(cond %,first (and %,@rest) :false)
 end
 
-export defmacro or stx do
-  syntax-case stx do
-    (_ last) -> last
-    (_ first rest ...) -> do
-      tmp = make-syntax-word stx "__or_tmp__"
-      %`do
-        %,tmp = %,first
-        cond %,tmp %,tmp (or %,@rest)
-      end
+export defmacro or do
+  %`(or %,last) -> last
+  %`(or %,first %,@rest) -> do
+    tmp = make-syntax-word first "__or_tmp__"
+    %`do
+      %,tmp = %,first
+      cond %,tmp %,tmp (or %,@rest)
     end
   end
 end

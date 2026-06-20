@@ -1,5 +1,5 @@
 CC ?= cc
-VERSION := 0.45.0-dev
+VERSION := 0.46.0-dev
 CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -g -D_POSIX_C_SOURCE=200809L -Iinclude -DIDM_VERSION=\"$(VERSION)\"
 DEPFLAGS ?= -MMD -MP
 LDFLAGS ?= -lpthread -lm
@@ -30,9 +30,16 @@ TEST_SRCS := $(wildcard tests/unit/*.c)
 TEST_OBJS := $(patsubst %.c,build/%.o,$(TEST_SRCS))
 DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
 
-.PHONY: all test sanitize tsan release clean snapshots perf perf-compare perf-profile perf-editor
+.PHONY: all test sanitize memcheck tsan release clean snapshots perf perf-compare perf-profile perf-editor
 
 SAN_FLAGS := -fsanitize=address,undefined -fno-omit-frame-pointer
+VALGRIND ?= valgrind
+MEMCHECK_FLAGS ?= --leak-check=full --show-leak-kinds=all --error-exitcode=99
+MEMCHECK_LOGS := \
+ build/valgrind-unit-tests.log \
+ build/valgrind-startup.log \
+ build/valgrind-protocols.log \
+ build/valgrind-editor-buffer.log
 
 all: build/idiomc build/ish build/nani
 
@@ -74,6 +81,13 @@ build/san/ish: build/san/idiomc $(wildcard app/ish/*.id)
 sanitize: build/unit_tests_san build/san/idiomc build/san/ish build/pty_driver
 	ASAN_OPTIONS=detect_leaks=1 ./build/unit_tests_san
 	@ASAN_OPTIONS=detect_leaks=1 sh tools/run_tests.sh ./build/san/idiomc ./build/san/ish san
+
+memcheck: build/unit_tests build/idiomc
+	$(VALGRIND) $(MEMCHECK_FLAGS) --log-file=build/valgrind-unit-tests.log ./build/unit_tests
+	$(VALGRIND) $(MEMCHECK_FLAGS) --log-file=build/valgrind-startup.log ./build/idiomc tests/perf/idiom/startup.id
+	$(VALGRIND) $(MEMCHECK_FLAGS) --log-file=build/valgrind-protocols.log ./build/idiomc test tests/lang/provider_surface.id tests/lang/golden_package.id tests/lang/activation.id tests/lang/syntax_patterns.id
+	$(VALGRIND) $(MEMCHECK_FLAGS) --log-file=build/valgrind-editor-buffer.log ./build/idiomc tests/perf/idiom/editor_buffer.id
+	@grep -E "in use at exit|ERROR SUMMARY" $(MEMCHECK_LOGS)
 
 release:
 	mkdir -p build/release

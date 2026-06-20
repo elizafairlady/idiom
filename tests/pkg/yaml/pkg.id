@@ -1,40 +1,42 @@
 package yaml
 
-resolver form do
-  defn rev do
-    '() acc -> acc
-    (list h . t) acc -> rev t (cons h acc)
-  end
+export protocol Yaml do
+  grammar do
+    %`(yaml %,body) -> do
+      defn rev do
+        '() acc -> acc
+        (list h . t) acc -> rev t (cons h acc)
+      end
 
-  defn scalar-word w -> match (syntax-word-text w) do
-    "true"  -> make-syntax-atom w "true"
-    "false" -> make-syntax-atom w "false"
-    "null"  -> make-syntax-atom w "nil"
-    "~"     -> make-syntax-atom w "nil"
-    text -> make-syntax-string w text
-  end
+      defn scalar-word w -> match (syntax-word-text w) do
+        "true"  -> make-syntax-atom w "true"
+        "false" -> make-syntax-atom w "false"
+        "null"  -> make-syntax-atom w "nil"
+        "~"     -> make-syntax-atom w "nil"
+        text -> make-syntax-string w text
+      end
 
-  defn node do
-    v when (syntax-word? v)              -> scalar-word v
-    v when (eq? (syntax-kind v) :dict)   -> mapping v 0 (syntax-length v) '()
-    v when (eq? (syntax-kind v) :vector) -> sequence v 0 (syntax-length v) '()
-    v when (eq? (syntax-kind v) :list)   -> sequence v 0 (syntax-length v) '()
-    v -> v
-  end
+      defn node do
+        v when (syntax-word? v)              -> scalar-word v
+        v when (eq? (syntax-kind v) :dict)   -> mapping v 0 (syntax-length v) '()
+        v when (eq? (syntax-kind v) :vector) -> sequence v 0 (syntax-length v) '()
+        v when (eq? (syntax-kind v) :list)   -> sequence v 0 (syntax-length v) '()
+        v -> v
+      end
 
-  defn mapping do
-    d i n acc when (eq? i n) -> make-syntax-dict d (rev acc '())
-    d i n acc -> mapping d (add i 2) n (cons (node (syntax-nth d (add i 1))) (cons (syntax-nth d i) acc))
-  end
+      defn mapping do
+        d i n acc when (eq? i n) -> make-syntax-dict d (rev acc '())
+        d i n acc -> mapping d (add i 2) n (cons (node (syntax-nth d (add i 1))) (cons (syntax-nth d i) acc))
+      end
 
-  defn sequence do
-    s i n acc when (eq? i n) -> make-syntax-expr s (cons (make-syntax-word s "list") (rev acc '()))
-    s i n acc -> sequence s (add i 1) n (cons (node (syntax-nth s i)) acc)
-  end
+      defn sequence do
+        s i n acc when (eq? i n) -> make-syntax-expr s (cons (make-syntax-word s "list") (rev acc '()))
+        s i n acc -> sequence s (add i 1) n (cons (node (syntax-nth s i)) acc)
+      end
 
-  if (lt? (syntax-length form) 3) do
-    syntax-error form "yaml expects a single mapping body"
-  else do
-    node (syntax-nth form 2)
+      node body
+    end
+
+    %`(yaml %,@_) -> syntax-error %`(yaml) "yaml expects a single mapping body"
   end
 end

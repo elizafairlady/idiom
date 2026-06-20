@@ -1,7 +1,29 @@
 export defmacro operator stx do
-  n = syntax-length stx
-  if (lt? n 4) do
-    syntax-error stx "operator declaration requires a name and a target"
+  defn empty-opts -> %`%{}
+
+  defn known-options stx opts -> do
+    data = syntax->datum opts
+    unknown = dict-del (dict-del (dict-del data :precedence) :assoc) :capture
+    if (gt? (dict-size unknown) 0) do
+      syntax-error stx "unknown operator keyword '#{first (dict-keys unknown)}'"
+    end
+    data
+  end
+
+  defn precedence-of do
+    stx data -> match (dict-get data :precedence 50) do
+      p when (int? p) -> p
+      _ -> syntax-error stx "operator precedence must be an integer 0..255"
+    end
+  end
+
+  defn assoc-of do
+    stx data -> match (dict-get data :assoc 'left) do
+      'left -> "left"
+      'right -> "right"
+      'none -> "none"
+      _ -> syntax-error stx "operator assoc must be left, right, or none"
+    end
   end
 
   defn head-is? do
@@ -10,136 +32,98 @@ export defmacro operator stx do
     _ _ -> :false
   end
 
-  defn word-is? do
-    node name when (syntax-word? node) -> eq? (syntax-word-text node) name
-    _ _ -> :false
-  end
-
-  defn body-form? node -> head-is? node "%-body"
-
-  defn find-decl-end do
-    i when (eq? i n) -> syntax-error stx "operator declaration requires '-> target' or an operator body"
-    i when (word-is? (syntax-nth stx i) "->") -> {:arrow i}
-    i when (body-form? (syntax-nth stx i)) ->
-      cond (neq? (add i 1) n) (syntax-error stx "operator body must be the final operator form")
-        (cond (and (gt? i 4) (word-is? (syntax-nth stx (sub i 2)) "macro")) {:macro-body i} {:body i})
-    i -> find-decl-end (add i 1)
-  end
-
-  defn kw-text do
-    v when (syntax-atom? v) -> syntax-atom-text v
-    _ -> syntax-error stx "operator declaration expects keyword: value pairs"
-  end
-
-  defn opt-word do
-    v when (syntax-word? v) -> syntax-word-text v
-    _ -> syntax-error stx "operator option must be an identifier"
-  end
-
-  defn syntax-string? v -> eq? (syntax-kind v) :string
-
-  defn syntax-tuple? v -> eq? (syntax-kind v) :tuple
-
-  defn syntax-dict? v -> eq? (syntax-kind v) :dict
+  defn syntax-quote-node ctx item -> make-syntax-list ctx (list (make-syntax-word ctx "%-syntax") item)
 
   defn capture-part-text do
-    v when (syntax-atom? v) -> syntax-atom-text v
-    v when (syntax-string? v) -> syntax-string-text v
-    v when (syntax-int? v) -> "#{syntax-int-value v}"
-    _ -> syntax-error stx "operator capture must use atoms, strings, integers, tuples, or grouped expressions"
+    stx v when (atom? v) -> "#{v}"
+    stx v when (string? v) -> v
+    stx v when (int? v) -> "#{v}"
+    stx _ -> syntax-error stx "operator capture must use atoms, strings, integers, tuples, or grouped expressions"
   end
 
-  defn capture-join do
-    v i len "" when (eq? i len) -> ""
-    v i len acc when (eq? i len) -> acc
-    v i len "" -> capture-join v (add i 1) len (capture-part-text (syntax-nth v i))
-    v i len acc -> capture-join v (add i 1) len "${acc} #{capture-part-text (syntax-nth v i)}"
+  defn capture-join-data do
+    stx '() "" -> ""
+    stx '() acc -> acc
+    stx (list v . rest) "" -> capture-join-data stx rest (capture-part-text stx v)
+    stx (list v . rest) acc -> capture-join-data stx rest "${acc} #{capture-part-text stx v}"
+  end
+
+  defn capture-join-syntax do
+    stx v i len "" when (eq? i len) -> ""
+    stx v i len acc when (eq? i len) -> acc
+    stx v i len "" -> capture-join-syntax stx v (add i 1) len (capture-part-text stx (syntax->datum (syntax-nth v i)))
+    stx v i len acc -> capture-join-syntax stx v (add i 1) len "${acc} #{capture-part-text stx (syntax->datum (syntax-nth v i))}"
+  end
+
+  defn capture-data-text do
+    stx v when (tuple? v) -> capture-join-data stx (tuple-to-list v) ""
+    stx v -> capture-part-text stx v
   end
 
   defn capture-text do
-    v when (head-is? v "%-group") -> capture-text (syntax-nth v 1)
-    v when (and (head-is? v "%-expr") (gt? (syntax-length v) 1)) -> capture-join v 1 (syntax-length v) ""
-    v when (syntax-tuple? v) -> capture-join v 0 (syntax-length v) ""
-    v -> capture-part-text v
+    stx v when (head-is? v "%-group") -> capture-text stx (syntax-nth v 1)
+    stx v when (and (head-is? v "%-expr") (gt? (syntax-length v) 1)) -> capture-join-syntax stx v 1 (syntax-length v) ""
+    stx v -> capture-data-text stx (syntax->datum v)
   end
 
-  defn apply-opt do
-    "precedence" v {p a c} -> {(syntax-int-value v) a c}
-    "assoc" v {p a c} -> {p (opt-word v) c}
-    "capture" v {p a c} -> {p a (capture-text v)}
-    other _ _ -> syntax-error stx "unknown operator keyword '${other}'"
-  end
-
-  defn parse-opt-dict do
-    opts i len acc when (eq? i len) -> acc
-    opts i len acc when (eq? (add i 1) len) -> syntax-error stx "operator option dict requires key/value pairs"
-    opts i len acc -> parse-opt-dict opts (add i 2) len (apply-opt (kw-text (syntax-nth opts i)) (syntax-nth opts (add i 1)) acc)
-  end
-
-  defn parse-opts do
-    i stop acc when (eq? i stop) -> acc
-    i stop acc when (eq? (add i 1) stop) -> do
-      opts = syntax-nth stx i
-      cond (syntax-dict? opts) (parse-opt-dict opts 0 (syntax-length opts) acc) (syntax-error stx "operator declaration expects keyword option dict")
+  defn capture-of do
+    stx opts -> match opts do
+      %`%{:capture %,capture} -> capture-text stx capture
+      _ -> "infix"
     end
-    _ _ _ -> syntax-error stx "operator declaration expects keyword option dict"
   end
 
-  defn target-of do
-    a when (eq? (add a 1) n) -> syntax-error stx "operator declaration requires '-> target'"
-    a when (neq? (add a 2) n) -> syntax-error stx "operator declaration expects a single target after '->'"
-    a -> syntax-nth stx (add a 1)
+  defn option-values stx opts -> do
+    data = known-options stx opts
+    {(precedence-of stx data) (assoc-of stx data) (capture-of stx opts)}
   end
 
-  defn emit do
-    {:arrow arrow} when (word-is? (syntax-nth stx (add arrow 1)) "macro") -> do
-      if (or (neq? (add arrow 4) n) (eq? (body-form? (syntax-nth stx (add arrow 3))) :false)) do
-        syntax-error stx "operator macro target expects '-> macro stx do ... end'"
-      end
-      target = make-syntax-word stx "__operator_target__"
-      {p a c} = parse-opts 3 arrow {50 "left" "infix"}
-      param = syntax-nth stx (add arrow 2)
-      body = syntax-nth stx (add arrow 3)
-      %`do
-        defmacro %,target %,param %,body
-        for-syntax do
-          expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
-        end
-      end
-    end
-    {:arrow arrow} -> do
-      {p a c} = parse-opts 3 arrow {50 "left" "infix"}
-      target = target-of arrow
-      %`do
-        for-syntax do
-          expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
-        end
-      end
-    end
-    {:macro-body bodyi} -> do
-      target = make-syntax-word stx "__operator_target__"
-      {p a c} = parse-opts 3 (sub bodyi 2) {50 "left" "infix"}
-      param = syntax-nth stx (sub bodyi 1)
-      body = syntax-nth stx bodyi
-      %`do
-        defmacro %,target %,param %,body
-        for-syntax do
-          expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
-        end
-      end
-    end
-    {:body bodyi} -> do
-      target = make-syntax-word stx "__operator_target__"
-      {p a c} = parse-opts 3 bodyi {50 "left" "infix"}
-      body = syntax-nth stx bodyi
-      %`do
-        defn %,target %,body
-        for-syntax do
-          expander-register-operator %'%,(syntax-nth stx 2) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %'%,target
-        end
+  defn emit-target stx name opts target -> do
+    {p a c} = option-values stx opts
+    %`do
+      for-syntax do
+        expander-register-operator %,(syntax-quote-node stx name) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,(syntax-quote-node stx target)
       end
     end
   end
 
-  emit (find-decl-end 3)
+  defn emit-fn stx name opts body -> do
+    target = make-syntax-word stx "__operator_target__"
+    {p a c} = option-values stx opts
+    %`do
+      defn %,target %,body
+      for-syntax do
+        expander-register-operator %,(syntax-quote-node stx name) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,(syntax-quote-node stx target)
+      end
+    end
+  end
+
+  defn emit-macro-tail stx name opts tail -> do
+    match tail do
+      '() -> syntax-error stx "operator macro requires a parameter or clauses"
+      _ -> :ok
+    end
+    target = make-syntax-word stx "__operator_target__"
+    {p a c} = option-values stx opts
+    %`do
+      defmacro %,target %,@tail
+      for-syntax do
+        expander-register-operator %,(syntax-quote-node stx name) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,(syntax-quote-node stx target)
+      end
+    end
+  end
+
+  match stx do
+    %`(operator %,name %,opts -> macro %,@tail) -> emit-macro-tail stx name opts tail
+    %`(operator %,name -> macro %,@tail) -> emit-macro-tail stx name (empty-opts) tail
+    %`(operator %,name %,opts -> %,target) -> emit-target stx name opts target
+    %`(operator %,name -> %,target) -> emit-target stx name (empty-opts) target
+    %`(operator %,name %,opts macro %,@tail) -> emit-macro-tail stx name opts tail
+    %`(operator %,name macro %,@tail) -> emit-macro-tail stx name (empty-opts) tail
+    %`(operator %,name %,opts do %,@body end) -> emit-fn stx name opts %`do %,@body end
+    %`(operator %,name do %,@body end) -> emit-fn stx name (empty-opts) %`do %,@body end
+    %`(operator) -> syntax-error stx "operator declaration requires a name and a target"
+    %`(operator %,name) -> syntax-error stx "operator declaration requires a name and a target"
+    _ -> syntax-error stx "operator declaration requires '-> target' or an operator body"
+  end
 end

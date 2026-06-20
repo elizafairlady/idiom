@@ -1,12 +1,13 @@
 use std/test
 import std/file as File
-activate std/test
+activate Test
 use std/enum
 
 suite do
   test "cwd-relative-file-prims" do
     got = do
-      activate app/ish
+      use app/ish
+      activate Shell
       cd "/"
       cd "tmp"
       w = File.write "idiom_actor_cwd_inner.txt" "inner"

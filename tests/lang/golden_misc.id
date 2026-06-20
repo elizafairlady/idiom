@@ -1,5 +1,5 @@
 use std/test
-activate std/test
+activate Test
 use std/enum
 
 suite do
@@ -74,7 +74,7 @@ suite do
   end
   test "defmacro-construct" do
     got = do
-      defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2); plus2 40
+      defmacro plus2 %`(plus2 %,x) -> %`(add %,x 2); plus2 40
     end
     assert-inspect got "42"
   end
@@ -109,22 +109,23 @@ suite do
     end
     assert-inspect got "42"
   end
-  test "defrules-basic" do
+  test "macro-clause-basic" do
     got = do
-      defrules swap do
-        (_ a b) -> %`{%,b %,a}
+      defmacro swap do
+        %`(swap %,a %,b) -> %`{%,b %,a}
       end
-      defrules pick do
-        (_ a) when (syntax-int? a) -> %`(add %,a 1)
-        (_ a) -> %`{:other %,a}
+      defmacro pick do
+        %`(pick %,a) when (syntax-int? a) -> %`(add %,a 1)
+        %`(pick %,a) -> %`{:other %,a}
       end
       {(swap 1 2) (pick 41) (pick :x)}
     end
     assert-inspect got "{{2 1} 42 {:other :x}}"
   end
-  test "defrules-export" do
+  test "macro-clause-export" do
     got = do
-      activate tests/pkg/rulespkg
+      use tests/pkg/rulespkg
+      activate RulesPkg
       twice-of 21
     end
     assert-inspect got "42"
@@ -172,14 +173,16 @@ suite do
   end
   test "export-macro" do
     got = do
-      activate tests/pkg/exporter
+      use tests/pkg/exporter
+      activate Exporter
       answer foo
     end
     assert-inspect got "99"
   end
   test "export-operator" do
     got = do
-      activate tests/pkg/exporter
+      use tests/pkg/exporter
+      activate Exporter
       3 <+> 4
     end
     assert-inspect got "7"
@@ -206,7 +209,8 @@ suite do
   end
   test "html-dsl" do
     got = do
-      activate tests/pkg/htmldsl
+      use tests/pkg/htmldsl
+      activate HtmlDsl
       html do
         body class: "main" do
           h1 "Title"
@@ -264,7 +268,7 @@ suite do
   test "make-dsl-diamond" do
     got = do
       use tests/pkg/makedsl
-      activate tests/pkg/makedsl
+      activate MakeDsl
       rules = list (rule :base do :b end) (rule :l deps: (list :base) do :l end) (rule :r deps: (list :base) do :r end) (rule :top deps: (list :l :r) do :t end)
       {(build rules :top) (try do
         build rules :missing
@@ -276,8 +280,9 @@ suite do
   test "make-dsl" do
     got = do
       use tests/pkg/makedsl
-      activate tests/pkg/makedsl
-      activate app/ish
+      activate MakeDsl
+      use app/ish
+      activate Shell
       rules = list (rule :prep do
           x = sh -c "printf prep"
           {:prep-out x}
@@ -429,9 +434,9 @@ suite do
   end
   test "quasi-do-shorthand" do
     got = do
-      defmacro defpair stx -> %`do
-        defn %,(syntax-nth stx 2) v -> v
-        defn %,(syntax-nth stx 3) v -> mul v 2
+      defmacro defpair %`(defpair %,one %,two) -> %`do
+        defn %,one v -> v
+        defn %,two v -> mul v 2
       end
       defpair one-of two-of
       {(one-of 3) (two-of 3)}
@@ -486,11 +491,10 @@ suite do
   end
   test "sc-literal" do
     got = do
-      defmacro pick stx ->
-        syntax-case stx do
-          (_ :inc n) -> %`(add %,n 1)
-          (_ :dec n) -> %`(sub %,n 1)
-        end
+      defmacro pick do
+        %`(pick :inc %,n) -> %`(add %,n 1)
+        %`(pick :dec %,n) -> %`(sub %,n 1)
+      end
       add (pick :inc 41) (pick :dec 1)
     end
     assert-inspect got "42"
@@ -548,9 +552,9 @@ suite do
     end
     assert-inspect got "{6 5}"
   end
-  test "syntax-case" do
+  test "macro-clause-syntax-pattern" do
     got = do
-      defmacro plus2 stx -> syntax-case stx do (_ x) -> %`(add %,x 2) end; plus2 40
+      defmacro plus2 %`(plus2 %,x) -> %`(add %,x 2); plus2 40
     end
     assert-inspect got "42"
   end
@@ -596,6 +600,12 @@ suite do
     end
     assert-inspect got "42"
   end
+  test "value-pipe-last" do
+    got = do
+      2 |>> sub 44
+    end
+    assert-inspect got "42"
+  end
   test "valueless-decls" do
     got = do
       last-is-decl = do
@@ -606,9 +616,7 @@ suite do
         1 weave 2
       end
       rules-last = do
-        defrules nothing do
-          (_ a) -> a
-        end
+        defmacro nothing %`(nothing %,a) -> a
       end
       {last-is-decl used-in-scope rules-last}
     end

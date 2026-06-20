@@ -1,6 +1,6 @@
 package sibmac
 
-export defmacro base-num s -> (make-syntax-int s 21)
-export defmacro doubled stx do syntax-case stx do
-  (_ q) -> %`(mul (base-num q) 2)
-end end
+export protocol SibMac do
+  export defmacro base-num %`(base-num %,where) -> (make-syntax-int where 21)
+  export defmacro doubled %`(doubled %,q) -> %`(mul (base-num %,q) 2)
+end

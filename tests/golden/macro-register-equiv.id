@@ -1,10 +1,10 @@
-defmacro twin-a stx do syntax-case stx do (_ e) -> %`(add %,e 1) end end
-defmacro mk-twin stx do syntax-case stx do
-  (_ n) -> do
-    expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ e) -> %`(add %,e 1) end end)
+defmacro twin-a %`(twin-a %,e) -> %`(add %,e 1)
+defmacro mk-twin do
+  %`(mk-twin %,n) -> do
+    expander-register-macro n (fn do %`(_ %,e) -> %`(add %,e 1) end)
     %`:nil
   end
-end end
+end
 mk-twin twin-b
 shadowed = do
   defn add a b -> :shadow

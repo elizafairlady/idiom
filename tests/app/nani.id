@@ -3,7 +3,7 @@ use std/string
 import std/file as File
 import std/tea as Tea
 use app/nani
-activate std/test
+activate Test
 
 defn feed do
   editor '() -> editor

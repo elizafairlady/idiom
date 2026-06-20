@@ -1,6 +1,6 @@
 {:operators ({:== 30 :left "infix"} {:!= 30 :left "infix"} {:< 30 :left "infix"} {:> 30 :left "infix"} {:<= 30 :left "infix"} {:>= 30 :left "infix"} {:+ 50 :left "infix"} {:- 50 :left "infix"} {:* 60 :left "infix"} {:/ 60 :left "infix"} {:% 60 :left "infix"} {:// 60 :left "infix"} {:%% 60 :left "infix"} {:** 70 :right "infix"} {:- 80 :left "prefix"} {:|> 10 :left "infix expression"} {:|>> 10 :left "infix expression"} {:| 20 :left "infix"} {:&& 10 :left "infix"} {:|| 10 :left "infix"} {:& 5 :left "postfix"} {:>> 30 :left "infix"} {:<< 30 :left "infix sentinel"} {:>& 30 :left "infix"} {:&> 30 :left "infix"} {:&>> 30 :left "infix"})}
-{:macros (:defrules :operator :syntax-case :if :match :error :case :unless :not? :and :or :jobs :fg :bg :cd)}
-{:protocols ()}
-{:resolvers (:resolver)}
-{:methods ()}
-{:active ({:std/kernel "<unknown>" 0 0} {:app/ish "<dump-surface>" 1 1})}
+{:macros (:if :match :error :case :unless :not? :and :or :operator :cd :jobs :fg :bg)}
+{:protocols (:Shell)}
+{:grammars (:grammar)}
+{:methods ({:Prompt#f85eed9de15a3081 :prompt %{:kind :set :min 1 :max 1 :mask 2}} {:Prompt#f85eed9de15a3081 :continuation-prompt %{:kind :set :min 1 :max 1 :mask 2}})}
+{:active ({:std/kernel "<unknown>" 0 0} {:Shell "<dump-surface>" 2 1})}

@@ -388,7 +388,7 @@ defn session-main mode do
   shell = eq? mode :shell
   trap-exit :true
   if shell do
-    eval-text "activate app/ish" :false
+    eval-text "use app/ish\nactivate Shell" :false
   end
   {hist entries} = history-load shell
   rcr = cond shell run-rc 0
@@ -408,7 +408,7 @@ end
 
 defn shell-source-status source do
   trap-exit :true
-  eval-text "activate app/ish" :false
+  eval-text "use app/ish\nactivate Shell" :false
   status-code (eval-text source :false)
 end
 

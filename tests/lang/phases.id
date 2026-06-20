@@ -1,5 +1,5 @@
 use std/test
-activate std/test
+activate Test
 
 for-syntax do
   defn tmp x -> add x 100

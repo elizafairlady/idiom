@@ -1,3 +1,5 @@
-activate tests/pkg/exporter
-activate tests/pkg/exporter2
+use tests/pkg/exporter
+use tests/pkg/exporter2
+activate Exporter
+activate Exporter2
 answer x

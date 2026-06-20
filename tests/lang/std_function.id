@@ -1,5 +1,5 @@
 use std/test
-activate std/test
+activate Test
 import std/function as Fn
 
 defn church-zero -> fn _f -> fn x -> x

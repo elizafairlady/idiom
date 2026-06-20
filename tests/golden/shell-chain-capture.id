@@ -1,4 +1,5 @@
-activate app/ish
+use app/ish
+activate Shell
 a = echo one && echo two
 println a
 b = false || echo rescue

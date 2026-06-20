@@ -1,6 +1,6 @@
 use std/test
 use tests/pkg/readcfg
-activate std/test
+activate Test
 
 suite do
   test "phase-one-file-read-bakes-into-artifact" do

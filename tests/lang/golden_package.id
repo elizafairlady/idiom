@@ -1,5 +1,5 @@
 use std/test
-activate std/test
+activate Test
 
 suite do
   test "package-decl" do
@@ -33,14 +33,16 @@ suite do
   end
   test "package-macro-phase" do
     got = do
-      activate tests/pkg/macropriv
+      use tests/pkg/macropriv
+      activate MacroPriv
       phase-answer anything
     end
     assert-inspect got "77"
   end
   test "package-macro-private-runtime" do
     got = do
-      activate tests/pkg/macropriv
+      use tests/pkg/macropriv
+      activate MacroPriv
       inc-private 41
     end
     assert-inspect got "42"

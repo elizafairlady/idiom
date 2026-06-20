@@ -43,7 +43,7 @@ typedef enum {
     IDM_OP_AWAIT,
     IDM_OP_APPLY,
     IDM_OP_ENTER_NAMESPACE,
-    IDM_OP_IMPORT_GLOBAL,
+    IDM_OP_TRANSFER_NAMESPACE,
     IDM_OP_LEAVE_NAMESPACE,
     IDM_OP_DEFINE_TRAIT,
     IDM_OP_IMPLEMENT_TRAIT,
@@ -54,6 +54,11 @@ typedef enum {
     IDM_OP_SPAWN_MONITOR,
     IDM_OP_TAIL_RECV
 } IdmOpcode;
+
+typedef enum {
+    IDM_NS_TRANSFER_PARENT_TO_CHILD = 0,
+    IDM_NS_TRANSFER_CHILD_TO_PARENT = 1
+} IdmNamespaceTransferDirection;
 
 #define IDM_CALL_DIRECT_FLAG 0x80000000u
 #define IDM_CALL_ARGC_MASK 0x7fffffffu
@@ -87,7 +92,7 @@ typedef struct IdmBytecodeModule {
     IdmBcFunction *functions;
     size_t function_count;
     size_t function_cap;
-    const char **span_files;
+    char **span_files;
     size_t span_file_count;
     size_t span_file_cap;
     struct { uint32_t offset; uint32_t file; uint32_t line; uint32_t column; } *spans;

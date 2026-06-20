@@ -69,18 +69,20 @@ static void test_surface_forms_are_kernel_sourced(void) {
 static void test_artifact_cache_relocation(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    check_value_written(&rt, "activate tests/pkg/macropriv\nphase-answer x\n", "77");
-    check_value_written(&rt, "activate tests/pkg/macropriv\ninc-private 41\n", "42");
+    check_value_written(&rt, "use tests/pkg/macropriv\nactivate MacroPriv\nphase-answer x\n", "77");
+    check_value_written(&rt, "use tests/pkg/macropriv\nactivate MacroPriv\ninc-private 41\n", "42");
     expect_expand_error_rt(&rt, "<cached-private-still-hidden>",
         "use tests/pkg/macropriv\n"
         "hidden 1\n",
         "unbound identifier 'hidden'");
-    check_value_written(&rt, "activate tests/pkg/exporter\n3 <+> 4\nanswer x\n", "99");
-    check_value_written(&rt, "activate tests/pkg/exporter\n3 <+> 4\n", "7");
+    check_value_written(&rt, "use tests/pkg/exporter\nactivate Exporter\n3 <+> 4\nanswer x\n", "99");
+    check_value_written(&rt, "use tests/pkg/exporter\nactivate Exporter\n3 <+> 4\n", "7");
     check_value_written(&rt,
-        "activate app/ish\n"
+        "use app/ish\n"
+        "activate Shell\n"
         "x = do\n"
-        "  activate app/ish\n"
+        "  use app/ish\n"
+        "  activate Shell\n"
         "  1\n"
         "end\n"
         "add x 1\n",
@@ -199,11 +201,15 @@ static void test_directory_package_declaration_prep(void) {
         "export defn makeb x -> Box x\n"
         "export defn call-label b -> label b\n"
         "export defn call-base b -> label-base b\n"
+        "export defn makeq x -> Q.box x\n"
+        "export defn call-q-label b -> label b\n"
+        "export defn call-q-base b -> label-base b\n"
         "export defn use-forward-proto x -> x <!!> 1\n"
         "export defn use-dep x -> depadd x\n"));
     CHECK(write_text_file("build/orderlesspkg/z_surface.id",
         "package orderlesspkg\n"
         "use build/orderlessdep\n"
+        "import tests/pkg/boxa as Q\n"
         "defn bump x -> add x 1\n"
         "defmacro later-macro stx -> make-syntax-int stx 40\n"
         "operator <++> precedence: 50 assoc: left capture: :infix -> add\n"
@@ -228,8 +234,12 @@ static void test_directory_package_declaration_prep(void) {
         "implement Label on Box\n"
         "implement BaseLabel on Box do\n"
         "  method label-base b -> add b.v 1\n"
+        "end\n"
+        "implement Label on Q.box\n"
+        "implement BaseLabel on Q.box do\n"
+        "  method label-base b -> add (Q.unbox b) 2\n"
         "end\n"));
-    check_pkg_value("use build/orderlesspkg\n{(run 1) (labelp (makep 9)) (use-forward-op 41) (call-label (makeb 9)) (call-base (makeb 9)) (use-forward-proto 41) (use-dep 32)}\n", "{42 9 42 10 10 42 42}");
+    check_pkg_value("use build/orderlesspkg\n{(run 1) (labelp (makep 9)) (use-forward-op 41) (call-label (makeb 9)) (call-base (makeb 9)) (call-q-label (makeq 9)) (call-q-base (makeq 9)) (use-forward-proto 41) (use-dep 32)}\n", "{42 9 42 10 10 11 11 42 42}");
 }
 
 static void test_stale_cache_runs_no_phase_init(void) {

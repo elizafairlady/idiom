@@ -697,7 +697,7 @@ IdmValue idm_vector(IdmRuntime *rt, const IdmValue *items, size_t count, IdmErro
     return sequence_value(rt, items, count, IDM_OBJ_VECTOR, IDM_VAL_VECTOR, err);
 }
 
-IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, IdmError *err) {
+static IdmValue dict_value_with_cap(IdmRuntime *rt, size_t cap, IdmError *err) {
     IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_DICT);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
@@ -705,16 +705,61 @@ IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, Idm
     }
     obj->as.dict.count = 0;
     obj->as.dict.entries = NULL;
-    if (count != 0) {
-        obj->as.dict.entries = malloc(count * sizeof(*obj->as.dict.entries));
+    if (cap != 0) {
+        obj->as.dict.entries = malloc(cap * sizeof(*obj->as.dict.entries));
         if (!obj->as.dict.entries) {
             idm_error_oom(err, idm_span_unknown(NULL));
             return idm_nil();
         }
+        heap_account(idm_active_heap(rt), obj, cap * sizeof(*obj->as.dict.entries));
+    }
+    IdmValue v;
+    v.tag = IDM_VAL_DICT;
+    v.as.obj = obj;
+    return v;
+}
+
+static bool dict_key_equal(IdmValue a, IdmValue b) {
+    if (a.tag != b.tag) return false;
+    switch (a.tag) {
+        case IDM_VAL_NIL:
+        case IDM_VAL_EMPTY_LIST:
+            return true;
+        case IDM_VAL_ATOM:
+        case IDM_VAL_WORD:
+            return a.as.symbol == b.as.symbol;
+        case IDM_VAL_INT:
+            return a.as.i == b.as.i;
+        case IDM_VAL_FLOAT:
+            return a.as.f == b.as.f;
+        case IDM_VAL_STRING:
+            return a.as.obj->as.string.len == b.as.obj->as.string.len &&
+                   memcmp(a.as.obj->as.string.bytes, b.as.obj->as.string.bytes, a.as.obj->as.string.len) == 0;
+        case IDM_VAL_SYNTAX:
+        case IDM_VAL_CELL:
+        case IDM_VAL_CLOSURE:
+        case IDM_VAL_REGEX:
+        case IDM_VAL_REGEX_RESULT:
+            return a.as.obj == b.as.obj;
+        case IDM_VAL_PID:
+        case IDM_VAL_REF:
+        case IDM_VAL_PORT:
+        case IDM_VAL_PRIMITIVE:
+            return a.as.id == b.as.id;
+        default:
+            return idm_value_equal(a, b);
+    }
+}
+
+IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, IdmError *err) {
+    IdmValue v = dict_value_with_cap(rt, count, err);
+    if (v.tag != IDM_VAL_DICT) return v;
+    IdmObject *obj = v.as.obj;
+    if (count != 0) {
         for (size_t i = 0; i < count; i++) {
             bool replaced = false;
             for (size_t j = 0; j < obj->as.dict.count; j++) {
-                if (idm_value_equal(obj->as.dict.entries[j].key, entries[i].key)) {
+                if (dict_key_equal(obj->as.dict.entries[j].key, entries[i].key)) {
                     obj->as.dict.entries[j].value = entries[i].value;
                     replaced = true;
                     break;
@@ -724,11 +769,7 @@ IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, Idm
                 obj->as.dict.entries[obj->as.dict.count++] = entries[i];
             }
         }
-        heap_account(idm_active_heap(rt), obj, count * sizeof(*entries));
     }
-    IdmValue v;
-    v.tag = IDM_VAL_DICT;
-    v.as.obj = obj;
     return v;
 }
 
@@ -1567,7 +1608,7 @@ size_t idm_dict_count(IdmValue value) {
 bool idm_dict_get(IdmValue dict, IdmValue key, IdmValue *out) {
     if (dict.tag != IDM_VAL_DICT) return false;
     for (size_t i = 0; i < dict.as.obj->as.dict.count; i++) {
-        if (idm_value_equal(dict.as.obj->as.dict.entries[i].key, key)) {
+        if (dict_key_equal(dict.as.obj->as.dict.entries[i].key, key)) {
             *out = dict.as.obj->as.dict.entries[i].value;
             return true;
         }
@@ -1580,6 +1621,48 @@ bool idm_dict_entry(IdmValue dict, size_t index, IdmValue *out_key, IdmValue *ou
     *out_key = dict.as.obj->as.dict.entries[index].key;
     *out_value = dict.as.obj->as.dict.entries[index].value;
     return true;
+}
+
+IdmValue idm_dict_put(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmValue value, IdmError *err) {
+    if (dict.tag != IDM_VAL_DICT) {
+        idm_error_set(err, idm_span_unknown(NULL), "dict-put expects a dict");
+        return idm_nil();
+    }
+    size_t n = dict.as.obj->as.dict.count;
+    IdmValue out = dict_value_with_cap(rt, n + 1u, err);
+    if (out.tag != IDM_VAL_DICT) return out;
+    IdmObject *obj = out.as.obj;
+    bool replaced = false;
+    for (size_t i = 0; i < n; i++) {
+        IdmDictEntry entry = dict.as.obj->as.dict.entries[i];
+        if (dict_key_equal(entry.key, key)) {
+            entry.value = value;
+            replaced = true;
+        }
+        obj->as.dict.entries[obj->as.dict.count++] = entry;
+    }
+    if (!replaced) {
+        obj->as.dict.entries[obj->as.dict.count].key = key;
+        obj->as.dict.entries[obj->as.dict.count].value = value;
+        obj->as.dict.count++;
+    }
+    return out;
+}
+
+IdmValue idm_dict_del(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmError *err) {
+    if (dict.tag != IDM_VAL_DICT) {
+        idm_error_set(err, idm_span_unknown(NULL), "dict-del expects a dict");
+        return idm_nil();
+    }
+    size_t n = dict.as.obj->as.dict.count;
+    IdmValue out = dict_value_with_cap(rt, n, err);
+    if (out.tag != IDM_VAL_DICT) return out;
+    IdmObject *obj = out.as.obj;
+    for (size_t i = 0; i < n; i++) {
+        IdmDictEntry entry = dict.as.obj->as.dict.entries[i];
+        if (!dict_key_equal(entry.key, key)) obj->as.dict.entries[obj->as.dict.count++] = entry;
+    }
+    return out;
 }
 
 const IdmSyntax *idm_syntax_get(IdmValue value, IdmError *err) {

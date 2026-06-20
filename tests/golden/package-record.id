@@ -1,5 +1,4 @@
 use tests/pkg/recordbox
-activate tests/pkg/recordbox
 
 b = Box 42 "answer"
 println b.value

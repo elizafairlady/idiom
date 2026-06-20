@@ -1,2 +1,2 @@
-tests/diag/surface-collision.id:2:1: error: surface '<+>' from 'tests/pkg/exporter' is already active in this context; activating 'tests/pkg/exporter2' would conflict
-  while activating 'tests/pkg/exporter2' (tests/diag/surface-collision.id:2:1)
+tests/diag/surface-collision.id:4:1: error: surface '<+>' from 'Exporter#39893da74fc02e0e' is already active in this context; activating 'Exporter2#0723129fa4b0fc27' would conflict
+  while activating 'Exporter2' (tests/diag/surface-collision.id:4:1)

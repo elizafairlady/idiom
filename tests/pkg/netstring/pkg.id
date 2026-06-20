@@ -60,6 +60,9 @@ implement Codec on string do
   end
 end
 
-defn frame acc value -> "#{acc}#{value |> encode}"
+export protocol Netstring do
+  use std/string
 
-operator << precedence: 25 assoc: left capture: :infix -> frame
+  defn frame acc value -> "#{acc}#{len value}:#{value},"
+  operator << precedence: 25 assoc: left capture: :infix -> frame
+end

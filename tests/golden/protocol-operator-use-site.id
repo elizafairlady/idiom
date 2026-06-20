@@ -4,9 +4,7 @@ protocol OpCarrier do
   end
 end
 protocol UsesOp do
-  export defmacro squarish stx do syntax-case stx do
-    (_ x) -> %`(%,x <%%> %,x)
-  end end
+  export defmacro squarish %`(squarish %,x) -> %`(%,x <%%> %,x)
 end
 r = do
   activate OpCarrier

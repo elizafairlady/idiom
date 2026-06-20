@@ -1,7 +1,7 @@
 use std/test
-activate std/test
+activate Test
 use tests/pkg/netstring
-activate tests/pkg/netstring
+activate Netstring
 
 suite do
   test "encode via the Codec trait" do

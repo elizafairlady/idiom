@@ -1,13 +1,13 @@
 use std/test
 use std/string
-activate std/test
+activate Test
 
-defmacro pair-sum stx do syntax-case stx do
-  (_ e) -> %`(do
+defmacro pair-sum do
+  %`(pair-sum %,e) -> %`(do
     {pa pb} = %,e
     add pa pb
   end)
-end end
+end
 
 suite do
   test "tuple-pattern-binds" do

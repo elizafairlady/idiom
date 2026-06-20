@@ -1,17 +1,18 @@
 x = 41
 defn bump n -> n + 1
 bump x
-defrules dbl do
-  (_ a) -> %`(mul 2 %,a)
+defmacro dbl do
+  %`(dbl %,a) -> %`(mul 2 %,a)
 end
 dbl (bump x)
 defn ff n -> add n kaboom
 ff 1
 defn ff n -> add n 1
 ff x
-defmacro mm stx do syntax-case stx do (_ a) -> %`(dbl %,a) end end
+defmacro mm %`(mm %,a) -> %`(dbl %,a)
 mm (ff 100)
-activate app/ish
+use app/ish
+activate Shell
 y = printf from-repl-shell
 y
 {p q} = tuple 5 6

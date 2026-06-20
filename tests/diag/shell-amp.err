@@ -1,4 +1,4 @@
-tests/diag/shell-amp.id:2:8: error: '&' is only allowed at the end of a command
-  in check-amp (app/ish:1712)
-  in resolver (app/ish:1891)
-  while resolving 'echo' (tests/diag/shell-amp.id:2:1)
+tests/diag/shell-amp.id:3:8: error: '&' is only allowed at the end of a command
+  in check-amp (app/ish:1739)
+  in grammar (app/ish:1917)
+  in grammar expansion of 'echo' (tests/diag/shell-amp.id:3:1)

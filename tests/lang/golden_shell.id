@@ -1,5 +1,5 @@
 use std/test
-activate std/test
+activate Test
 
 suite do
   test "shell-cd-relative" do
@@ -24,7 +24,8 @@ suite do
     got = do
       start = pwd
       env-set "HOME" start
-      activate app/ish
+      use app/ish
+      activate Shell
       cd tests
       here = pwd
       cd ..
@@ -44,7 +45,8 @@ suite do
   end
   test "shell-env-prefix" do
     got = do
-      activate app/ish
+      use app/ish
+      activate Shell
       x = ISH_GOLD_PREFIX=hello printenv ISH_GOLD_PREFIX
       x
     end
@@ -52,7 +54,8 @@ suite do
   end
   test "shell-fd-dup" do
     got = do
-      activate app/ish
+      use app/ish
+      activate Shell
       x = sh -c "echo oops >&2" 2>&1
       x
     end
@@ -60,7 +63,8 @@ suite do
   end
   test "shell-glob-nomatch" do
     got = do
-      activate app/ish
+      use app/ish
+      activate Shell
       x = echo *.zzz-no-match
       x
     end
@@ -68,7 +72,8 @@ suite do
   end
   test "shell-glob-quoted" do
     got = do
-      activate app/ish
+      use app/ish
+      activate Shell
       x = echo "*.zzz-no-match"
       x
     end
@@ -76,7 +81,8 @@ suite do
   end
   test "shell-word-join" do
     got = do
-      activate app/ish
+      use app/ish
+      activate Shell
       x = echo a"b"c
       x
     end
@@ -84,7 +90,8 @@ suite do
   end
   test "shell-command-substitution" do
     got = do
-      activate app/ish
+      use app/ish
+      activate Shell
       a = echo $(printf hi)
       b = echo pre$(printf hi)post
       c = echo $(printf a)$(printf b)
@@ -95,12 +102,13 @@ suite do
   end
   test "shell-heredoc-sentinel" do
     got = do
-      activate app/ish
+      use app/ish
+      activate Shell
       cat << EOF hello EOF
     end
     assert-inspect got "{:ok 0 \"hello\\n\" \"\"}"
   end
-  test "word-syntax-requires-resolver" do
-    assert-expand-error "\$(echo hi)" "word syntax requires a resolver"
+  test "word-syntax-requires-grammar" do
+    assert-expand-error "\$(echo hi)" "word syntax requires a grammar"
   end
 end

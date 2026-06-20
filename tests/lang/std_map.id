@@ -1,5 +1,5 @@
 use std/test
-activate std/test
+activate Test
 import std/map as Map
 use std/enum
 

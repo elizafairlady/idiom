@@ -1,3 +1,4 @@
-activate app/ish
+use app/ish
+activate Shell
 p = echo hi &
 await p

@@ -194,6 +194,19 @@ static void test_trait_requirements(void) {
         "end\n"
         "implement HighReq on int\n",
         "required trait 'LowReq#");
+    check_value_written(&rt,
+        "import std/enum as E\n"
+        "trait NeedsImportedIter do\n"
+        "  require E.Iter\n"
+        "  method imported-sum xs -> xs.foldl 0 &add\n"
+        "end\n"
+        "implement NeedsImportedIter on pair\n"
+        "imported-sum (list 1 2 3)\n",
+        "6");
+    check_value_written(&rt,
+        "import std/enum as E\n"
+        "{(implements? E.Iter (list 1)) (implements? E.Iter 1)}\n",
+        "{:true :false}");
     expect_expand_result("<trait-requirement-unknown>",
         "trait MissingReq do\n"
         "  require NopeReq\n"
@@ -304,7 +317,6 @@ static void test_records_on_trait_dispatch(void) {
         "{\"point:7\" \"user:ada\"}");
     check_value_written(&rt,
         "use tests/pkg/recordbox\n"
-        "activate tests/pkg/recordbox\n"
         "b = Box 42 \"answer\"\n"
         "{b.value (label b) (Box? b)}\n",
         "{42 \"answer\" :true}");
@@ -491,13 +503,15 @@ static void test_dsl_protocol_scoping(void) {
         "unbound identifier 'h1'");
     expect_expand_error_rt(&rt, "<html-scoped-deactivation>",
         "x = do\n"
-        "  activate tests/pkg/htmldsl\n"
+        "  use tests/pkg/htmldsl\n"
+        "  activate HtmlDsl\n"
         "  h1 \"inside\"\n"
         "end\n"
         "h1 \"outside\"\n",
         "unbound identifier 'h1'");
     check_value_written(&rt,
-        "activate tests/pkg/htmldsl\n"
+        "use tests/pkg/htmldsl\n"
+        "activate HtmlDsl\n"
         "div 10 2\n",
         "5");
     idm_runtime_destroy(&rt);

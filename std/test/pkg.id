@@ -43,22 +43,12 @@ export defn run-suite tests do
   end
 end
 
-export defrules test do
-  (_ name body) -> %`{:test %,name (fn %,body)}
-end
+export protocol Test do
+  export defmacro test %`(test %,name %,body) -> %`{:test %,name (fn %,body)}
 
-export defmacro suite stx do
-  defn parts-of do
-    i n _body when (eq? i n) -> '()
-    i n body -> cons (syntax-nth body i) (parts-of (add i 1) n body)
-  end
-  body = syntax-nth stx 2
-  body-form? = and (syntax-list? body) (gt? (syntax-length body) 0) (syntax-word? (syntax-nth body 0)) (eq? (syntax-word-text (syntax-nth body 0)) "%-body")
-  if body-form? do
-    parts = parts-of 1 (syntax-length body) body
-    cond (eq? parts '()) %`(run-suite '()) %`(run-suite (list %,@parts))
-  else do
-    %`(run-suite %,body)
+  export defmacro suite do
+    %`(suite do %,@tests end) -> %`(run-suite (list %,@tests))
+    %`(suite %,tests) -> %`(run-suite %,tests)
   end
 end
 

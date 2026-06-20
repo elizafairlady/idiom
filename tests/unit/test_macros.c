@@ -24,7 +24,7 @@ static void test_source_defmacro(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro id stx -> syntax-nth stx 2\nid 42\n", &core, &err));
+    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro id %`(id %,x) -> x\nid 42\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -34,7 +34,7 @@ static void test_source_defmacro(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2)\nplus2 40\n", &core, &err));
+    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro plus2 %`(plus2 %,x) -> %`(add %,x 2)\nplus2 40\n", &core, &err));
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
     CHECK_STR(dump.data, "((prim add) 40 2)");
@@ -51,20 +51,19 @@ static void test_source_defmacro(void) {
     idm_runtime_destroy(&rt);
 }
 
-static void test_source_syntax_case(void) {
+static void test_source_macro_clauses(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     IdmError err;
     idm_error_init(&err);
     const char *source =
-        "defmacro plus2 stx ->\n"
-        "  syntax-case stx do\n"
-        "    (_ x) -> %`(add %,x 2)\n"
-        "  end\n"
+        "defmacro plus2 do\n"
+        "  %`(plus2 %,x) -> %`(add %,x 2)\n"
+        "end\n"
         "plus2 40\n";
 
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<syntax-case-test>", source, &core, &err));
+    CHECK(idm_expand_string(&rt, "<macro-clause-test>", source, &core, &err));
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
@@ -82,14 +81,13 @@ static void test_source_syntax_case(void) {
     idm_core_free(core);
 
     const char *guarded_source =
-        "defmacro word-only stx ->\n"
-        "  syntax-case stx do\n"
-        "    (_ x) when (syntax-word? x) -> %`(42)\n"
-        "    (_ x) -> %`(0)\n"
-        "  end\n"
+        "defmacro word-only do\n"
+        "  %`(word-only %,x) when (syntax-word? x) -> %`(42)\n"
+        "  %`(word-only %,x) -> %`(0)\n"
+        "end\n"
         "word-only hello\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<syntax-case-guard-test>", guarded_source, &core, &err));
+    CHECK(idm_expand_string(&rt, "<macro-clause-guard-test>", guarded_source, &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -99,14 +97,13 @@ static void test_source_syntax_case(void) {
     idm_core_free(core);
 
     const char *guard_fallback_source =
-        "defmacro word-only stx ->\n"
-        "  syntax-case stx do\n"
-        "    (_ x) when (syntax-word? x) -> %`(0)\n"
-        "    (_ x) -> %`(42)\n"
-        "  end\n"
+        "defmacro word-only do\n"
+        "  %`(word-only %,x) when (syntax-word? x) -> %`(0)\n"
+        "  %`(word-only %,x) -> %`(42)\n"
+        "end\n"
         "word-only 10\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<syntax-case-guard-fallback-test>", guard_fallback_source, &core, &err));
+    CHECK(idm_expand_string(&rt, "<macro-clause-guard-fallback-test>", guard_fallback_source, &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -116,13 +113,12 @@ static void test_source_syntax_case(void) {
     idm_core_free(core);
 
     const char *ellipsis_source =
-        "defmacro do-it stx ->\n"
-        "  syntax-case stx do\n"
-        "    (_ body ...) -> %`(do %,@body end)\n"
-        "  end\n"
+        "defmacro do-it do\n"
+        "  %`(do-it %,@body) -> %`(do %,@body end)\n"
+        "end\n"
         "do-it 1 42\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<syntax-case-ellipsis-test>", ellipsis_source, &core, &err));
+    CHECK(idm_expand_string(&rt, "<macro-clause-splice-test>", ellipsis_source, &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -234,13 +230,12 @@ static void test_macro_hygienic_introduction(void) {
     IdmError err;
     idm_error_init(&err);
     const char *source =
-        "defmacro twice stx ->\n"
-        "  syntax-case stx do\n"
-        "    (_ expr) -> %`(do\n"
+        "defmacro twice do\n"
+        "  %`(twice %,expr) -> %`(do\n"
         "      tmp = %,expr\n"
         "      add tmp tmp\n"
         "    end)\n"
-        "  end\n"
+        "end\n"
         "tmp = 100\n"
         "twice 21\n"
         "tmp\n";
@@ -267,16 +262,15 @@ static void test_macro_bind_bang_and_depth(void) {
     idm_error_init(&err);
 
     const char *capture_source =
-        "defmacro with-it stx ->\n"
-        "  syntax-case stx do\n"
-        "    (_ value body) -> do\n"
-        "      it = bind! stx \"it\"\n"
+        "defmacro with-it do\n"
+        "  %`(with-it %,value %,body) -> do\n"
+        "      it = bind! value \"it\"\n"
         "      %`(do\n"
         "        %,it = %,value\n"
         "        %,body\n"
         "      end)\n"
-        "    end\n"
         "  end\n"
+        "end\n"
         "with-it 10 (add it 5)\n";
     IdmCore *core = NULL;
     CHECK(idm_expand_string(&rt, "<bind-bang-test>", capture_source, &core, &err));
@@ -292,7 +286,7 @@ static void test_macro_bind_bang_and_depth(void) {
     idm_core_free(core);
 
     const char *use_site_source =
-        "defmacro id stx -> %`(%,(syntax-nth stx 2))\n"
+        "defmacro id %`(id %,x) -> %`(%,x)\n"
         "x = 42\n"
         "id x\n";
     core = NULL;
@@ -314,7 +308,7 @@ static void test_macro_bind_bang_and_depth(void) {
     idm_error_clear(&err);
 
     const char *local_expand_source =
-        "defmacro plus2 stx -> %`(add %,(syntax-nth stx 2) 2)\n"
+        "defmacro plus2 %`(plus2 %,x) -> %`(add %,x 2)\n"
         "defmacro expand-plus2 stx -> local-expand %`(plus2 40)\n"
         "expand-plus2\n";
     core = NULL;
@@ -430,13 +424,15 @@ static void test_compile_time_surface_scoping(void) {
         false);
     expect_expand_result("<surface-scope-ok-shell>",
         "do\n"
-        "  activate app/ish\n"
+        "  use app/ish\n"
+        "  activate Shell\n"
         "  echo inner\n"
         "end\n",
         true);
     expect_expand_result("<surface-scope-leak-shell>",
         "do\n"
-        "  activate app/ish\n"
+        "  use app/ish\n"
+        "  activate Shell\n"
         "  echo inner\n"
         "end\n"
         "echo outer\n",
@@ -446,9 +442,9 @@ static void test_compile_time_surface_scoping(void) {
 static void test_import_compile_time_surface_boundaries(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    check_value_written(&rt, "activate tests/pkg/exporter\nanswer anything\n", "99");
-    check_value_written(&rt, "activate tests/pkg/exporter\n3 <+> 4\n", "7");
-    check_value_written(&rt, "import tests/pkg/exporter as E\nE.answer anything\n", "99");
+    check_value_written(&rt, "use tests/pkg/exporter\nactivate Exporter\nanswer anything\n", "99");
+    check_value_written(&rt, "use tests/pkg/exporter\nactivate Exporter\n3 <+> 4\n", "7");
+    check_value_written(&rt, "import tests/pkg/exporter as E\nactivate E.Exporter\nanswer anything\n", "99");
     idm_runtime_destroy(&rt);
 
     expect_expand_result("<import-macro-leak>",
@@ -542,7 +538,7 @@ static void test_scoped_surface_protocol_nesting(void) {
         "end\n"
         "activate BodyLocal\n"
         "answer foo\n",
-        "not found");
+        "activate expects a protocol");
     expect_expand_error_rt(&rt, "<fn-body-implement-scoped>",
         "protocol Nest do\n"
         "  export defmacro answer y do %`7 end\n"
@@ -576,7 +572,7 @@ static void test_scoped_surface_rollback_on_failure(void) {
     expect_expand_error_rt(&rt, "<rollback-protocol-gone>",
         "activate RollP\n"
         "roll now\n",
-        "not found");
+        "activate expects a protocol");
     expect_expand_result_rt(&rt, "<body-surface-ok>",
         "do\n"
         "  defmacro answer y do %`42 end\n"
@@ -608,15 +604,18 @@ static void test_macro_phase_environment(void) {
         "answer anything\n",
         "42");
     check_value_written(&rt,
-        "activate tests/pkg/macropriv\n"
+        "use tests/pkg/macropriv\n"
+        "activate MacroPriv\n"
         "phase-answer anything\n",
         "77");
     check_value_written(&rt,
         "import tests/pkg/macropriv as M\n"
-        "M.phase-answer anything\n",
+        "activate M.MacroPriv\n"
+        "phase-answer anything\n",
         "77");
     check_value_written(&rt,
-        "activate tests/pkg/macropriv\n"
+        "use tests/pkg/macropriv\n"
+        "activate MacroPriv\n"
         "inc-private 41\n",
         "42");
     expect_expand_result("<private-runtime-helper-hidden>",
@@ -649,8 +648,8 @@ static void test_free_identifier_eq_uses_bindings(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     check_value_written(&rt,
-        "defmacro same-use-site stx ->\n"
-        "  cond (free-identifier=? (syntax-nth stx 2) (syntax-nth stx 3)) %`(1) %`(0)\n"
+        "defmacro same-use-site %`(same-use-site %,a %,b) ->\n"
+        "  cond (free-identifier=? a b) %`(1) %`(0)\n"
         "x = 1\n"
         "same-use-site x x\n",
         "1");
@@ -669,10 +668,10 @@ static void test_splice_hygiene_negatives(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     expect_expand_error_rt(&rt, "<splice-helper-hidden>",
-        "defmacro m stx ->\n"
+        "defmacro m %`(m %,name) ->\n"
         "  %`(do\n"
         "      defn helper99 -> 1\n"
-        "      defn %,(syntax-nth stx 2) v -> v\n"
+        "      defn %,name v -> v\n"
         "    end)\n"
         "m pub\n"
         "helper99\n",
@@ -693,7 +692,7 @@ static void test_splice_hygiene_negatives(void) {
 
 void run_macro_suite(void) {
     test_source_defmacro();
-    test_source_syntax_case();
+    test_source_macro_clauses();
     test_source_standard_if();
     test_source_standard_control_macros();
     test_macro_hygienic_introduction();

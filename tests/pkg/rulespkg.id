@@ -1,4 +1,5 @@
 package rulespkg
-export defrules twice-of do
-  (_ x) -> %`(mul 2 %,x)
+
+export protocol RulesPkg do
+  export defmacro twice-of %`(twice-of %,x) -> %`(mul 2 %,x)
 end

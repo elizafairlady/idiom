@@ -1,10 +1,11 @@
 package macropriv
 
-defn hidden x -> add x 1
+defn bump-private x -> add x 1
 
-for-syntax do
-  defn lit stx -> make-syntax-int stx 77
-  export defmacro phase-answer stx -> lit stx
+export protocol MacroPriv do
+  defn hidden x -> bump-private x
+
+  export defmacro phase-answer %`(phase-answer %,where) -> make-syntax-int where 77
+
+  export defmacro inc-private %`(inc-private %,x) -> %`(hidden %,x)
 end
-
-export defmacro inc-private stx -> %`(hidden %,(syntax-nth stx 2))

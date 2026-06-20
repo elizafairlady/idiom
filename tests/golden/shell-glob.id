@@ -1,2 +1,3 @@
-activate app/ish
+use app/ish
+activate Shell
 ls tests/pkg/mathx/*.id

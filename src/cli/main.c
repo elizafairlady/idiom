@@ -432,8 +432,7 @@ static int run_sealed(const char *file, const unsigned char *data, size_t len) {
         if (!idm_expand_preload_package_artifact(&rt, package_path, artifact_data, (size_t)artifact_len, &err)) goto done;
         IdmBuffer seed;
         idm_buf_init(&seed);
-        bool seed_ok = idm_buf_append(&seed, "use ") && idm_buf_append(&seed, package_path) &&
-            idm_buf_append(&seed, "\nactivate ") && idm_buf_append(&seed, package_path) && idm_buf_append(&seed, "\n");
+        bool seed_ok = idm_buf_append(&seed, "use ") && idm_buf_append(&seed, package_path) && idm_buf_append(&seed, "\n");
         if (!seed_ok) {
             idm_buf_destroy(&seed);
             idm_error_oom(&err, idm_span_unknown(file));
@@ -490,6 +489,7 @@ static int build_sealed(const char *src_path, const char *out_path) {
     int status = 1;
     IdmCore *core = NULL;
     IdmSyntax *program = NULL;
+    IdmSyntax *prelude = NULL;
     IdmSyntax *wrapped = NULL;
     IdmRuntime rt;
     idm_runtime_init(&rt);
@@ -509,7 +509,8 @@ static int build_sealed(const char *src_path, const char *out_path) {
     if (!idm_reader_read_string(file, source, &program, &err)) goto done;
     size_t src_len = strlen(src_path);
     if (src_len >= 4 && strcmp(src_path + src_len - 4, ".ish") == 0) {
-        wrapped = idm_syn_program_prepend_activate(program, "app/ish", file);
+        if (!idm_reader_read_string("<ish-prelude>", "use app/ish\nactivate Shell\n", &prelude, &err)) goto done;
+        wrapped = idm_syn_program_prepend_program(program, prelude, file);
         if (!wrapped) { idm_error_oom(&err, idm_span_unknown(file)); goto done; }
     }
     if (!idm_expand_syntax(&rt, wrapped ? wrapped : program, &core, &err)) goto done;
@@ -561,6 +562,7 @@ done:
     idm_bc_destroy(&module);
     idm_core_free(core);
     idm_syn_free(wrapped);
+    idm_syn_free(prelude);
     idm_syn_free(program);
     free(source);
     idm_runtime_destroy(&rt);
@@ -575,7 +577,7 @@ static int dump_surface(const char *prelude) {
              "  println (tuple :operators (expander-surface :operators))\n"
              "  println (tuple :macros (expander-surface :macros))\n"
              "  println (tuple :protocols (expander-surface :protocols))\n"
-             "  println (tuple :resolvers (expander-surface :resolvers))\n"
+             "  println (tuple :grammars (expander-surface :grammars))\n"
              "  println (tuple :methods (expander-surface :methods))\n"
              "  println (tuple :active (expander-surface :active))\n"
              "end\n"

@@ -294,12 +294,16 @@ IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, I
     return core;
 }
 
-IdmCore *idm_core_use_package(IdmValue name, IdmBytecodeModule *module, uint32_t init_fn, uint32_t *export_src, uint32_t *export_dst, char **export_names, size_t export_count, IdmCore *cont, IdmSpan span) {
+IdmCore *idm_core_use_package(IdmValue name, IdmBytecodeModule *module, uint32_t init_fn, uint32_t *import_src, uint32_t *import_dst, char **import_names, size_t import_count, uint32_t *export_src, uint32_t *export_dst, char **export_names, size_t export_count, IdmCore *cont, IdmSpan span) {
     IdmCore *core = core_alloc(IDM_CORE_USE_PACKAGE, span);
     if (!core) return NULL;
     core->as.use_package.name = name;
     core->as.use_package.module = module;
     core->as.use_package.init_fn = init_fn;
+    core->as.use_package.import_src = import_src;
+    core->as.use_package.import_dst = import_dst;
+    core->as.use_package.import_names = import_names;
+    core->as.use_package.import_count = import_count;
     core->as.use_package.export_src = export_src;
     core->as.use_package.export_dst = export_dst;
     core->as.use_package.export_names = export_names;
@@ -402,6 +406,10 @@ void idm_core_free(IdmCore *core) {
             break;
         case IDM_CORE_USE_PACKAGE:
             idm_core_free(core->as.use_package.cont);
+            free(core->as.use_package.import_src);
+            free(core->as.use_package.import_dst);
+            for (size_t i = 0; i < core->as.use_package.import_count; i++) free(core->as.use_package.import_names[i]);
+            free(core->as.use_package.import_names);
             free(core->as.use_package.export_src);
             free(core->as.use_package.export_dst);
             for (size_t i = 0; i < core->as.use_package.export_count; i++) free(core->as.use_package.export_names[i]);
@@ -628,6 +636,16 @@ static bool normalize_do(IdmRuntime *rt, IdmCore **slot, IdmError *err) {
         core->as.do_expr.count = total;
         core->as.do_expr.cap = total;
     }
+    size_t write = 0;
+    for (size_t read = 0; read < core->as.do_expr.count; read++) {
+        IdmCore *item = core->as.do_expr.items[read];
+        if (read + 1u < core->as.do_expr.count && item && item->kind == IDM_CORE_LITERAL) {
+            idm_core_free(item);
+            continue;
+        }
+        core->as.do_expr.items[write++] = item;
+    }
+    core->as.do_expr.count = write;
     if (core->as.do_expr.count == 1) {
         IdmCore *replacement = core->as.do_expr.items[0];
         free(core->as.do_expr.items);
@@ -1486,6 +1504,18 @@ static bool emit_named_u32(IdmBytecodeModule *module, IdmOpcode op, uint32_t ope
     return true;
 }
 
+static bool emit_namespace_transfers(IdmBytecodeModule *module, IdmNamespaceTransferDirection direction, const uint32_t *src, const uint32_t *dst, size_t count, IdmError *err, IdmSpan span) {
+    if (count == 0) return true;
+    if (count > UINT32_MAX) return idm_error_set(err, span, "too many namespace transfers");
+    if (!idm_bc_emit_u32(module, IDM_OP_TRANSFER_NAMESPACE, (uint32_t)direction, NULL)) return idm_error_oom(err, span);
+    if (!idm_bc_emit(module, (uint32_t)count, NULL)) return idm_error_oom(err, span);
+    for (size_t i = 0; i < count; i++) {
+        if (!idm_bc_emit(module, src[i], NULL)) return idm_error_oom(err, span);
+        if (!idm_bc_emit(module, dst[i], NULL)) return idm_error_oom(err, span);
+    }
+    return true;
+}
+
 static bool emit_capture_load(IdmBytecodeModule *module, IdmCapture cap, IdmError *err, IdmSpan span) {
     switch (cap.kind) {
         case IDM_CAP_LOCAL:
@@ -1840,6 +1870,78 @@ static bool compile_guard(IdmCore *core, IdmBytecodeModule *module, const Compil
     return compile_guard_ensure_only(core, module, ctx, err);
 }
 
+static bool compile_primitive_call(IdmCore *core, IdmBytecodeModule *module, const CompileContext *ctx, IdmError *err) {
+    IdmPrimitive prim = core->as.call.callee->as.primitive;
+    for (size_t i = 0; i < core->as.call.arg_count; i++) {
+        if (!compile_expr(core->as.call.args[i], module, false, ctx, err)) return false;
+    }
+    if (prim == IDM_PRIM_EXIT && core->as.call.arg_count == 0) {
+        uint32_t zero_const = 0;
+        if (!add_const_value(module, idm_int(0), &zero_const, err, core->span)) return false;
+        if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, zero_const, NULL)) return idm_error_oom(err, core->span);
+        if (!idm_bc_emit_op(module, IDM_OP_EXIT, NULL)) return idm_error_oom(err, core->span);
+        return true;
+    }
+    if (prim == IDM_PRIM_RAISE) {
+        if (core->as.call.arg_count != 1u) return idm_error_set(err, core->span, "primitive 'raise' expects 1 argument(s)");
+        if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
+        return true;
+    }
+    IdmOpcode actor_op = IDM_OP_HALT;
+    uint32_t actor_arity = 0;
+    if (actor_primitive_opcode(prim, core->as.call.arg_count, &actor_op, &actor_arity)) {
+        if (core->as.call.arg_count != actor_arity) return idm_error_set(err, core->span, "primitive '%s' expects %u argument(s)", idm_primitive_name(prim), actor_arity);
+        if (!idm_bc_emit_op(module, actor_op, NULL)) return idm_error_oom(err, core->span);
+        return true;
+    }
+    if (core->as.call.arg_count > UINT32_MAX) return idm_error_set(err, core->span, "too many primitive arguments");
+    if (!idm_bc_emit_u32(module, IDM_OP_PRIM_CALL, (uint32_t)prim, NULL)) return idm_error_oom(err, core->span);
+    if (!idm_bc_emit(module, (uint32_t)core->as.call.arg_count, NULL)) return idm_error_oom(err, core->span);
+    return true;
+}
+
+static bool compile_call_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, const CompileContext *ctx, IdmError *err) {
+    if (core->as.call.callee && core->as.call.callee->kind == IDM_CORE_PRIMITIVE) {
+        return compile_primitive_call(core, module, ctx, err);
+    }
+    if (core->as.call.callee && (core->as.call.callee->kind == IDM_CORE_FN || core->as.call.callee->kind == IDM_CORE_FN_MULTI)) {
+        return compile_direct_callable_call(core->as.call.callee, core->as.call.args, core->as.call.arg_count, module, tail, ctx, err, core->span);
+    }
+    const CompiledCallable *known = known_callable_for_ref(ctx, core->as.call.callee);
+    if (known) return emit_direct_callable_call(known, core->as.call.args, core->as.call.arg_count, module, tail, ctx, err, core->span);
+    if (!compile_expr(core->as.call.callee, module, false, ctx, err)) return false;
+    for (size_t i = 0; i < core->as.call.arg_count; i++) {
+        if (!compile_expr(core->as.call.args[i], module, false, ctx, err)) return false;
+    }
+    if (core->as.call.arg_count > IDM_CALL_ARGC_MASK) return idm_error_set(err, core->span, "too many call arguments");
+    if (!idm_bc_emit_u32(module, tail ? IDM_OP_TAIL_CALL : IDM_OP_CALL, (uint32_t)core->as.call.arg_count, NULL)) return idm_error_oom(err, core->span);
+    return true;
+}
+
+static bool compile_cond_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, const CompileContext *ctx, IdmError *err) {
+    if (!compile_expr(core->as.cond_expr.cond, module, false, ctx, err)) return false;
+    size_t jump_false_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_JUMP_IF_FALSE, 0, &jump_false_op)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.cond_expr.then_branch, module, tail, ctx, err)) return false;
+    size_t jump_end_op = 0;
+    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_end_op)) return idm_error_oom(err, core->span);
+    if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
+    if (!idm_bc_patch_u32(module, jump_false_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch cond false jump");
+    if (!compile_expr(core->as.cond_expr.else_branch, module, tail, ctx, err)) return false;
+    if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
+    if (!idm_bc_patch_u32(module, jump_end_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch cond end jump");
+    return true;
+}
+
+static bool compile_do_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, const CompileContext *ctx, IdmError *err) {
+    if (core->as.do_expr.count == 0) return emit_load_value(module, idm_nil(), err, core->span);
+    for (size_t i = 0; i < core->as.do_expr.count; i++) {
+        if (!compile_expr(core->as.do_expr.items[i], module, i + 1u == core->as.do_expr.count ? tail : false, ctx, err)) return false;
+        if (i + 1u < core->as.do_expr.count && !idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+    }
+    return true;
+}
+
 static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, const CompileContext *ctx, IdmError *err) {
     if (!core) return idm_error_set(err, idm_span_unknown(NULL), "cannot compile null core expression");
     if (!idm_bc_note_span(module, core->span)) return idm_error_oom(err, core->span);
@@ -1866,72 +1968,11 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, co
             return true;
         }
         case IDM_CORE_CALL:
-            if (core->as.call.callee && core->as.call.callee->kind == IDM_CORE_PRIMITIVE) {
-                for (size_t i = 0; i < core->as.call.arg_count; i++) {
-                    if (!compile_expr(core->as.call.args[i], module, false, ctx, err)) return false;
-                }
-                if (core->as.call.callee->as.primitive == IDM_PRIM_EXIT && core->as.call.arg_count == 0) {
-                    uint32_t zero_const = 0;
-                    if (!add_const_value(module, idm_int(0), &zero_const, err, core->span)) return false;
-                    if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, zero_const, NULL)) return idm_error_oom(err, core->span);
-                    if (!idm_bc_emit_op(module, IDM_OP_EXIT, NULL)) return idm_error_oom(err, core->span);
-                    return true;
-                }
-                if (core->as.call.callee->as.primitive == IDM_PRIM_RAISE) {
-                    if (core->as.call.arg_count != 1u) return idm_error_set(err, core->span, "primitive 'raise' expects 1 argument(s)");
-                    if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
-                    return true;
-                }
-                IdmOpcode actor_op = IDM_OP_HALT;
-                uint32_t actor_arity = 0;
-                if (actor_primitive_opcode(core->as.call.callee->as.primitive, core->as.call.arg_count, &actor_op, &actor_arity)) {
-                    if (core->as.call.arg_count != actor_arity) return idm_error_set(err, core->span, "primitive '%s' expects %u argument(s)", idm_primitive_name(core->as.call.callee->as.primitive), actor_arity);
-                    if (!idm_bc_emit_op(module, actor_op, NULL)) return idm_error_oom(err, core->span);
-                    return true;
-                }
-                if (core->as.call.arg_count > UINT32_MAX) return idm_error_set(err, core->span, "too many primitive arguments");
-                if (!idm_bc_emit_u32(module, IDM_OP_PRIM_CALL, (uint32_t)core->as.call.callee->as.primitive, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit(module, (uint32_t)core->as.call.arg_count, NULL)) return idm_error_oom(err, core->span);
-                return true;
-            }
-            if (core->as.call.callee && (core->as.call.callee->kind == IDM_CORE_FN || core->as.call.callee->kind == IDM_CORE_FN_MULTI)) {
-                return compile_direct_callable_call(core->as.call.callee, core->as.call.args, core->as.call.arg_count, module, tail, ctx, err, core->span);
-            }
-            const CompiledCallable *known = known_callable_for_ref(ctx, core->as.call.callee);
-            if (known) return emit_direct_callable_call(known, core->as.call.args, core->as.call.arg_count, module, tail, ctx, err, core->span);
-            if (!compile_expr(core->as.call.callee, module, false, ctx, err)) return false;
-            for (size_t i = 0; i < core->as.call.arg_count; i++) {
-                if (!compile_expr(core->as.call.args[i], module, false, ctx, err)) return false;
-            }
-            if (core->as.call.arg_count > IDM_CALL_ARGC_MASK) return idm_error_set(err, core->span, "too many call arguments");
-            if (!idm_bc_emit_u32(module, tail ? IDM_OP_TAIL_CALL : IDM_OP_CALL, (uint32_t)core->as.call.arg_count, NULL)) return idm_error_oom(err, core->span);
-            return true;
-        case IDM_CORE_COND: {
-            if (!compile_expr(core->as.cond_expr.cond, module, false, ctx, err)) return false;
-            size_t jump_false_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_JUMP_IF_FALSE, 0, &jump_false_op)) return idm_error_oom(err, core->span);
-            if (!compile_expr(core->as.cond_expr.then_branch, module, tail, ctx, err)) return false;
-            size_t jump_end_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_end_op)) return idm_error_oom(err, core->span);
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, jump_false_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch cond false jump");
-            if (!compile_expr(core->as.cond_expr.else_branch, module, tail, ctx, err)) return false;
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, jump_end_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch cond end jump");
-            return true;
-        }
+            return compile_call_expr(core, module, tail, ctx, err);
+        case IDM_CORE_COND:
+            return compile_cond_expr(core, module, tail, ctx, err);
         case IDM_CORE_DO:
-            if (core->as.do_expr.count == 0) {
-                uint32_t index = 0;
-                if (!idm_bc_add_const(module, idm_nil(), &index)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, index, NULL)) return idm_error_oom(err, core->span);
-                return true;
-            }
-            for (size_t i = 0; i < core->as.do_expr.count; i++) {
-                if (!compile_expr(core->as.do_expr.items[i], module, i + 1u == core->as.do_expr.count ? tail : false, ctx, err)) return false;
-                if (i + 1u < core->as.do_expr.count && !idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
-            }
-            return true;
+            return compile_do_expr(core, module, tail, ctx, err);
         case IDM_CORE_BIND_LOCAL:
             if (!compile_expr(core->as.bind_local.value, module, false, ctx, err)) return false;
             if (core->local_celled && !idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, core->span);
@@ -1977,15 +2018,13 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, co
             uint32_t name_index = 0;
             if (!idm_bc_add_const(module, core->as.use_package.name, &name_index)) return idm_error_oom(err, core->span);
             if (!idm_bc_emit_u32(module, IDM_OP_ENTER_NAMESPACE, name_index, NULL)) return idm_error_oom(err, core->span);
+            if (!emit_namespace_transfers(module, IDM_NS_TRANSFER_PARENT_TO_CHILD, core->as.use_package.import_src, core->as.use_package.import_dst, core->as.use_package.import_count, err, core->span)) return false;
             if (core->as.use_package.module) {
                 if (!idm_bc_emit_u32(module, IDM_OP_MAKE_CLOSURE, fn_off + core->as.use_package.init_fn, NULL)) return idm_error_oom(err, core->span);
                 if (!idm_bc_emit_u32(module, IDM_OP_CALL, 0u, NULL)) return idm_error_oom(err, core->span);
                 if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
             }
-            for (size_t i = 0; i < core->as.use_package.export_count; i++) {
-                if (!emit_named_u32(module, IDM_OP_IMPORT_GLOBAL, core->as.use_package.export_src[i], core->as.use_package.export_names[i], err, core->span)) return false;
-                if (!idm_bc_emit(module, core->as.use_package.export_dst[i], NULL)) return idm_error_oom(err, core->span);
-            }
+            if (!emit_namespace_transfers(module, IDM_NS_TRANSFER_CHILD_TO_PARENT, core->as.use_package.export_src, core->as.use_package.export_dst, core->as.use_package.export_count, err, core->span)) return false;
             if (!idm_bc_emit_op(module, IDM_OP_LEAVE_NAMESPACE, NULL)) return idm_error_oom(err, core->span);
             return compile_expr(core->as.use_package.cont, module, tail, ctx, err);
         }
@@ -2078,6 +2117,46 @@ bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t ar
     if (!compile_function_code(module, fn, body, NULL, err, body->span, NULL, 0)) return false;
     if (out_function) *out_function = fn;
     return true;
+}
+
+static bool compile_function_entry(IdmCore *fn, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
+    if (!fn || fn->kind != IDM_CORE_FN) return idm_error_set(err, fn ? fn->span : idm_span_unknown(NULL), "expected a function");
+    CompiledCallable callable;
+    if (!compile_callable_entries(fn, module, &callable, err, fn->span)) return false;
+    bool ok = compile_callable_bodies(fn, &callable, module, NULL, err, fn->span);
+    if (ok && out_function) *out_function = callable.entries[0];
+    compiled_callable_destroy(&callable);
+    return ok;
+}
+
+bool idm_core_compile_function(IdmCore *fn, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
+    if (!fn || (fn->kind != IDM_CORE_FN && fn->kind != IDM_CORE_FN_MULTI)) return idm_error_set(err, fn ? fn->span : idm_span_unknown(NULL), "expected a function");
+    size_t capture_count = fn->kind == IDM_CORE_FN ? fn->as.fn.capture_count : fn->as.fn_multi.capture_count;
+    if (capture_count != 0) return idm_error_set(err, fn->span, "captured function cannot be compiled as a bare module entry");
+    if (fn->kind == IDM_CORE_FN) return compile_function_entry(fn, module, out_function, err);
+
+    IdmCore *arg = idm_core_arg_ref("__syntax__", 0, fn->span);
+    IdmCore *call = idm_core_call(fn, fn->span);
+    const char *name = fn->as.fn_multi.name ? fn->as.fn_multi.name : "<transformer>";
+    IdmCore *wrapper = call ? idm_core_fn(name, 1, call, fn->span) : NULL;
+    bool arg_attached = false;
+    bool ok = arg && call && wrapper;
+    if (ok) {
+        ok = idm_core_call_add_arg(call, arg);
+        arg_attached = ok;
+    }
+    if (ok) ok = compile_function_entry(wrapper, module, out_function, err);
+    if (call) call->as.call.callee = NULL;
+    if (wrapper) idm_core_free(wrapper);
+    else {
+        if (call) {
+            call->as.call.callee = NULL;
+            idm_core_free(call);
+        }
+    }
+    if (!arg_attached) idm_core_free(arg);
+    if (!ok && err && !err->present) idm_error_oom(err, fn->span);
+    return ok;
 }
 
 bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
@@ -2213,9 +2292,14 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
             return idm_buf_appendf(buf, "(global %s#%u)", core->as.slot_ref.name, core->as.slot_ref.slot);
         case IDM_CORE_USE_PACKAGE:
             if (!idm_buf_append(buf, "(use-package ") || !dump_value(buf, core->as.use_package.name) ||
-                !idm_buf_appendf(buf, " init=%u exports=[", core->as.use_package.init_fn)) {
+                !idm_buf_appendf(buf, " init=%u imports=[", core->as.use_package.init_fn)) {
                 return false;
             }
+            for (size_t i = 0; i < core->as.use_package.import_count; i++) {
+                if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
+                if (!idm_buf_appendf(buf, "%s#%u->%s#%u", core->as.use_package.import_names[i], core->as.use_package.import_src[i], core->as.use_package.import_names[i], core->as.use_package.import_dst[i])) return false;
+            }
+            if (!idm_buf_append(buf, "] exports=[")) return false;
             for (size_t i = 0; i < core->as.use_package.export_count; i++) {
                 if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
                 if (!idm_buf_appendf(buf, "%s#%u->%s#%u", core->as.use_package.export_names[i], core->as.use_package.export_src[i], core->as.use_package.export_names[i], core->as.use_package.export_dst[i])) return false;
@@ -2457,7 +2541,30 @@ static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent) {
             return idm_buf_append_char(buf, ')');
         case IDM_CORE_USE_PACKAGE: {
             if (!idm_buf_append(buf, "(use-package ") || !dump_value(buf, core->as.use_package.name) ||
-                !idm_buf_appendf(buf, " init=%u exports=", core->as.use_package.init_fn)) return false;
+                !idm_buf_appendf(buf, " init=%u imports=", core->as.use_package.init_fn)) return false;
+            IdmBuffer im;
+            idm_buf_init(&im);
+            bool im_ok = idm_buf_append_char(&im, '[');
+            for (size_t i = 0; im_ok && i < core->as.use_package.import_count; i++) {
+                if (i != 0) im_ok = idm_buf_append_char(&im, ' ');
+                im_ok = im_ok && idm_buf_appendf(&im, "%s#%u->%s#%u", core->as.use_package.import_names[i], core->as.use_package.import_src[i], core->as.use_package.import_names[i], core->as.use_package.import_dst[i]);
+            }
+            im_ok = im_ok && idm_buf_append_char(&im, ']');
+            if (!im_ok) { idm_buf_destroy(&im); return false; }
+            if (ci + im.len <= IDM_CORE_PRETTY_WIDTH) {
+                bool ok = idm_buf_append_n(buf, im.data ? im.data : "", im.len);
+                idm_buf_destroy(&im);
+                if (!ok) return false;
+            } else {
+                idm_buf_destroy(&im);
+                if (!idm_buf_append_char(buf, '[')) return false;
+                for (size_t i = 0; i < core->as.use_package.import_count; i++) {
+                    if (!pretty_newline(buf, ci + 2)) return false;
+                    if (!idm_buf_appendf(buf, "%s#%u->%s#%u", core->as.use_package.import_names[i], core->as.use_package.import_src[i], core->as.use_package.import_names[i], core->as.use_package.import_dst[i])) return false;
+                }
+                if (!pretty_newline(buf, ci) || !idm_buf_append_char(buf, ']')) return false;
+            }
+            if (!idm_buf_append(buf, " exports=")) return false;
             IdmBuffer ex;
             idm_buf_init(&ex);
             bool ex_ok = idm_buf_append_char(&ex, '[');

@@ -43,6 +43,7 @@ static IdmCore *expand_form_expr(ExpandContext *ctx, const IdmSyntax *syn, IdmEr
 static IdmCore *expand_form_body(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 static IdmCore *expand_form_group(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 static IdmCore *expand_form_expression(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+static IdmCore *expand_form_adjacent(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 static IdmCore *expand_form_syntax_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 static IdmCore *expand_form_regex(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 static IdmCore *expand_program(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
@@ -51,6 +52,8 @@ static IdmCore *empty_container_literal(IdmRuntime *rt, IdmPrimitive prim, IdmSp
 static bool word_has_subtraction_shape(const char *text);
 static bool syntax_is_literal_value(const IdmSyntax *syn);
 static bool syntax_is_negative_number(const IdmSyntax *syn);
+static bool adjacent_items_present(IdmSyntax *const *items, size_t start, size_t end);
+static bool flatten_adjacent_items(IdmSyntax *const *items, size_t start, size_t end, IdmSyntax ***out_items, size_t *out_count);
 
 static IdmPrimitive primitive_from_binding(const IdmBinding *binding) {
     return (IdmPrimitive)binding->payload;
@@ -357,10 +360,8 @@ static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, si
 
 static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
     if (start + 2u >= end) return expand_error(err, items[start]->span, "implements? expects 'implements? TRAIT value'");
-    if (items[start + 1u]->kind != IDM_SYN_WORD) return expand_error(err, items[start + 1u]->span, "implements? expects a trait name");
-
     size_t trait_end = end;
-    IdmSyntax *trait_name = make_qualified_word(items, start + 1u, &trait_end, err);
+    IdmSyntax *trait_name = expect_qualified_word_at(items, start + 1u, &trait_end, "implements? expects a trait name", err);
     if (!trait_name) return NULL;
     if (trait_end >= end) {
         IdmSpan span = trait_name->span;
@@ -414,7 +415,7 @@ static bool syn_is_dot(const IdmSyntax *s) {
     return s->kind == IDM_SYN_WORD && strcmp(s->as.text, ".") == 0;
 }
 
-IdmSyntax *make_qualified_word(IdmSyntax *const *items, size_t start, size_t *inout_end, IdmError *err) {
+static IdmSyntax *make_qualified_word(IdmSyntax *const *items, size_t start, size_t *inout_end, IdmError *err) {
     IdmBuffer name;
     idm_buf_init(&name);
     bool ok = idm_buf_append(&name, items[start]->as.text);
@@ -443,6 +444,51 @@ IdmSyntax *make_qualified_word(IdmSyntax *const *items, size_t start, size_t *in
     }
     *inout_end = k;
     return word;
+}
+
+bool try_qualified_word_at(IdmSyntax *const *items, size_t start, size_t end, IdmSyntax **out_word, size_t *out_end, IdmError *err) {
+    *out_word = NULL;
+    if (out_end) *out_end = start;
+    if (start >= end) return true;
+    if (items[start]->kind == IDM_SYN_WORD) {
+        size_t pos = end;
+        IdmSyntax *word = make_qualified_word(items, start, &pos, err);
+        if (!word) return false;
+        *out_word = word;
+        if (out_end) *out_end = pos;
+        return true;
+    }
+    if (syn_is_form(items[start], "%-adjacent")) {
+        const IdmSyntax *run = items[start];
+        if (run->as.seq.count < 2u || run->as.seq.items[1]->kind != IDM_SYN_WORD) return true;
+        size_t run_end = run->as.seq.count;
+        IdmSyntax *word = make_qualified_word(run->as.seq.items, 1u, &run_end, err);
+        if (!word) return false;
+        if (run_end != run->as.seq.count) {
+            idm_syn_free(word);
+            return true;
+        }
+        *out_word = word;
+        if (out_end) *out_end = start + 1u;
+        return true;
+    }
+    return true;
+}
+
+IdmSyntax *expect_qualified_word_at(IdmSyntax *const *items, size_t start, size_t *inout_end, const char *message, IdmError *err) {
+    if (start >= *inout_end) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s", message);
+        return NULL;
+    }
+    IdmSyntax *word = NULL;
+    size_t end = start;
+    if (!try_qualified_word_at(items, start, *inout_end, &word, &end, err)) return NULL;
+    if (word) {
+        *inout_end = end;
+        return word;
+    }
+    idm_error_set(err, items[start]->span, "%s", message);
+    return NULL;
 }
 
 static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word) {
@@ -486,6 +532,50 @@ static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const Metho
 
 static bool arg_parse_at_stop(ExpandContext *ctx, IdmSyntax *const *items, size_t pos, size_t end, bool stop_at_operator) {
     return pos >= end || (stop_at_operator && op_lookup(ctx, items[pos], false) != NULL);
+}
+
+static bool adjacent_items_present(IdmSyntax *const *items, size_t start, size_t end) {
+    for (size_t i = start; i < end; i++) {
+        if (syn_is_form(items[i], "%-adjacent")) return true;
+    }
+    return false;
+}
+
+static bool flatten_adjacent_push(IdmSyntax ***out_items, size_t *out_count, size_t *out_cap, IdmSyntax *item) {
+    if (*out_count == *out_cap) {
+        size_t cap = *out_cap ? *out_cap * 2u : 8u;
+        IdmSyntax **items = realloc(*out_items, cap * sizeof(*items));
+        if (!items) return false;
+        *out_items = items;
+        *out_cap = cap;
+    }
+    (*out_items)[(*out_count)++] = item;
+    return true;
+}
+
+static bool flatten_adjacent_walk(IdmSyntax ***out_items, size_t *out_count, size_t *out_cap, IdmSyntax *item) {
+    if (syn_is_form(item, "%-adjacent") && item->as.seq.count >= 2u) {
+        for (size_t i = 1; i < item->as.seq.count; i++) {
+            if (!flatten_adjacent_walk(out_items, out_count, out_cap, item->as.seq.items[i])) return false;
+        }
+        return true;
+    }
+    return flatten_adjacent_push(out_items, out_count, out_cap, item);
+}
+
+static bool flatten_adjacent_items(IdmSyntax *const *items, size_t start, size_t end, IdmSyntax ***out_items, size_t *out_count) {
+    *out_items = NULL;
+    *out_count = 0;
+    size_t cap = 0;
+    for (size_t i = start; i < end; i++) {
+        if (!flatten_adjacent_walk(out_items, out_count, &cap, items[i])) {
+            free(*out_items);
+            *out_items = NULL;
+            *out_count = 0;
+            return false;
+        }
+    }
+    return true;
 }
 
 static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size_t *pos, size_t end, bool stop_at_operator, IdmCore *receiver, IdmError *err) {
@@ -557,6 +647,7 @@ static IdmCore *parse_postfix_expr(ExpandContext *ctx, IdmSyntax *const *items, 
 }
 
 IdmCore *expand_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
+    if (start >= end) return expand_error(err, idm_span_unknown(NULL), "empty expression");
     bool saw_dot = false;
     bool folded = false;
     IdmSyntax **collapsed = malloc((end - start) * sizeof(*collapsed));
@@ -734,13 +825,21 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
     }
     if (items[start]->kind == IDM_SYN_WORD && !head_is_bound(ctx, items[start]) &&
         !op_lookup(ctx, items[start], true) && !op_lookup(ctx, items[start], false)) {
-        uint32_t resolver_index = 0;
-        if (resolve_head_resolver(ctx, items[start], &resolver_index, err)) return expand_resolver_use_from_parts(ctx, items, start, end, resolver_index, err);
+        uint32_t grammar_index = 0;
+        if (resolve_head_grammar(ctx, items[start], &grammar_index, err)) return expand_grammar_use_from_parts(ctx, items, start, end, grammar_index, err);
         if (err && err->present) return NULL;
         if (reserved_prefix_string(items, start, end, err)) return NULL;
         expand_error(err, items[start]->span, "unbound identifier '%s'", items[start]->as.text);
         note_unbound_context(ctx, items[start], err);
         return NULL;
+    }
+    if (adjacent_items_present(items, start, end)) {
+        IdmSyntax **flat = NULL;
+        size_t flat_count = 0;
+        if (!flatten_adjacent_items(items, start, end, &flat, &flat_count)) return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
+        IdmCore *core = expand_parts(ctx, flat, 0, flat_count, err);
+        free(flat);
+        return core;
     }
     if (reserved_prefix_string(items, start, end, err)) return NULL;
     if (len == 1) return expand_syntax(ctx, items[start], err);
@@ -1188,6 +1287,11 @@ static IdmCore *expand_form_expression(ExpandContext *ctx, const IdmSyntax *syn,
     return expand_syntax(ctx, child, err);
 }
 
+static IdmCore *expand_form_adjacent(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+    if (syn->as.seq.count < 3) return expand_error(err, syn->span, "%-adjacent expects at least two children");
+    return expand_parts(ctx, syn->as.seq.items, 1, syn->as.seq.count, err);
+}
+
 static IdmCore *expand_form_syntax_quote(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count != 2) return expand_error(err, syn->span, "%-syntax expects one child");
     IdmValue value = idm_syntax_value(ctx->rt, syn->as.seq.items[1], err);
@@ -1215,6 +1319,17 @@ static IdmCore *expand_form_regex(ExpandContext *ctx, const IdmSyntax *syn, IdmE
 
 static IdmCore *expand_program(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (!syn_is_form(syn, "%-package-begin")) return expand_error(err, syn->span, "expected %%-package-begin syntax");
+    for (size_t i = 1; i < syn->as.seq.count; i++) {
+        const IdmSyntax *item = syn->as.seq.items[i];
+        if (syn_is_form(item, "%-expr") && item->as.seq.count == 3 &&
+            syn_is_word(item->as.seq.items[1], "package") && item->as.seq.items[2]->kind == IDM_SYN_WORD) {
+            bool saved_in_package = ctx->in_package;
+            ctx->in_package = true;
+            IdmCore *core = expand_package_body_items(ctx, syn->as.seq.items, 1, syn->as.seq.count, err);
+            ctx->in_package = saved_in_package;
+            return core;
+        }
+    }
     return expand_body_items(ctx, syn->as.seq.items, 1, syn->as.seq.count, true, err);
 }
 
@@ -1242,6 +1357,68 @@ static IdmCore *empty_container_literal(IdmRuntime *rt, IdmPrimitive prim, IdmSp
     return literal;
 }
 
+bool dict_rest_index(const IdmSyntax *syn, size_t *out_index, IdmError *err) {
+    *out_index = SIZE_MAX;
+    if (!syn || syn->kind != IDM_SYN_DICT) return true;
+    for (size_t i = 0; i < syn->as.seq.count; i++) {
+        if (!syn_is_word(syn->as.seq.items[i], ".")) continue;
+        if (syn->as.seq.items[i]->token_adjacent_previous) continue;
+        if ((i % 2u) != 0) return idm_error_set(err, syn->as.seq.items[i]->span, "dict rest marker must follow key/value pairs");
+        *out_index = i;
+        return true;
+    }
+    return true;
+}
+
+static IdmCore *dict_put_core(IdmCore *dict, IdmCore *key, IdmCore *value, IdmSpan span, IdmError *err) {
+    IdmCore *call = expand_primitive_call(IDM_PRIM_DICT_PUT, span, err);
+    if (!call) {
+        idm_core_free(dict);
+        idm_core_free(key);
+        idm_core_free(value);
+        return NULL;
+    }
+    if (!core_call_add_arg_or_free(call, dict, err, span)) {
+        idm_core_free(key);
+        idm_core_free(value);
+        return NULL;
+    }
+    if (!core_call_add_arg_or_free(call, key, err, span)) {
+        idm_core_free(value);
+        return NULL;
+    }
+    if (!core_call_add_arg_or_free(call, value, err, span)) return NULL;
+    return call;
+}
+
+static IdmCore *expand_dict_tail_container(ExpandContext *ctx, const IdmSyntax *syn, size_t tail_index, IdmError *err) {
+    if (tail_index + 1u >= syn->as.seq.count) return expand_error(err, syn->span, "dict rest marker requires a tail expression");
+    IdmCore *dict = expand_parts(ctx, syn->as.seq.items, tail_index + 1u, syn->as.seq.count, err);
+    if (!dict) return NULL;
+    size_t pos = 0;
+    while (pos < tail_index) {
+        IdmCore *key = parse_postfix_expr(ctx, syn->as.seq.items, &pos, tail_index, false, err);
+        if (!key) {
+            idm_core_free(dict);
+            return NULL;
+        }
+        if (pos >= tail_index) {
+            idm_core_free(dict);
+            idm_core_free(key);
+            return expand_error(err, syn->span, "dict literal requires key/value pairs before rest marker");
+        }
+        IdmCore *value = parse_postfix_expr(ctx, syn->as.seq.items, &pos, tail_index, false, err);
+        if (!value) {
+            idm_core_free(dict);
+            idm_core_free(key);
+            return NULL;
+        }
+        dict = dict_put_core(dict, key, value, syn->span, err);
+        if (!dict) return NULL;
+    }
+    return dict;
+}
+
 static IdmCore *expand_container(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     IdmPrimitive prim;
     switch (syn->kind) {
@@ -1255,6 +1432,11 @@ static IdmCore *expand_container(ExpandContext *ctx, const IdmSyntax *syn, IdmEr
             return expand_error(err, syn->span, "unsupported container syntax");
     }
     if (syn->as.seq.count == 0) return empty_container_literal(ctx->rt, prim, syn->span, err);
+    if (syn->kind == IDM_SYN_DICT) {
+        size_t tail_index = SIZE_MAX;
+        if (!dict_rest_index(syn, &tail_index, err)) return NULL;
+        if (tail_index != SIZE_MAX) return expand_dict_tail_container(ctx, syn, tail_index, err);
+    }
     IdmCore *call = expand_primitive_call(prim, syn->span, err);
     if (!call) return NULL;
     size_t pos = 0;
@@ -1285,6 +1467,7 @@ IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) 
     if (syn_is_form(syn, "%-body")) return expand_form_body(ctx, syn, err);
     if (syn_is_form(syn, "%-group")) return expand_form_group(ctx, syn, err);
     if (syn_is_form(syn, "%-expression")) return expand_form_expression(ctx, syn, err);
+    if (syn_is_form(syn, "%-adjacent")) return expand_form_adjacent(ctx, syn, err);
     if (syn_is_form(syn, "%-syntax")) return expand_form_syntax_quote(ctx, syn, err);
     if (syn_is_form(syn, "%-quasisyntax")) return expand_form_quasisyntax(ctx, syn, err);
     if (syn_is_form(syn, "%-quote")) return expand_form_quote(ctx, syn, err);
@@ -1293,7 +1476,7 @@ IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) 
     if (syn_is_form(syn, "%-regex")) return expand_form_regex(ctx, syn, err);
     if (syn_is_form(syn, "%-package-begin")) return expand_program(ctx, syn, err);
     if (syn_is_form(syn, "%-word")) {
-        return expand_error(err, syn->span, "word syntax requires a resolver");
+        return expand_error(err, syn->span, "word syntax requires a grammar");
     }
     if (syn_is_form(syn, "%-pin")) {
         return expand_error(err, syn->span, "pin '^name' is only valid in pattern position");

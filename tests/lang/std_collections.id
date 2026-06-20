@@ -1,5 +1,5 @@
 use std/test
-activate std/test
+activate Test
 use std/enum
 import std/set as Set
 import std/range as Range
@@ -27,6 +27,8 @@ suite do
     assert-eq (datum-keyword-dict :now) %{:x 1 :y 2}
     assert-eq %{:a 1 :a 2 :b 3} %{:a 2 :b 3}
     assert-eq (dict-size %{:a 1 :a 2}) 1
+    assert-eq %{:a 1 . %{:b 2}} %{:b 2 :a 1}
+    assert-eq %{:a 1 :c 3 . %{:a 0 :b 2}} %{:a 1 :b 2 :c 3}
 
     collect = fn label opts -> {label opts}
     assert-eq (collect "build" retries: 3 verbose: :true) {"build" %{:retries 3 :verbose :true}}
@@ -34,6 +36,14 @@ suite do
       retries: 4
       verbose: :false
     assert-eq multiline {"deploy" %{:retries 4 :verbose :false}}
+
+    nested =
+      config:
+        retries: 3
+        nested:
+          flag: :true
+      name: "app"
+    assert-eq nested %{:config %{:retries 3 :nested %{:flag :true}} :name "app"}
 
     assert-eq (match %{:a 1 :b 2 :c 3} do %{:a x . rest} -> {x rest} end) {1 %{:b 2 :c 3}}
     assert-eq (match %{:a 1} do %{. rest} -> rest end) %{:a 1}

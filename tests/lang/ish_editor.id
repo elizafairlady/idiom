@@ -2,7 +2,7 @@ use std/test
 use std/string
 use app/ish
 use std/term
-activate std/test
+activate Test
 
 defn fresh -> initial-state "> "
 

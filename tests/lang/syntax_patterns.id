@@ -1,0 +1,73 @@
+use std/test
+activate Test
+
+defmacro plus-two %`(plus-two %,x) -> %`(add %,x 2)
+
+defmacro syntax-list do
+  %`(syntax-list %,@xs) -> %`(list %,@xs)
+end
+
+defmacro install-syntax-macro %`(install-syntax-macro %,name) -> do
+  expander-register-macro name (fn do
+    %`(installed-syntax-macro %,x) -> %`(add %,x 4)
+  end)
+  %`:nil
+end
+
+install-syntax-macro installed-syntax-macro
+
+protocol SyntaxGrammar do
+  grammar do
+    %`(syntax-grammar-add %,x %,y) -> %`(add %,x %,y)
+    %`(syntax-grammar-list %,@xs) -> %`(list %,@xs)
+  end
+end
+
+activate SyntaxGrammar
+
+suite do
+  test "match accepts quasisyntax patterns" do
+    got = match %`(add 1 2) do
+      %`(sub %,a %,b) -> :bad
+      %`(add %,a %,b) -> {(syntax->datum a) (syntax->datum b)}
+    end
+    assert-eq got {1 2}
+  end
+
+  test "repeated quasisyntax binders compare structurally" do
+    assert-eq (match %`(same 1 1) do %`(same %,x %,x) -> :same; _ -> :different end) :same
+    assert-eq (match %`(same 1 2) do %`(same %,x %,x) -> :same; _ -> :different end) :different
+    assert-eq (match %`(both (1 2) (1 2)) do %`(both (%,@xs) (%,@xs)) -> :same; _ -> :different end) :same
+    assert-eq (match %`(both (1 2) (1 3)) do %`(both (%,@xs) (%,@xs)) -> :same; _ -> :different end) :different
+  end
+
+  test "quasisyntax dict patterns are keyed" do
+    got = match %`%{:b 2 :a 1 :c 3} do
+      %`%{:a %,x . %,rest} -> {(syntax->datum x) (syntax->datum rest)}
+    end
+    assert-eq got {1 %{:b 2 :c 3}}
+
+    duplicate = match %`%{:a 1 :a 2 :b 3} do
+      %`%{:a %,x . %,rest} -> {(syntax->datum x) (syntax->datum rest)}
+    end
+    assert-eq duplicate {2 %{:b 3}}
+
+    assert-eq (match %`%{:a 1 :b 2} do %`%{:a %,x} -> syntax->datum x; _ -> :bad end) 1
+  end
+
+  test "defmacro accepts quasisyntax parameter" do
+    assert-eq (plus-two 40) 42
+  end
+
+  test "defmacro accepts quasisyntax clauses" do
+    assert-eq (syntax-list 1 2 3) '(1 2 3)
+  end
+
+  test "registered macros accept quasisyntax clauses" do
+    assert-eq (installed-syntax-macro 38) 42
+  end
+
+  test "grammar accepts quasisyntax clauses" do
+    assert-eq {(syntax-grammar-add 20 22) (syntax-grammar-list 1 2 3)} {42 '(1 2 3)}
+  end
+end

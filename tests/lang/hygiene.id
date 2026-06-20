@@ -1,27 +1,25 @@
 use std/test
-activate std/test
+activate Test
 
 defn kadd a b -> add a b
-defmacro twice stx do syntax-case stx do (_ e) -> %`(kadd %,e %,e) end end
+defmacro twice %`(twice %,e) -> %`(kadd %,e %,e)
 defn myadd a b -> add a b
 operator <+> precedence: 50 assoc: left capture: :infix -> myadd
 
-defmacro defmm stx do
-  syntax-case stx do
-    (_ n) -> do
-      expander-register-macro (syntax-nth stx 2) (fn s do syntax-case s do (_ a) -> %`(add %,a 1) end end)
-      %`:nil
-    end
+defmacro defmm do
+  %`(defmm %,n) -> do
+    expander-register-macro n (fn do %`(_ %,a) -> %`(add %,a 1) end)
+    %`:nil
   end
 end
 defmm inc
 
-defmacro defproto stx do syntax-case stx do (_ n b) -> %`do
+defmacro defproto %`(defproto %,n %,b) -> %`do
   protocol %,n %,b
-end end end
-defmacro deftrait stx do syntax-case stx do (_ n b) -> %`do
+end
+defmacro deftrait %`(deftrait %,n %,b) -> %`do
   trait %,n %,b
-end end end
+end
 defproto Greets do
   export defmacro answer s -> (make-syntax-int s 99)
 end
@@ -29,9 +27,9 @@ deftrait Sized do
   method size-of x
 end
 
-defmacro defrec stx do syntax-case stx do (_ n b) -> %`do
+defmacro defrec %`(defrec %,n %,b) -> %`do
   record %,n %,b
-end end end
+end
 defrec Pt do
   field x
 end

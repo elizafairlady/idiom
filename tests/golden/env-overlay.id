@@ -1,4 +1,5 @@
-activate app/ish
+use app/ish
+activate Shell
 env-set "ISH_GOLD_VAR" "from-overlay"
 printf "penv:"
 printenv ISH_GOLD_VAR

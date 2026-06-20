@@ -1,6 +1,7 @@
 #ifndef IDM_PATTERN_H
 #define IDM_PATTERN_H
 
+#include "idiom/syntax.h"
 #include "idiom/value.h"
 
 typedef enum {
@@ -14,11 +15,40 @@ typedef enum {
     IDM_PAT_TUPLE,
     IDM_PAT_VECTOR_REST,
     IDM_PAT_TUPLE_REST,
-    IDM_PAT_DICT
+    IDM_PAT_DICT,
+    IDM_PAT_SYNTAX
 } IdmPatternKind;
 
 typedef struct IdmPattern IdmPattern;
 typedef struct IdmPatternSelector IdmPatternSelector;
+
+typedef enum {
+    IDM_SYN_PAT_WILDCARD,
+    IDM_SYN_PAT_BIND,
+    IDM_SYN_PAT_LITERAL,
+    IDM_SYN_PAT_SEQUENCE
+} IdmSyntaxPatternKind;
+
+#define IDM_SYN_PAT_NO_REST ((size_t)-1)
+
+typedef struct IdmSyntaxPattern IdmSyntaxPattern;
+
+struct IdmSyntaxPattern {
+    IdmSyntaxPatternKind kind;
+    IdmSpan span;
+    union {
+        struct { char *name; uint32_t slot; } bind;
+        IdmSyntax *literal;
+        struct {
+            IdmSyntaxKind kind;
+            IdmSyntaxPattern **items;
+            size_t count;
+            size_t rest_index;
+            char *rest_name;
+            uint32_t rest_slot;
+        } seq;
+    } as;
+};
 
 typedef struct {
     char *name;
@@ -67,8 +97,16 @@ struct IdmPattern {
         struct { IdmPattern **items; size_t count; } seq;
         struct { IdmPattern **items; size_t count; IdmPattern *rest; } seq_rest;
         struct { IdmDictPatternEntry *entries; size_t count; IdmPattern *rest; } dict;
+        IdmSyntaxPattern *syntax;
     } as;
 };
+
+IdmSyntaxPattern *idm_syn_pat_wildcard(IdmSpan span);
+IdmSyntaxPattern *idm_syn_pat_bind(const char *name, IdmSpan span);
+IdmSyntaxPattern *idm_syn_pat_literal_take(IdmSyntax *literal, IdmSpan span);
+IdmSyntaxPattern *idm_syn_pat_sequence(IdmSyntaxKind kind, IdmSyntaxPattern **items, size_t count, size_t rest_index, const char *rest_name, IdmSpan span);
+IdmSyntaxPattern *idm_syn_pat_clone(const IdmSyntaxPattern *pat);
+void idm_syn_pat_free(IdmSyntaxPattern *pat);
 
 IdmPattern *idm_pat_wildcard(IdmSpan span);
 IdmPattern *idm_pat_bind(const char *name, IdmSpan span);
@@ -78,6 +116,7 @@ IdmPattern *idm_pat_pair(IdmPattern *left, IdmPattern *right, IdmSpan span);
 IdmPattern *idm_pat_sequence(IdmPatternKind kind, IdmPattern **items, size_t count, IdmSpan span);
 IdmPattern *idm_pat_sequence_rest(IdmPatternKind kind, IdmPattern **items, size_t count, IdmPattern *rest, IdmSpan span);
 IdmPattern *idm_pat_dict(IdmDictPatternEntry *entries, size_t count, IdmPattern *rest, IdmSpan span);
+IdmPattern *idm_pat_syntax_take(IdmSyntaxPattern *syntax, IdmSpan span);
 IdmPattern *idm_pat_clone(const IdmPattern *pat);
 void idm_pat_free(IdmPattern *pat);
 

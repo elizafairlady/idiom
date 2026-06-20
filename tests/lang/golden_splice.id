@@ -1,5 +1,5 @@
 use std/test
-activate std/test
+activate Test
 
 suite do
   test "qq-splice" do
@@ -11,10 +11,10 @@ suite do
   test "splice-flatt-capture" do
     got = do
       x = 40
-      defmacro m stx do
+      defmacro m %`(m %,name %,slot) -> do
         %`(do
-            defn %,(syntax-nth stx 2) v do
-                %,(syntax-nth stx 3) = :other
+            defn %,name v do
+                %,slot = :other
                 x
               end
           end)
@@ -26,11 +26,11 @@ suite do
   end
   test "splice-flatt-dual" do
     got = do
-      defmacro m2 stx do
+      defmacro m2 %`(m2 %,name %,slot) -> do
         %`(do
-            defn %,(syntax-nth stx 2) v do
-                %,(syntax-nth stx 3) = 7
-                add %,(syntax-nth stx 3) 1
+            defn %,name v do
+                %,slot = 7
+                add %,slot 1
               end
           end)
       end
@@ -41,7 +41,8 @@ suite do
   end
   test "splice-import" do
     got = do
-      activate tests/pkg/splicemak
+      use tests/pkg/splicemak
+      activate SpliceMak
       defdouble dbl
       dbl 21
     end
@@ -49,9 +50,9 @@ suite do
   end
   test "splice-isolation" do
     got = do
-      defmacro defconst stx do
+      defmacro defconst %`(defconst %,name %,value) -> do
         %`(do
-            defn %,(syntax-nth stx 2) v -> %,(syntax-nth stx 3)
+            defn %,name v -> %,value
           end)
       end
       defconst a 1
@@ -62,9 +63,9 @@ suite do
   end
   test "splice-publish" do
     got = do
-      defmacro defzero stx do
+      defmacro defzero %`(defzero %,name) -> do
         %`(do
-            defn %,(syntax-nth stx 2) v -> v
+            defn %,name v -> v
             defn helper99 -> 1
           end)
       end

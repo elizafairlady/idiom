@@ -4,6 +4,7 @@ static bool expand_macro_syntax_only(ExpandContext *ctx, const IdmSyntax *syntax
 static const char *operator_decl_token_text(const IdmSyntax *syn);
 static MacroDef *macro_slot(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err);
 static void phase_syntax_fn_import(ExpandContext *ctx, PhaseSyntaxFn *out, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env);
+static bool phase_syntax_callable_arity_one(const IdmCore *fn);
 
 bool run_phase_core(ExpandContext *ctx, IdmCore *core, IdmError *err) {
     IdmBytecodeModule *module = malloc(sizeof(*module));
@@ -43,30 +44,30 @@ bool resolve_transformer(ExpandContext *ctx, const IdmSyntax *head, uint32_t *ou
     return true;
 }
 
-bool resolve_head_resolver(ExpandContext *ctx, const IdmSyntax *head, uint32_t *out_resolver_index, IdmError *err) {
+bool resolve_head_grammar(ExpandContext *ctx, const IdmSyntax *head, uint32_t *out_grammar_index, IdmError *err) {
     if (!head || head->kind != IDM_SYN_WORD) return false;
     const IdmScopeSet *scopes = idm_syn_scope_set(head, 0);
     if (scopes) {
-        const ResolverDef *best = NULL;
-        for (size_t i = 0; i < ctx->resolver_count; i++) {
-            const ResolverDef *candidate = &ctx->resolvers[i];
+        const GrammarDef *best = NULL;
+        for (size_t i = 0; i < ctx->grammar_count; i++) {
+            const GrammarDef *candidate = &ctx->grammars[i];
             if (!idm_scope_set_subset(&candidate->scopes, scopes)) continue;
             if (!best || idm_scope_set_subset(&best->scopes, &candidate->scopes)) best = candidate;
         }
         if (!best) return false;
-        for (size_t i = 0; i < ctx->resolver_count; i++) {
-            const ResolverDef *candidate = &ctx->resolvers[i];
+        for (size_t i = 0; i < ctx->grammar_count; i++) {
+            const GrammarDef *candidate = &ctx->grammars[i];
             if (!idm_scope_set_subset(&candidate->scopes, scopes)) continue;
             if (!idm_scope_set_subset(&candidate->scopes, &best->scopes)) {
-                expand_error(err, head->span, "ambiguous resolver for '%s'", head->as.text); return false;
+                expand_error(err, head->span, "ambiguous grammar for '%s'", head->as.text); return false;
             }
         }
-        *out_resolver_index = (uint32_t)(best - ctx->resolvers);
+        *out_grammar_index = (uint32_t)(best - ctx->grammars);
         return true;
     }
-    for (size_t i = ctx->resolver_count; i > 0; i--) {
-        const ResolverDef *candidate = &ctx->resolvers[i - 1u];
-        if (candidate->scopes.count == 0) { *out_resolver_index = (uint32_t)(i - 1u); return true; }
+    for (size_t i = ctx->grammar_count; i > 0; i--) {
+        const GrammarDef *candidate = &ctx->grammars[i - 1u];
+        if (candidate->scopes.count == 0) { *out_grammar_index = (uint32_t)(i - 1u); return true; }
     }
     return false;
 }
@@ -81,9 +82,15 @@ static bool phase_syntax_call(IdmRuntime *rt, const IdmSyntax *use_syntax, const
     IdmNamespace *call_ns = fn->phase_env ? fn->phase_env->ns : fn->phase_ns;
     if (call_ns) rt->main_ns = call_ns;
     rt->trait_phase = 1;
-    bool ok = fn->closure_backed
-        ? idm_vm_call_closure(rt, fn->closure, &arg, 1, &result, err)
-        : idm_vm_call_function(rt, &fn->module->module, fn->function_index, &arg, 1, &result, err);
+    IdmValue callee = fn->closure_backed
+        ? fn->closure
+        : idm_closure_in_module(rt, &fn->module->module, fn->function_index, NULL, 0, call_ns, err);
+    if (err && err->present) {
+        rt->main_ns = old_main_ns;
+        rt->trait_phase = old_trait_phase;
+        return false;
+    }
+    bool ok = idm_vm_call_closure(rt, callee, &arg, 1, &result, err);
     rt->main_ns = old_main_ns;
     rt->trait_phase = old_trait_phase;
     if (!ok) return false;
@@ -97,9 +104,9 @@ bool local_macro_invoke(void *user, IdmRuntime *rt, uint32_t payload, const IdmS
     ExpandContext *ctx = user; if (payload >= ctx->macro_count) return idm_error_set(err, use_syntax ? use_syntax->span : idm_span_unknown(NULL), "macro transformer payload %u is out of bounds", payload);
     return phase_syntax_call(rt, use_syntax, &ctx->macros[payload].fn, out_syntax, err); }
 
-static bool local_resolver_invoke(ExpandContext *ctx, IdmRuntime *rt, uint32_t resolver_index, const IdmSyntax *use_syntax, IdmSyntax **out_syntax, IdmError *err) {
-    if (resolver_index >= ctx->resolver_count) return idm_error_set(err, use_syntax ? use_syntax->span : idm_span_unknown(NULL), "resolver index %u is out of bounds", resolver_index);
-    return phase_syntax_call(rt, use_syntax, &ctx->resolvers[resolver_index].fn, out_syntax, err); }
+static bool local_grammar_invoke(ExpandContext *ctx, IdmRuntime *rt, uint32_t grammar_index, const IdmSyntax *use_syntax, IdmSyntax **out_syntax, IdmError *err) {
+    if (grammar_index >= ctx->grammar_count) return idm_error_set(err, use_syntax ? use_syntax->span : idm_span_unknown(NULL), "grammar index %u is out of bounds", grammar_index);
+    return phase_syntax_call(rt, use_syntax, &ctx->grammars[grammar_index].fn, out_syntax, err); }
 
 typedef bool (*SyntaxSurfaceInvokeFn)(ExpandContext *ctx, uint32_t payload, const IdmSyntax *use_copy, const IdmSyntax *head, IdmSyntax **out_syntax, IdmError *err);
 
@@ -109,7 +116,7 @@ static bool invoke_macro_payload(ExpandContext *ctx, uint32_t payload, const Idm
     return runner->invoke(runner->user, ctx->rt, payload, use_copy, out_syntax, err);
 }
 
-static bool invoke_resolver_payload(ExpandContext *ctx, uint32_t resolver_index, const IdmSyntax *use_copy, const IdmSyntax *head, IdmSyntax **out_syntax, IdmError *err) { (void)head; return local_resolver_invoke(ctx, ctx->rt, resolver_index, use_copy, out_syntax, err); }
+static bool invoke_grammar_payload(ExpandContext *ctx, uint32_t grammar_index, const IdmSyntax *use_copy, const IdmSyntax *head, IdmSyntax **out_syntax, IdmError *err) { (void)head; return local_grammar_invoke(ctx, ctx->rt, grammar_index, use_copy, out_syntax, err); }
 
 static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, const char *depth_action, const char *note_action, SyntaxSurfaceInvokeFn invoke, IdmSyntax **out_syntax, IdmError *err) {
     if (ctx->surface_depth >= 128) return expand_error(err, head->span, "%s '%s'", depth_action, head->as.text);
@@ -155,7 +162,7 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
 
 bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, payload, "macro expansion depth exceeded while expanding", "in expansion of", invoke_macro_payload, out_syntax, err); }
 
-static bool invoke_resolver_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t resolver_index, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, resolver_index, "resolver expansion depth exceeded while resolving", "while resolving", invoke_resolver_payload, out_syntax, err); }
+static bool invoke_grammar_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t grammar_index, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, grammar_index, "grammar expansion depth exceeded while expanding", "in grammar expansion of", invoke_grammar_payload, out_syntax, err); }
 
 IdmCore *expand_macro_use(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmError *err) {
     IdmSyntax *expanded_syntax = NULL;
@@ -221,6 +228,16 @@ bool free_identifier_eq_callback(void *user, IdmRuntime *rt, const IdmSyntax *a,
     return true;
 }
 
+static bool phase_syntax_callable_arity_one(const IdmCore *fn) {
+    if (!fn) return false;
+    if (fn->kind == IDM_CORE_FN) return fn->as.fn.arity == 1;
+    if (fn->kind != IDM_CORE_FN_MULTI || fn->as.fn_multi.count == 0) return false;
+    for (size_t i = 0; i < fn->as.fn_multi.count; i++) {
+        if (fn->as.fn_multi.clauses[i].arity != 1) return false;
+    }
+    return true;
+}
+
 IdmSyntax *syntax_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
     IdmSyntax *use = idm_syn_list(items[start]->span);
     if (!use || !idm_syn_append(use, idm_syn_word("%-expr", items[start]->span))) {
@@ -255,11 +272,11 @@ IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items
     return core;
 }
 
-IdmCore *expand_resolver_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t resolver_index, IdmError *err) {
+IdmCore *expand_grammar_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t grammar_index, IdmError *err) {
     IdmSyntax *use = syntax_use_from_parts(ctx, items, start, end, err);
     if (!use) return NULL;
     IdmSyntax *expanded_syntax = NULL;
-    if (!invoke_resolver_to_syntax(ctx, use, items[start], resolver_index, &expanded_syntax, err)) {
+    if (!invoke_grammar_to_syntax(ctx, use, items[start], grammar_index, &expanded_syntax, err)) {
         idm_syn_free(use);
         return NULL;
     }
@@ -276,7 +293,8 @@ static bool phase_syntax_fn_compile(ExpandContext *ctx, PhaseSyntaxFn *out, IdmC
     out->phase_env = idm_phase_env_retain(ctx->phase_env);
     out->module = idm_module_ref_create(ctx->rt);
     if (!out->module) return idm_error_oom(err, span);
-    if (!idm_core_compile_function_body(fn->as.fn.body, debug_name, fn->as.fn.arity, &out->module->module, &out->function_index, err) ||
+    (void)debug_name;
+    if (!idm_core_compile_function(fn, &out->module->module, &out->function_index, err) ||
         !idm_bc_intern_literals(ctx->rt, &out->module->module, err)) {
         phase_syntax_fn_destroy(out);
         return false;
@@ -317,8 +335,8 @@ static bool bind_macro_surface(ExpandContext *ctx, const IdmSyntax *name_syntax,
 bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *fn, IdmSpan span, bool exported, IdmError *err) {
     const char *name = name_syntax && name_syntax->kind == IDM_SYN_WORD ? name_syntax->as.text : NULL;
     if (!name) return idm_error_set(err, span, "defmacro name must be an identifier");
-    if (!fn || fn->kind != IDM_CORE_FN) return idm_error_set(err, span, "defmacro must compile to a transformer function");
-    if (fn->as.fn.arity != 1) return idm_error_set(err, span, "defmacro transformer must accept exactly one syntax argument");
+    if (!fn || (fn->kind != IDM_CORE_FN && fn->kind != IDM_CORE_FN_MULTI)) return idm_error_set(err, span, "defmacro must compile to a transformer function");
+    if (!phase_syntax_callable_arity_one(fn)) return idm_error_set(err, span, "defmacro transformer must accept exactly one syntax argument");
     MacroDef *macro = macro_slot(ctx, name, span, err);
     if (!macro) return false;
     macro->exported = exported;
@@ -335,14 +353,20 @@ bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *f
     return true;
 }
 
-bool register_resolver(ExpandContext *ctx, IdmCore *fn, IdmSpan span, IdmError *err) {
-    if (!fn || fn->kind != IDM_CORE_FN) return idm_error_set(err, span, "resolver must compile to a transformer function");
-    if (fn->as.fn.arity != 1) return idm_error_set(err, span, "resolver transformer must accept exactly one syntax argument");
-    if (fn->as.fn.capture_count != 0) return idm_error_set(err, span, "resolver transformer captures require phase environment support");
-    if (ctx->decl_resolver) return idm_error_set(err, span, "only one resolver may be declared per protocol");
-    if (!phase_syntax_fn_compile(ctx, &ctx->decl_resolver_impl, fn, "resolver", span, err)) return false;
-    ctx->decl_resolver = true;
+static bool register_grammar_named(ExpandContext *ctx, IdmCore *fn, IdmSpan span, const char *surface, IdmError *err) {
+    const char *name = surface ? surface : "grammar";
+    if (!fn || (fn->kind != IDM_CORE_FN && fn->kind != IDM_CORE_FN_MULTI)) return idm_error_set(err, span, "%s must compile to a transformer function", name);
+    if (!phase_syntax_callable_arity_one(fn)) return idm_error_set(err, span, "%s transformer must accept exactly one syntax argument", name);
+    size_t capture_count = fn->kind == IDM_CORE_FN ? fn->as.fn.capture_count : fn->as.fn_multi.capture_count;
+    if (capture_count != 0) return idm_error_set(err, span, "%s transformer captures require phase environment support", name);
+    if (ctx->decl_grammar) return idm_error_set(err, span, "only one %s may be declared per protocol", name);
+    if (!phase_syntax_fn_compile(ctx, &ctx->decl_grammar_impl, fn, name, span, err)) return false;
+    ctx->decl_grammar = true;
     return true;
+}
+
+bool register_grammar(ExpandContext *ctx, IdmCore *fn, IdmSpan span, IdmError *err) {
+    return register_grammar_named(ctx, fn, span, "grammar", err);
 }
 
 bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_syntax, IdmValue transformer, IdmError *err) {
@@ -351,9 +375,20 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
     if (!name) return idm_error_set(err, name_syntax ? name_syntax->span : idm_span_unknown(NULL), "macro name must be an identifier");
     const IdmBytecodeModule *closure_module = idm_closure_module(transformer);
     if (!closure_module) return idm_error_set(err, name_syntax->span, "macro transformer must be a module-backed function value");
-    uint32_t fn_index = idm_closure_function_index(transformer);
-    if (fn_index >= closure_module->function_count || closure_module->functions[fn_index].arity != 1) {
-        return idm_error_set(err, name_syntax->span, "macro transformer must accept exactly one syntax argument");
+    size_t entry_count = idm_closure_entry_count(transformer);
+    if (entry_count == 0) {
+        uint32_t fn_index = idm_closure_function_index(transformer);
+        if (fn_index >= closure_module->function_count || closure_module->functions[fn_index].arity != 1) {
+            return idm_error_set(err, name_syntax->span, "macro transformer must accept exactly one syntax argument");
+        }
+    } else {
+        for (size_t i = 0; i < entry_count; i++) {
+            uint32_t fn_index = idm_closure_entry(transformer, i, err);
+            if (err && err->present) return false;
+            if (fn_index >= closure_module->function_count || closure_module->functions[fn_index].arity != 1) {
+                return idm_error_set(err, name_syntax->span, "macro transformer must accept exactly one syntax argument");
+            }
+        }
     }
     MacroDef *macro = macro_slot(ctx, name, name_syntax->span, err);
     if (!macro) return false;
@@ -400,26 +435,26 @@ bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScope
     return install_imported_macro_impl(ctx, name, scopes, module, function_index, phase_ns, phase_env, provider, provider_key, false, err);
 }
 
-bool install_imported_resolver(ExpandContext *ctx, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
+bool install_imported_grammar(ExpandContext *ctx, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
     const IdmScopeSet *binding_scopes = scopes ? scopes : &ctx->empty_scopes;
-    int guard = surface_install_guard(ctx, provider, provider_key, "resolver", "resolver", IDM_BIND_SPACE_RESOLVER, binding_scopes, err);
+    int guard = surface_install_guard(ctx, provider, provider_key, "grammar", "grammar", IDM_BIND_SPACE_GRAMMAR, binding_scopes, err);
     if (guard <= 0) return guard == 0;
-    if (ctx->resolver_count == ctx->resolver_cap) {
-        size_t cap = ctx->resolver_cap ? ctx->resolver_cap * 2u : 4u;
-        ResolverDef *resolvers = realloc(ctx->resolvers, cap * sizeof(*resolvers));
-        if (!resolvers) return idm_error_oom(err, idm_span_unknown(NULL));
-        ctx->resolvers = resolvers;
-        ctx->resolver_cap = cap;
+    if (ctx->grammar_count == ctx->grammar_cap) {
+        size_t cap = ctx->grammar_cap ? ctx->grammar_cap * 2u : 4u;
+        GrammarDef *grammars = realloc(ctx->grammars, cap * sizeof(*grammars));
+        if (!grammars) return idm_error_oom(err, idm_span_unknown(NULL));
+        ctx->grammars = grammars;
+        ctx->grammar_cap = cap;
     }
-    ResolverDef *resolver = &ctx->resolvers[ctx->resolver_count];
-    memset(resolver, 0, sizeof(*resolver));
-    if (!idm_scope_set_copy(&resolver->scopes, binding_scopes)) {
-        idm_scope_set_destroy(&resolver->scopes);
-        memset(resolver, 0, sizeof(*resolver));
+    GrammarDef *grammar = &ctx->grammars[ctx->grammar_count];
+    memset(grammar, 0, sizeof(*grammar));
+    if (!idm_scope_set_copy(&grammar->scopes, binding_scopes)) {
+        idm_scope_set_destroy(&grammar->scopes);
+        memset(grammar, 0, sizeof(*grammar));
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
-    phase_syntax_fn_import(ctx, &resolver->fn, module, function_index, phase_ns, phase_env);
-    ctx->resolver_count++;
+    phase_syntax_fn_import(ctx, &grammar->fn, module, function_index, phase_ns, phase_env);
+    ctx->grammar_count++;
     return true;
 }
 

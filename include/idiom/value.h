@@ -294,6 +294,8 @@ bool idm_value_ok(IdmValue value);
 size_t idm_dict_count(IdmValue value);
 bool idm_dict_get(IdmValue dict, IdmValue key, IdmValue *out);
 bool idm_dict_entry(IdmValue dict, size_t index, IdmValue *out_key, IdmValue *out_value);
+IdmValue idm_dict_put(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmValue value, IdmError *err);
+IdmValue idm_dict_del(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmError *err);
 const IdmSyntax *idm_syntax_get(IdmValue value, IdmError *err);
 IdmSyntax *idm_syntax_value_get(IdmValue value);
 const char *idm_string_bytes(IdmValue value);

@@ -98,19 +98,38 @@ bool value_from_literal_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmValu
             return !(err && err->present);
         }
         case IDM_SYN_DICT: {
-            if (syn->as.seq.count % 2u != 0) {
+            size_t elem_count = syn->as.seq.count;
+            size_t tail_index = SIZE_MAX;
+            if (!dict_rest_index(syn, &tail_index, err)) return false;
+            IdmValue tail = idm_nil();
+            if (tail_index != SIZE_MAX) {
+                if (tail_index + 2u != syn->as.seq.count) return false;
+                if (!value_from_literal_syntax(ctx, syn->as.seq.items[tail_index + 1u], &tail, err)) return false;
+                if (!idm_is_dict(tail)) return false;
+                elem_count = tail_index;
+            }
+            if (elem_count % 2u != 0) {
                 idm_error_set(err, syn->span, "dict literal requires key/value pairs");
                 return false;
             }
-            size_t count = syn->as.seq.count / 2u;
+            size_t pair_count = elem_count / 2u;
+            size_t tail_count = tail_index == SIZE_MAX ? 0u : idm_dict_count(tail);
+            size_t count = tail_count + pair_count;
             IdmDictEntry *entries = count == 0 ? NULL : calloc(count, sizeof(*entries));
             if (count != 0 && !entries) {
                 idm_error_oom(err, syn->span);
                 return false;
             }
-            for (size_t i = 0; i < count; i++) {
-                if (!value_from_literal_syntax(ctx, syn->as.seq.items[i * 2u], &entries[i].key, err) ||
-                    !value_from_literal_syntax(ctx, syn->as.seq.items[i * 2u + 1u], &entries[i].value, err)) {
+            for (size_t i = 0; i < tail_count; i++) {
+                if (!idm_dict_entry(tail, i, &entries[i].key, &entries[i].value)) {
+                    free(entries);
+                    return idm_error_set(err, syn->span, "dict rest literal conversion failed");
+                }
+            }
+            for (size_t i = 0; i < pair_count; i++) {
+                size_t out_i = tail_count + i;
+                if (!value_from_literal_syntax(ctx, syn->as.seq.items[i * 2u], &entries[out_i].key, err) ||
+                    !value_from_literal_syntax(ctx, syn->as.seq.items[i * 2u + 1u], &entries[out_i].value, err)) {
                     free(entries);
                     return false;
                 }
@@ -135,6 +154,143 @@ static bool pattern_binder_note(ExpandContext *ctx, const IdmSyntax *syn) {
     }
     ctx->pat_binders[ctx->pat_binder_count++] = syn;
     return true;
+}
+
+static bool syntax_pattern_note_local(ExpandContext *ctx, const IdmSyntax *name, IdmError *err) {
+    const IdmBinding *existing = resolve_default(ctx, name, NULL);
+    bool have = existing && existing->kind == IDM_BIND_LOCAL && existing->frame_id == ctx->frame;
+    if (!have && (!local_push_scoped(ctx, name->as.text, name, NULL) || !pattern_binder_note(ctx, name))) {
+        idm_error_oom(err, name->span);
+        return false;
+    }
+    return true;
+}
+
+static IdmSyntaxPattern *syntax_pattern_hole(ExpandContext *ctx, const IdmSyntax *hole, IdmError *err) {
+    if (!syn_is_form(hole, "%-unsyntax") || hole->as.seq.count != 2) {
+        idm_error_set(err, hole->span, "syntax pattern hole expects %,name");
+        return NULL;
+    }
+    const IdmSyntax *name = hole->as.seq.items[1];
+    if (name->kind != IDM_SYN_WORD) {
+        idm_error_set(err, hole->span, "syntax pattern hole must bind an identifier");
+        return NULL;
+    }
+    if (strcmp(name->as.text, "_") == 0) return idm_syn_pat_wildcard(hole->span);
+    if (!syntax_pattern_note_local(ctx, name, err)) return NULL;
+    IdmSyntaxPattern *pat = idm_syn_pat_bind(name->as.text, hole->span);
+    if (!pat) idm_error_oom(err, hole->span);
+    return pat;
+}
+
+static const IdmSyntax *syntax_pattern_splice_form(const IdmSyntax *item) {
+    if (syn_is_form(item, "%-expr") && item->as.seq.count == 2 && syn_is_form(item->as.seq.items[1], "%-unsyntax-splicing")) {
+        return item->as.seq.items[1];
+    }
+    return item;
+}
+
+static bool syntax_pattern_rest_name(ExpandContext *ctx, const IdmSyntax *splice, const char **out_name, IdmError *err) {
+    *out_name = NULL;
+    if (!syn_is_form(splice, "%-unsyntax-splicing") || splice->as.seq.count != 2) {
+        idm_error_set(err, splice->span, "syntax rest pattern expects %,@name");
+        return false;
+    }
+    const IdmSyntax *name = splice->as.seq.items[1];
+    if (name->kind != IDM_SYN_WORD) {
+        idm_error_set(err, splice->span, "syntax rest pattern must bind an identifier");
+        return false;
+    }
+    if (strcmp(name->as.text, "_") == 0) return true;
+    if (!syntax_pattern_note_local(ctx, name, err)) return false;
+    *out_name = name->as.text;
+    return true;
+}
+
+static IdmSyntaxPattern *syntax_pattern_from_template(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
+
+static IdmSyntaxPattern *syntax_pattern_sequence(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+    IdmSyntaxPattern **items = NULL;
+    size_t count = 0;
+    size_t cap = 0;
+    size_t rest_index = IDM_SYN_PAT_NO_REST;
+    const char *rest_name = NULL;
+    for (size_t i = 0; i < syn->as.seq.count; i++) {
+        const IdmSyntax *splice = syntax_pattern_splice_form(syn->as.seq.items[i]);
+        if (syn_is_form(splice, "%-unsyntax-splicing")) {
+            if (rest_index != IDM_SYN_PAT_NO_REST) {
+                idm_error_set(err, splice->span, "syntax pattern may contain only one rest hole");
+                goto fail;
+            }
+            rest_index = count;
+            if (!syntax_pattern_rest_name(ctx, splice, &rest_name, err)) goto fail;
+            continue;
+        }
+        IdmSyntaxPattern *item = syntax_pattern_from_template(ctx, syn->as.seq.items[i], err);
+        if (!item) goto fail;
+        if (count == cap) {
+            size_t next = cap ? cap * 2u : 8u;
+            IdmSyntaxPattern **grown = realloc(items, next * sizeof(*grown));
+            if (!grown) {
+                idm_syn_pat_free(item);
+                idm_error_oom(err, syn->span);
+                goto fail;
+            }
+            items = grown;
+            cap = next;
+        }
+        items[count++] = item;
+    }
+    IdmSyntaxPattern *pat = idm_syn_pat_sequence(syn->kind, items, count, rest_index, rest_name, syn->span);
+    if (!pat) {
+        idm_error_oom(err, syn->span);
+        goto fail;
+    }
+    return pat;
+
+fail:
+    for (size_t i = 0; i < count; i++) idm_syn_pat_free(items[i]);
+    free(items);
+    return NULL;
+}
+
+static IdmSyntaxPattern *syntax_pattern_from_template(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+    if (syn_is_form(syn, "%-group") && syn->as.seq.count == 2) return syntax_pattern_from_template(ctx, syn->as.seq.items[1], err);
+    if (syn_is_form(syn, "%-unsyntax")) return syntax_pattern_hole(ctx, syn, err);
+    if (syn_is_form(syn, "%-unsyntax-splicing")) {
+        idm_error_set(err, syn->span, "syntax rest pattern is only valid inside sequence patterns");
+        return NULL;
+    }
+    if (syn->kind == IDM_SYN_WORD && strcmp(syn->as.text, "_") == 0) return idm_syn_pat_wildcard(syn->span);
+    if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT) {
+        return syntax_pattern_sequence(ctx, syn, err);
+    }
+    IdmSyntax *literal = idm_syn_clone(syn);
+    if (!literal) {
+        idm_error_oom(err, syn->span);
+        return NULL;
+    }
+    IdmSyntaxPattern *pat = idm_syn_pat_literal_take(literal, syn->span);
+    if (!pat) {
+        idm_syn_free(literal);
+        idm_error_oom(err, syn->span);
+    }
+    return pat;
+}
+
+static IdmPattern *pattern_from_quasisyntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+    if (!syn_is_form(syn, "%-quasisyntax") || syn->as.seq.count != 2) {
+        idm_error_set(err, syn->span, "%-quasisyntax pattern expects one child");
+        return NULL;
+    }
+    IdmSyntaxPattern *syntax = syntax_pattern_from_template(ctx, syn->as.seq.items[1], err);
+    if (!syntax) return NULL;
+    IdmPattern *pat = idm_pat_syntax_take(syntax, syn->span);
+    if (!pat) {
+        idm_syn_pat_free(syntax);
+        idm_error_oom(err, syn->span);
+    }
+    return pat;
 }
 
 static bool list_pattern_group_items(const IdmSyntax *syn, IdmSyntax *const **out_items, size_t *out_count) {
@@ -238,6 +394,7 @@ static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax 
         }
         return idm_pat_pin(target->as.text, syn->span);
     }
+    if (syn_is_form(syn, "%-quasisyntax")) return pattern_from_quasisyntax(ctx, syn, err);
     IdmSyntax *const *list_items = NULL;
     size_t list_count = 0;
     if (list_pattern_group_items(syn, &list_items, &list_count)) return pattern_from_list_items(ctx, list_items, list_count, syn->span, err);
@@ -435,7 +592,7 @@ static bool pattern_bind_form_parts(const IdmSyntax *form, const IdmSyntax **out
     if (form->as.seq.count < 4) return false;
     const IdmSyntax *lhs = form->as.seq.items[1];
     if (lhs->kind == IDM_SYN_WORD) return false;
-    if (lhs->kind == IDM_SYN_LIST && !syn_is_form(lhs, "%-quote")) {
+    if (lhs->kind == IDM_SYN_LIST && !syn_is_form(lhs, "%-quote") && !syn_is_form(lhs, "%-quasisyntax")) {
         IdmSyntax *const *items = NULL;
         size_t count = 0;
         if (!list_pattern_group_items(lhs, &items, &count)) return false;
@@ -676,6 +833,13 @@ static IdmArity core_callable_arity(const IdmCore *core) {
     return arity;
 }
 
+static size_t core_callable_capture_count(const IdmCore *core) {
+    if (!core) return 0;
+    if (core->kind == IDM_CORE_FN) return core->as.fn.capture_count;
+    if (core->kind == IDM_CORE_FN_MULTI) return core->as.fn_multi.capture_count;
+    return 0;
+}
+
 static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, uint32_t slot, IdmArity arity, IdmError *err) {
     bool global_bind = body_bind_is_global(ctx);
     IdmScopeSet scopes;
@@ -833,8 +997,10 @@ static bool body_boundary_form(const IdmSyntax *form) {
            syn_is_word(form->as.seq.items[1], "record") || syn_is_word(form->as.seq.items[1], "use") ||
            syn_is_word(form->as.seq.items[1], "import") || syn_is_word(form->as.seq.items[1], "method") ||
            syn_is_word(form->as.seq.items[1], "protocol") || syn_is_word(form->as.seq.items[1], "trait") ||
+           syn_is_word(form->as.seq.items[1], "grammar") ||
            (syn_is_word(form->as.seq.items[1], "export") && form->as.seq.count >= 3u &&
-            (syn_is_word(form->as.seq.items[2], "record") || syn_is_word(form->as.seq.items[2], "trait")));
+            (syn_is_word(form->as.seq.items[2], "record") || syn_is_word(form->as.seq.items[2], "trait") ||
+             syn_is_word(form->as.seq.items[2], "protocol")));
 }
 
 static bool body_eval_for_syntax(ExpandContext *ctx, const IdmSyntax *form, const IdmSyntax *for_syntax_body, ScopePropagation *propagation, IdmError *err) {
@@ -947,9 +1113,9 @@ static int package_work_rank(const IdmSyntax *form) {
     if (!syn_is_form(form, "%-expr") || form->as.seq.count < 2u) return 10;
     if (syn_is_word(form->as.seq.items[1], "package")) return 0;
     if (syn_is_word(form->as.seq.items[1], "use") || syn_is_word(form->as.seq.items[1], "import")) return 1;
-    if (syn_is_word(form->as.seq.items[1], "protocol")) return 2;
+    if (package_form_head_is(form, "protocol")) return 2;
     if (syn_is_word(form->as.seq.items[1], "activate")) return 3;
-    if (syn_is_word(form->as.seq.items[1], "resolver")) return 4;
+    if (syn_is_word(form->as.seq.items[1], "grammar")) return 4;
     if (package_form_head_is(form, "record")) return 5;
     if (package_form_head_is(form, "trait")) return 6;
     if (syn_is_word(form->as.seq.items[1], "implement")) return 7;
@@ -972,102 +1138,148 @@ static bool package_trait_decl_parts(const IdmSyntax *form, const IdmSyntax **ou
     return true;
 }
 
-static bool package_local_trait_decl_exists(IdmSyntax **work, size_t work_count, const char *name) {
+static bool package_local_trait_decl_seen(IdmSyntax **work, const bool *placed, size_t work_count, const char *name, bool require_placed) {
     for (size_t i = 0; i < work_count; i++) {
+        if (require_placed && (!placed || !placed[i])) continue;
         const IdmSyntax *decl_name = NULL;
         if (package_trait_decl_parts(work[i], &decl_name, NULL) && strcmp(decl_name->as.text, name) == 0) return true;
     }
     return false;
 }
 
-static bool package_local_trait_decl_placed(IdmSyntax **work, const bool *placed, size_t work_count, const char *name) {
-    for (size_t i = 0; i < work_count; i++) {
-        const IdmSyntax *decl_name = NULL;
-        if (placed[i] && package_trait_decl_parts(work[i], &decl_name, NULL) && strcmp(decl_name->as.text, name) == 0) return true;
+static bool package_trait_require_name(const IdmSyntax *stmt, IdmSyntax **out_required, IdmError *err) {
+    *out_required = NULL;
+    if (!syn_is_form(stmt, "%-expr") || stmt->as.seq.count < 3u || !syn_is_word(stmt->as.seq.items[1], "require")) return true;
+    size_t end = 0;
+    if (!try_qualified_word_at(stmt->as.seq.items, 2u, stmt->as.seq.count, out_required, &end, err)) return false;
+    if (*out_required && end != stmt->as.seq.count) {
+        idm_syn_free(*out_required);
+        *out_required = NULL;
     }
-    return false;
+    return true;
 }
 
-static bool package_trait_ready(IdmSyntax **work, const bool *placed, size_t work_count, size_t index) {
+static bool package_trait_ready(IdmSyntax **work, const bool *placed, size_t work_count, size_t index, bool *out_ready, IdmError *err) {
+    *out_ready = true;
     const IdmSyntax *body = NULL;
     if (!package_trait_decl_parts(work[index], NULL, &body)) return true;
     for (size_t i = 1; i < body->as.seq.count; i++) {
-        const IdmSyntax *stmt = body->as.seq.items[i];
-        if (!syn_is_form(stmt, "%-expr") || stmt->as.seq.count != 3u || !syn_is_word(stmt->as.seq.items[1], "require") ||
-            stmt->as.seq.items[2]->kind != IDM_SYN_WORD) {
-            continue;
+        IdmSyntax *required = NULL;
+        if (!package_trait_require_name(body->as.seq.items[i], &required, err)) return false;
+        if (!required) continue;
+        if (package_local_trait_decl_seen(work, placed, work_count, required->as.text, false) &&
+            !package_local_trait_decl_seen(work, placed, work_count, required->as.text, true)) {
+            idm_syn_free(required);
+            *out_ready = false;
+            return true;
         }
-        const char *required = stmt->as.seq.items[2]->as.text;
-        if (package_local_trait_decl_exists(work, work_count, required) &&
-            !package_local_trait_decl_placed(work, placed, work_count, required)) {
-            return false;
-        }
+        idm_syn_free(required);
     }
     return true;
 }
 
-static bool package_implement_decl_parts(const IdmSyntax *form, const IdmSyntax **out_trait, const IdmSyntax **out_type) {
-    if (!syn_is_form(form, "%-expr") || form->as.seq.count < 5u || !syn_is_word(form->as.seq.items[1], "implement") ||
-        form->as.seq.items[2]->kind != IDM_SYN_WORD || !syn_is_word(form->as.seq.items[3], "on") ||
-        form->as.seq.items[4]->kind != IDM_SYN_WORD) {
+static bool package_implement_decl_parts(const IdmSyntax *form, IdmSyntax **out_trait, IdmSyntax **out_type, IdmError *err) {
+    *out_trait = NULL;
+    *out_type = NULL;
+    if (!syn_is_form(form, "%-expr") || form->as.seq.count < 5u || !syn_is_word(form->as.seq.items[1], "implement")) {
+        return true;
+    }
+    size_t pos = 0;
+    IdmSyntax *trait = NULL;
+    if (!try_qualified_word_at(form->as.seq.items, 2u, form->as.seq.count, &trait, &pos, err)) return false;
+    if (!trait) return true;
+    if (pos >= form->as.seq.count || !syn_is_word(form->as.seq.items[pos], "on")) {
+        idm_syn_free(trait);
+        return true;
+    }
+    pos++;
+    IdmSyntax *type = NULL;
+    size_t type_end = 0;
+    if (!try_qualified_word_at(form->as.seq.items, pos, form->as.seq.count, &type, &type_end, err)) {
+        idm_syn_free(trait);
         return false;
     }
-    if (out_trait) *out_trait = form->as.seq.items[2];
-    if (out_type) *out_type = form->as.seq.items[4];
+    bool valid = type && (type_end == form->as.seq.count ||
+                          (type_end + 1u == form->as.seq.count && syn_is_form(form->as.seq.items[type_end], "%-body")));
+    if (!valid) {
+        idm_syn_free(type);
+        idm_syn_free(trait);
+        return true;
+    }
+    *out_trait = trait;
+    *out_type = type;
     return true;
 }
 
-static bool package_local_implement_decl_exists(IdmSyntax **work, size_t work_count, const char *trait_name, const char *type_name) {
+static bool package_local_implement_decl_seen(IdmSyntax **work, const bool *placed, size_t work_count, const char *trait_name, const char *type_name, bool require_placed, bool *out_seen, IdmError *err) {
+    *out_seen = false;
     for (size_t i = 0; i < work_count; i++) {
-        const IdmSyntax *impl_trait = NULL;
-        const IdmSyntax *impl_type = NULL;
-        if (package_implement_decl_parts(work[i], &impl_trait, &impl_type) &&
-            strcmp(impl_trait->as.text, trait_name) == 0 && strcmp(impl_type->as.text, type_name) == 0) {
+        if (require_placed && (!placed || !placed[i])) continue;
+        IdmSyntax *impl_trait = NULL;
+        IdmSyntax *impl_type = NULL;
+        if (!package_implement_decl_parts(work[i], &impl_trait, &impl_type, err)) return false;
+        bool matched = impl_trait && impl_type && strcmp(impl_trait->as.text, trait_name) == 0 && strcmp(impl_type->as.text, type_name) == 0;
+        idm_syn_free(impl_type);
+        idm_syn_free(impl_trait);
+        if (matched) {
+            *out_seen = true;
             return true;
         }
     }
-    return false;
+    return true;
 }
 
-static bool package_local_implement_decl_placed(IdmSyntax **work, const bool *placed, size_t work_count, const char *trait_name, const char *type_name) {
-    for (size_t i = 0; i < work_count; i++) {
-        const IdmSyntax *impl_trait = NULL;
-        const IdmSyntax *impl_type = NULL;
-        if (placed[i] && package_implement_decl_parts(work[i], &impl_trait, &impl_type) &&
-            strcmp(impl_trait->as.text, trait_name) == 0 && strcmp(impl_type->as.text, type_name) == 0) {
-            return true;
-        }
+static bool package_implement_ready(IdmSyntax **work, const bool *placed, size_t work_count, size_t index, bool *out_ready, IdmError *err) {
+    *out_ready = true;
+    IdmSyntax *trait = NULL;
+    IdmSyntax *type = NULL;
+    if (!package_implement_decl_parts(work[index], &trait, &type, err)) return false;
+    if (!trait || !type) {
+        idm_syn_free(type);
+        idm_syn_free(trait);
+        return true;
     }
-    return false;
-}
-
-static bool package_implement_ready(IdmSyntax **work, const bool *placed, size_t work_count, size_t index) {
-    const IdmSyntax *trait = NULL;
-    const IdmSyntax *type = NULL;
-    if (!package_implement_decl_parts(work[index], &trait, &type)) return true;
     for (size_t i = 0; i < work_count; i++) {
         const IdmSyntax *decl_name = NULL;
         const IdmSyntax *body = NULL;
         if (!package_trait_decl_parts(work[i], &decl_name, &body) || strcmp(decl_name->as.text, trait->as.text) != 0) continue;
         for (size_t j = 1; j < body->as.seq.count; j++) {
-            const IdmSyntax *stmt = body->as.seq.items[j];
-            if (!syn_is_form(stmt, "%-expr") || stmt->as.seq.count != 3u || !syn_is_word(stmt->as.seq.items[1], "require") ||
-                stmt->as.seq.items[2]->kind != IDM_SYN_WORD) {
-                continue;
-            }
-            const char *required = stmt->as.seq.items[2]->as.text;
-            if (package_local_implement_decl_exists(work, work_count, required, type->as.text) &&
-                !package_local_implement_decl_placed(work, placed, work_count, required, type->as.text)) {
+            IdmSyntax *required = NULL;
+            if (!package_trait_require_name(body->as.seq.items[j], &required, err)) {
+                idm_syn_free(type);
+                idm_syn_free(trait);
                 return false;
             }
+            if (!required) continue;
+            bool exists = false;
+            bool placed_impl = false;
+            bool ok = package_local_implement_decl_seen(work, placed, work_count, required->as.text, type->as.text, false, &exists, err) &&
+                      package_local_implement_decl_seen(work, placed, work_count, required->as.text, type->as.text, true, &placed_impl, err);
+            if (!ok) {
+                idm_syn_free(required);
+                idm_syn_free(type);
+                idm_syn_free(trait);
+                return false;
+            }
+            if (exists && !placed_impl) {
+                idm_syn_free(required);
+                idm_syn_free(type);
+                idm_syn_free(trait);
+                *out_ready = false;
+                return true;
+            }
+            idm_syn_free(required);
         }
     }
+    idm_syn_free(type);
+    idm_syn_free(trait);
     return true;
 }
 
-static bool package_rank_ready(IdmSyntax **work, const bool *placed, size_t work_count, size_t index, int rank) {
-    if (rank == 6) return package_trait_ready(work, placed, work_count, index);
-    if (rank == 7) return package_implement_ready(work, placed, work_count, index);
+static bool package_rank_ready(IdmSyntax **work, const bool *placed, size_t work_count, size_t index, int rank, bool *out_ready, IdmError *err) {
+    *out_ready = true;
+    if (rank == 6) return package_trait_ready(work, placed, work_count, index, out_ready, err);
+    if (rank == 7) return package_implement_ready(work, placed, work_count, index, out_ready, err);
     return true;
 }
 
@@ -1087,7 +1299,14 @@ static bool package_order_work(IdmSyntax **work, size_t work_count, IdmError *er
             while (progress) {
                 progress = false;
                 for (size_t i = 0; i < work_count; i++) {
-                    if (placed[i] || package_work_rank(work[i]) != rank || !package_rank_ready(work, placed, work_count, i, rank)) continue;
+                    if (placed[i] || package_work_rank(work[i]) != rank) continue;
+                    bool ready = true;
+                    if (!package_rank_ready(work, placed, work_count, i, rank, &ready, err)) {
+                        free(ordered);
+                        free(placed);
+                        return false;
+                    }
+                    if (!ready) continue;
                     ordered[out++] = work[i];
                     placed[i] = true;
                     progress = true;
@@ -1115,6 +1334,63 @@ static bool package_owned_push(IdmSyntax ***owned, size_t *count, size_t *cap, I
         *cap = next;
     }
     (*owned)[(*count)++] = syn;
+    return true;
+}
+
+static IdmSyntax *flatten_degenerate_adjacent_expr(const IdmSyntax *form, IdmError *err) {
+    if (!syn_is_form(form, "%-expr") || form->as.seq.count != 2u ||
+        !syn_is_form(form->as.seq.items[1], "%-adjacent")) {
+        return NULL;
+    }
+    IdmSyntax *flat = idm_syn_clone(form);
+    if (!flat) {
+        idm_error_oom(err, form->span);
+        return NULL;
+    }
+    IdmSyntax *run = flat->as.seq.items[1];
+    if (run->as.seq.count < 3u) return flat;
+
+    size_t new_count = run->as.seq.count;
+    IdmSyntax **new_items = malloc(new_count * sizeof(*new_items));
+    if (!new_items) {
+        idm_syn_free(flat);
+        idm_error_oom(err, form->span);
+        return NULL;
+    }
+
+    IdmSyntax **old_items = flat->as.seq.items;
+    IdmSyntax **run_items = run->as.seq.items;
+    new_items[0] = old_items[0];
+    for (size_t i = 1; i < run->as.seq.count; i++) new_items[i] = run_items[i];
+
+    IdmSyntax *adjacent_head = run_items[0];
+    run->as.seq.items = NULL;
+    run->as.seq.count = 0;
+    run->as.seq.cap = 0;
+    idm_syn_free(adjacent_head);
+    idm_syn_free(run);
+    free(run_items);
+    free(old_items);
+
+    flat->as.seq.items = new_items;
+    flat->as.seq.count = new_count;
+    flat->as.seq.cap = new_count;
+    return flat;
+}
+
+static bool normalize_degenerate_adjacent_exprs(IdmSyntax **work, size_t work_count, IdmSyntax ***owned, size_t *owned_count, size_t *owned_cap, IdmError *err) {
+    for (size_t i = 0; i < work_count; i++) {
+        IdmSyntax *flat = flatten_degenerate_adjacent_expr(work[i], err);
+        if (!flat) {
+            if (err && err->present) return false;
+            continue;
+        }
+        if (!package_owned_push(owned, owned_count, owned_cap, flat, err)) {
+            idm_syn_free(flat);
+            return false;
+        }
+        work[i] = flat;
+    }
     return true;
 }
 
@@ -1166,7 +1442,7 @@ static bool package_register_defmacro_at(ExpandContext *ctx, IdmSyntax **work, s
         }
         return false;
     }
-    if (fn->kind == IDM_CORE_FN && fn->as.fn.capture_count != 0) {
+    if (core_callable_capture_count(fn) != 0) {
         idm_core_free(fn);
         return idm_error_set(err, form->span, "package defmacro '%s' cannot capture for-syntax locals during package preparation", macro_name);
     }
@@ -1226,8 +1502,17 @@ IdmCore *expand_package_body_items(ExpandContext *ctx, IdmSyntax *const *items, 
     size_t owned_count = 0;
     size_t owned_cap = 0;
 
+    if (!normalize_degenerate_adjacent_exprs(work, work_count, &owned, &owned_count, &owned_cap, err)) {
+        for (size_t i = 0; i < owned_count; i++) idm_syn_free(owned[i]);
+        free(owned);
+        free(work);
+        return NULL;
+    }
+
     IdmScopeId package_scope = idm_scope_fresh(&ctx->scope_store);
     if (work_count != 0 && !body_scope_add_range(ctx, work, 0, work_count, package_scope, work[0]->span, err)) {
+        for (size_t i = 0; i < owned_count; i++) idm_syn_free(owned[i]);
+        free(owned);
         free(work);
         return NULL;
     }
@@ -1276,23 +1561,33 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     IdmSyntax **work = malloc(work_cap * sizeof(*work));
     if (!work) return (IdmCore *)(uintptr_t)idm_error_oom(err, items[index]->span);
     for (size_t i = 0; i < work_count; i++) work[i] = items[index + i];
+    IdmSyntax **owned = NULL;
+    size_t owned_count = 0;
+    size_t owned_cap = 0;
+    if (!normalize_degenerate_adjacent_exprs(work, work_count, &owned, &owned_count, &owned_cap, err)) {
+        for (size_t i = 0; i < owned_count; i++) idm_syn_free(owned[i]);
+        free(owned);
+        free(work);
+        return NULL;
+    }
     if (def_scope) {
         IdmScopeId body_scope = idm_scope_fresh(&ctx->scope_store);
         if (!body_scope_add_range(ctx, work, 0, work_count, body_scope, items[index]->span, err)) {
+            for (size_t i = 0; i < owned_count; i++) idm_syn_free(owned[i]);
+            free(owned);
             free(work);
             return NULL;
         }
     }
     IdmScopeSet body_ctx_scopes;
     if (!syntax_scopes_copy(&body_ctx_scopes, work[0])) {
+        for (size_t i = 0; i < owned_count; i++) idm_syn_free(owned[i]);
+        free(owned);
         free(work);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, items[index]->span);
     }
     const IdmScopeSet *saved_op_fallback = ctx->op_fallback;
     ctx->op_fallback = &body_ctx_scopes;
-    IdmSyntax **owned = NULL;
-    size_t owned_count = 0;
-    size_t owned_cap = 0;
     BodyRec *recs = NULL;
     size_t rec_count = 0;
     size_t rec_cap = 0;
@@ -1323,15 +1618,15 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             i++;
             continue;
         }
-        if (syn_is_form(form, "%-expr") && form->as.seq.count == 4 &&
-            syn_is_word(form->as.seq.items[1], "resolver") && form->as.seq.items[2]->kind == IDM_SYN_WORD &&
-            syn_is_form(form->as.seq.items[3], "%-body")) {
+        if (syn_is_form(form, "%-expr") && form->as.seq.count == 3 &&
+            syn_is_word(form->as.seq.items[1], "grammar") &&
+            syn_is_form(form->as.seq.items[2], "%-body")) {
             int saved_phase = ctx->phase;
             ctx->phase = 1;
-            IdmCore *fn = expand_function_literal(ctx, "resolver", form->as.seq.items[1], form->as.seq.items, 2u, form->as.seq.count, err);
+            IdmCore *fn = build_clause_fn(ctx, form->as.seq.items[2], form->as.seq.items[2]->as.seq.count, form->as.seq.items[1]->as.text, err);
             ctx->phase = saved_phase;
             if (!fn) { failed = true; break; }
-            bool ok = register_resolver(ctx, fn, form->span, err);
+            bool ok = register_grammar(ctx, fn, form->span, err);
             idm_core_free(fn);
             if (!ok) { failed = true; break; }
             i++;
@@ -1381,7 +1676,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 ctx->phase = saved_phase;
                 idm_binding_table_truncate(&ctx->bindings, temp_base);
                 if (!fn) { failed = true; break; }
-                if (fn->kind == IDM_CORE_FN && fn->as.fn.capture_count != 0) {
+                if (core_callable_capture_count(fn) != 0) {
                     if (mbase == 2u) {
                         idm_core_free(fn);
                         expand_error(err, form->span, "exported defmacro '%s' cannot capture for-syntax locals", macro_name);
@@ -1632,17 +1927,27 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     if (!failed) {
         if (boundary) {
             const IdmSyntax *bform = work[boundary_index];
-            if (syn_is_word(bform->as.seq.items[1], "protocol") && bform->as.seq.count == 4 &&
-                bform->as.seq.items[2]->kind == IDM_SYN_WORD && syn_is_form(bform->as.seq.items[3], "%-body")) {
+            if (syn_is_word(bform->as.seq.items[1], "protocol") ||
+                (syn_is_word(bform->as.seq.items[1], "export") && bform->as.seq.count >= 3 && syn_is_word(bform->as.seq.items[2], "protocol"))) {
                 core = expand_protocol_decl(ctx, bform, work, boundary_index, work_count, err);
             } else if (syn_is_word(bform->as.seq.items[1], "trait") ||
                        (syn_is_word(bform->as.seq.items[1], "export") && bform->as.seq.count >= 3 && syn_is_word(bform->as.seq.items[2], "trait"))) {
                 core = expand_trait_decl(ctx, bform, work, boundary_index, work_count, err);
-            } else if (syn_is_word(bform->as.seq.items[1], "activate") && bform->as.seq.count == 3 && bform->as.seq.items[2]->kind == IDM_SYN_WORD) {
-                core = expand_activate(ctx, bform->as.seq.items[2], work, boundary_index, work_count, bform->span, err);
+            } else if (syn_is_word(bform->as.seq.items[1], "activate") && bform->as.seq.count >= 3) {
+                size_t name_end = bform->as.seq.count;
+                IdmSyntax *name = expect_qualified_word_at(bform->as.seq.items, 2u, &name_end, "activate expects a single protocol name", err);
+                if (!name) {
+                    failed = true;
+                } else if (name_end != bform->as.seq.count) {
+                    idm_syn_free(name);
+                    expand_error(err, bform->span, "activate expects a single protocol name");
+                    failed = true;
+                } else {
+                    core = expand_activate(ctx, name, work, boundary_index, work_count, bform->span, err);
+                    idm_syn_free(name);
+                }
             } else if (syn_is_word(bform->as.seq.items[1], "implement") && bform->as.seq.count >= 2) {
-                if (bform->as.seq.count == 3) core = expand_error(err, bform->span, "implement expects 'implement TRAIT on TYPE' or 'implement TRAIT on TYPE do ... end'; use 'activate NAME' for language surfaces");
-                else core = expand_implement_trait_decl(ctx, bform, work, boundary_index, work_count, err);
+                core = expand_implement_trait_decl(ctx, bform, work, boundary_index, work_count, err);
             } else if (syn_is_word(bform->as.seq.items[1], "record") ||
                        (syn_is_word(bform->as.seq.items[1], "export") && bform->as.seq.count >= 3 && syn_is_word(bform->as.seq.items[2], "record"))) {
                 core = expand_record_decl(ctx, bform, work, boundary_index, work_count, err);

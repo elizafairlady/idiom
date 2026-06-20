@@ -54,9 +54,11 @@ struct IdmExec {
     IdmValue *stack;
     size_t sp;
     size_t stack_cap;
+    bool stack_borrowed;
     Frame *frames;
     size_t frame_count;
     size_t frame_cap;
+    bool frames_borrowed;
     IdmVmLimits limits;
     bool has_port_request;
     IdmValue port_request;
@@ -76,6 +78,7 @@ struct IdmExec {
     Handler *handlers;
     size_t handler_count;
     size_t handler_cap;
+    bool handlers_borrowed;
     IdmValue raised;
     bool has_raised;
     IdmValue pending_raise;
@@ -83,6 +86,7 @@ struct IdmExec {
     IdmNamespace **ns_save;
     size_t ns_save_count;
     size_t ns_save_cap;
+    struct IdmExec *selector_cache_owner;
     SelectorCacheEntry *selector_cache;
     size_t selector_cache_count;
     size_t selector_cache_cap;
@@ -106,22 +110,26 @@ IdmVmLimits idm_vm_default_limits(void) {
 }
 
 static void vm_reset(Vm *vm) {
-    free(vm->frames);
-    free(vm->stack);
-    free(vm->handlers);
+    if (!vm->frames_borrowed) free(vm->frames);
+    if (!vm->stack_borrowed) free(vm->stack);
+    if (!vm->handlers_borrowed) free(vm->handlers);
     vm->frames = NULL;
     vm->frame_count = 0;
     vm->frame_cap = 0;
+    vm->frames_borrowed = false;
     vm->stack = NULL;
     vm->sp = 0;
     vm->stack_cap = 0;
+    vm->stack_borrowed = false;
     vm->handlers = NULL;
     vm->handler_count = 0;
     vm->handler_cap = 0;
+    vm->handlers_borrowed = false;
     free(vm->ns_save);
     vm->ns_save = NULL;
     vm->ns_save_count = 0;
     vm->ns_save_cap = 0;
+    vm->selector_cache_owner = NULL;
     for (size_t i = 0; i < vm->selector_cache_cap; i++) idm_pattern_selector_free(vm->selector_cache[i].selector);
     free(vm->selector_cache);
     vm->selector_cache = NULL;
@@ -134,15 +142,29 @@ static void vm_reset(Vm *vm) {
     vm->method_cache_cap = 0;
 }
 
+static void vm_borrow_storage(Vm *vm, IdmValue *stack, size_t stack_cap, Frame *frames, size_t frame_cap, Handler *handlers, size_t handler_cap) {
+    vm->stack = stack;
+    vm->stack_cap = stack_cap;
+    vm->stack_borrowed = true;
+    vm->frames = frames;
+    vm->frame_cap = frame_cap;
+    vm->frames_borrowed = true;
+    vm->handlers = handlers;
+    vm->handler_cap = handler_cap;
+    vm->handlers_borrowed = true;
+}
+
 static bool stack_reserve_slow(Vm *vm, size_t needed, IdmError *err) {
     if (needed > vm->limits.max_stack) return idm_error_set(err, idm_span_unknown(NULL), "VM stack limit exceeded");
     if (needed <= vm->stack_cap) return true;
     size_t cap = vm->stack_cap ? vm->stack_cap * 2u : 64u;
     while (cap < needed) cap *= 2u;
-    IdmValue *next = realloc(vm->stack, cap * sizeof(*next));
+    IdmValue *next = vm->stack_borrowed ? malloc(cap * sizeof(*next)) : realloc(vm->stack, cap * sizeof(*next));
     if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (vm->stack_borrowed && vm->sp != 0) memcpy(next, vm->stack, vm->sp * sizeof(*next));
     vm->stack = next;
     vm->stack_cap = cap;
+    vm->stack_borrowed = false;
     return true;
 }
 
@@ -197,6 +219,32 @@ static const IdmBytecodeModule *closure_module_or_current(Vm *vm, IdmValue closu
     return module ? module : vm->module;
 }
 
+static bool frame_reserve(Vm *vm, size_t needed, IdmError *err) {
+    if (needed <= vm->frame_cap) return true;
+    size_t cap = vm->frame_cap ? vm->frame_cap * 2u : 32u;
+    while (cap < needed) cap *= 2u;
+    Frame *next = vm->frames_borrowed ? malloc(cap * sizeof(*next)) : realloc(vm->frames, cap * sizeof(*next));
+    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (vm->frames_borrowed && vm->frame_count != 0) memcpy(next, vm->frames, vm->frame_count * sizeof(*next));
+    vm->frames = next;
+    vm->frame_cap = cap;
+    vm->frames_borrowed = false;
+    return true;
+}
+
+static bool handler_reserve(Vm *vm, size_t needed, IdmError *err) {
+    if (needed <= vm->handler_cap) return true;
+    size_t cap = vm->handler_cap ? vm->handler_cap * 2u : 8u;
+    while (cap < needed) cap *= 2u;
+    Handler *next = vm->handlers_borrowed ? malloc(cap * sizeof(*next)) : realloc(vm->handlers, cap * sizeof(*next));
+    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (vm->handlers_borrowed && vm->handler_count != 0) memcpy(next, vm->handlers, vm->handler_count * sizeof(*next));
+    vm->handlers = next;
+    vm->handler_cap = cap;
+    vm->handlers_borrowed = false;
+    return true;
+}
+
 static bool generated_clause_name(const char *name) {
     if (!name || !name[0]) return true;
     if (name[0] == '<' || name[0] == '{' || name[0] == '[' || name[0] == '(') return true;
@@ -207,13 +255,7 @@ static bool push_frame(Vm *vm, const IdmBytecodeModule *module, uint32_t functio
     if (!module) module = vm->module;
     if (function_index >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function index %u out of bounds", function_index);
     if (vm->frame_count >= vm->limits.max_frames) return idm_error_set(err, idm_span_unknown(NULL), "VM frame limit exceeded");
-    if (vm->frame_count == vm->frame_cap) {
-        size_t cap = vm->frame_cap ? vm->frame_cap * 2u : 32u;
-        Frame *next = realloc(vm->frames, cap * sizeof(*next));
-        if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-        vm->frames = next;
-        vm->frame_cap = cap;
-    }
+    if (!frame_reserve(vm, vm->frame_count + 1u, err)) return false;
     const IdmBcFunction *fn = &module->functions[function_index];
     Frame *caller = current_frame(vm);
     IdmNamespace *ns = idm_is_closure(closure) ? idm_closure_namespace(closure) : (caller ? caller->ns : vm->rt->main_ns);
@@ -241,13 +283,7 @@ static bool push_frame_direct(Vm *vm, const IdmBytecodeModule *module, uint32_t 
     if (!module) module = vm->module;
     if (function_index >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function index %u out of bounds", function_index);
     if (vm->frame_count >= vm->limits.max_frames) return idm_error_set(err, idm_span_unknown(NULL), "VM frame limit exceeded");
-    if (vm->frame_count == vm->frame_cap) {
-        size_t cap = vm->frame_cap ? vm->frame_cap * 2u : 32u;
-        Frame *next = realloc(vm->frames, cap * sizeof(*next));
-        if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-        vm->frames = next;
-        vm->frame_cap = cap;
-    }
+    if (!frame_reserve(vm, vm->frame_count + 1u, err)) return false;
     const IdmBcFunction *fn = &module->functions[function_index];
     Frame *frame = &vm->frames[vm->frame_count];
     frame->module = module;
@@ -289,6 +325,256 @@ static bool raise_arity_error(Vm *vm, uint32_t argc, IdmError *err) {
     return idm_error_reason(vm->rt, err, "arity", 4,
                             idm_atom(vm->rt, info ? info->name : "raise"),
                             idm_int((int64_t)argc), idm_int(1), idm_int(1));
+}
+
+static bool vm_value_is_proper_list(IdmValue value) {
+    while (idm_is_pair(value)) value = idm_cdr(value, NULL);
+    return idm_is_empty_list(value);
+}
+
+static bool vm_fast_type_predicate(IdmPrimitive prim, IdmValue value, bool *out) {
+    switch (prim) {
+        case IDM_PRIM_NIL_P: *out = value.tag == IDM_VAL_NIL; return true;
+        case IDM_PRIM_ATOM_P: *out = value.tag == IDM_VAL_ATOM; return true;
+        case IDM_PRIM_WORD_P: *out = value.tag == IDM_VAL_WORD; return true;
+        case IDM_PRIM_INT_P: *out = value.tag == IDM_VAL_INT; return true;
+        case IDM_PRIM_FLOAT_P: *out = value.tag == IDM_VAL_FLOAT; return true;
+        case IDM_PRIM_STRING_P: *out = value.tag == IDM_VAL_STRING; return true;
+        case IDM_PRIM_PAIR_P: *out = value.tag == IDM_VAL_PAIR; return true;
+        case IDM_PRIM_EMPTY_LIST_P: *out = value.tag == IDM_VAL_EMPTY_LIST; return true;
+        case IDM_PRIM_LIST_P: *out = vm_value_is_proper_list(value); return true;
+        case IDM_PRIM_TUPLE_P: *out = value.tag == IDM_VAL_TUPLE; return true;
+        case IDM_PRIM_VECTOR_P: *out = value.tag == IDM_VAL_VECTOR; return true;
+        case IDM_PRIM_DICT_P: *out = value.tag == IDM_VAL_DICT; return true;
+        case IDM_PRIM_SYNTAX_P: *out = value.tag == IDM_VAL_SYNTAX; return true;
+        case IDM_PRIM_CELL_P: *out = value.tag == IDM_VAL_CELL; return true;
+        case IDM_PRIM_CLOSURE_P: *out = value.tag == IDM_VAL_CLOSURE; return true;
+        case IDM_PRIM_PID_P: *out = value.tag == IDM_VAL_PID; return true;
+        case IDM_PRIM_REF_P: *out = value.tag == IDM_VAL_REF; return true;
+        case IDM_PRIM_PORT_P: *out = value.tag == IDM_VAL_PORT; return true;
+        case IDM_PRIM_PRIMITIVE_P: *out = value.tag == IDM_VAL_PRIMITIVE; return true;
+        case IDM_PRIM_REGEX_P:
+        case IDM_PRIM_REGEX_PRED: *out = value.tag == IDM_VAL_REGEX; return true;
+        case IDM_PRIM_REGEX_RESULT_P:
+        case IDM_PRIM_REGEX_RESULT_PRED: *out = value.tag == IDM_VAL_REGEX_RESULT; return true;
+        case IDM_PRIM_RECORD_PRED: *out = value.tag == IDM_VAL_RECORD; return true;
+        default: return false;
+    }
+}
+
+static bool vm_fast_equal_known(IdmValue a, IdmValue b, bool *out_equal) {
+    if (a.tag != b.tag) {
+        *out_equal = false;
+        return true;
+    }
+    switch (a.tag) {
+        case IDM_VAL_NIL:
+        case IDM_VAL_EMPTY_LIST:
+            *out_equal = true;
+            return true;
+        case IDM_VAL_ATOM:
+        case IDM_VAL_WORD:
+            *out_equal = a.as.symbol == b.as.symbol;
+            return true;
+        case IDM_VAL_INT:
+            *out_equal = a.as.i == b.as.i;
+            return true;
+        case IDM_VAL_FLOAT:
+            *out_equal = a.as.f == b.as.f;
+            return true;
+        case IDM_VAL_STRING:
+            *out_equal = idm_string_length(a) == idm_string_length(b) &&
+                         memcmp(idm_string_bytes(a), idm_string_bytes(b), idm_string_length(a)) == 0;
+            return true;
+        case IDM_VAL_SYNTAX:
+        case IDM_VAL_CELL:
+        case IDM_VAL_CLOSURE:
+        case IDM_VAL_REGEX:
+        case IDM_VAL_REGEX_RESULT:
+            *out_equal = a.as.obj == b.as.obj;
+            return true;
+        case IDM_VAL_PID:
+        case IDM_VAL_REF:
+        case IDM_VAL_PORT:
+        case IDM_VAL_PRIMITIVE:
+            *out_equal = a.as.id == b.as.id;
+            return true;
+        case IDM_VAL_PAIR:
+        case IDM_VAL_TUPLE:
+        case IDM_VAL_VECTOR:
+        case IDM_VAL_DICT:
+        case IDM_VAL_RECORD:
+            if (a.as.obj == b.as.obj) {
+                *out_equal = true;
+                return true;
+            }
+            return false;
+    }
+    return false;
+}
+
+static inline bool vm_primitive_has_fast_path(IdmPrimitive prim) {
+    static const bool fast[IDM_PRIM_FILE_OPEN + 1u] = {
+        [IDM_PRIM_EQ] = true,
+        [IDM_PRIM_NEQ] = true,
+        [IDM_PRIM_OK] = true,
+        [IDM_PRIM_TUPLE_GET] = true,
+        [IDM_PRIM_RECORD_PRED] = true,
+        [IDM_PRIM_STR_LEN] = true,
+        [IDM_PRIM_STR_BYTE] = true,
+        [IDM_PRIM_REGEX_PRED] = true,
+        [IDM_PRIM_REGEX_RESULT_PRED] = true,
+        [IDM_PRIM_DICT_GET] = true,
+        [IDM_PRIM_DICT_PUT] = true,
+        [IDM_PRIM_DICT_DEL] = true,
+        [IDM_PRIM_DICT_HAS] = true,
+        [IDM_PRIM_DICT_SIZE] = true,
+        [IDM_PRIM_NIL_P] = true,
+        [IDM_PRIM_ATOM_P] = true,
+        [IDM_PRIM_WORD_P] = true,
+        [IDM_PRIM_INT_P] = true,
+        [IDM_PRIM_FLOAT_P] = true,
+        [IDM_PRIM_STRING_P] = true,
+        [IDM_PRIM_PAIR_P] = true,
+        [IDM_PRIM_EMPTY_LIST_P] = true,
+        [IDM_PRIM_LIST_P] = true,
+        [IDM_PRIM_TUPLE_P] = true,
+        [IDM_PRIM_VECTOR_P] = true,
+        [IDM_PRIM_DICT_P] = true,
+        [IDM_PRIM_SYNTAX_P] = true,
+        [IDM_PRIM_CELL_P] = true,
+        [IDM_PRIM_CLOSURE_P] = true,
+        [IDM_PRIM_PID_P] = true,
+        [IDM_PRIM_REF_P] = true,
+        [IDM_PRIM_PORT_P] = true,
+        [IDM_PRIM_PRIMITIVE_P] = true,
+        [IDM_PRIM_REGEX_P] = true,
+        [IDM_PRIM_REGEX_RESULT_P] = true,
+    };
+    uint32_t index = (uint32_t)prim;
+    return index <= (uint32_t)IDM_PRIM_FILE_OPEN && fast[index];
+}
+
+static bool try_fast_prim_invoke(Vm *vm, IdmPrimitive prim, IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err, bool *out_done) {
+    *out_done = false;
+    switch (prim) {
+        case IDM_PRIM_OK:
+            if (argc != 1u) return true;
+            *out = idm_bool(vm->rt, idm_value_ok(args[0]));
+            *out_done = true;
+            return true;
+
+        case IDM_PRIM_NIL_P:
+        case IDM_PRIM_ATOM_P:
+        case IDM_PRIM_WORD_P:
+        case IDM_PRIM_INT_P:
+        case IDM_PRIM_FLOAT_P:
+        case IDM_PRIM_STRING_P:
+        case IDM_PRIM_PAIR_P:
+        case IDM_PRIM_EMPTY_LIST_P:
+        case IDM_PRIM_LIST_P:
+        case IDM_PRIM_TUPLE_P:
+        case IDM_PRIM_VECTOR_P:
+        case IDM_PRIM_DICT_P:
+        case IDM_PRIM_SYNTAX_P:
+        case IDM_PRIM_CELL_P:
+        case IDM_PRIM_CLOSURE_P:
+        case IDM_PRIM_PID_P:
+        case IDM_PRIM_REF_P:
+        case IDM_PRIM_PORT_P:
+        case IDM_PRIM_PRIMITIVE_P:
+        case IDM_PRIM_REGEX_P:
+        case IDM_PRIM_REGEX_PRED:
+        case IDM_PRIM_REGEX_RESULT_P:
+        case IDM_PRIM_REGEX_RESULT_PRED:
+        case IDM_PRIM_RECORD_PRED: {
+            if (argc != 1u) return true;
+            bool pred = false;
+            if (!vm_fast_type_predicate(prim, args[0], &pred)) return true;
+            *out = idm_bool(vm->rt, pred);
+            *out_done = true;
+            return true;
+        }
+
+        case IDM_PRIM_STR_LEN:
+            if (argc != 1u || args[0].tag != IDM_VAL_STRING) return true;
+            *out = idm_int((int64_t)idm_string_length(args[0]));
+            *out_done = true;
+            return true;
+
+        case IDM_PRIM_DICT_SIZE:
+            if (argc != 1u || args[0].tag != IDM_VAL_DICT) return true;
+            *out = idm_int((int64_t)idm_dict_count(args[0]));
+            *out_done = true;
+            return true;
+
+        case IDM_PRIM_EQ:
+        case IDM_PRIM_NEQ: {
+            if (argc != 2u) return true;
+            bool equal = false;
+            if (vm_fast_equal_known(args[0], args[1], &equal)) {
+                *out = idm_bool(vm->rt, prim == IDM_PRIM_EQ ? equal : !equal);
+                *out_done = true;
+                return true;
+            }
+            return true;
+        }
+
+        case IDM_PRIM_TUPLE_GET: {
+            if (argc != 2u || args[0].tag != IDM_VAL_TUPLE || args[1].tag != IDM_VAL_INT || args[1].as.i < 0) return true;
+            size_t index = (size_t)args[1].as.i;
+            if (index < idm_sequence_count(args[0])) {
+                *out = idm_sequence_item(args[0], index, err);
+                *out_done = true;
+                return !(err && err->present);
+            }
+            return true;
+        }
+
+        case IDM_PRIM_STR_BYTE: {
+            if (argc != 2u || args[0].tag != IDM_VAL_STRING || args[1].tag != IDM_VAL_INT) return true;
+            int64_t index = args[1].as.i;
+            size_t len = idm_string_length(args[0]);
+            if (index < 0 || (size_t)index >= len) {
+                *out = idm_nil();
+            } else {
+                *out = idm_int((int64_t)(unsigned char)idm_string_bytes(args[0])[index]);
+            }
+            *out_done = true;
+            return true;
+        }
+
+        case IDM_PRIM_DICT_HAS: {
+            if (argc != 2u || args[0].tag != IDM_VAL_DICT) return true;
+            IdmValue found;
+            *out = idm_bool(vm->rt, idm_dict_get(args[0], args[1], &found));
+            *out_done = true;
+            return true;
+        }
+
+        case IDM_PRIM_DICT_DEL:
+            if (argc != 2u || args[0].tag != IDM_VAL_DICT) return true;
+            *out = idm_dict_del(vm->rt, args[0], args[1], err);
+            *out_done = true;
+            return !(err && err->present);
+
+        case IDM_PRIM_DICT_GET: {
+            if (argc != 3u || args[0].tag != IDM_VAL_DICT) return true;
+            IdmValue found;
+            *out = idm_dict_get(args[0], args[1], &found) ? found : args[2];
+            *out_done = true;
+            return true;
+        }
+
+        case IDM_PRIM_DICT_PUT:
+            if (argc != 3u || args[0].tag != IDM_VAL_DICT) return true;
+            *out = idm_dict_put(vm->rt, args[0], args[1], args[2], err);
+            *out_done = true;
+            return !(err && err->present);
+
+        default:
+            return true;
+    }
 }
 
 static bool generic_prim_call(Vm *vm, uint32_t primitive, uint32_t argc, IdmError *err) {
@@ -395,10 +681,14 @@ static bool op_port_write_block(Vm *vm, uint32_t argc, IdmError *err) {
 }
 
 #define IDM_GUARD_BUDGET (1 << 20)
+#define IDM_GUARD_STACK_SLOTS 32u
+#define IDM_GUARD_FRAME_SLOTS 4u
+#define IDM_GUARD_HANDLER_SLOTS 2u
 
 static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
 static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
 static bool enter_clause(Vm *vm, IdmValue callee, uint32_t function_index, size_t closure_index, uint32_t argc, const IdmPatternBindings *bindings, bool tail, IdmError *err);
+static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err);
 
 static bool vm_run_call(Vm *vm, int64_t budget, IdmExecStatus *out_status, IdmValue *out, IdmError *err) {
     IdmRuntime *rt = vm->rt;
@@ -505,33 +795,34 @@ static bool selector_cache_grow(Vm *vm, IdmError *err) {
 }
 
 static bool selector_for_closure_site(Vm *vm, const IdmBytecodeModule *module, size_t site, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err) {
-    if (vm->selector_cache_cap != 0) {
+    Vm *cache_vm = vm->selector_cache_owner ? vm->selector_cache_owner : vm;
+    if (cache_vm->selector_cache_cap != 0) {
         bool found = false;
-        size_t slot = selector_cache_slot(vm->selector_cache, vm->selector_cache_cap, module, site, &found);
+        size_t slot = selector_cache_slot(cache_vm->selector_cache, cache_vm->selector_cache_cap, module, site, &found);
         if (found) {
-            *out = vm->selector_cache[slot].selector;
+            *out = cache_vm->selector_cache[slot].selector;
             return true;
         }
     }
     IdmPatternSelector *selector = NULL;
     if (!build_selector_for_entries(module, entries, entry_count, &selector, err)) return false;
-    if (vm->selector_cache_cap == 0 || (vm->selector_cache_count + 1u) * 4u >= vm->selector_cache_cap * 3u) {
-        if (!selector_cache_grow(vm, err)) {
+    if (cache_vm->selector_cache_cap == 0 || (cache_vm->selector_cache_count + 1u) * 4u >= cache_vm->selector_cache_cap * 3u) {
+        if (!selector_cache_grow(cache_vm, err)) {
             idm_pattern_selector_free(selector);
             return false;
         }
     }
     bool found = false;
-    size_t slot = selector_cache_slot(vm->selector_cache, vm->selector_cache_cap, module, site, &found);
+    size_t slot = selector_cache_slot(cache_vm->selector_cache, cache_vm->selector_cache_cap, module, site, &found);
     if (found) {
         idm_pattern_selector_free(selector);
-        *out = vm->selector_cache[slot].selector;
+        *out = cache_vm->selector_cache[slot].selector;
         return true;
     }
-    vm->selector_cache[slot].module = module;
-    vm->selector_cache[slot].site = site;
-    vm->selector_cache[slot].selector = selector;
-    vm->selector_cache_count++;
+    cache_vm->selector_cache[slot].module = module;
+    cache_vm->selector_cache[slot].site = site;
+    cache_vm->selector_cache[slot].selector = selector;
+    cache_vm->selector_cache_count++;
     *out = selector;
     return true;
 }
@@ -589,9 +880,14 @@ static bool run_guard_function(Vm *caller, const IdmBytecodeModule *callee_modul
 
     Vm guard_vm;
     memset(&guard_vm, 0, sizeof(guard_vm));
+    IdmValue guard_stack[IDM_GUARD_STACK_SLOTS];
+    Frame guard_frames[IDM_GUARD_FRAME_SLOTS];
+    Handler guard_handlers[IDM_GUARD_HANDLER_SLOTS];
+    vm_borrow_storage(&guard_vm, guard_stack, IDM_GUARD_STACK_SLOTS, guard_frames, IDM_GUARD_FRAME_SLOTS, guard_handlers, IDM_GUARD_HANDLER_SLOTS);
     guard_vm.rt = caller->rt;
     guard_vm.module = callee_module;
     guard_vm.limits = caller->limits;
+    guard_vm.selector_cache_owner = caller->selector_cache_owner ? caller->selector_cache_owner : caller;
     if (!push(&guard_vm, callee, err)) { vm_reset(&guard_vm); return false; }
     for (uint32_t i = 0; i < argc; i++) {
         if (!push(&guard_vm, caller->stack[arg_base + i], err)) { vm_reset(&guard_vm); return false; }
@@ -627,9 +923,14 @@ static bool run_guard_function_direct(Vm *caller, const IdmBytecodeModule *modul
 
     Vm guard_vm;
     memset(&guard_vm, 0, sizeof(guard_vm));
+    IdmValue guard_stack[IDM_GUARD_STACK_SLOTS];
+    Frame guard_frames[IDM_GUARD_FRAME_SLOTS];
+    Handler guard_handlers[IDM_GUARD_HANDLER_SLOTS];
+    vm_borrow_storage(&guard_vm, guard_stack, IDM_GUARD_STACK_SLOTS, guard_frames, IDM_GUARD_FRAME_SLOTS, guard_handlers, IDM_GUARD_HANDLER_SLOTS);
     guard_vm.rt = caller->rt;
     guard_vm.module = module;
     guard_vm.limits = caller->limits;
+    guard_vm.selector_cache_owner = caller->selector_cache_owner ? caller->selector_cache_owner : caller;
     for (uint32_t i = 0; i < capture_count; i++) {
         if (!push(&guard_vm, caller->stack[capture_base + i], err)) { vm_reset(&guard_vm); return false; }
     }
@@ -959,6 +1260,21 @@ static bool call_direct(Vm *vm, const IdmBytecodeModule *module, size_t site, co
     return entered;
 }
 
+static bool execute_call_op(Vm *vm, Frame *frame, const IdmBytecodeModule *module, size_t instr_ip, bool tail, IdmError *err) {
+    uint32_t operand = module->code[frame->ip++];
+    if ((operand & IDM_CALL_DIRECT_FLAG) == 0) return call_value(vm, operand, tail, err);
+
+    uint32_t argc = operand & IDM_CALL_ARGC_MASK;
+    uint32_t entry_count = module->code[frame->ip++];
+    uint32_t capture_count = module->code[frame->ip++];
+    const char *op_name = tail ? "TAIL_CALL" : "CALL";
+    if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "%s direct requires entries", op_name);
+    if (frame->ip + entry_count > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s direct entries out of bounds", op_name);
+    const uint32_t *entries = &module->code[frame->ip];
+    frame->ip += entry_count;
+    return call_direct(vm, module, instr_ip, entries, entry_count, capture_count, argc, tail, err);
+}
+
 static bool closure_accepts_argc(Vm *vm, IdmValue closure, uint32_t argc) {
     const IdmBytecodeModule *m = closure_module_or_current(vm, closure);
     size_t n = idm_closure_entry_count(closure);
@@ -988,6 +1304,14 @@ static bool call_value(Vm *vm, uint32_t argc, bool tail, IdmError *err) {
             return argc == 1u ? raise_value(vm, args[0], err) : raise_arity_error(vm, argc, err);
         }
         IdmValue out = idm_nil();
+        bool fast_done = false;
+        if (vm_primitive_has_fast_path((IdmPrimitive)callee.as.id) &&
+            !try_fast_prim_invoke(vm, (IdmPrimitive)callee.as.id, args, argc, &out, err, &fast_done)) return false;
+        if (fast_done) {
+            vm->stack[closure_index] = out;
+            vm->sp = closure_index + 1u;
+            return true;
+        }
         if (!idm_prim_invoke(vm->rt, (IdmPrimitive)callee.as.id, args, argc, &out, err)) return false;
         vm->sp = closure_index;
         return push(vm, out, err);
@@ -1297,8 +1621,29 @@ static bool op_call_method(Vm *vm, Frame *frame, bool tail, IdmError *err) {
     return call_closure_at_args(vm, impl, arg_base, argc, tail, err);
 }
 
+static bool transfer_namespace_slots(Vm *vm, Frame *frame, IdmError *err) {
+    const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
+    uint32_t direction = module->code[frame->ip++];
+    uint32_t count = module->code[frame->ip++];
+    if (direction != (uint32_t)IDM_NS_TRANSFER_PARENT_TO_CHILD && direction != (uint32_t)IDM_NS_TRANSFER_CHILD_TO_PARENT) {
+        return idm_error_set(err, idm_span_unknown(NULL), "TRANSFER_NAMESPACE direction %u is invalid", direction);
+    }
+    if (vm->ns_save_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "TRANSFER_NAMESPACE with no active namespace");
+    IdmNamespace *outer = vm->ns_save[vm->ns_save_count - 1u];
+    bool parent_to_child = direction == (uint32_t)IDM_NS_TRANSFER_PARENT_TO_CHILD;
+    IdmNamespace *src = parent_to_child ? outer : frame->ns;
+    IdmNamespace *dst = parent_to_child ? frame->ns : outer;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t src_slot = module->code[frame->ip++];
+        uint32_t dst_slot = module->code[frame->ip++];
+        if (!idm_ns_slot_ensure(dst, dst_slot, err)) return false;
+        idm_ns_slot_set(dst, dst_slot, idm_ns_slot_get(src, src_slot));
+    }
+    return true;
+}
+
 static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
-        IdmRuntime *rt = vm->rt;
+    IdmRuntime *rt = vm->rt;
     IdmValue result = idm_nil();
     *status = IDM_EXEC_DONE;
     if (vm->has_pending_raise) {
@@ -1438,30 +1783,10 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 break;
             }
             case IDM_OP_CALL:
-                operand = module->code[frame->ip++];
-                if (operand & IDM_CALL_DIRECT_FLAG) {
-                    uint32_t argc = operand & IDM_CALL_ARGC_MASK;
-                    uint32_t entry_count = module->code[frame->ip++];
-                    uint32_t capture_count = module->code[frame->ip++];
-                    if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "CALL direct requires entries");
-                    if (frame->ip + entry_count > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "CALL direct entries out of bounds");
-                    const uint32_t *entries = &module->code[frame->ip];
-                    frame->ip += entry_count;
-                    if (!call_direct(vm, module, instr_ip, entries, entry_count, capture_count, argc, false, err)) return false;
-                } else if (!call_value(vm, operand, false, err)) return false;
+                if (!execute_call_op(vm, frame, module, instr_ip, false, err)) return false;
                 break;
             case IDM_OP_TAIL_CALL:
-                operand = module->code[frame->ip++];
-                if (operand & IDM_CALL_DIRECT_FLAG) {
-                    uint32_t argc = operand & IDM_CALL_ARGC_MASK;
-                    uint32_t entry_count = module->code[frame->ip++];
-                    uint32_t capture_count = module->code[frame->ip++];
-                    if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "TAIL_CALL direct requires entries");
-                    if (frame->ip + entry_count > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "TAIL_CALL direct entries out of bounds");
-                    const uint32_t *entries = &module->code[frame->ip];
-                    frame->ip += entry_count;
-                    if (!call_direct(vm, module, instr_ip, entries, entry_count, capture_count, argc, true, err)) return false;
-                } else if (!call_value(vm, operand, true, err)) return false;
+                if (!execute_call_op(vm, frame, module, instr_ip, true, err)) return false;
                 break;
             case IDM_OP_RETURN: {
                 IdmValue value;
@@ -1517,6 +1842,19 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                             case IDM_PRIM_EQ:  *lhs = idm_bool(rt, a == b); vm->sp--; fast_done = true; break;
                             case IDM_PRIM_NEQ: *lhs = idm_bool(rt, a != b); vm->sp--; fast_done = true; break;
                             default: break;
+                        }
+                    }
+                }
+                if (!fast_done) {
+                    if (vm->sp >= argc && vm_primitive_has_fast_path((IdmPrimitive)prim)) {
+                        IdmValue out = idm_nil();
+                        bool primitive_fast_done = false;
+                        IdmValue *args = argc == 0 ? NULL : &vm->stack[vm->sp - argc];
+                        if (!try_fast_prim_invoke(vm, (IdmPrimitive)prim, args, argc, &out, err, &primitive_fast_done)) return false;
+                        if (primitive_fast_done) {
+                            vm->stack[vm->sp - argc] = out;
+                            vm->sp -= (size_t)argc - 1u;
+                            fast_done = true;
                         }
                     }
                 }
@@ -1727,13 +2065,8 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 frame->ns = target;
                 break;
             }
-            case IDM_OP_IMPORT_GLOBAL: {
-                uint32_t import_src = module->code[frame->ip++];
-                uint32_t import_dst = module->code[frame->ip++];
-                if (vm->ns_save_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "IMPORT_GLOBAL with no active namespace");
-                IdmNamespace *outer = vm->ns_save[vm->ns_save_count - 1u];
-                if (!idm_ns_slot_ensure(outer, import_dst, err)) return false;
-                idm_ns_slot_set(outer, import_dst, idm_ns_slot_get(frame->ns, import_src));
+            case IDM_OP_TRANSFER_NAMESPACE: {
+                if (!transfer_namespace_slots(vm, frame, err)) return false;
                 break;
             }
             case IDM_OP_LEAVE_NAMESPACE: {
@@ -1755,13 +2088,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 break;
             case IDM_OP_RESCUE_PUSH: {
                 operand = module->code[frame->ip++];
-                if (vm->handler_count == vm->handler_cap) {
-                    size_t cap = vm->handler_cap ? vm->handler_cap * 2u : 8u;
-                    Handler *next = realloc(vm->handlers, cap * sizeof(*next));
-                    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-                    vm->handlers = next;
-                    vm->handler_cap = cap;
-                }
+                if (!handler_reserve(vm, vm->handler_count + 1u, err)) return false;
                 vm->handlers[vm->handler_count].catch_ip = operand;
                 vm->handlers[vm->handler_count].frame_count = vm->frame_count;
                 vm->handlers[vm->handler_count].sp = vm->sp;

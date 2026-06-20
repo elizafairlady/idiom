@@ -133,7 +133,8 @@ static void test_port_result_gc_rooted(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     check_sched_value_written(&rt,
-        "activate app/ish\n"
+        "use app/ish\n"
+        "activate Shell\n"
         "p = echo hi &\n"
         "a = await p\n"
         "defn churn n do\n"
@@ -155,17 +156,20 @@ static void test_procsub_temp_cleanup(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     check_sched_value_written(&rt,
-        "activate app/ish\n"
+        "use app/ish\n"
+        "activate Shell\n"
         "x = cat <(echo hello)\n"
         "x\n",
         "{:ok 0 \"hello\\n\" \"\"}");
     check_sched_value_written(&rt,
-        "activate app/ish\n"
+        "use app/ish\n"
+        "activate Shell\n"
         "x = cat <(echo a) <(echo b)\n"
         "x\n",
         "{:ok 0 \"a\\nb\\n\" \"\"}");
     check_sched_value_written(&rt,
-        "activate app/ish\n"
+        "use app/ish\n"
+        "activate Shell\n"
         "echo data > >(cat > /tmp/idm_d9_psw)\n"
         "y = cat /tmp/idm_d9_psw\n"
         "y\n",
