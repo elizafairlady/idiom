@@ -53,6 +53,41 @@ suite do
     assert-eq (test? r"[0-9]+" "abc") :false
   end
 
+  test "regex-scan-filter-edge-cases" do
+    assert-eq (start-of (raw-scan-from r"" "abc" 2)) 2
+    assert-eq (start-of (raw-scan-from r"" "abc" 99)) 3
+    assert-eq (raw-scan-from r"^b" "a\nb" 0) :nil
+    assert-eq (start-of (raw-scan-from (compile! "^b" '(:multiline)) "a\nb" 0)) 2
+    assert-eq (text-of (raw-scan-from r"[A-Z]+" "xxABC" 0)) "ABC"
+    assert-eq (text-of (raw-scan-from r"(?<=foo)bar" "xxfoobar" 0)) "bar"
+    assert-eq (text-of (raw-scan-from r"^a|b" "xxb" 0)) "b"
+    assert-eq (text-of (raw-scan-from r"(^a)?b" "xxb" 0)) "b"
+    assert-eq (raw-scan-from r"z+" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" 0) :nil
+    assert-eq (raw-test? r"^a|b" "xxb") :true
+    assert-eq (raw-test? r"z+$" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaz") :true
+    assert-eq (raw-test? r"z+$" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaa") :false
+  end
+
+  test "regex-result-retains-subject-through-gc-and-copy" do
+    defn build do
+      0 acc -> acc
+      n acc -> build (n - 1) (cons n acc)
+    end
+    m = do
+      s = "12abc34"
+      raw-scan-from r"[a-z]+" s 0
+    end
+    build 50000 '()
+    assert-eq (text-of m) "abc"
+    parent = self
+    spawn (fn do
+      send parent {:match (raw-scan-from r"[a-z]+" "99xyz00" 0)}
+    end)
+    receive do
+      {:match copied} -> assert-eq (text-of copied) "xyz"
+    end
+  end
+
   test "regex-lookaround" do
     assert-eq (text-of (scan r"foo(?=bar)" "xxfoobar")) "foo"
     assert-eq (scan r"foo(?!bar)" "xxfoobar") :nil
@@ -90,6 +125,9 @@ suite do
     assert-eq (r"([a-z]+)([0-9]+)".sub "ab12" "$2-$1") "12-ab"
     assert-eq (r"(?<word>[a-z]+)".sub "abc" "\\k<word>!") "abc!"
     assert-inspect (r",".split-on "a,b,,c") "(\"a\" \"b\" \"\" \"c\")"
+    assert-inspect (texts (r"^a|b".scan-all "xxb")) "(\"b\")"
+    assert-eq (r"(?=b)".sub-all "ab" "-") "a-b"
+    assert-inspect (r"(?=b)".split-on "ab") "(\"a\" \"\")"
     assert-eq (text-of (scan (compile! (escape "a+b")) "xxa+b")) "a+b"
   end
 

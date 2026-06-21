@@ -528,6 +528,101 @@ static void test_core_fn_literal_and_call(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_regex_primitives_compile_to_opcodes(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmCore *core = NULL;
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    uint32_t main_fn = 0;
+    const char *source =
+        "use std/regex\n"
+        "rx = compile! \"a+\"\n"
+        "raw-test? rx \"baaa\"\n"
+        "raw-scan-from rx \"baaa\" 0\n"
+        "raw-scan-at rx \"baaa\" 1\n"
+        "raw-scan-full rx \"aaa\"\n";
+    CHECK(idm_expand_string(&rt, "<regex-opcode-test>", source, &core, &err));
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    (void)main_fn;
+    IdmBuffer dis;
+    idm_buf_init(&dis);
+    CHECK(idm_bc_disassemble(&dis, &module));
+    CHECK(strstr(dis.data, "REGEX_TEST") != NULL);
+    CHECK(strstr(dis.data, "REGEX_SCAN") != NULL);
+    CHECK(strstr(dis.data, "REGEX_EXEC       0") != NULL);
+    CHECK(strstr(dis.data, "REGEX_EXEC       1") != NULL);
+    idm_buf_destroy(&dis);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_arithmetic_primitives_compile_to_opcodes(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmCore *core = NULL;
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    uint32_t main_fn = 0;
+    const char *source =
+        "1 + 2\n"
+        "3 - 1\n"
+        "2 * 4\n"
+        "8 / 2\n"
+        "8 % 3\n"
+        "2 ** 8\n"
+        "neg 5\n"
+        "1 < 2\n"
+        "2 > 1\n"
+        "1 <= 1\n"
+        "2 >= 1\n"
+        "1 == 1\n"
+        "1 != 2\n";
+    CHECK(idm_expand_string(&rt, "<arithmetic-opcode-test>", source, &core, &err));
+    CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    (void)main_fn;
+    IdmBuffer dis;
+    idm_buf_init(&dis);
+    CHECK(idm_bc_disassemble(&dis, &module));
+    CHECK(strstr(dis.data, "NUM_ADD") != NULL);
+    CHECK(strstr(dis.data, "NUM_SUB") != NULL);
+    CHECK(strstr(dis.data, "NUM_MUL") != NULL);
+    CHECK(strstr(dis.data, "NUM_DIV") != NULL);
+    CHECK(strstr(dis.data, "NUM_MOD") != NULL);
+    CHECK(strstr(dis.data, "NUM_POW") != NULL);
+    CHECK(strstr(dis.data, "NUM_NEG") != NULL);
+    CHECK(strstr(dis.data, "NUM_LT") != NULL);
+    CHECK(strstr(dis.data, "NUM_GT") != NULL);
+    CHECK(strstr(dis.data, "NUM_LTE") != NULL);
+    CHECK(strstr(dis.data, "NUM_GTE") != NULL);
+    CHECK(strstr(dis.data, "EQ") != NULL);
+    CHECK(strstr(dis.data, "NEQ") != NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        0 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        1 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        2 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        3 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        4 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        5 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        6 1") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        7 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        8 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        9 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        10 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        11 2") == NULL);
+    CHECK(strstr(dis.data, "PRIM_CALL        12 2") == NULL);
+    idm_buf_destroy(&dis);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
 static IdmCore *binary_prim(IdmPrimitive prim, IdmCore *a, IdmCore *b, IdmSpan span) {
     IdmCore *call = idm_core_call(idm_core_primitive(prim, span), span);
     CHECK(call != NULL);
@@ -998,6 +1093,8 @@ void run_substrate_suite(void) {
     test_pattern_matcher();
     test_core_do_and_local_bind();
     test_core_fn_literal_and_call();
+    test_regex_primitives_compile_to_opcodes();
+    test_arithmetic_primitives_compile_to_opcodes();
     test_core_letrec_recursion();
     test_source_expansion_capabilities();
     test_sha256_vectors();

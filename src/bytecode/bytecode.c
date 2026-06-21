@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IDM_IC_VERSION 15u
+#define IDM_IC_VERSION 17u
 
 static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err);
 
@@ -394,6 +394,22 @@ const char *idm_opcode_name(IdmOpcode op) {
         case IDM_OP_IMPLEMENT_TRAIT: return "IMPLEMENT_TRAIT";
         case IDM_OP_CALL_METHOD: return "CALL_METHOD";
         case IDM_OP_TAIL_CALL_METHOD: return "TAIL_CALL_METHOD";
+        case IDM_OP_REGEX_TEST: return "REGEX_TEST";
+        case IDM_OP_REGEX_EXEC: return "REGEX_EXEC";
+        case IDM_OP_REGEX_SCAN: return "REGEX_SCAN";
+        case IDM_OP_NUM_ADD: return "NUM_ADD";
+        case IDM_OP_NUM_SUB: return "NUM_SUB";
+        case IDM_OP_NUM_MUL: return "NUM_MUL";
+        case IDM_OP_NUM_DIV: return "NUM_DIV";
+        case IDM_OP_NUM_MOD: return "NUM_MOD";
+        case IDM_OP_NUM_POW: return "NUM_POW";
+        case IDM_OP_NUM_NEG: return "NUM_NEG";
+        case IDM_OP_NUM_LT: return "NUM_LT";
+        case IDM_OP_NUM_GT: return "NUM_GT";
+        case IDM_OP_NUM_LTE: return "NUM_LTE";
+        case IDM_OP_NUM_GTE: return "NUM_GTE";
+        case IDM_OP_EQ: return "EQ";
+        case IDM_OP_NEQ: return "NEQ";
     }
     return "<bad-op>";
 }
@@ -449,6 +465,25 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
             case IDM_OP_RESCUE_POP:
             case IDM_OP_RAISE:
             case IDM_OP_LOAD_RAISED:
+            case IDM_OP_REGEX_TEST:
+            case IDM_OP_REGEX_SCAN:
+            case IDM_OP_NUM_ADD:
+            case IDM_OP_NUM_SUB:
+            case IDM_OP_NUM_MUL:
+            case IDM_OP_NUM_DIV:
+            case IDM_OP_NUM_MOD:
+            case IDM_OP_NUM_POW:
+            case IDM_OP_NUM_NEG:
+            case IDM_OP_NUM_LT:
+            case IDM_OP_NUM_GT:
+            case IDM_OP_NUM_LTE:
+            case IDM_OP_NUM_GTE:
+            case IDM_OP_EQ:
+            case IDM_OP_NEQ:
+                break;
+            case IDM_OP_REGEX_EXEC:
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (operand > 1u) return idm_error_set(err, idm_span_unknown(NULL), "REGEX_EXEC mode %u is invalid", operand);
                 break;
             case IDM_OP_DEFINE_TRAIT: {
                 uint32_t trait_const = 0;
@@ -681,6 +716,7 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
             case IDM_OP_LOAD_GLOBAL:
             case IDM_OP_STORE_GLOBAL:
             case IDM_OP_ENTER_NAMESPACE:
+            case IDM_OP_REGEX_EXEC:
                 if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                 uint32_t operand = module->code[ip++];
                 if (op == IDM_OP_MAKE_CLOSURE || op == IDM_OP_MAKE_CLOSURE_CAPTURES) {
@@ -1349,6 +1385,14 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
             case IDM_OP_LINK: case IDM_OP_UNLINK: case IDM_OP_MONITOR: case IDM_OP_DEMONITOR: case IDM_OP_TRAP_EXIT:
             case IDM_OP_EXEC: case IDM_OP_AWAIT: case IDM_OP_APPLY: case IDM_OP_LEAVE_NAMESPACE:
             case IDM_OP_RESCUE_POP: case IDM_OP_RAISE: case IDM_OP_LOAD_RAISED:
+            case IDM_OP_REGEX_TEST: case IDM_OP_REGEX_SCAN:
+            case IDM_OP_NUM_ADD: case IDM_OP_NUM_SUB: case IDM_OP_NUM_MUL: case IDM_OP_NUM_DIV:
+            case IDM_OP_NUM_MOD: case IDM_OP_NUM_POW: case IDM_OP_NUM_NEG:
+            case IDM_OP_NUM_LT: case IDM_OP_NUM_GT: case IDM_OP_NUM_LTE: case IDM_OP_NUM_GTE:
+            case IDM_OP_EQ: case IDM_OP_NEQ:
+                break;
+            case IDM_OP_REGEX_EXEC:
+                if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             case IDM_OP_DEFINE_TRAIT: {
                 uint32_t trait_const = src->code[ip++];

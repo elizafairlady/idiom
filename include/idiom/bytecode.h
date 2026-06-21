@@ -52,7 +52,23 @@ typedef enum {
     IDM_OP_EXIT_SIGNAL,
     IDM_OP_SPAWN_LINK,
     IDM_OP_SPAWN_MONITOR,
-    IDM_OP_TAIL_RECV
+    IDM_OP_TAIL_RECV,
+    IDM_OP_REGEX_TEST,
+    IDM_OP_REGEX_EXEC,
+    IDM_OP_REGEX_SCAN,
+    IDM_OP_NUM_ADD,
+    IDM_OP_NUM_SUB,
+    IDM_OP_NUM_MUL,
+    IDM_OP_NUM_DIV,
+    IDM_OP_NUM_MOD,
+    IDM_OP_NUM_POW,
+    IDM_OP_NUM_NEG,
+    IDM_OP_NUM_LT,
+    IDM_OP_NUM_GT,
+    IDM_OP_NUM_LTE,
+    IDM_OP_NUM_GTE,
+    IDM_OP_EQ,
+    IDM_OP_NEQ
 } IdmOpcode;
 
 typedef enum {

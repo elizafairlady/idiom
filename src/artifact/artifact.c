@@ -375,7 +375,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 32u
+#define IDM_ARTIFACT_VERSION 34u
 
 static bool artifact_noop_register_operator(void *user, IdmRuntime *rt, const IdmSyntax *name, int64_t precedence, const char *assoc, const char *capture, const IdmSyntax *target, IdmError *err) {
     (void)user; (void)rt; (void)name; (void)precedence; (void)assoc; (void)capture; (void)target; (void)err;

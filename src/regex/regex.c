@@ -108,6 +108,13 @@ typedef struct {
     bool dynamic;
 } RxTestClosure;
 
+typedef struct {
+    bool any;
+    bool bytes[256];
+    bool nullable;
+    bool anchored_start;
+} RxStartInfo;
+
 struct RxProg {
     RxInst *insts;
     size_t count;
@@ -115,6 +122,7 @@ struct RxProg {
     size_t capture_count;
     uint32_t flags;
     RxTestClosure *test_closures;
+    RxStartInfo start;
 };
 
 struct IdmRegex {
@@ -130,10 +138,12 @@ struct IdmRegex {
 struct IdmRegexResult {
     char *subject;
     size_t subject_len;
+    IdmValue subject_value;
     RxCapture *captures;
     char **group_names;
     size_t capture_count;
     bool inline_storage;
+    bool owns_subject;
 };
 
 typedef struct {
@@ -181,6 +191,7 @@ enum { RX_MAX_CLOSURE_DEPTH = 10000 };
 static void node_free(RxNode *node);
 static bool parse_alt(RxParser *p, RxNode **out);
 static void prog_free(RxProg *prog);
+static bool regex_start_candidate(const RxProg *prog, const char *s, size_t len, size_t pos);
 
 static bool require_string_arg(IdmRuntime *rt, const char *name, IdmValue v, const char **out, size_t *out_len, IdmError *err) {
     if (v.tag != IDM_VAL_STRING) {
@@ -847,6 +858,89 @@ static bool parse_alt(RxParser *p, RxNode **out) {
 
 #define RX_REPEAT_COMPILE_LIMIT 100000u
 
+static void start_info_add_byte(RxStartInfo *info, unsigned char ch, uint32_t flags) {
+    info->bytes[ch] = true;
+    if ((flags & IDM_REGEX_CASELESS) != 0 && isalpha(ch)) {
+        info->bytes[(unsigned char)tolower(ch)] = true;
+        info->bytes[(unsigned char)toupper(ch)] = true;
+    }
+}
+
+static void start_info_add_class(RxStartInfo *info, const RxClass *cls) {
+    for (unsigned i = 0; i < 256u; i++) {
+        if (cls_has(cls, (unsigned char)i)) info->bytes[i] = true;
+    }
+}
+
+static void start_info_union(RxStartInfo *dst, const RxStartInfo *src) {
+    dst->any = dst->any || src->any;
+    dst->nullable = dst->nullable || src->nullable;
+    for (size_t i = 0; i < 256u; i++) dst->bytes[i] = dst->bytes[i] || src->bytes[i];
+}
+
+static RxStartInfo start_info_node(const RxNode *node, uint32_t flags) {
+    RxStartInfo info = {0};
+    if (!node) {
+        info.nullable = true;
+        return info;
+    }
+    switch (node->kind) {
+        case RX_EMPTY:
+        case RX_ANCHOR_END:
+        case RX_LOOK_POS:
+        case RX_LOOK_NEG:
+        case RX_LOOKBEHIND_POS:
+        case RX_LOOKBEHIND_NEG:
+            info.nullable = true;
+            return info;
+        case RX_ANCHOR_START:
+            info.nullable = true;
+            info.anchored_start = true;
+            return info;
+        case RX_LITERAL:
+            start_info_add_byte(&info, node->as.literal, flags);
+            return info;
+        case RX_DOT:
+            info.any = true;
+            return info;
+        case RX_CLASS:
+            start_info_add_class(&info, &node->as.cls);
+            return info;
+        case RX_CAPTURE:
+            return start_info_node(node->as.capture.child, flags);
+        case RX_REPEAT:
+            info = start_info_node(node->as.repeat.child, flags);
+            if (node->as.repeat.min == 0) {
+                info.nullable = true;
+                info.anchored_start = false;
+            }
+            return info;
+        case RX_ALT:
+            info.anchored_start = node->as.seq.count != 0;
+            for (size_t i = 0; i < node->as.seq.count; i++) {
+                RxStartInfo child = start_info_node(node->as.seq.items[i], flags);
+                start_info_union(&info, &child);
+                info.anchored_start = info.anchored_start && child.anchored_start;
+            }
+            return info;
+        case RX_CONCAT: {
+            info.nullable = true;
+            for (size_t i = 0; i < node->as.seq.count; i++) {
+                RxStartInfo child = start_info_node(node->as.seq.items[i], flags);
+                bool prior_nullable = info.nullable;
+                info.any = info.any || child.any;
+                info.anchored_start = info.anchored_start || (i == 0 && child.anchored_start);
+                for (size_t b = 0; b < 256u; b++) info.bytes[b] = info.bytes[b] || child.bytes[b];
+                info.nullable = prior_nullable && child.nullable;
+                if (!child.nullable) break;
+            }
+            return info;
+        }
+    }
+    info.any = true;
+    return info;
+}
+
 static RxProg *prog_new(size_t capture_count, uint32_t flags, IdmError *err) {
     RxProg *prog = calloc(1u, sizeof(*prog));
     if (!prog) {
@@ -1126,6 +1220,7 @@ static bool prog_build_test_closures(RxProg *prog, IdmError *err) {
 static bool compile_regex_program(IdmRegex *rx, IdmError *err) {
     RxProg *prog = prog_new(rx->group_count + 1u, rx->flags, err);
     if (!prog) return false;
+    prog->start = start_info_node(rx->root, rx->flags);
     if (!compile_node(prog, rx->root, err) || !prog_emit_simple(prog, RXI_MATCH, NULL, err)) {
         prog_free(prog);
         return false;
@@ -1270,13 +1365,8 @@ static size_t align_up_size(size_t value, size_t align) {
     return (value + align - 1u) & ~(align - 1u);
 }
 
-static IdmRegexResult *result_alloc_inline(size_t subject_len, size_t capture_count, IdmError *err) {
-    size_t subject_bytes = subject_len + 1u;
-    if (subject_bytes == 0 || subject_bytes > SIZE_MAX - sizeof(IdmRegexResult)) {
-        idm_error_oom(err, idm_span_unknown(NULL));
-        return NULL;
-    }
-    size_t capture_offset = align_up_size(sizeof(IdmRegexResult) + subject_bytes, _Alignof(RxCapture));
+static IdmRegexResult *result_alloc_inline(size_t capture_count, IdmError *err) {
+    size_t capture_offset = align_up_size(sizeof(IdmRegexResult), _Alignof(RxCapture));
     if (capture_count > (SIZE_MAX - capture_offset) / sizeof(RxCapture)) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return NULL;
@@ -1288,11 +1378,10 @@ static IdmRegexResult *result_alloc_inline(size_t subject_len, size_t capture_co
         return NULL;
     }
     char *base = (char *)result;
-    result->subject = base + sizeof(*result);
-    result->subject_len = subject_len;
     result->captures = (RxCapture *)(void *)(base + capture_offset);
     result->capture_count = capture_count;
     result->inline_storage = true;
+    result->subject_value = idm_nil();
     return result;
 }
 
@@ -1495,7 +1584,8 @@ static bool nfa_test_search(const RxProg *prog, const char *s, size_t len, size_
     };
     bool ok = true;
     for (size_t pos = offset; ok && !*out_matched && pos <= len; pos++) {
-        ok = nfa_add_test_closure(prog, &active, marks, s, len, 0, pos, false, 0, out_matched, err);
+        if (regex_start_candidate(prog, s, len, pos))
+            ok = nfa_add_test_closure(prog, &active, marks, s, len, 0, pos, false, 0, out_matched, err);
         if (!ok || *out_matched || pos == len) break;
         test_state_vec_clear(&next, next_mark++);
         for (size_t i = 0; ok && !*out_matched && i < active.count; i++) {
@@ -1667,12 +1757,29 @@ static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset
     return ok;
 }
 
-static IdmRegexResult *result_new(const IdmRegex *rx, const char *s, size_t len, size_t start, const RxMatch *match, IdmError *err) {
+static bool result_set_subject(IdmRegexResult *result, IdmValue subject, const char *s, size_t len, IdmError *err) {
+    result->subject_len = len;
+    if (subject.tag == IDM_VAL_STRING && idm_string_bytes(subject) == s && idm_string_length(subject) == len) {
+        result->subject_value = subject;
+        result->subject = (char *)s;
+        result->owns_subject = false;
+        return true;
+    }
+    result->subject = idm_strndup(s, len);
+    if (!result->subject) return idm_error_oom(err, idm_span_unknown(NULL));
+    result->subject_value = idm_nil();
+    result->owns_subject = true;
+    return true;
+}
+
+static IdmRegexResult *result_new(const IdmRegex *rx, IdmValue subject, const char *s, size_t len, size_t start, const RxMatch *match, IdmError *err) {
     size_t capture_count = rx->group_count + 1u;
-    IdmRegexResult *result = result_alloc_inline(len, capture_count, err);
+    IdmRegexResult *result = result_alloc_inline(capture_count, err);
     if (!result) return NULL;
-    memcpy(result->subject, s, len);
-    result->subject[len] = '\0';
+    if (!result_set_subject(result, subject, s, len, err)) {
+        idm_regex_result_free(result);
+        return NULL;
+    }
     memcpy(result->captures, match->captures, result->capture_count * sizeof(*result->captures));
     result->captures[0].set = true;
     result->captures[0].start = start;
@@ -1705,15 +1812,59 @@ static IdmRegexResult *result_new(const IdmRegex *rx, const char *s, size_t len,
     return result;
 }
 
-static bool scan_at_raw(const IdmRegex *rx, const char *s, size_t len, size_t offset, bool full, IdmRegexResult **out, IdmError *err) {
+static bool scan_at_raw(const IdmRegex *rx, IdmValue subject, const char *s, size_t len, size_t offset, bool full, IdmRegexResult **out, IdmError *err) {
     *out = NULL;
     if (offset > len) return true;
     RxMatch match = {0};
     bool ok = nfa_run(rx->prog, s, len, offset, full, len, &match, err);
     if (!ok) return false;
-    if (match.matched) *out = result_new(rx, s, len, offset, &match, err);
+    if (match.matched) *out = result_new(rx, subject, s, len, offset, &match, err);
     match_destroy(&match);
     return !(err && err->present);
+}
+
+static bool regex_start_candidate(const RxProg *prog, const char *s, size_t len, size_t pos) {
+    if (!prog) return false;
+    const RxStartInfo *start = &prog->start;
+    if (start->anchored_start && !(pos == 0 || ((prog->flags & IDM_REGEX_MULTILINE) != 0 && at_line_start(s, pos)))) return false;
+    if (pos >= len) return start->nullable;
+    if (start->any || start->nullable) return true;
+    return start->bytes[(unsigned char)s[pos]];
+}
+
+static bool scan_from_raw(const IdmRegex *rx, IdmValue subject, const char *s, size_t len, size_t offset, IdmRegexResult **out, IdmError *err) {
+    *out = NULL;
+    if (offset > len) offset = len;
+    for (size_t pos = offset; pos <= len; pos++) {
+        if (!regex_start_candidate(rx->prog, s, len, pos)) continue;
+        if (!scan_at_raw(rx, subject, s, len, pos, false, out, err)) return false;
+        if (*out) return true;
+    }
+    return true;
+}
+
+bool idm_regex_test_bytes(const IdmRegex *rx, const char *input, size_t input_len, bool *out_matched, IdmError *err) {
+    if (!rx) {
+        *out_matched = false;
+        return true;
+    }
+    return nfa_test_search(rx->prog, input, input_len, 0, out_matched, err);
+}
+
+bool idm_regex_exec_at_subject(const IdmRegex *rx, IdmValue subject, const char *input, size_t input_len, size_t offset, bool full, IdmRegexResult **out, IdmError *err) {
+    if (!rx) {
+        *out = NULL;
+        return true;
+    }
+    return scan_at_raw(rx, subject, input, input_len, offset, full, out, err);
+}
+
+bool idm_regex_scan_subject(const IdmRegex *rx, IdmValue subject, const char *input, size_t input_len, size_t offset, IdmRegexResult **out, IdmError *err) {
+    if (!rx) {
+        *out = NULL;
+        return true;
+    }
+    return scan_from_raw(rx, subject, input, input_len, offset, out, err);
 }
 
 static bool wrap_result_or_nil(IdmRuntime *rt, IdmRegexResult *result, IdmValue *out, IdmError *err) {
@@ -1815,8 +1966,8 @@ const char *idm_regex_group_name(const IdmRegex *rx, size_t index) {
 
 void idm_regex_result_free(IdmRegexResult *result) {
     if (!result) return;
+    if (result->owns_subject) free(result->subject);
     if (!result->inline_storage) {
-        free(result->subject);
         free(result->captures);
     }
     if (result->group_names) {
@@ -1826,43 +1977,56 @@ void idm_regex_result_free(IdmRegexResult *result) {
     free(result);
 }
 
-IdmRegexResult *idm_regex_result_clone(const IdmRegexResult *src) {
+IdmRegexResult *idm_regex_result_clone_with_subject(const IdmRegexResult *src, IdmValue subject, IdmError *err) {
     if (!src) return NULL;
-    IdmRegexResult *r = calloc(1u, sizeof(*r));
+    IdmRegexResult *r = result_alloc_inline(src->capture_count, err);
     if (!r) return NULL;
-    r->subject_len = src->subject_len;
-    r->capture_count = src->capture_count;
-    if (src->subject) {
-        r->subject = malloc(src->subject_len + 1u);
-        if (!r->subject) { idm_regex_result_free(r); return NULL; }
-        memcpy(r->subject, src->subject, src->subject_len);
-        r->subject[src->subject_len] = '\0';
+    const char *subject_bytes = src->subject ? src->subject : "";
+    size_t subject_len = src->subject ? src->subject_len : 0u;
+    if (subject.tag == IDM_VAL_STRING) {
+        subject_bytes = idm_string_bytes(subject);
+        subject_len = idm_string_length(subject);
     }
-    if (src->capture_count != 0 && src->captures) {
-        r->captures = malloc(src->capture_count * sizeof(*r->captures));
-        if (!r->captures) { idm_regex_result_free(r); return NULL; }
+    if (!result_set_subject(r, subject, subject_bytes, subject_len, err)) {
+        idm_regex_result_free(r);
+        return NULL;
+    }
+    if (src->capture_count != 0 && src->captures)
         memcpy(r->captures, src->captures, src->capture_count * sizeof(*r->captures));
-    }
     if (src->group_names) {
         r->group_names = calloc(src->capture_count, sizeof(*r->group_names));
-        if (!r->group_names) { idm_regex_result_free(r); return NULL; }
+        if (!r->group_names) { idm_regex_result_free(r); idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
         for (size_t i = 0; i < src->capture_count; i++) {
             if (!src->group_names[i]) continue;
             r->group_names[i] = idm_strdup(src->group_names[i]);
-            if (!r->group_names[i]) { idm_regex_result_free(r); return NULL; }
+            if (!r->group_names[i]) { idm_regex_result_free(r); idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
         }
     }
     return r;
 }
 
+IdmRegexResult *idm_regex_result_clone(const IdmRegexResult *src) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmRegexResult *copy = idm_regex_result_clone_with_subject(src, idm_nil(), &err);
+    idm_error_clear(&err);
+    return copy;
+}
+
 size_t idm_regex_result_footprint(const IdmRegexResult *result) {
     if (!result) return 0;
-    size_t total = sizeof(*result) + result->subject_len + 1u + result->capture_count * sizeof(*result->captures);
+    size_t total = sizeof(*result) + result->capture_count * sizeof(*result->captures);
+    if (result->owns_subject) total += result->subject_len + 1u;
     if (result->group_names) {
         total += result->capture_count * sizeof(*result->group_names);
         for (size_t i = 0; i < result->capture_count; i++) if (result->group_names[i]) total += strlen(result->group_names[i]) + 1u;
     }
     return total;
+}
+
+IdmValue idm_regex_result_subject_value(const IdmRegexResult *result) {
+    if (!result) return idm_nil();
+    return result->subject_value;
 }
 
 bool idm_regex_compile_value(IdmRuntime *rt, IdmValue source, IdmValue options, IdmValue *out, IdmError *err) {
@@ -1928,7 +2092,7 @@ bool idm_regex_scan_at(IdmRuntime *rt, IdmValue regex, IdmValue input, size_t of
     size_t len = 0;
     if (!regex_and_input(rt, "raw-scan-at", regex, input, &rx, &s, &len, err)) return false;
     IdmRegexResult *result = NULL;
-    if (!scan_at_raw(rx, s, len, offset, false, &result, err)) return false;
+    if (!idm_regex_exec_at_subject(rx, input, s, len, offset, false, &result, err)) return false;
     return wrap_result_or_nil(rt, result, out, err);
 }
 
@@ -1937,14 +2101,9 @@ bool idm_regex_scan_from(IdmRuntime *rt, IdmValue regex, IdmValue input, size_t 
     const char *s = NULL;
     size_t len = 0;
     if (!regex_and_input(rt, "raw-scan-from", regex, input, &rx, &s, &len, err)) return false;
-    if (offset > len) offset = len;
-    for (size_t pos = offset; pos <= len; pos++) {
-        IdmRegexResult *result = NULL;
-        if (!scan_at_raw(rx, s, len, pos, false, &result, err)) return false;
-        if (result) return wrap_result_or_nil(rt, result, out, err);
-    }
-    *out = idm_nil();
-    return true;
+    IdmRegexResult *result = NULL;
+    if (!idm_regex_scan_subject(rx, input, s, len, offset, &result, err)) return false;
+    return wrap_result_or_nil(rt, result, out, err);
 }
 
 bool idm_regex_scan_full(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue *out, IdmError *err) {
@@ -1953,7 +2112,7 @@ bool idm_regex_scan_full(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValu
     size_t len = 0;
     if (!regex_and_input(rt, "raw-scan-full", regex, input, &rx, &s, &len, err)) return false;
     IdmRegexResult *result = NULL;
-    if (!scan_at_raw(rx, s, len, 0, true, &result, err)) return false;
+    if (!idm_regex_exec_at_subject(rx, input, s, len, 0, true, &result, err)) return false;
     return wrap_result_or_nil(rt, result, out, err);
 }
 
@@ -1963,7 +2122,7 @@ bool idm_regex_test(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue *ou
     size_t len = 0;
     if (!regex_and_input(rt, "raw-test?", regex, input, &rx, &s, &len, err)) return false;
     bool matched = false;
-    if (!nfa_test_search(rx->prog, s, len, 0, &matched, err)) return false;
+    if (!idm_regex_test_bytes(rx, s, len, &matched, err)) return false;
     *out = idm_bool(rt, matched);
     return true;
 }
@@ -1977,11 +2136,8 @@ bool idm_regex_scan_all(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue
     size_t pos = 0;
     while (pos <= len) {
         IdmRegexResult *result = NULL;
-        if (!scan_at_raw(rx, s, len, pos, false, &result, err)) return false;
-        if (!result) {
-            pos++;
-            continue;
-        }
+        if (!idm_regex_scan_subject(rx, input, s, len, pos, &result, err)) return false;
+        if (!result) break;
         size_t start = result->captures[0].start;
         size_t end = result->captures[0].end;
         IdmValue wrapped = idm_regex_result_value(rt, result, err);
@@ -2180,16 +2336,12 @@ bool idm_regex_replace(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue 
     bool changed = false;
     while (pos <= len) {
         IdmRegexResult *result = NULL;
-        if (!scan_at_raw(rx, s, len, pos, false, &result, err)) {
+        if (!scan_from_raw(rx, input, s, len, pos, &result, err)) {
             idm_buf_destroy(&buf);
             return false;
         }
         if (!result) {
-            if (pos < len) {
-                if (!idm_buf_append_char(&buf, s[pos])) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
-                pos++;
-                continue;
-            }
+            if (changed && !idm_buf_append_n(&buf, s + pos, len - pos)) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
             break;
         }
         RxCapture whole = result->captures[0];
@@ -2206,7 +2358,7 @@ bool idm_regex_replace(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue 
             pos = len + 1u;
             break;
         }
-        if (next <= pos) {
+        if (next <= whole.start) {
             if (next < len && !idm_buf_append_char(&buf, s[next])) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
             pos = next < len ? next + 1u : len + 1u;
         } else {
@@ -2233,10 +2385,8 @@ bool idm_regex_split_on(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue
     size_t scan_pos = 0;
     while (scan_pos <= len) {
         IdmRegexResult *result = NULL;
-        if (!scan_at_raw(rx, s, len, scan_pos, false, &result, err)) return false;
+        if (!scan_from_raw(rx, input, s, len, scan_pos, &result, err)) return false;
         if (!result) {
-            scan_pos++;
-            if (scan_pos <= len) continue;
             IdmValue tail = idm_string_n(rt, s + segment_start, len - segment_start, err);
             if (err && err->present) return false;
             acc = idm_cons(rt, tail, acc, err);

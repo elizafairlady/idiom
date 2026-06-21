@@ -2,9 +2,11 @@
 
 #include "idiom/actor.h"
 #include "idiom/prims.h"
+#include "idiom/regex.h"
 
 #include <stdint.h>
 #include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -210,6 +212,348 @@ static inline bool vm_checked_mul(int64_t a, int64_t b, int64_t *out) {
 #endif
 }
 
+static bool vm_num_as_double(IdmValue value, double *out) {
+    if (value.tag == IDM_VAL_INT) {
+        *out = (double)value.as.i;
+        return true;
+    }
+    if (value.tag == IDM_VAL_FLOAT) {
+        *out = value.as.f;
+        return true;
+    }
+    return false;
+}
+
+static IdmValue vm_float_result(IdmRuntime *rt, double value) {
+    if (isnan(value)) return idm_atom(rt, "nan");
+    if (isinf(value)) return idm_atom(rt, "inf");
+    return idm_float(value);
+}
+
+static bool vm_num_pair(Vm *vm, const char *name, IdmValue a_value, IdmValue b_value, bool *ints, int64_t *a, int64_t *b, double *x, double *y, IdmError *err) {
+    if (a_value.tag == IDM_VAL_INT && b_value.tag == IDM_VAL_INT) {
+        *ints = true;
+        *a = a_value.as.i;
+        *b = b_value.as.i;
+        return true;
+    }
+    if (!vm_num_as_double(a_value, x) || !vm_num_as_double(b_value, y)) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s expects numeric operands", name);
+        return idm_error_reason(vm->rt, err, "type-error", 3, idm_atom(vm->rt, name), a_value, b_value);
+    }
+    *ints = false;
+    return true;
+}
+
+static bool vm_num_overflow(Vm *vm, const char *name, IdmError *err) {
+    idm_error_set(err, idm_span_unknown(NULL), "integer overflow in %s", name);
+    return idm_error_reason(vm->rt, err, "overflow", 1, idm_atom(vm->rt, name));
+}
+
+static bool vm_num_div_zero(Vm *vm, const char *name, IdmError *err) {
+    idm_error_set(err, idm_span_unknown(NULL), "division by zero in %s", name);
+    return idm_error_reason(vm->rt, err, "div-by-zero", 1, idm_atom(vm->rt, name));
+}
+
+static bool vm_num_binary_slow(Vm *vm, IdmOpcode op, const char *name, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "%s stack underflow", idm_opcode_name(op));
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    bool ints = false;
+    int64_t a = 0, b = 0, r = 0;
+    double x = 0.0, y = 0.0;
+    if (!vm_num_pair(vm, name, *lhs, rhs, &ints, &a, &b, &x, &y, err)) return false;
+    if (!ints) {
+        double f = 0.0;
+        switch (op) {
+            case IDM_OP_NUM_ADD: f = x + y; break;
+            case IDM_OP_NUM_SUB: f = x - y; break;
+            case IDM_OP_NUM_MUL: f = x * y; break;
+            case IDM_OP_NUM_DIV:
+                if (y == 0.0) return vm_num_div_zero(vm, name, err);
+                f = x / y;
+                break;
+            case IDM_OP_NUM_MOD:
+                if (y == 0.0) return vm_num_div_zero(vm, name, err);
+                f = fmod(x, y);
+                break;
+            case IDM_OP_NUM_POW:
+                f = pow(x, y);
+                break;
+            default:
+                return idm_error_set(err, idm_span_unknown(NULL), "invalid numeric opcode %s", idm_opcode_name(op));
+        }
+        *lhs = vm_float_result(vm->rt, f);
+        vm->sp--;
+        return true;
+    }
+    bool ok = true;
+    switch (op) {
+        case IDM_OP_NUM_ADD: ok = vm_checked_add(a, b, &r); break;
+        case IDM_OP_NUM_SUB: ok = vm_checked_sub(a, b, &r); break;
+        case IDM_OP_NUM_MUL: ok = vm_checked_mul(a, b, &r); break;
+        case IDM_OP_NUM_DIV:
+        case IDM_OP_NUM_MOD:
+            if (b == 0) return vm_num_div_zero(vm, name, err);
+            if (a == INT64_MIN && b == -1) return vm_num_overflow(vm, name, err);
+            r = op == IDM_OP_NUM_DIV ? a / b : a % b;
+            break;
+        case IDM_OP_NUM_POW:
+            if (b < 0) {
+                idm_error_set(err, idm_span_unknown(NULL), "pow exponent must be non-negative");
+                return idm_error_reason(vm->rt, err, "bad-arg", 2, idm_atom(vm->rt, name), rhs);
+            }
+            ok = idm_checked_pow(a, b, &r);
+            break;
+        default:
+            return idm_error_set(err, idm_span_unknown(NULL), "invalid integer opcode %s", idm_opcode_name(op));
+    }
+    if (!ok) return vm_num_overflow(vm, name, err);
+    *lhs = idm_int(r);
+    vm->sp--;
+    return true;
+}
+
+static inline bool vm_num_add(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_ADD stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        int64_t r = 0;
+        if (!vm_checked_add(lhs->as.i, rhs.as.i, &r)) return vm_num_overflow(vm, "add", err);
+        *lhs = idm_int(r);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_binary_slow(vm, IDM_OP_NUM_ADD, "add", err);
+}
+
+static inline bool vm_num_sub(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_SUB stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        int64_t r = 0;
+        if (!vm_checked_sub(lhs->as.i, rhs.as.i, &r)) return vm_num_overflow(vm, "sub", err);
+        *lhs = idm_int(r);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_binary_slow(vm, IDM_OP_NUM_SUB, "sub", err);
+}
+
+static inline bool vm_num_mul(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_MUL stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        int64_t r = 0;
+        if (!vm_checked_mul(lhs->as.i, rhs.as.i, &r)) return vm_num_overflow(vm, "mul", err);
+        *lhs = idm_int(r);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_binary_slow(vm, IDM_OP_NUM_MUL, "mul", err);
+}
+
+static inline bool vm_num_div(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_DIV stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        int64_t a = lhs->as.i;
+        int64_t b = rhs.as.i;
+        if (b == 0) return vm_num_div_zero(vm, "div", err);
+        if (a == INT64_MIN && b == -1) return vm_num_overflow(vm, "div", err);
+        *lhs = idm_int(a / b);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_binary_slow(vm, IDM_OP_NUM_DIV, "div", err);
+}
+
+static inline bool vm_num_mod(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_MOD stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        int64_t a = lhs->as.i;
+        int64_t b = rhs.as.i;
+        if (b == 0) return vm_num_div_zero(vm, "mod", err);
+        if (a == INT64_MIN && b == -1) return vm_num_overflow(vm, "mod", err);
+        *lhs = idm_int(a % b);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_binary_slow(vm, IDM_OP_NUM_MOD, "mod", err);
+}
+
+static inline bool vm_num_pow_op(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_POW stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        int64_t r = 0;
+        if (rhs.as.i < 0) {
+            idm_error_set(err, idm_span_unknown(NULL), "pow exponent must be non-negative");
+            return idm_error_reason(vm->rt, err, "bad-arg", 2, idm_atom(vm->rt, "pow"), rhs);
+        }
+        if (!idm_checked_pow(lhs->as.i, rhs.as.i, &r)) return vm_num_overflow(vm, "pow", err);
+        *lhs = idm_int(r);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_binary_slow(vm, IDM_OP_NUM_POW, "pow", err);
+}
+
+static bool vm_num_neg(Vm *vm, IdmError *err) {
+    if (vm->sp < 1u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_NEG stack underflow");
+    IdmValue *value = &vm->stack[vm->sp - 1u];
+    if (value->tag == IDM_VAL_FLOAT) {
+        *value = vm_float_result(vm->rt, -value->as.f);
+        return true;
+    }
+    if (value->tag != IDM_VAL_INT) {
+        idm_error_set(err, idm_span_unknown(NULL), "neg expects a number");
+        return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "neg"), *value);
+    }
+    if (value->as.i == INT64_MIN) return vm_num_overflow(vm, "neg", err);
+    *value = idm_int(-value->as.i);
+    return true;
+}
+
+static bool vm_num_compare_slow(Vm *vm, IdmOpcode op, const char *name, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "%s stack underflow", idm_opcode_name(op));
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    bool ints = false;
+    int64_t a = 0, b = 0;
+    double x = 0.0, y = 0.0;
+    if (!vm_num_pair(vm, name, *lhs, rhs, &ints, &a, &b, &x, &y, err)) return false;
+    bool result = false;
+    switch (op) {
+        case IDM_OP_NUM_LT: result = ints ? a < b : x < y; break;
+        case IDM_OP_NUM_GT: result = ints ? a > b : x > y; break;
+        case IDM_OP_NUM_LTE: result = ints ? a <= b : x <= y; break;
+        case IDM_OP_NUM_GTE: result = ints ? a >= b : x >= y; break;
+        default:
+            return idm_error_set(err, idm_span_unknown(NULL), "invalid numeric comparison opcode %s", idm_opcode_name(op));
+    }
+    *lhs = idm_bool(vm->rt, result);
+    vm->sp--;
+    return true;
+}
+
+static inline bool vm_num_lt(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_LT stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        *lhs = idm_bool(vm->rt, lhs->as.i < rhs.as.i);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_compare_slow(vm, IDM_OP_NUM_LT, "lt?", err);
+}
+
+static inline bool vm_num_gt(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_GT stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        *lhs = idm_bool(vm->rt, lhs->as.i > rhs.as.i);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_compare_slow(vm, IDM_OP_NUM_GT, "gt?", err);
+}
+
+static inline bool vm_num_lte(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_LTE stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        *lhs = idm_bool(vm->rt, lhs->as.i <= rhs.as.i);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_compare_slow(vm, IDM_OP_NUM_LTE, "lte?", err);
+}
+
+static inline bool vm_num_gte(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "NUM_GTE stack underflow");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
+        *lhs = idm_bool(vm->rt, lhs->as.i >= rhs.as.i);
+        vm->sp--;
+        return true;
+    }
+    return vm_num_compare_slow(vm, IDM_OP_NUM_GTE, "gte?", err);
+}
+
+static bool vm_equal_known(IdmValue a, IdmValue b, bool *out_equal) {
+    if (a.tag != b.tag) {
+        *out_equal = false;
+        return true;
+    }
+    switch (a.tag) {
+        case IDM_VAL_NIL:
+        case IDM_VAL_EMPTY_LIST:
+            *out_equal = true;
+            return true;
+        case IDM_VAL_ATOM:
+        case IDM_VAL_WORD:
+            *out_equal = a.as.symbol == b.as.symbol;
+            return true;
+        case IDM_VAL_INT:
+            *out_equal = a.as.i == b.as.i;
+            return true;
+        case IDM_VAL_FLOAT:
+            *out_equal = a.as.f == b.as.f;
+            return true;
+        case IDM_VAL_STRING:
+            *out_equal = idm_string_length(a) == idm_string_length(b) &&
+                         memcmp(idm_string_bytes(a), idm_string_bytes(b), idm_string_length(a)) == 0;
+            return true;
+        case IDM_VAL_SYNTAX:
+        case IDM_VAL_CELL:
+        case IDM_VAL_CLOSURE:
+        case IDM_VAL_REGEX:
+        case IDM_VAL_REGEX_RESULT:
+            *out_equal = a.as.obj == b.as.obj;
+            return true;
+        case IDM_VAL_PID:
+        case IDM_VAL_REF:
+        case IDM_VAL_PORT:
+        case IDM_VAL_PRIMITIVE:
+            *out_equal = a.as.id == b.as.id;
+            return true;
+        case IDM_VAL_PAIR:
+        case IDM_VAL_TUPLE:
+        case IDM_VAL_VECTOR:
+        case IDM_VAL_DICT:
+        case IDM_VAL_RECORD:
+            if (a.as.obj == b.as.obj) {
+                *out_equal = true;
+                return true;
+            }
+            return false;
+    }
+    return false;
+}
+
+static bool vm_eq_op(Vm *vm, bool negate, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "%s stack underflow", negate ? "NEQ" : "EQ");
+    IdmValue *lhs = &vm->stack[vm->sp - 2u];
+    IdmValue rhs = vm->stack[vm->sp - 1u];
+    bool equal = false;
+    if (!vm_equal_known(*lhs, rhs, &equal)) equal = idm_value_equal(*lhs, rhs);
+    *lhs = idm_bool(vm->rt, negate ? !equal : equal);
+    vm->sp--;
+    return true;
+}
+
 static Frame *current_frame(Vm *vm) {
     return vm->frame_count == 0 ? NULL : &vm->frames[vm->frame_count - 1u];
 }
@@ -362,61 +706,8 @@ static bool vm_fast_type_predicate(IdmPrimitive prim, IdmValue value, bool *out)
     }
 }
 
-static bool vm_fast_equal_known(IdmValue a, IdmValue b, bool *out_equal) {
-    if (a.tag != b.tag) {
-        *out_equal = false;
-        return true;
-    }
-    switch (a.tag) {
-        case IDM_VAL_NIL:
-        case IDM_VAL_EMPTY_LIST:
-            *out_equal = true;
-            return true;
-        case IDM_VAL_ATOM:
-        case IDM_VAL_WORD:
-            *out_equal = a.as.symbol == b.as.symbol;
-            return true;
-        case IDM_VAL_INT:
-            *out_equal = a.as.i == b.as.i;
-            return true;
-        case IDM_VAL_FLOAT:
-            *out_equal = a.as.f == b.as.f;
-            return true;
-        case IDM_VAL_STRING:
-            *out_equal = idm_string_length(a) == idm_string_length(b) &&
-                         memcmp(idm_string_bytes(a), idm_string_bytes(b), idm_string_length(a)) == 0;
-            return true;
-        case IDM_VAL_SYNTAX:
-        case IDM_VAL_CELL:
-        case IDM_VAL_CLOSURE:
-        case IDM_VAL_REGEX:
-        case IDM_VAL_REGEX_RESULT:
-            *out_equal = a.as.obj == b.as.obj;
-            return true;
-        case IDM_VAL_PID:
-        case IDM_VAL_REF:
-        case IDM_VAL_PORT:
-        case IDM_VAL_PRIMITIVE:
-            *out_equal = a.as.id == b.as.id;
-            return true;
-        case IDM_VAL_PAIR:
-        case IDM_VAL_TUPLE:
-        case IDM_VAL_VECTOR:
-        case IDM_VAL_DICT:
-        case IDM_VAL_RECORD:
-            if (a.as.obj == b.as.obj) {
-                *out_equal = true;
-                return true;
-            }
-            return false;
-    }
-    return false;
-}
-
 static inline bool vm_primitive_has_fast_path(IdmPrimitive prim) {
     static const bool fast[IDM_PRIM_FILE_OPEN + 1u] = {
-        [IDM_PRIM_EQ] = true,
-        [IDM_PRIM_NEQ] = true,
         [IDM_PRIM_OK] = true,
         [IDM_PRIM_TUPLE_GET] = true,
         [IDM_PRIM_RECORD_PRED] = true,
@@ -508,18 +799,6 @@ static bool try_fast_prim_invoke(Vm *vm, IdmPrimitive prim, IdmValue *args, uint
             *out_done = true;
             return true;
 
-        case IDM_PRIM_EQ:
-        case IDM_PRIM_NEQ: {
-            if (argc != 2u) return true;
-            bool equal = false;
-            if (vm_fast_equal_known(args[0], args[1], &equal)) {
-                *out = idm_bool(vm->rt, prim == IDM_PRIM_EQ ? equal : !equal);
-                *out_done = true;
-                return true;
-            }
-            return true;
-        }
-
         case IDM_PRIM_TUPLE_GET: {
             if (argc != 2u || args[0].tag != IDM_VAL_TUPLE || args[1].tag != IDM_VAL_INT || args[1].as.i < 0) return true;
             size_t index = (size_t)args[1].as.i;
@@ -594,6 +873,89 @@ static bool generic_prim_call(Vm *vm, uint32_t primitive, uint32_t argc, IdmErro
     vm->sp -= argc;
     if (!ok) return false;
     return push(vm, out, err);
+}
+
+static bool vm_regex_offset_arg(IdmRuntime *rt, const char *name, IdmValue value, size_t *out, IdmError *err) {
+    if (value.tag != IDM_VAL_INT || value.as.i < 0) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s offset must be a non-negative integer", name);
+        return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, name), value);
+    }
+    *out = (size_t)value.as.i;
+    return true;
+}
+
+static bool vm_regex_operands(IdmRuntime *rt, const char *name, IdmValue regex, IdmValue input, IdmRegex **out_rx, const char **out_s, size_t *out_len, IdmError *err) {
+    *out_rx = idm_regex_value_get(regex, err);
+    if (!*out_rx) return false;
+    if (input.tag != IDM_VAL_STRING) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s expects a string", name);
+        return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, name), input);
+    }
+    *out_s = idm_string_bytes(input);
+    *out_len = idm_string_length(input);
+    return true;
+}
+
+static bool push_regex_result_or_nil(Vm *vm, IdmRegexResult *result, IdmError *err) {
+    IdmValue out = idm_nil();
+    if (result) {
+        out = idm_regex_result_value(vm->rt, result, err);
+        if (err && err->present) return false;
+    }
+    return push(vm, out, err);
+}
+
+static bool op_regex_test(Vm *vm, IdmError *err) {
+    if (vm->sp < 2u) return idm_error_set(err, idm_span_unknown(NULL), "REGEX_TEST stack underflow");
+    IdmValue regex = vm->stack[vm->sp - 2u];
+    IdmValue input = vm->stack[vm->sp - 1u];
+    IdmRegex *rx = NULL;
+    const char *s = NULL;
+    size_t len = 0;
+    if (!vm_regex_operands(vm->rt, "raw-test?", regex, input, &rx, &s, &len, err)) return false;
+    bool matched = false;
+    if (!idm_regex_test_bytes(rx, s, len, &matched, err)) return false;
+    vm->stack[vm->sp - 2u] = idm_bool(vm->rt, matched);
+    vm->sp--;
+    return true;
+}
+
+static bool op_regex_exec(Vm *vm, uint32_t mode, IdmError *err) {
+    if (mode > 1u) return idm_error_set(err, idm_span_unknown(NULL), "REGEX_EXEC mode %u is invalid", mode);
+    uint32_t argc = mode == 0u ? 3u : 2u;
+    if (vm->sp < argc) return idm_error_set(err, idm_span_unknown(NULL), "REGEX_EXEC stack underflow");
+    IdmValue regex = vm->stack[vm->sp - argc];
+    IdmValue input = vm->stack[vm->sp - argc + 1u];
+    IdmRegex *rx = NULL;
+    const char *s = NULL;
+    size_t len = 0;
+    if (!vm_regex_operands(vm->rt, mode == 0u ? "raw-scan-at" : "raw-scan-full", regex, input, &rx, &s, &len, err)) return false;
+    IdmRegexResult *result = NULL;
+    if (mode == 0u) {
+        size_t offset = 0;
+        if (!vm_regex_offset_arg(vm->rt, "raw-scan-at", vm->stack[vm->sp - 1u], &offset, err)) return false;
+        if (!idm_regex_exec_at_subject(rx, input, s, len, offset, false, &result, err)) return false;
+    } else {
+        if (!idm_regex_exec_at_subject(rx, input, s, len, 0, true, &result, err)) return false;
+    }
+    vm->sp -= argc;
+    return push_regex_result_or_nil(vm, result, err);
+}
+
+static bool op_regex_scan(Vm *vm, IdmError *err) {
+    if (vm->sp < 3u) return idm_error_set(err, idm_span_unknown(NULL), "REGEX_SCAN stack underflow");
+    IdmValue regex = vm->stack[vm->sp - 3u];
+    IdmValue input = vm->stack[vm->sp - 2u];
+    IdmRegex *rx = NULL;
+    const char *s = NULL;
+    size_t len = 0;
+    if (!vm_regex_operands(vm->rt, "raw-scan-from", regex, input, &rx, &s, &len, err)) return false;
+    size_t offset = 0;
+    if (!vm_regex_offset_arg(vm->rt, "raw-scan-from", vm->stack[vm->sp - 1u], &offset, err)) return false;
+    IdmRegexResult *result = NULL;
+    if (!idm_regex_scan_subject(rx, input, s, len, offset, &result, err)) return false;
+    vm->sp -= 3u;
+    return push_regex_result_or_nil(vm, result, err);
 }
 
 static bool op_tty_block(Vm *vm, IdmPrimitive prim, uint32_t argc, IdmError *err) {
@@ -1932,28 +2294,6 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 uint32_t prim = module->code[frame->ip++];
                 uint32_t argc = module->code[frame->ip++];
                 bool fast_done = false;
-                if (argc == 2u && vm->sp >= 2u) {
-                    IdmValue *lhs = &vm->stack[vm->sp - 2u];
-                    IdmValue rhs = vm->stack[vm->sp - 1u];
-                    if (lhs->tag == IDM_VAL_INT && rhs.tag == IDM_VAL_INT) {
-                        int64_t a = lhs->as.i, b = rhs.as.i, r = 0;
-                        switch (prim) {
-                            case IDM_PRIM_ADD: if (vm_checked_add(a, b, &r)) { *lhs = idm_int(r); vm->sp--; fast_done = true; } break;
-                            case IDM_PRIM_SUB: if (vm_checked_sub(a, b, &r)) { *lhs = idm_int(r); vm->sp--; fast_done = true; } break;
-                            case IDM_PRIM_MUL: if (vm_checked_mul(a, b, &r)) { *lhs = idm_int(r); vm->sp--; fast_done = true; } break;
-                            case IDM_PRIM_DIV: if (b != 0 && !(a == INT64_MIN && b == -1)) { *lhs = idm_int(a / b); vm->sp--; fast_done = true; } break;
-                            case IDM_PRIM_MOD: if (b != 0 && !(a == INT64_MIN && b == -1)) { *lhs = idm_int(a % b); vm->sp--; fast_done = true; } break;
-                            case IDM_PRIM_POW: if (b >= 0 && idm_checked_pow(a, b, &r)) { *lhs = idm_int(r); vm->sp--; fast_done = true; } break;
-                            case IDM_PRIM_LT:  *lhs = idm_bool(rt, a < b);  vm->sp--; fast_done = true; break;
-                            case IDM_PRIM_GT:  *lhs = idm_bool(rt, a > b);  vm->sp--; fast_done = true; break;
-                            case IDM_PRIM_LTE: *lhs = idm_bool(rt, a <= b); vm->sp--; fast_done = true; break;
-                            case IDM_PRIM_GTE: *lhs = idm_bool(rt, a >= b); vm->sp--; fast_done = true; break;
-                            case IDM_PRIM_EQ:  *lhs = idm_bool(rt, a == b); vm->sp--; fast_done = true; break;
-                            case IDM_PRIM_NEQ: *lhs = idm_bool(rt, a != b); vm->sp--; fast_done = true; break;
-                            default: break;
-                        }
-                    }
-                }
                 if (!fast_done) {
                     if (vm->sp >= argc && vm_primitive_has_fast_path((IdmPrimitive)prim)) {
                         IdmValue out = idm_nil();
@@ -1987,6 +2327,55 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 }
                 break;
             }
+            case IDM_OP_REGEX_TEST:
+                if (!op_regex_test(vm, err)) return false;
+                break;
+            case IDM_OP_REGEX_EXEC:
+                operand = module->code[frame->ip++];
+                if (!op_regex_exec(vm, operand, err)) return false;
+                break;
+            case IDM_OP_REGEX_SCAN:
+                if (!op_regex_scan(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_ADD:
+                if (!vm_num_add(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_SUB:
+                if (!vm_num_sub(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_MUL:
+                if (!vm_num_mul(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_DIV:
+                if (!vm_num_div(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_MOD:
+                if (!vm_num_mod(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_POW:
+                if (!vm_num_pow_op(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_NEG:
+                if (!vm_num_neg(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_LT:
+                if (!vm_num_lt(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_GT:
+                if (!vm_num_gt(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_LTE:
+                if (!vm_num_lte(vm, err)) return false;
+                break;
+            case IDM_OP_NUM_GTE:
+                if (!vm_num_gte(vm, err)) return false;
+                break;
+            case IDM_OP_EQ:
+                if (!vm_eq_op(vm, false, err)) return false;
+                break;
+            case IDM_OP_NEQ:
+                if (!vm_eq_op(vm, true, err)) return false;
+                break;
             case IDM_OP_SELF:
                 if (!require_actor(vm, err)) return false;
                 if (!push(vm, idm_pid(idm_actor_pid(vm->self)), err)) return false;

@@ -42,6 +42,8 @@ suite do
   test "one-arithmetic" do
     assert-eq (1 + 2.5) 3.5
     assert-eq (add 1 2.5) 3.5
+    add-f = &add
+    assert-eq (add-f 1 2) 3
     assert-eq ((list 1 2.5) |> apply &add) 3.5
     assert-eq (2.0 * 2) 4.0
     assert-eq (1.5 < 2) :true

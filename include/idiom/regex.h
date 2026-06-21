@@ -23,7 +23,13 @@ const char *idm_regex_group_name(const IdmRegex *rx, size_t index);
 
 void idm_regex_result_free(IdmRegexResult *result);
 IdmRegexResult *idm_regex_result_clone(const IdmRegexResult *result);
+IdmRegexResult *idm_regex_result_clone_with_subject(const IdmRegexResult *result, IdmValue subject, IdmError *err);
 size_t idm_regex_result_footprint(const IdmRegexResult *result);
+IdmValue idm_regex_result_subject_value(const IdmRegexResult *result);
+
+bool idm_regex_test_bytes(const IdmRegex *rx, const char *input, size_t input_len, bool *out_matched, IdmError *err);
+bool idm_regex_exec_at_subject(const IdmRegex *rx, IdmValue subject, const char *input, size_t input_len, size_t offset, bool full, IdmRegexResult **out, IdmError *err);
+bool idm_regex_scan_subject(const IdmRegex *rx, IdmValue subject, const char *input, size_t input_len, size_t offset, IdmRegexResult **out, IdmError *err);
 
 bool idm_regex_compile_value(IdmRuntime *rt, IdmValue source, IdmValue options, IdmValue *out, IdmError *err);
 bool idm_regex_options_value(IdmRuntime *rt, IdmValue regex, IdmValue *out, IdmError *err);

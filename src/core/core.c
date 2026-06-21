@@ -900,6 +900,26 @@ static bool actor_primitive_opcode(IdmPrimitive primitive, size_t argc, IdmOpcod
     }
 }
 
+static bool arithmetic_primitive_opcode(IdmPrimitive primitive, size_t argc, IdmOpcode *out_op, uint32_t *out_arity) {
+    (void)argc;
+    switch (primitive) {
+        case IDM_PRIM_ADD: *out_op = IDM_OP_NUM_ADD; *out_arity = 2; return true;
+        case IDM_PRIM_SUB: *out_op = IDM_OP_NUM_SUB; *out_arity = 2; return true;
+        case IDM_PRIM_MUL: *out_op = IDM_OP_NUM_MUL; *out_arity = 2; return true;
+        case IDM_PRIM_DIV: *out_op = IDM_OP_NUM_DIV; *out_arity = 2; return true;
+        case IDM_PRIM_MOD: *out_op = IDM_OP_NUM_MOD; *out_arity = 2; return true;
+        case IDM_PRIM_POW: *out_op = IDM_OP_NUM_POW; *out_arity = 2; return true;
+        case IDM_PRIM_NEG: *out_op = IDM_OP_NUM_NEG; *out_arity = 1; return true;
+        case IDM_PRIM_LT: *out_op = IDM_OP_NUM_LT; *out_arity = 2; return true;
+        case IDM_PRIM_GT: *out_op = IDM_OP_NUM_GT; *out_arity = 2; return true;
+        case IDM_PRIM_LTE: *out_op = IDM_OP_NUM_LTE; *out_arity = 2; return true;
+        case IDM_PRIM_GTE: *out_op = IDM_OP_NUM_GTE; *out_arity = 2; return true;
+        case IDM_PRIM_EQ: *out_op = IDM_OP_EQ; *out_arity = 2; return true;
+        case IDM_PRIM_NEQ: *out_op = IDM_OP_NEQ; *out_arity = 2; return true;
+        default: return false;
+    }
+}
+
 static bool clone_patterns(IdmPattern **patterns, uint32_t count, IdmPattern ***out) {
     if (count == 0) {
         *out = NULL;
@@ -1892,6 +1912,29 @@ static bool compile_primitive_call(IdmCore *core, IdmBytecodeModule *module, con
     if (actor_primitive_opcode(prim, core->as.call.arg_count, &actor_op, &actor_arity)) {
         if (core->as.call.arg_count != actor_arity) return idm_error_set(err, core->span, "primitive '%s' expects %u argument(s)", idm_primitive_name(prim), actor_arity);
         if (!idm_bc_emit_op(module, actor_op, NULL)) return idm_error_oom(err, core->span);
+        return true;
+    }
+    IdmOpcode arithmetic_op = IDM_OP_HALT;
+    uint32_t arithmetic_arity = 0;
+    if (arithmetic_primitive_opcode(prim, core->as.call.arg_count, &arithmetic_op, &arithmetic_arity)) {
+        if (core->as.call.arg_count != arithmetic_arity) return idm_error_set(err, core->span, "primitive '%s' expects %u argument(s)", idm_primitive_name(prim), arithmetic_arity);
+        if (!idm_bc_emit_op(module, arithmetic_op, NULL)) return idm_error_oom(err, core->span);
+        return true;
+    }
+    if (prim == IDM_PRIM_REGEX_TEST && core->as.call.arg_count == 2u) {
+        if (!idm_bc_emit_op(module, IDM_OP_REGEX_TEST, NULL)) return idm_error_oom(err, core->span);
+        return true;
+    }
+    if (prim == IDM_PRIM_REGEX_SCAN_AT && core->as.call.arg_count == 3u) {
+        if (!idm_bc_emit_u32(module, IDM_OP_REGEX_EXEC, 0u, NULL)) return idm_error_oom(err, core->span);
+        return true;
+    }
+    if (prim == IDM_PRIM_REGEX_SCAN_FULL && core->as.call.arg_count == 2u) {
+        if (!idm_bc_emit_u32(module, IDM_OP_REGEX_EXEC, 1u, NULL)) return idm_error_oom(err, core->span);
+        return true;
+    }
+    if (prim == IDM_PRIM_REGEX_SCAN_FROM && core->as.call.arg_count == 3u) {
+        if (!idm_bc_emit_op(module, IDM_OP_REGEX_SCAN, NULL)) return idm_error_oom(err, core->span);
         return true;
     }
     if (core->as.call.arg_count > UINT32_MAX) return idm_error_set(err, core->span, "too many primitive arguments");

@@ -531,6 +531,8 @@ static void gc_trace_object(IdmHeap *heap, IdmObject *obj) {
         for (size_t i = 0; i < obj->as.closure.capture_count; i++) gc_grey_value(heap, obj->as.closure.captures[i]);
     } else if (obj->kind == IDM_OBJ_RECORD) {
         gc_grey_value(heap, obj->as.record.fields);
+    } else if (obj->kind == IDM_OBJ_REGEX_RESULT) {
+        gc_grey_value(heap, idm_regex_result_subject_value(obj->as.regex_result));
     }
 }
 
@@ -1999,11 +2001,12 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
             if (err && err->present) return false;
             heap_account_unlocked(target, dst, idm_regex_footprint(dst->as.regex));
             return true;
-        case IDM_OBJ_REGEX_RESULT:
-            dst->as.regex_result = idm_regex_result_clone(src->as.regex_result);
-            if (!dst->as.regex_result && src->as.regex_result) return idm_error_oom(err, idm_span_unknown(NULL));
+        case IDM_OBJ_REGEX_RESULT: {
+            dst->as.regex_result = idm_regex_result_clone_with_subject(src->as.regex_result, idm_nil(), err);
+            if (!dst->as.regex_result && src->as.regex_result) return false;
             heap_account_unlocked(target, dst, idm_regex_result_footprint(dst->as.regex_result));
             return true;
+        }
     }
     return idm_error_set(err, idm_span_unknown(NULL), "value copy: unknown object kind");
 }
