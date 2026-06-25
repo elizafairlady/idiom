@@ -8,9 +8,8 @@ static bool add_primitive_clause_fn(IdmBytecodeModule *module, IdmPrimitive prim
     return idm_bc_add_primitive_function(module, idm_primitive_name(primitive), idm_primitive_arity(primitive), (uint32_t)primitive, out_index);
 }
 
-static bool emit_call(IdmBytecodeModule *module, uint32_t argc, bool tail) {
-    return idm_bc_emit_u32(module, IDM_OP_CALL, argc, NULL) &&
-           idm_bc_emit(module, tail ? 1u : 0u, NULL);
+static bool emit_call(IdmBytecodeModule *module, uint32_t dst, uint32_t callee, uint32_t first_arg, uint32_t argc, bool tail) {
+    return test_emit_call(module, dst, callee, first_arg, argc, tail);
 }
 
 static IdmCore *primitive_clause_call(IdmPrimitive primitive, IdmSpan span) {
@@ -1190,10 +1189,22 @@ static void test_bytecode_verifier(void) {
     idm_error_init(&err);
     uint32_t main_fn = 0;
     CHECK(idm_bc_add_function(&module, "main", 0, 0, 0, &main_fn));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, 99, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&module, 0, 99));
+    CHECK(test_emit_return(&module, 0));
+    CHECK(idm_bc_set_function_register_count(&module, main_fn, 1));
     CHECK(!idm_bc_verify(&module, &err));
     CHECK(err.present);
+    idm_error_clear(&err);
+    idm_bc_destroy(&module);
+
+    idm_bc_init(&module);
+    CHECK(idm_bc_add_function(&module, "main", 0, 0, 0, &main_fn));
+    CHECK(test_emit_move(&module, 1, 0));
+    CHECK(test_emit_return(&module, 0));
+    CHECK(idm_bc_set_function_register_count(&module, main_fn, 1));
+    CHECK(!idm_bc_verify(&module, &err));
+    CHECK(err.present);
+    CHECK(err.message && strstr(err.message, "MOVE destination register r1 out of bounds"));
     idm_error_clear(&err);
     idm_bc_destroy(&module);
 }
@@ -1214,11 +1225,10 @@ static void test_vm_call_and_locals(void) {
     CHECK(idm_bc_add_function(&module, "add2", 2, 0, 0, &add2));
     CHECK(idm_bc_add_function(&module, "main", 0, 1, 0, &main_fn));
     CHECK(idm_bc_set_function_entry(&module, add2, module.code_count));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, add_prim, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 1, NULL));
-    CHECK(emit_call(&module, 2, false));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_make_closure(&module, 2, add_prim));
+    CHECK(emit_call(&module, 3, 2, 0, 2, false));
+    CHECK(test_emit_return(&module, 3));
+    CHECK(idm_bc_set_function_register_count(&module, add2, 4));
     CHECK(idm_bc_set_function_entry(&module, main_fn, module.code_count));
     uint32_t c20 = 0;
     uint32_t c22 = 0;
@@ -1226,16 +1236,16 @@ static void test_vm_call_and_locals(void) {
     CHECK(idm_bc_add_const(&module, idm_int(20), &c20));
     CHECK(idm_bc_add_const(&module, idm_int(22), &c22));
     CHECK(idm_bc_add_const(&module, idm_int(1), &c1));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, add2, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c20, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c22, NULL));
-    CHECK(emit_call(&module, 2, false));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_STORE_LOCAL, 0, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, sub_prim, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_LOCAL, 0, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c1, NULL));
-    CHECK(emit_call(&module, 2, false));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_make_closure(&module, 1, add2));
+    CHECK(test_emit_load_const(&module, 2, c20));
+    CHECK(test_emit_load_const(&module, 3, c22));
+    CHECK(emit_call(&module, 0, 1, 2, 2, false));
+    CHECK(test_emit_make_closure(&module, 1, sub_prim));
+    CHECK(test_emit_move(&module, 2, 0));
+    CHECK(test_emit_load_const(&module, 3, c1));
+    CHECK(emit_call(&module, 4, 1, 2, 2, false));
+    CHECK(test_emit_return(&module, 4));
+    CHECK(idm_bc_set_function_register_count(&module, main_fn, 5));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -1258,14 +1268,14 @@ static void test_vm_tail_call_reuses_frame(void) {
     CHECK(idm_bc_add_function(&module, "id", 1, 0, 0, &id_fn));
     CHECK(idm_bc_add_function(&module, "main", 0, 0, 0, &main_fn));
     CHECK(idm_bc_set_function_entry(&module, id_fn, module.code_count));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_return(&module, 0));
     CHECK(idm_bc_set_function_entry(&module, main_fn, module.code_count));
     uint32_t c99 = 0;
     CHECK(idm_bc_add_const(&module, idm_int(99), &c99));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, id_fn, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c99, NULL));
-    CHECK(emit_call(&module, 1, true));
+    CHECK(test_emit_make_closure(&module, 0, id_fn));
+    CHECK(test_emit_load_const(&module, 1, c99));
+    CHECK(emit_call(&module, 2, 0, 1, 1, true));
+    CHECK(idm_bc_set_function_register_count(&module, main_fn, 3));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmVmLimits limits = idm_vm_default_limits();
     limits.max_frames = 1;
@@ -1307,25 +1317,30 @@ static void test_vm_guard_error_is_clause_failure(void) {
     CHECK(!err.present);
 
     CHECK(idm_bc_set_function_entry(&module, guard, module.code_count));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, lt_prim, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c0, NULL));
-    CHECK(emit_call(&module, 2, false));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&module, 1, c0));
+    CHECK(test_emit_make_closure(&module, 2, lt_prim));
+    CHECK(emit_call(&module, 3, 2, 0, 2, false));
+    CHECK(test_emit_return(&module, 3));
+    CHECK(idm_bc_set_function_register_count(&module, guard, 4));
     CHECK(idm_bc_set_function_entry(&module, guarded, module.code_count));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c1, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&module, 1, c1));
+    CHECK(test_emit_return(&module, 1));
+    CHECK(idm_bc_set_function_register_count(&module, guarded, 2));
     CHECK(idm_bc_set_function_entry(&module, fallback, module.code_count));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c42, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&module, 1, c42));
+    CHECK(test_emit_return(&module, 1));
+    CHECK(idm_bc_set_function_register_count(&module, fallback, 2));
     CHECK(idm_bc_set_function_entry(&module, main_fn, module.code_count));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_MULTI_CLOSURE, 2, NULL));
+    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_MULTI_CLOSURE, 0, NULL));
+    CHECK(idm_bc_emit(&module, 2, NULL));
+    CHECK(idm_bc_emit(&module, 0, NULL));
     CHECK(idm_bc_emit(&module, 0, NULL));
     CHECK(idm_bc_emit(&module, guarded, NULL));
     CHECK(idm_bc_emit(&module, fallback, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c_bad, NULL));
-    CHECK(emit_call(&module, 1, false));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&module, 1, c_bad));
+    CHECK(emit_call(&module, 2, 0, 1, 1, false));
+    CHECK(test_emit_return(&module, 2));
+    CHECK(idm_bc_set_function_register_count(&module, main_fn, 3));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
 
     IdmValue out = idm_nil();
@@ -1348,8 +1363,9 @@ static void test_bytecode_link_finalizes_after_intern(void) {
     uint32_t main_fn = 0;
     CHECK(idm_bc_add_const(&src, idm_int(7), &c7));
     CHECK(idm_bc_add_function(&src, "main", 0, 0, 0, &main_fn));
-    CHECK(idm_bc_emit_u32(&src, IDM_OP_LOAD_CONST, c7, NULL));
-    CHECK(idm_bc_emit_op(&src, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&src, 0, c7));
+    CHECK(test_emit_return(&src, 0));
+    CHECK(idm_bc_set_function_register_count(&src, main_fn, 1));
     IdmBytecodeModule linked;
     idm_bc_init(&linked);
     uint32_t fn_off = 0;
@@ -1378,8 +1394,9 @@ static void test_stale_closure_selector_fails(void) {
     uint32_t main_fn = 0;
     CHECK(idm_bc_add_const(&module, idm_int(7), &c7));
     CHECK(idm_bc_add_function(&module, "main", 0, 0, 0, &main_fn));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c7, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&module, 0, c7));
+    CHECK(test_emit_return(&module, 0));
+    CHECK(idm_bc_set_function_register_count(&module, main_fn, 1));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue closure = idm_closure_in_module(&rt, &module, main_fn, NULL, 0, rt.main_env, &err);
     CHECK(!err.present);
@@ -1698,7 +1715,8 @@ static void test_core_fn_literal_and_call(void) {
     idm_buf_init(&dis);
     CHECK(idm_bc_disassemble(&dis, &module));
     CHECK(strstr(dis.data, "MAKE_CLOSURE") != NULL);
-    CHECK(strstr(dis.data, "CALL             1 tail=1") != NULL);
+    CHECK(strstr(dis.data, "CALL             r") != NULL);
+    CHECK(strstr(dis.data, "argc=1 tail=1") != NULL);
     CHECK(strstr(dis.data, "direct") == NULL);
     idm_buf_destroy(&dis);
     IdmValue out = idm_nil();
@@ -2098,8 +2116,9 @@ static void test_module_syntax_constant_roundtrip(void) {
     CHECK(idm_bc_add_const(&m1, template_value, &const_index));
     uint32_t fn = 0;
     CHECK(idm_bc_add_function(&m1, "main", 0, 0, 0, &fn));
-    CHECK(idm_bc_emit_u32(&m1, IDM_OP_LOAD_CONST, const_index, NULL));
-    CHECK(idm_bc_emit_op(&m1, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&m1, 0, const_index));
+    CHECK(test_emit_return(&m1, 0));
+    CHECK(idm_bc_set_function_register_count(&m1, fn, 1));
 
     IdmBuffer blob;
     idm_buf_init(&blob);
@@ -2158,8 +2177,9 @@ static void test_string_constant_nul_roundtrip(void) {
     CHECK(idm_bc_add_const(&m1, s, &const_index));
     uint32_t fn = 0;
     CHECK(idm_bc_add_function(&m1, "main", 0, 0, 0, &fn));
-    CHECK(idm_bc_emit_u32(&m1, IDM_OP_LOAD_CONST, const_index, NULL));
-    CHECK(idm_bc_emit_op(&m1, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&m1, 0, const_index));
+    CHECK(test_emit_return(&m1, 0));
+    CHECK(idm_bc_set_function_register_count(&m1, fn, 1));
     IdmBuffer blob;
     idm_buf_init(&blob);
     CHECK(idm_ic_serialize(&m1, &blob, &err));

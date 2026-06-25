@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IDM_IC_VERSION 34u
+#define IDM_IC_VERSION 35u
 
 static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err);
 
@@ -380,6 +380,7 @@ bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t a
     module->functions[index].arity = arity;
     module->functions[index].call_arity = idm_arity_exact(arity);
     module->functions[index].local_count = local_count;
+    module->functions[index].register_count = arity + local_count;
     module->functions[index].entry = entry;
     module->functions[index].has_guard = false;
     module->functions[index].guard_function = UINT32_MAX;
@@ -412,6 +413,7 @@ bool idm_bc_add_primitive_function(IdmBytecodeModule *module, const char *name, 
     module->functions[index].arity = arity.min;
     module->functions[index].call_arity = arity;
     module->functions[index].local_count = 0;
+    module->functions[index].register_count = arity.min;
     module->functions[index].entry = 0;
     module->functions[index].has_guard = false;
     module->functions[index].guard_function = UINT32_MAX;
@@ -432,6 +434,16 @@ bool idm_bc_add_primitive_function(IdmBytecodeModule *module, const char *name, 
 bool idm_bc_set_function_entry(IdmBytecodeModule *module, uint32_t function_index, size_t entry) {
     if (function_index >= module->function_count) return false;
     module->functions[function_index].entry = entry;
+    module_mutated(module);
+    return true;
+}
+
+bool idm_bc_set_function_register_count(IdmBytecodeModule *module, uint32_t function_index, uint32_t register_count) {
+    if (function_index >= module->function_count) return false;
+    IdmBcFunction *fn = &module->functions[function_index];
+    uint32_t minimum = fn->arity + fn->local_count;
+    if (register_count < minimum) register_count = minimum;
+    fn->register_count = register_count;
     module_mutated(module);
     return true;
 }
@@ -515,10 +527,8 @@ bool idm_bc_patch_u32(IdmBytecodeModule *module, size_t operand_offset, uint32_t
 const char *idm_opcode_name(IdmOpcode op) {
     switch (op) {
         case IDM_OP_HALT: return "HALT";
+        case IDM_OP_MOVE: return "MOVE";
         case IDM_OP_LOAD_CONST: return "LOAD_CONST";
-        case IDM_OP_LOAD_ARG: return "LOAD_ARG";
-        case IDM_OP_LOAD_LOCAL: return "LOAD_LOCAL";
-        case IDM_OP_STORE_LOCAL: return "STORE_LOCAL";
         case IDM_OP_LOAD_CAPTURE: return "LOAD_CAPTURE";
         case IDM_OP_MAKE_CELL: return "MAKE_CELL";
         case IDM_OP_LOAD_CELL: return "LOAD_CELL";
@@ -528,7 +538,6 @@ const char *idm_opcode_name(IdmOpcode op) {
         case IDM_OP_MAKE_MULTI_CLOSURE: return "MAKE_MULTI_CLOSURE";
         case IDM_OP_CALL: return "CALL";
         case IDM_OP_RETURN: return "RETURN";
-        case IDM_OP_POP: return "POP";
         case IDM_OP_JUMP: return "JUMP";
         case IDM_OP_JUMP_IF_FALSE: return "JUMP_IF_FALSE";
         case IDM_OP_RECV: return "RECV";
@@ -631,6 +640,14 @@ static bool skip_arity_words(const IdmBytecodeModule *module, size_t *ip, IdmOpc
     return true;
 }
 
+static bool skip_words(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t count, IdmError *err) {
+    uint32_t ignored = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (!verify_operand(module, ip, op, &ignored, err)) return false;
+    }
+    return true;
+}
+
 bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err) {
     if (module->selectors_prepared) return true;
     selectors_clear(module);
@@ -651,19 +668,32 @@ bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err) {
         uint32_t operand = 0;
         switch (op) {
             case IDM_OP_HALT:
+            case IDM_OP_RESCUE_POP:
+            case IDM_OP_POP_PACKAGE_ENV:
+                break;
             case IDM_OP_RETURN:
-            case IDM_OP_POP:
+            case IDM_OP_RAISE:
+            case IDM_OP_LOAD_RAISED:
+                if (!skip_words(module, &ip, op, 1u, err)) return false;
+                break;
+            case IDM_OP_MOVE:
+            case IDM_OP_LOAD_CONST:
+            case IDM_OP_LOAD_CAPTURE:
             case IDM_OP_MAKE_CELL:
             case IDM_OP_LOAD_CELL:
             case IDM_OP_STORE_CELL:
-            case IDM_OP_RESCUE_POP:
-            case IDM_OP_RAISE:
-            case IDM_OP_LOAD_RAISED:
-            case IDM_OP_POP_PACKAGE_ENV:
+            case IDM_OP_LOAD_ENV:
+            case IDM_OP_STORE_ENV:
+            case IDM_OP_JUMP_IF_FALSE:
+                if (!skip_words(module, &ip, op, 2u, err)) return false;
+                break;
             case IDM_OP_LIST_CONS:
             case IDM_OP_LIST_APPEND:
+            case IDM_OP_LOAD_PACKAGE_SLOT:
+                if (!skip_words(module, &ip, op, 3u, err)) return false;
                 break;
             case IDM_OP_DEFINE_TRAIT: {
+                if (!skip_words(module, &ip, op, 2u, err)) return false;
                 uint32_t requirement_count = 0;
                 uint32_t method_count = 0;
                 if (!verify_operand(module, &ip, op, &operand, err) ||
@@ -680,10 +710,8 @@ bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err) {
                 break;
             }
             case IDM_OP_IMPLEMENT_TRAIT: {
+                if (!skip_words(module, &ip, op, 6u, err)) return false;
                 uint32_t method_count = 0;
-                for (size_t i = 0; i < 4u; i++) {
-                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                }
                 if (!verify_operand(module, &ip, op, &method_count, err)) return false;
                 for (uint32_t i = 0; i < method_count; i++) {
                     if (!verify_operand(module, &ip, op, &operand, err) ||
@@ -691,65 +719,53 @@ bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err) {
                 }
                 break;
             }
-            case IDM_OP_CALL_METHOD:
-                for (size_t i = 0; i < 4u; i++) {
-                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                }
-                break;
-            case IDM_OP_LOAD_CONST:
-            case IDM_OP_LOAD_ARG:
-            case IDM_OP_LOAD_LOCAL:
-            case IDM_OP_STORE_LOCAL:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_LOAD_ENV:
-            case IDM_OP_STORE_ENV:
             case IDM_OP_JUMP:
-            case IDM_OP_JUMP_IF_FALSE:
             case IDM_OP_RESCUE_PUSH:
             case IDM_OP_PUSH_PACKAGE_ENV:
-            case IDM_OP_STRING_CONCAT:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
-            case IDM_OP_LOAD_PACKAGE_SLOT:
-                if (!verify_operand(module, &ip, op, &operand, err) ||
-                    !verify_operand(module, &ip, op, &operand, err)) return false;
                 break;
             case IDM_OP_RECV:
-                if (!verify_operand(module, &ip, op, &operand, err) ||
-                    !verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
-            case IDM_OP_MAKE_VALUE_SEQUENCE:
-                if (!verify_operand(module, &ip, op, &operand, err) ||
-                    !verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
-            case IDM_OP_MAKE_SYNTAX:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (!skip_words(module, &ip, op, 5u, err)) return false;
                 break;
             case IDM_OP_MAKE_CLOSURE:
+                if (!skip_words(module, &ip, op, 1u, err)) { selectors_clear(module); return false; }
                 if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
                 if (!selector_site_for_entries(module, offset, &operand, 1u, err)) { selectors_clear(module); return false; }
                 break;
             case IDM_OP_MAKE_CLOSURE_CAPTURES:
+                if (!skip_words(module, &ip, op, 1u, err)) { selectors_clear(module); return false; }
                 if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
                 if (!selector_site_for_entries(module, offset, &operand, 1u, err)) { selectors_clear(module); return false; }
-                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
+                if (!skip_words(module, &ip, op, 2u, err)) { selectors_clear(module); return false; }
                 break;
             case IDM_OP_MAKE_MULTI_CLOSURE: {
+                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
                 uint32_t entry_count = 0;
                 uint32_t capture_count = 0;
                 if (!verify_operand(module, &ip, op, &entry_count, err) ||
-                    !verify_operand(module, &ip, op, &capture_count, err)) { selectors_clear(module); return false; }
+                    !verify_operand(module, &ip, op, &capture_count, err) ||
+                    !verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
                 (void)capture_count;
                 if (ip + entry_count > module->code_count) { selectors_clear(module); return idm_error_set(err, idm_span_unknown(NULL), "MAKE_MULTI_CLOSURE entries out of bounds"); }
                 if (!selector_site_for_entries(module, offset, &module->code[ip], entry_count, err)) { selectors_clear(module); return false; }
                 ip += entry_count;
                 break;
             }
-            case IDM_OP_CALL: {
-                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
-                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
+            case IDM_OP_CALL:
+                if (!skip_words(module, &ip, op, 5u, err)) { selectors_clear(module); return false; }
                 break;
-            }
+            case IDM_OP_CALL_METHOD:
+                if (!skip_words(module, &ip, op, 6u, err)) { selectors_clear(module); return false; }
+                break;
+            case IDM_OP_MAKE_VALUE_SEQUENCE:
+                if (!skip_words(module, &ip, op, 4u, err)) { selectors_clear(module); return false; }
+                break;
+            case IDM_OP_STRING_CONCAT:
+                if (!skip_words(module, &ip, op, 3u, err)) { selectors_clear(module); return false; }
+                break;
+            case IDM_OP_MAKE_SYNTAX:
+                if (!skip_words(module, &ip, op, 4u, err)) { selectors_clear(module); return false; }
+                break;
             default:
                 selectors_clear(module);
                 return idm_error_set(err, idm_span_unknown(NULL), "selector preparation: invalid opcode %u at offset %zu", (unsigned)op, offset);
@@ -767,19 +783,29 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
         uint32_t operand = 0;
         switch (op) {
             case IDM_OP_HALT:
+            case IDM_OP_RESCUE_POP:
+            case IDM_OP_POP_PACKAGE_ENV:
+                break;
             case IDM_OP_RETURN:
-            case IDM_OP_POP:
+            case IDM_OP_RAISE:
+            case IDM_OP_LOAD_RAISED:
+                if (!skip_words(module, &ip, op, 1u, err)) return false;
+                break;
+            case IDM_OP_MOVE:
+            case IDM_OP_LOAD_CAPTURE:
             case IDM_OP_MAKE_CELL:
             case IDM_OP_LOAD_CELL:
             case IDM_OP_STORE_CELL:
-            case IDM_OP_RESCUE_POP:
-            case IDM_OP_RAISE:
-            case IDM_OP_LOAD_RAISED:
-            case IDM_OP_POP_PACKAGE_ENV:
+            case IDM_OP_LOAD_ENV:
+            case IDM_OP_STORE_ENV:
+                if (!skip_words(module, &ip, op, 2u, err)) return false;
+                break;
             case IDM_OP_LIST_CONS:
             case IDM_OP_LIST_APPEND:
+                if (!skip_words(module, &ip, op, 3u, err)) return false;
                 break;
             case IDM_OP_DEFINE_TRAIT: {
+                if (!skip_words(module, &ip, op, 2u, err)) return false;
                 uint32_t trait_const = 0;
                 uint32_t requirement_count = 0;
                 uint32_t method_count = 0;
@@ -804,6 +830,7 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
                 break;
             }
             case IDM_OP_IMPLEMENT_TRAIT: {
+                if (!skip_words(module, &ip, op, 2u, err)) return false;
                 uint32_t trait_const = 0;
                 uint32_t type_const = 0;
                 uint32_t provider_const = 0;
@@ -827,21 +854,27 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
                 break;
             }
             case IDM_OP_CALL_METHOD: {
+                uint32_t dst = 0;
                 uint32_t trait_const = 0;
                 uint32_t method_const = 0;
+                uint32_t first_arg = 0;
                 uint32_t argc = 0;
                 uint32_t tail_flag = 0;
+                if (!verify_operand(module, &ip, op, &dst, err)) return false;
+                (void)dst;
                 if (!verify_operand(module, &ip, op, &trait_const, err)) return false;
                 if (trait_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "CALL_METHOD trait constant %u out of bounds", trait_const);
                 if (!verify_operand(module, &ip, op, &method_const, err)) return false;
                 if (method_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "CALL_METHOD method constant %u out of bounds", method_const);
+                if (!verify_operand(module, &ip, op, &first_arg, err)) return false;
+                (void)first_arg;
                 if (!verify_operand(module, &ip, op, &argc, err)) return false;
-                (void)argc;
                 if (!verify_operand(module, &ip, op, &tail_flag, err)) return false;
                 if (tail_flag > 1u) return idm_error_set(err, idm_span_unknown(NULL), "CALL_METHOD tail flag must be 0 or 1");
                 break;
             }
             case IDM_OP_LOAD_CONST:
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_CONST index %u out of bounds", operand);
                 break;
@@ -851,77 +884,120 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
                 break;
             case IDM_OP_MAKE_CLOSURE:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_CLOSURE function %u out of bounds", operand);
-                break;
-            case IDM_OP_LOAD_ARG:
-            case IDM_OP_LOAD_LOCAL:
-            case IDM_OP_STORE_LOCAL:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_LOAD_ENV:
-            case IDM_OP_STORE_ENV:
-            case IDM_OP_STRING_CONCAT:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (operand >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_CLOSURE function %u out of bounds", operand);
                 break;
             case IDM_OP_LOAD_PACKAGE_SLOT: {
                 uint32_t key_const = 0;
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (!verify_operand(module, &ip, op, &key_const, err)) return false;
                 if (key_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_PACKAGE_SLOT key constant %u out of bounds", key_const);
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 break;
             }
             case IDM_OP_CALL: {
+                uint32_t dst = 0;
+                uint32_t callee = 0;
+                uint32_t first_arg = 0;
                 uint32_t argc = 0;
                 uint32_t tail_flag = 0;
+                if (!verify_operand(module, &ip, op, &dst, err)) return false;
+                if (!verify_operand(module, &ip, op, &callee, err)) return false;
+                if (!verify_operand(module, &ip, op, &first_arg, err)) return false;
+                (void)dst;
+                (void)callee;
+                (void)first_arg;
                 if (!verify_operand(module, &ip, op, &argc, err)) return false;
-                (void)argc;
                 if (!verify_operand(module, &ip, op, &tail_flag, err)) return false;
                 if (tail_flag > 1u) return idm_error_set(err, idm_span_unknown(NULL), "CALL tail flag must be 0 or 1");
                 break;
             }
             case IDM_OP_MAKE_VALUE_SEQUENCE: {
+                uint32_t dst = 0;
                 uint32_t kind = 0;
+                uint32_t first_item = 0;
                 uint32_t count = 0;
+                if (!verify_operand(module, &ip, op, &dst, err)) return false;
+                (void)dst;
                 if (!verify_operand(module, &ip, op, &kind, err)) return false;
                 if (!valid_value_sequence_kind(kind)) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_VALUE_SEQUENCE kind %u is invalid", kind);
+                if (!verify_operand(module, &ip, op, &first_item, err)) return false;
+                (void)first_item;
                 if (!verify_operand(module, &ip, op, &count, err)) return false;
                 (void)count;
                 break;
             }
             case IDM_OP_MAKE_SYNTAX: {
+                uint32_t dst = 0;
                 uint32_t kind = 0;
+                if (!verify_operand(module, &ip, op, &dst, err)) return false;
+                (void)dst;
                 if (!verify_operand(module, &ip, op, &kind, err)) return false;
                 if (!valid_syntax_build_kind(kind)) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_SYNTAX kind %u is invalid", kind);
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 break;
             }
             case IDM_OP_MAKE_MULTI_CLOSURE: {
+                uint32_t dst = 0;
                 uint32_t entry_count = 0;
                 uint32_t capture_count = 0;
+                if (!verify_operand(module, &ip, op, &dst, err)) return false;
+                (void)dst;
                 if (!verify_operand(module, &ip, op, &entry_count, err)) return false;
                 if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_MULTI_CLOSURE requires at least one entry");
                 if (!verify_operand(module, &ip, op, &capture_count, err)) return false;
-                (void)capture_count;
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                (void)operand;
                 for (uint32_t i = 0; i < entry_count; i++) {
                     uint32_t entry = 0;
                     if (!verify_operand(module, &ip, op, &entry, err)) return false;
                     if (entry >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_MULTI_CLOSURE function %u out of bounds", entry);
                 }
+                (void)capture_count;
                 break;
             }
             case IDM_OP_MAKE_CLOSURE_CAPTURES:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_CLOSURE_CAPTURES function %u out of bounds", operand);
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 break;
+            case IDM_OP_STRING_CONCAT: {
+                uint32_t first_item = 0;
+                uint32_t count = 0;
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (!verify_operand(module, &ip, op, &first_item, err)) return false;
+                (void)first_item;
+                if (!verify_operand(module, &ip, op, &count, err)) return false;
+                (void)count;
+                break;
+            }
             case IDM_OP_JUMP:
-            case IDM_OP_JUMP_IF_FALSE:
             case IDM_OP_RESCUE_PUSH:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u out of bounds", idm_opcode_name(op), operand);
                 targets[(*target_count)++] = operand;
                 break;
+            case IDM_OP_JUMP_IF_FALSE:
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                if (operand >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u out of bounds", idm_opcode_name(op), operand);
+                targets[(*target_count)++] = operand;
+                break;
             case IDM_OP_RECV: {
+                uint32_t dst = 0;
+                uint32_t timeout = 0;
+                uint32_t receiver = 0;
                 uint32_t target = 0;
                 uint32_t tail_flag = 0;
+                if (!verify_operand(module, &ip, op, &dst, err)) return false;
+                if (!verify_operand(module, &ip, op, &timeout, err)) return false;
+                if (!verify_operand(module, &ip, op, &receiver, err)) return false;
+                (void)dst;
+                (void)timeout;
+                (void)receiver;
                 if (!verify_operand(module, &ip, op, &target, err)) return false;
                 if (target >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "RECV target %u out of bounds", target);
                 targets[(*target_count)++] = target;
@@ -936,10 +1012,291 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
     return true;
 }
 
+static bool verify_reg(uint32_t register_count, IdmOpcode op, const char *role, uint32_t reg, IdmError *err) {
+    if (reg < register_count) return true;
+    return idm_error_set(err, idm_span_unknown(NULL), "%s %s register r%u out of bounds for %u registers", idm_opcode_name(op), role, reg, register_count);
+}
+
+static bool verify_reg_range(uint32_t register_count, IdmOpcode op, const char *role, uint32_t first, uint32_t count, IdmError *err) {
+    if (count == 0) return true;
+    if (first < register_count && count <= register_count - first) return true;
+    unsigned long long last = (unsigned long long)first + (unsigned long long)count - 1u;
+    return idm_error_set(err, idm_span_unknown(NULL), "%s %s register range r%u..r%llu out of bounds for %u registers", idm_opcode_name(op), role, first, last, register_count);
+}
+
+static bool verify_enqueue_target(const IdmBytecodeModule *module, const unsigned char *is_start, unsigned char *seen, size_t *work, size_t *work_count, uint32_t target, IdmOpcode op, IdmError *err) {
+    if (target >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u out of bounds", idm_opcode_name(op), target);
+    if (!is_start[target]) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u is not an instruction boundary", idm_opcode_name(op), target);
+    if (!seen[target]) {
+        seen[target] = 1u;
+        work[(*work_count)++] = target;
+    }
+    return true;
+}
+
+static bool verify_enqueue_next(const IdmBytecodeModule *module, const unsigned char *is_start, unsigned char *seen, size_t *work, size_t *work_count, size_t next, IdmOpcode op, IdmError *err) {
+    if (next >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s fallthrough is out of bounds", idm_opcode_name(op));
+    if (!is_start[next]) return idm_error_set(err, idm_span_unknown(NULL), "%s fallthrough %zu is not an instruction boundary", idm_opcode_name(op), next);
+    if (!seen[next]) {
+        seen[next] = 1u;
+        work[(*work_count)++] = next;
+    }
+    return true;
+}
+
+static bool verify_enqueue_tail_next(const IdmBytecodeModule *module, const unsigned char *is_start, unsigned char *seen, size_t *work, size_t *work_count, size_t next, IdmOpcode op, IdmError *err) {
+    if (next >= module->code_count) return true;
+    if (!is_start[next]) return idm_error_set(err, idm_span_unknown(NULL), "%s fallthrough %zu is not an instruction boundary", idm_opcode_name(op), next);
+    if (!seen[next]) {
+        seen[next] = 1u;
+        work[(*work_count)++] = next;
+    }
+    return true;
+}
+
+static bool verify_function_registers(const IdmBytecodeModule *module, uint32_t function_index, const unsigned char *is_start, IdmError *err) {
+    const IdmBcFunction *fn = &module->functions[function_index];
+    if (fn->primitive_backed) return true;
+    unsigned char *seen = calloc(module->code_count ? module->code_count : 1u, 1u);
+    size_t *work = malloc((module->code_count ? module->code_count : 1u) * sizeof(*work));
+    if (!seen || !work) {
+        free(seen);
+        free(work);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    size_t work_count = 0;
+    seen[fn->entry] = 1u;
+    work[work_count++] = fn->entry;
+    bool ok = true;
+    while (ok && work_count != 0) {
+        size_t ip = work[--work_count];
+        size_t instr_ip = ip;
+        IdmOpcode op = (IdmOpcode)module->code[ip++];
+        uint32_t a = 0;
+        uint32_t b = 0;
+        uint32_t c = 0;
+        uint32_t d = 0;
+        uint32_t e = 0;
+        switch (op) {
+            case IDM_OP_HALT:
+                break;
+            case IDM_OP_RESCUE_POP:
+            case IDM_OP_POP_PACKAGE_ENV:
+                ok = verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_RETURN:
+            case IDM_OP_RAISE:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_reg(fn->register_count, op, "source", a, err);
+                break;
+            case IDM_OP_LOAD_RAISED:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_MOVE:
+            case IDM_OP_MAKE_CELL:
+            case IDM_OP_LOAD_CELL:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg(fn->register_count, op, "source", b, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_LOAD_CONST:
+            case IDM_OP_LOAD_CAPTURE:
+            case IDM_OP_LOAD_ENV:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_STORE_CELL:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_reg(fn->register_count, op, "cell", a, err) &&
+                     verify_reg(fn->register_count, op, "value", b, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_STORE_ENV:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_reg(fn->register_count, op, "source", b, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_LIST_CONS:
+            case IDM_OP_LIST_APPEND:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg(fn->register_count, op, "head", b, err) &&
+                     verify_reg(fn->register_count, op, "tail", c, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_LOAD_PACKAGE_SLOT:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_JUMP:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_enqueue_target(module, is_start, seen, work, &work_count, a, op, err);
+                break;
+            case IDM_OP_RESCUE_PUSH:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_enqueue_target(module, is_start, seen, work, &work_count, a, op, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_PUSH_PACKAGE_ENV:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_JUMP_IF_FALSE:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_reg(fn->register_count, op, "condition", a, err) &&
+                     verify_enqueue_target(module, is_start, seen, work, &work_count, b, op, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_RECV:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_operand(module, &ip, op, &e, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg(fn->register_count, op, "timeout", b, err) &&
+                     verify_reg(fn->register_count, op, "receiver", c, err) &&
+                     verify_enqueue_target(module, is_start, seen, work, &work_count, d, op, err) &&
+                     (e ? verify_enqueue_tail_next(module, is_start, seen, work, &work_count, ip, op, err) : verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err));
+                break;
+            case IDM_OP_MAKE_CLOSURE:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_MAKE_CLOSURE_CAPTURES:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg_range(fn->register_count, op, "capture", c, d, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_MAKE_MULTI_CLOSURE: {
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg_range(fn->register_count, op, "capture", d, c, err);
+                for (uint32_t i = 0; ok && i < b; i++) ok = verify_operand(module, &ip, op, &e, err);
+                if (ok) ok = verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            }
+            case IDM_OP_CALL:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_operand(module, &ip, op, &e, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg(fn->register_count, op, "callee", b, err) &&
+                     verify_reg_range(fn->register_count, op, "argument", c, d, err) &&
+                     (e ? verify_enqueue_tail_next(module, is_start, seen, work, &work_count, ip, op, err) : verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err));
+                break;
+            case IDM_OP_CALL_METHOD:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_operand(module, &ip, op, &e, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg_range(fn->register_count, op, "argument", d, e, err) &&
+                     (b ? verify_enqueue_tail_next(module, is_start, seen, work, &work_count, ip, op, err) : verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err));
+                break;
+            case IDM_OP_MAKE_VALUE_SEQUENCE:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg_range(fn->register_count, op, "item", c, d, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_MAKE_SYNTAX:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg(fn->register_count, op, "context", c, err) &&
+                     verify_reg(fn->register_count, op, "payload", d, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_STRING_CONCAT:
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg_range(fn->register_count, op, "item", b, c, err) &&
+                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            case IDM_OP_DEFINE_TRAIT: {
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_operand(module, &ip, op, &e, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg_range(fn->register_count, op, "default", b, e, err);
+                for (uint32_t i = 0; ok && i < d; i++) ok = verify_operand(module, &ip, op, &a, err);
+                for (uint32_t i = 0; ok && i < e; i++) {
+                    ok = verify_operand(module, &ip, op, &a, err) &&
+                         skip_arity_words(module, &ip, op, err) &&
+                         verify_operand(module, &ip, op, &b, err);
+                }
+                if (ok) ok = verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            }
+            case IDM_OP_IMPLEMENT_TRAIT: {
+                ok = verify_operand(module, &ip, op, &a, err) &&
+                     verify_operand(module, &ip, op, &b, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_operand(module, &ip, op, &d, err) &&
+                     verify_operand(module, &ip, op, &e, err) &&
+                     skip_words(module, &ip, op, 1u, err) &&
+                     verify_operand(module, &ip, op, &c, err) &&
+                     verify_reg(fn->register_count, op, "destination", a, err) &&
+                     verify_reg_range(fn->register_count, op, "implementation", b, c, err);
+                for (uint32_t i = 0; ok && i < c; i++) {
+                    ok = verify_operand(module, &ip, op, &a, err) &&
+                         skip_arity_words(module, &ip, op, err);
+                }
+                if (ok) ok = verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
+                break;
+            }
+            default:
+                ok = idm_error_set(err, idm_span_unknown(NULL), "invalid opcode %u at offset %zu", (unsigned)op, instr_ip);
+                break;
+        }
+    }
+    free(seen);
+    free(work);
+    return ok;
+}
+
 bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
     if (module->function_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "bytecode module has no functions");
     for (size_t i = 0; i < module->function_count; i++) {
         if (!module->functions[i].primitive_backed && module->functions[i].entry >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu entry is out of bounds", i);
+        if (module->functions[i].register_count < module->functions[i].arity + module->functions[i].local_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu register count is smaller than args plus locals", i);
         if (module->functions[i].has_guard && module->functions[i].guard_function >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard function is out of bounds", i);
         if (module->functions[i].has_guard && !idm_arity_equal(&module->functions[module->functions[i].guard_function].call_arity, &module->functions[i].call_arity)) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard arity mismatch", i);
     }
@@ -955,6 +1312,9 @@ bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
     }
     for (size_t i = 0; ok && i < target_count; i++) {
         if (!is_start[targets[i]]) ok = idm_error_set(err, idm_span_unknown(NULL), "branch target %zu is not an instruction boundary", targets[i]);
+    }
+    for (size_t i = 0; ok && i < module->function_count; i++) {
+        ok = verify_function_registers(module, (uint32_t)i, is_start, err);
     }
     free(is_start);
     free(targets);
@@ -990,7 +1350,7 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
     for (size_t i = 0; i < module->function_count; i++) {
         if (!idm_buf_appendf(buf, "fn %zu %s/", i, module->functions[i].name) ||
             !idm_arity_describe(buf, &module->functions[i].call_arity) ||
-            !idm_buf_appendf(buf, " entry=%zu locals=%u", module->functions[i].entry, module->functions[i].local_count)) return false;
+            !idm_buf_appendf(buf, " entry=%zu locals=%u registers=%u", module->functions[i].entry, module->functions[i].local_count, module->functions[i].register_count)) return false;
         if (module->functions[i].primitive_backed && !idm_buf_appendf(buf, " primitive=%u", module->functions[i].primitive)) return false;
         if (module->functions[i].has_guard) {
             uint32_t guard = module->functions[i].guard_function;
@@ -1006,54 +1366,80 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
         IdmOpcode op = (IdmOpcode)module->code[ip++];
         if (!idm_buf_appendf(buf, "%04zu %-16s", offset, idm_opcode_name(op))) return false;
         switch (op) {
-            case IDM_OP_LOAD_CONST:
-            case IDM_OP_LOAD_ARG:
-            case IDM_OP_LOAD_LOCAL:
-            case IDM_OP_STORE_LOCAL:
+            case IDM_OP_RETURN:
+            case IDM_OP_RAISE:
+            case IDM_OP_LOAD_RAISED:
+                if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u", module->code[ip++])) return false;
+                break;
+            case IDM_OP_MOVE:
             case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_MAKE_CLOSURE:
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-            case IDM_OP_JUMP:
-            case IDM_OP_JUMP_IF_FALSE:
-            case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_MAKE_CELL:
+            case IDM_OP_LOAD_CELL:
+            case IDM_OP_STORE_CELL:
             case IDM_OP_LOAD_ENV:
             case IDM_OP_STORE_ENV:
-            case IDM_OP_STRING_CONCAT:
+                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u r%u", module->code[ip], module->code[ip + 1u])) return false;
+                ip += 2u;
+                break;
+            case IDM_OP_LIST_CONS:
+            case IDM_OP_LIST_APPEND:
+                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u r%u r%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
+                ip += 3u;
+                break;
+            case IDM_OP_LOAD_CONST:
+                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u const=%u", module->code[ip], module->code[ip + 1u])) return false;
+                ip += 2u;
+                break;
+            case IDM_OP_MAKE_CLOSURE:
+                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u", module->code[ip++])) return false;
+                if (!append_function_ref(buf, module, module->code[ip++])) return false;
+                break;
+            case IDM_OP_MAKE_CLOSURE_CAPTURES:
+                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u", module->code[ip++])) return false;
+                if (!append_function_ref(buf, module, module->code[ip++])) return false;
+                if (!idm_buf_appendf(buf, " first=r%u count=%u", module->code[ip], module->code[ip + 1u])) return false;
+                ip += 2u;
+                break;
+            case IDM_OP_JUMP:
+            case IDM_OP_RESCUE_PUSH:
                 if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t operand = module->code[ip++];
-                if (op == IDM_OP_MAKE_CLOSURE || op == IDM_OP_MAKE_CLOSURE_CAPTURES) {
-                    if (!append_function_ref(buf, module, operand)) return false;
-                } else {
-                    if (!idm_buf_appendf(buf, " %u", operand)) return false;
-                }
-                if (op == IDM_OP_MAKE_CLOSURE_CAPTURES) {
-                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
-                }
+                if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
+                break;
+            case IDM_OP_JUMP_IF_FALSE:
+                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u %u", module->code[ip], module->code[ip + 1u])) return false;
+                ip += 2u;
                 break;
             case IDM_OP_LOAD_PACKAGE_SLOT:
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " key=%u slot=%u", module->code[ip], module->code[ip + 1u])) return false;
-                ip += 2u;
+                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u key=%u slot=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
+                ip += 3u;
                 break;
             case IDM_OP_RECV:
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " %u tail=%u", module->code[ip], module->code[ip + 1u])) return false;
-                ip += 2u;
+                if (ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u timeout=r%u receiver=r%u target=%u tail=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u], module->code[ip + 4u])) return false;
+                ip += 5u;
                 break;
             case IDM_OP_MAKE_VALUE_SEQUENCE:
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " kind=%u count=%u", module->code[ip], module->code[ip + 1u])) return false;
-                ip += 2u;
+                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u kind=%u first=r%u count=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u])) return false;
+                ip += 4u;
                 break;
             case IDM_OP_MAKE_SYNTAX:
-                if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " kind=%u", module->code[ip++])) return false;
+                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u kind=%u ctx=r%u payload=r%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u])) return false;
+                ip += 4u;
                 break;
             case IDM_OP_CALL: {
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " %u tail=%u", module->code[ip], module->code[ip + 1u])) return false;
-                ip += 2u;
+                if (ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u callee=r%u first=r%u argc=%u tail=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u], module->code[ip + 4u])) return false;
+                ip += 5u;
                 break;
             }
             case IDM_OP_PUSH_PACKAGE_ENV: {
@@ -1063,10 +1449,12 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 break;
             }
             case IDM_OP_MAKE_MULTI_CLOSURE: {
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                uint32_t dst = module->code[ip++];
                 uint32_t entry_count = module->code[ip++];
                 uint32_t capture_count = module->code[ip++];
-                if (!idm_buf_appendf(buf, " %u %u", entry_count, capture_count)) return false;
+                uint32_t first_capture = module->code[ip++];
+                if (!idm_buf_appendf(buf, " r%u entries=%u first=r%u captures=%u", dst, entry_count, first_capture, capture_count)) return false;
                 for (uint32_t i = 0; i < entry_count; i++) {
                     if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                     if (!append_function_ref(buf, module, module->code[ip++])) return false;
@@ -1074,11 +1462,13 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 break;
             }
             case IDM_OP_DEFINE_TRAIT: {
-                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                uint32_t dst = module->code[ip++];
+                uint32_t first_default = module->code[ip++];
                 uint32_t trait_const = module->code[ip++];
                 uint32_t requirement_count = module->code[ip++];
                 uint32_t method_count = module->code[ip++];
-                if (!idm_buf_appendf(buf, " %u %u %u", trait_const, requirement_count, method_count)) return false;
+                if (!idm_buf_appendf(buf, " r%u first_default=r%u trait=%u requirements=%u methods=%u", dst, first_default, trait_const, requirement_count, method_count)) return false;
                 for (uint32_t i = 0; i < requirement_count; i++) {
                     if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                     if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
@@ -1093,13 +1483,15 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 break;
             }
             case IDM_OP_IMPLEMENT_TRAIT: {
-                if (ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (ip + 7u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                uint32_t dst = module->code[ip++];
+                uint32_t first_impl = module->code[ip++];
                 uint32_t trait_const = module->code[ip++];
                 uint32_t type_const = module->code[ip++];
                 uint32_t provider_const = module->code[ip++];
                 uint32_t provider_key_const = module->code[ip++];
                 uint32_t method_count = module->code[ip++];
-                if (!idm_buf_appendf(buf, " %u %u %u %u %u", trait_const, type_const, provider_const, provider_key_const, method_count)) return false;
+                if (!idm_buf_appendf(buf, " r%u first_impl=r%u trait=%u type=%u provider=%u provider_key=%u methods=%u", dst, first_impl, trait_const, type_const, provider_const, provider_key_const, method_count)) return false;
                 for (uint32_t i = 0; i < method_count; i++) {
                     if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                     if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
@@ -1108,9 +1500,14 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 break;
             }
             case IDM_OP_CALL_METHOD:
-                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " %u %u %u tail=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u])) return false;
-                ip += 4u;
+                if (ip + 6u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u trait=%u method=%u first=r%u argc=%u tail=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u], module->code[ip + 4u], module->code[ip + 5u])) return false;
+                ip += 6u;
+                break;
+            case IDM_OP_STRING_CONCAT:
+                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " r%u first=r%u count=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
+                ip += 3u;
                 break;
             default:
                 break;
@@ -1281,59 +1678,65 @@ static bool serialize_code(IdmBuffer *out, const IdmBytecodeModule *module, IdmE
         IdmOpcode op = (IdmOpcode)module->code[ip++];
         if (!idm_buf_put_u32(out, (uint32_t)op)) return idm_error_oom(err, idm_span_unknown(NULL));
         switch (op) {
+            case IDM_OP_RETURN:
+            case IDM_OP_RAISE:
+            case IDM_OP_LOAD_RAISED:
+            case IDM_OP_JUMP:
+            case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_PUSH_PACKAGE_ENV:
+                if (!serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_MOVE:
             case IDM_OP_LOAD_CONST:
-            case IDM_OP_LOAD_ARG:
-            case IDM_OP_LOAD_LOCAL:
-            case IDM_OP_STORE_LOCAL:
             case IDM_OP_LOAD_CAPTURE:
             case IDM_OP_MAKE_CLOSURE:
-            case IDM_OP_JUMP:
-            case IDM_OP_JUMP_IF_FALSE:
-            case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_MAKE_CELL:
+            case IDM_OP_LOAD_CELL:
+            case IDM_OP_STORE_CELL:
             case IDM_OP_LOAD_ENV:
             case IDM_OP_STORE_ENV:
-            case IDM_OP_PUSH_PACKAGE_ENV:
-            case IDM_OP_STRING_CONCAT:
-                if (!serialize_code_word(out, module, &ip, err)) return false;
+            case IDM_OP_JUMP_IF_FALSE:
+                for (size_t i = 0; i < 2u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
                 break;
+            case IDM_OP_LIST_CONS:
+            case IDM_OP_LIST_APPEND:
             case IDM_OP_LOAD_PACKAGE_SLOT:
-                if (!serialize_code_word(out, module, &ip, err) ||
-                    !serialize_code_word(out, module, &ip, err)) return false;
-                break;
-            case IDM_OP_RECV:
-                if (!serialize_code_word(out, module, &ip, err) ||
-                    !serialize_code_word(out, module, &ip, err)) return false;
+            case IDM_OP_STRING_CONCAT:
+                for (size_t i = 0; i < 3u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
                 break;
             case IDM_OP_MAKE_VALUE_SEQUENCE:
-                if (!serialize_code_word(out, module, &ip, err) ||
-                    !serialize_code_word(out, module, &ip, err)) return false;
-                break;
             case IDM_OP_MAKE_SYNTAX:
-                if (!serialize_code_word(out, module, &ip, err)) return false;
-                break;
             case IDM_OP_MAKE_CLOSURE_CAPTURES:
-                if (!serialize_code_word(out, module, &ip, err) ||
-                    !serialize_code_word(out, module, &ip, err)) return false;
+                for (size_t i = 0; i < 4u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
                 break;
+            case IDM_OP_RECV:
             case IDM_OP_CALL:
-                if (!serialize_code_word(out, module, &ip, err) ||
-                    !serialize_code_word(out, module, &ip, err)) return false;
+                for (size_t i = 0; i < 5u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_CALL_METHOD:
+                for (size_t i = 0; i < 6u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
                 break;
             case IDM_OP_MAKE_MULTI_CLOSURE: {
-                if (ip + 2u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic multi closure");
+                if (ip + 4u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic multi closure");
+                uint32_t dst = module->code[ip++];
                 uint32_t entry_count = module->code[ip++];
                 uint32_t capture_count = module->code[ip++];
-                if (!idm_buf_put_u32(out, entry_count) || !idm_buf_put_u32(out, capture_count)) return idm_error_oom(err, idm_span_unknown(NULL));
+                uint32_t first_capture = module->code[ip++];
+                if (!idm_buf_put_u32(out, dst) ||
+                    !idm_buf_put_u32(out, entry_count) ||
+                    !idm_buf_put_u32(out, capture_count) ||
+                    !idm_buf_put_u32(out, first_capture)) return idm_error_oom(err, idm_span_unknown(NULL));
                 for (uint32_t i = 0; i < entry_count; i++) {
                     if (!serialize_code_word(out, module, &ip, err)) return false;
                 }
+                (void)capture_count;
                 break;
             }
             case IDM_OP_DEFINE_TRAIT: {
-                if (ip + 3u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic trait definition");
-                uint32_t requirement_count = module->code[ip + 1u];
-                uint32_t method_count = module->code[ip + 2u];
-                for (size_t i = 0; i < 3u; i++) {
+                if (ip + 5u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic trait definition");
+                uint32_t requirement_count = module->code[ip + 3u];
+                uint32_t method_count = module->code[ip + 4u];
+                for (size_t i = 0; i < 5u; i++) {
                     if (!serialize_code_word(out, module, &ip, err)) return false;
                 }
                 for (uint32_t i = 0; i < requirement_count; i++) {
@@ -1347,9 +1750,9 @@ static bool serialize_code(IdmBuffer *out, const IdmBytecodeModule *module, IdmE
                 break;
             }
             case IDM_OP_IMPLEMENT_TRAIT: {
-                if (ip + 5u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic trait implementation");
-                uint32_t method_count = module->code[ip + 4u];
-                for (size_t i = 0; i < 5u; i++) {
+                if (ip + 7u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic trait implementation");
+                uint32_t method_count = module->code[ip + 6u];
+                for (size_t i = 0; i < 7u; i++) {
                     if (!serialize_code_word(out, module, &ip, err)) return false;
                 }
                 for (uint32_t i = 0; i < method_count; i++) {
@@ -1358,11 +1761,6 @@ static bool serialize_code(IdmBuffer *out, const IdmBytecodeModule *module, IdmE
                 }
                 break;
             }
-            case IDM_OP_CALL_METHOD:
-                for (size_t i = 0; i < 4u; i++) {
-                    if (!serialize_code_word(out, module, &ip, err)) return false;
-                }
-                break;
             default:
                 break;
         }
@@ -1378,7 +1776,10 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
     for (size_t i = 0; i < module->function_count; i++) {
         const IdmBcFunction *f = &module->functions[i];
         if (!idm_buf_put_str(out, f->name ? f->name : "", f->name ? strlen(f->name) : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
-        if (!idm_buf_put_u32(out, f->arity) || !idm_buf_put_u32(out, f->local_count) || !idm_buf_put_u64(out, (uint64_t)f->entry)) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (!idm_buf_put_u32(out, f->arity) ||
+            !idm_buf_put_u32(out, f->local_count) ||
+            !idm_buf_put_u32(out, f->register_count) ||
+            !idm_buf_put_u64(out, (uint64_t)f->entry)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!idm_buf_put_u8(out, f->has_guard ? 1u : 0u) || !idm_buf_put_u32(out, f->guard_function)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!put_serialized_arity(out, f->call_arity) ||
             !idm_buf_put_u8(out, f->primitive_backed ? 1u : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1673,61 +2074,70 @@ static bool deserialize_code(IdmBytecodeModule *module, IdmByteReader *r, uint64
         IdmOpcode op = (IdmOpcode)raw_op;
         if (!idm_bc_emit(module, raw_op, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
         switch (op) {
+            case IDM_OP_RETURN:
+            case IDM_OP_RAISE:
+            case IDM_OP_LOAD_RAISED:
+            case IDM_OP_JUMP:
+            case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_PUSH_PACKAGE_ENV:
+                if (!deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_MOVE:
             case IDM_OP_LOAD_CONST:
-            case IDM_OP_LOAD_ARG:
-            case IDM_OP_LOAD_LOCAL:
-            case IDM_OP_STORE_LOCAL:
             case IDM_OP_LOAD_CAPTURE:
             case IDM_OP_MAKE_CLOSURE:
-            case IDM_OP_JUMP:
-            case IDM_OP_JUMP_IF_FALSE:
-            case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_MAKE_CELL:
+            case IDM_OP_LOAD_CELL:
+            case IDM_OP_STORE_CELL:
             case IDM_OP_LOAD_ENV:
             case IDM_OP_STORE_ENV:
-            case IDM_OP_PUSH_PACKAGE_ENV:
-            case IDM_OP_STRING_CONCAT:
-                if (!deserialize_code_word(module, r, err)) return false;
+            case IDM_OP_JUMP_IF_FALSE:
+                for (size_t i = 0; i < 2u; i++) if (!deserialize_code_word(module, r, err)) return false;
                 break;
+            case IDM_OP_LIST_CONS:
+            case IDM_OP_LIST_APPEND:
             case IDM_OP_LOAD_PACKAGE_SLOT:
-                if (!deserialize_code_word(module, r, err) ||
-                    !deserialize_code_word(module, r, err)) return false;
-                break;
-            case IDM_OP_RECV:
-                if (!deserialize_code_word(module, r, err) ||
-                    !deserialize_code_word(module, r, err)) return false;
+            case IDM_OP_STRING_CONCAT:
+                for (size_t i = 0; i < 3u; i++) if (!deserialize_code_word(module, r, err)) return false;
                 break;
             case IDM_OP_MAKE_VALUE_SEQUENCE:
-                if (!deserialize_code_word(module, r, err) ||
-                    !deserialize_code_word(module, r, err)) return false;
-                break;
             case IDM_OP_MAKE_SYNTAX:
-                if (!deserialize_code_word(module, r, err)) return false;
-                break;
             case IDM_OP_MAKE_CLOSURE_CAPTURES:
-                if (!deserialize_code_word(module, r, err) ||
-                    !deserialize_code_word(module, r, err)) return false;
+                for (size_t i = 0; i < 4u; i++) if (!deserialize_code_word(module, r, err)) return false;
                 break;
+            case IDM_OP_RECV:
             case IDM_OP_CALL:
-                if (!deserialize_code_word(module, r, err) ||
-                    !deserialize_code_word(module, r, err)) return false;
+                for (size_t i = 0; i < 5u; i++) if (!deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_CALL_METHOD:
+                for (size_t i = 0; i < 6u; i++) if (!deserialize_code_word(module, r, err)) return false;
                 break;
             case IDM_OP_MAKE_MULTI_CLOSURE: {
+                uint32_t dst = idm_rd_u32(r);
                 uint32_t entry_count = idm_rd_u32(r);
                 uint32_t capture_count = idm_rd_u32(r);
+                uint32_t first_capture = idm_rd_u32(r);
                 if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic multi closure");
-                if (!idm_bc_emit(module, entry_count, NULL) ||
-                    !idm_bc_emit(module, capture_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                if (!idm_bc_emit(module, dst, NULL) ||
+                    !idm_bc_emit(module, entry_count, NULL) ||
+                    !idm_bc_emit(module, capture_count, NULL) ||
+                    !idm_bc_emit(module, first_capture, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 for (uint32_t i = 0; i < entry_count; i++) {
                     if (!deserialize_code_word(module, r, err)) return false;
                 }
+                (void)capture_count;
                 break;
             }
             case IDM_OP_DEFINE_TRAIT: {
+                uint32_t dst = idm_rd_u32(r);
+                uint32_t first_default = idm_rd_u32(r);
                 uint32_t trait_const = idm_rd_u32(r);
                 uint32_t requirement_count = idm_rd_u32(r);
                 uint32_t method_count = idm_rd_u32(r);
                 if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic trait definition");
-                if (!idm_bc_emit(module, trait_const, NULL) ||
+                if (!idm_bc_emit(module, dst, NULL) ||
+                    !idm_bc_emit(module, first_default, NULL) ||
+                    !idm_bc_emit(module, trait_const, NULL) ||
                     !idm_bc_emit(module, requirement_count, NULL) ||
                     !idm_bc_emit(module, method_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 for (uint32_t i = 0; i < requirement_count; i++) {
@@ -1741,13 +2151,17 @@ static bool deserialize_code(IdmBytecodeModule *module, IdmByteReader *r, uint64
                 break;
             }
             case IDM_OP_IMPLEMENT_TRAIT: {
+                uint32_t dst = idm_rd_u32(r);
+                uint32_t first_impl = idm_rd_u32(r);
                 uint32_t trait_const = idm_rd_u32(r);
                 uint32_t type_const = idm_rd_u32(r);
                 uint32_t provider_const = idm_rd_u32(r);
                 uint32_t provider_key_const = idm_rd_u32(r);
                 uint32_t method_count = idm_rd_u32(r);
                 if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic trait implementation");
-                if (!idm_bc_emit(module, trait_const, NULL) ||
+                if (!idm_bc_emit(module, dst, NULL) ||
+                    !idm_bc_emit(module, first_impl, NULL) ||
+                    !idm_bc_emit(module, trait_const, NULL) ||
                     !idm_bc_emit(module, type_const, NULL) ||
                     !idm_bc_emit(module, provider_const, NULL) ||
                     !idm_bc_emit(module, provider_key_const, NULL) ||
@@ -1758,11 +2172,6 @@ static bool deserialize_code(IdmBytecodeModule *module, IdmByteReader *r, uint64
                 }
                 break;
             }
-            case IDM_OP_CALL_METHOD:
-                for (size_t i = 0; i < 4u; i++) {
-                    if (!deserialize_code_word(module, r, err)) return false;
-                }
-                break;
             default:
                 break;
         }
@@ -1797,6 +2206,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
         if (!name) { free(deferred_guards); idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "truncated function name"); }
         uint32_t arity = idm_rd_u32(&r);
         uint32_t local_count = idm_rd_u32(&r);
+        uint32_t register_count = idm_rd_u32(&r);
         uint64_t entry = idm_rd_u64(&r);
         uint8_t has_guard = idm_rd_u8(&r);
         uint32_t guard_function = idm_rd_u32(&r);
@@ -1830,6 +2240,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
             : idm_bc_add_function(module, name, arity, local_count, (size_t)entry, &idx);
         if (!r.ok || !added) { free(name); free(deferred_guards); idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic function"); }
         module->functions[idx].call_arity = call_arity;
+        module->functions[idx].register_count = register_count;
         free(name);
         if (has_guard) deferred_guards[idx] = guard_function;
         uint32_t pattern_count = idm_rd_u32(&r);
@@ -1931,18 +2342,45 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
         IdmOpcode op = (IdmOpcode)src->code[ip++];
         if (!idm_bc_emit(dst, (uint32_t)op, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
         switch (op) {
-            case IDM_OP_HALT: case IDM_OP_RETURN: case IDM_OP_POP: case IDM_OP_MAKE_CELL: case IDM_OP_LOAD_CELL:
-            case IDM_OP_STORE_CELL:
-            case IDM_OP_RESCUE_POP: case IDM_OP_RAISE: case IDM_OP_LOAD_RAISED:
+            case IDM_OP_HALT:
+            case IDM_OP_RESCUE_POP:
             case IDM_OP_POP_PACKAGE_ENV:
+                break;
+            case IDM_OP_RETURN:
+            case IDM_OP_RAISE:
+            case IDM_OP_LOAD_RAISED:
+                if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case IDM_OP_PUSH_PACKAGE_ENV:
+                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case IDM_OP_MOVE:
+            case IDM_OP_LOAD_CAPTURE:
+            case IDM_OP_MAKE_CELL:
+            case IDM_OP_LOAD_CELL:
+            case IDM_OP_STORE_CELL:
+            case IDM_OP_LOAD_ENV:
+            case IDM_OP_STORE_ENV:
+            case IDM_OP_CALL:
+                for (size_t i = 0; i < (op == IDM_OP_CALL ? 5u : 2u); i++) {
+                    if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                }
+                break;
             case IDM_OP_LIST_CONS:
             case IDM_OP_LIST_APPEND:
+            case IDM_OP_STRING_CONCAT:
+                for (size_t i = 0; i < 3u; i++) {
+                    if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                }
                 break;
             case IDM_OP_DEFINE_TRAIT: {
+                uint32_t dst_reg = src->code[ip++];
+                uint32_t first_default = src->code[ip++];
                 uint32_t trait_const = src->code[ip++];
                 uint32_t requirement_count = src->code[ip++];
                 uint32_t method_count = src->code[ip++];
-                if (!idm_bc_emit(dst, trait_const + const_off, NULL) || !idm_bc_emit(dst, requirement_count, NULL) ||
+                if (!idm_bc_emit(dst, dst_reg, NULL) || !idm_bc_emit(dst, first_default, NULL) ||
+                    !idm_bc_emit(dst, trait_const + const_off, NULL) || !idm_bc_emit(dst, requirement_count, NULL) ||
                     !idm_bc_emit(dst, method_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 for (uint32_t i = 0; i < requirement_count; i++) {
                     uint32_t requirement_const = src->code[ip++];
@@ -1957,12 +2395,15 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
                 break;
             }
             case IDM_OP_IMPLEMENT_TRAIT: {
+                uint32_t dst_reg = src->code[ip++];
+                uint32_t first_impl = src->code[ip++];
                 uint32_t trait_const = src->code[ip++];
                 uint32_t type_const = src->code[ip++];
                 uint32_t provider_const = src->code[ip++];
                 uint32_t provider_key_const = src->code[ip++];
                 uint32_t method_count = src->code[ip++];
-                if (!idm_bc_emit(dst, trait_const + const_off, NULL) || !idm_bc_emit(dst, type_const + const_off, NULL) ||
+                if (!idm_bc_emit(dst, dst_reg, NULL) || !idm_bc_emit(dst, first_impl, NULL) ||
+                    !idm_bc_emit(dst, trait_const + const_off, NULL) || !idm_bc_emit(dst, type_const + const_off, NULL) ||
                     !idm_bc_emit(dst, provider_const + const_off, NULL) || !idm_bc_emit(dst, provider_key_const + const_off, NULL) ||
                     !idm_bc_emit(dst, method_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 for (uint32_t i = 0; i < method_count; i++) {
@@ -1972,56 +2413,62 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
                 break;
             }
             case IDM_OP_CALL_METHOD:
-                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
+                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
                     !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
                     !idm_bc_emit(dst, src->code[ip++], NULL) ||
                     !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             case IDM_OP_LOAD_CONST:
-                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             case IDM_OP_LOAD_PACKAGE_SLOT:
-                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
+                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
                     !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_PUSH_PACKAGE_ENV:
-                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             case IDM_OP_MAKE_CLOSURE:
-                if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_LOAD_ARG: case IDM_OP_LOAD_LOCAL: case IDM_OP_STORE_LOCAL: case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_LOAD_ENV: case IDM_OP_STORE_ENV: case IDM_OP_STRING_CONCAT:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_CALL: {
                 if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case IDM_OP_MAKE_CLOSURE_CAPTURES:
+                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++] + fn_off, NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
                     !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
-            }
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-                if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL) || !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
             case IDM_OP_MAKE_MULTI_CLOSURE: {
+                uint32_t dst_reg = src->code[ip++];
                 uint32_t entry_count = src->code[ip++];
                 uint32_t capture_count = src->code[ip++];
-                if (!idm_bc_emit(dst, entry_count, NULL) || !idm_bc_emit(dst, capture_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                uint32_t first_capture = src->code[ip++];
+                if (!idm_bc_emit(dst, dst_reg, NULL) || !idm_bc_emit(dst, entry_count, NULL) ||
+                    !idm_bc_emit(dst, capture_count, NULL) || !idm_bc_emit(dst, first_capture, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 for (uint32_t i = 0; i < entry_count; i++) if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             }
-            case IDM_OP_JUMP: case IDM_OP_JUMP_IF_FALSE: case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_JUMP:
+            case IDM_OP_RESCUE_PUSH:
                 if (!idm_bc_emit(dst, src->code[ip++] + code_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
+            case IDM_OP_JUMP_IF_FALSE:
+                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++] + code_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
             case IDM_OP_RECV:
-                if (!idm_bc_emit(dst, src->code[ip++] + code_off, NULL) ||
+                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++] + code_off, NULL) ||
                     !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             case IDM_OP_MAKE_VALUE_SEQUENCE:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
             case IDM_OP_MAKE_SYNTAX:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (size_t i = 0; i < 4u; i++) {
+                    if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                }
                 break;
             default:
                 return idm_error_set(err, idm_span_unknown(NULL), "relocation: invalid opcode %u", (unsigned)op);
@@ -2073,6 +2520,7 @@ bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t 
             : idm_bc_add_function(dst, sf->name, sf->arity, sf->local_count, sf->entry + code_off, &nf);
         if (!added) return idm_error_oom(err, idm_span_unknown(NULL));
         dst->functions[nf].call_arity = sf->call_arity;
+        dst->functions[nf].register_count = sf->register_count;
         if (sf->pattern_count != 0) {
             IdmPattern **clones = malloc((size_t)sf->pattern_count * sizeof(*clones));
             if (!clones) return idm_error_oom(err, idm_span_unknown(NULL));

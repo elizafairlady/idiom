@@ -8,7 +8,7 @@ typedef struct IdmActor IdmActor;
 typedef struct IdmExec IdmExec;
 
 typedef struct {
-    size_t max_stack;
+    size_t max_registers;
     size_t max_frames;
 } IdmVmLimits;
 

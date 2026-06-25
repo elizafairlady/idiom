@@ -261,8 +261,9 @@ static void test_stale_cache_runs_no_phase_init(void) {
     uint32_t nil_const = 0;
     CHECK(idm_bc_add_const(art.module, idm_nil(), &nil_const));
     CHECK(idm_bc_add_function(art.module, "init", 0, 0, 0, &art.init_fn));
-    CHECK(idm_bc_emit_u32(art.module, IDM_OP_LOAD_CONST, nil_const, NULL));
-    CHECK(idm_bc_emit_op(art.module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(art.module, 0, nil_const));
+    CHECK(test_emit_return(art.module, 0));
+    CHECK(idm_bc_set_function_register_count(art.module, art.init_fn, 1));
 
     IdmEnv *phase_runtime_env = idm_fresh_phase_runtime_env(&rt, &err);
     CHECK(phase_runtime_env != NULL && !err.present);
@@ -280,12 +281,12 @@ static void test_stale_cache_runs_no_phase_init(void) {
     CHECK(idm_bc_add_primitive_function(phase, idm_primitive_name(IDM_PRIM_FILE_WRITE), idm_primitive_arity(IDM_PRIM_FILE_WRITE), (uint32_t)IDM_PRIM_FILE_WRITE, &file_write_fn));
     uint32_t phase_fn = 0;
     CHECK(idm_bc_add_function(phase, "phase-init", 0, 0, 0, &phase_fn));
-    CHECK(idm_bc_emit_u32(phase, IDM_OP_MAKE_CLOSURE, file_write_fn, NULL));
-    CHECK(idm_bc_emit_u32(phase, IDM_OP_LOAD_CONST, path_const, NULL));
-    CHECK(idm_bc_emit_u32(phase, IDM_OP_LOAD_CONST, text_const, NULL));
-    CHECK(idm_bc_emit_u32(phase, IDM_OP_CALL, 2u, NULL));
-    CHECK(idm_bc_emit(phase, 0u, NULL));
-    CHECK(idm_bc_emit_op(phase, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_make_closure(phase, 0, file_write_fn));
+    CHECK(test_emit_load_const(phase, 1, path_const));
+    CHECK(test_emit_load_const(phase, 2, text_const));
+    CHECK(test_emit_call(phase, 3, 0, 1, 2, false));
+    CHECK(test_emit_return(phase, 3));
+    CHECK(idm_bc_set_function_register_count(phase, phase_fn, 4));
     CHECK(idm_bc_intern_literals(&rt, phase, &err));
     CHECK(idm_phase_env_add_module(art.phase_env, phase, phase_fn, &err));
 
@@ -407,8 +408,9 @@ static void test_read_set_roundtrip(void) {
     uint32_t nil_const = 0;
     CHECK(idm_bc_add_const(art.module, idm_nil(), &nil_const));
     CHECK(idm_bc_add_function(art.module, "init", 0, 0, 0, &art.init_fn));
-    CHECK(idm_bc_emit_u32(art.module, IDM_OP_LOAD_CONST, nil_const, NULL));
-    CHECK(idm_bc_emit_op(art.module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(art.module, 0, nil_const));
+    CHECK(test_emit_return(art.module, 0));
+    CHECK(idm_bc_set_function_register_count(art.module, art.init_fn, 1));
     art.deps = calloc(4u, sizeof(*art.deps));
     CHECK(art.deps != NULL);
     art.dep_count = 4u;
@@ -489,8 +491,9 @@ static void test_phase_env_rejects_prepared_uninterned_module(void) {
     uint32_t main_fn = 0;
     CHECK(idm_bc_add_const(module, idm_int(1), &c1));
     CHECK(idm_bc_add_function(module, "phase", 0, 0, 0, &main_fn));
-    CHECK(idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, c1, NULL));
-    CHECK(idm_bc_emit_op(module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(module, 0, c1));
+    CHECK(test_emit_return(module, 0));
+    CHECK(idm_bc_set_function_register_count(module, main_fn, 1));
     CHECK(idm_bc_prepare_selectors(module, &err));
     CHECK(!idm_phase_env_add_module(env, module, main_fn, &err));
     CHECK(err.present && err.message && strstr(err.message, "finalized") != NULL);

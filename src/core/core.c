@@ -811,7 +811,27 @@ typedef struct {
     size_t capture_count;
 } CompiledCallable;
 
-static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err);
+typedef struct {
+    IdmBytecodeModule *module;
+    uint32_t function_index;
+    uint32_t arity;
+    uint32_t local_count;
+    uint32_t next_reg;
+    uint32_t max_reg;
+} CompileCtx;
+
+static bool compile_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail, IdmError *err);
+static bool emit_op1(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, size_t *out_offset);
+static bool emit_op2(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, size_t *out_offset);
+static bool emit_op3(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, uint32_t c, size_t *out_offset);
+static bool emit_op4(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, uint32_t c, uint32_t d, size_t *out_offset);
+static bool emit_op5(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, size_t *out_offset);
+static bool emit_op6(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t f, size_t *out_offset);
+static uint32_t ctx_alloc(CompileCtx *ctx);
+static uint32_t ctx_alloc_range(CompileCtx *ctx, uint32_t count);
+static uint32_t ctx_mark(const CompileCtx *ctx);
+static void ctx_reset(CompileCtx *ctx, uint32_t mark);
+static uint32_t ctx_local_reg(const CompileCtx *ctx, uint32_t slot);
 
 static uint32_t core_max_local_plus_one(IdmCore *core) {
     if (!core) return 0;
@@ -1245,6 +1265,7 @@ static void mark_celled(IdmCore *core, const bool *celled, uint32_t lc, const Id
 
 static bool compile_function_code(IdmBytecodeModule *module, uint32_t function_index, IdmCore *body, IdmError *err, IdmSpan span, const IdmCapture *captures, size_t capture_count) {
     if (!idm_bc_set_function_entry(module, function_index, module->code_count)) return idm_error_set(err, span, "failed to set function entry");
+    uint32_t arity = module->functions[function_index].arity;
     uint32_t lc = module->functions[function_index].local_count;
     bool *celled = NULL;
     if (lc > 0) {
@@ -1254,8 +1275,17 @@ static bool compile_function_code(IdmBytecodeModule *module, uint32_t function_i
     }
     mark_celled(body, celled, lc, captures, capture_count);
     free(celled);
-    if (!compile_expr(body, module, true, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_RETURN, NULL)) return idm_error_oom(err, span);
+    CompileCtx ctx;
+    ctx.module = module;
+    ctx.function_index = function_index;
+    ctx.arity = arity;
+    ctx.local_count = lc;
+    ctx.next_reg = arity + lc;
+    ctx.max_reg = ctx.next_reg;
+    uint32_t result = ctx_alloc(&ctx);
+    if (!compile_expr(body, &ctx, result, true, err)) return false;
+    if (!emit_op1(module, IDM_OP_RETURN, result, NULL)) return idm_error_oom(err, span);
+    if (!idm_bc_set_function_register_count(module, function_index, ctx.max_reg)) return idm_error_set(err, span, "failed to set function register count");
     return true;
 }
 
@@ -1608,33 +1638,103 @@ const char *idm_primitive_name(IdmPrimitive primitive) {
     return "<bad-primitive>";
 }
 
-static bool emit_named_u32(IdmBytecodeModule *module, IdmOpcode op, uint32_t operand, const char *name, IdmError *err, IdmSpan span) {
+static bool emit_op1(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, size_t *out_offset) {
+    return idm_bc_emit_u32(module, op, a, out_offset);
+}
+
+static bool emit_op2(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, size_t *out_offset) {
     size_t op_offset = 0;
-    if (!idm_bc_emit_u32(module, op, operand, &op_offset)) return idm_error_oom(err, span);
+    if (!idm_bc_emit_u32(module, op, a, &op_offset)) return false;
+    if (!idm_bc_emit(module, b, NULL)) return false;
+    if (out_offset) *out_offset = op_offset;
+    return true;
+}
+
+static bool emit_op3(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, uint32_t c, size_t *out_offset) {
+    size_t op_offset = 0;
+    if (!emit_op2(module, op, a, b, &op_offset)) return false;
+    if (!idm_bc_emit(module, c, NULL)) return false;
+    if (out_offset) *out_offset = op_offset;
+    return true;
+}
+
+static bool emit_op4(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, uint32_t c, uint32_t d, size_t *out_offset) {
+    size_t op_offset = 0;
+    if (!emit_op3(module, op, a, b, c, &op_offset)) return false;
+    if (!idm_bc_emit(module, d, NULL)) return false;
+    if (out_offset) *out_offset = op_offset;
+    return true;
+}
+
+static bool emit_op5(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, size_t *out_offset) {
+    size_t op_offset = 0;
+    if (!emit_op4(module, op, a, b, c, d, &op_offset)) return false;
+    if (!idm_bc_emit(module, e, NULL)) return false;
+    if (out_offset) *out_offset = op_offset;
+    return true;
+}
+
+static bool emit_op6(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t f, size_t *out_offset) {
+    size_t op_offset = 0;
+    if (!emit_op5(module, op, a, b, c, d, e, &op_offset)) return false;
+    if (!idm_bc_emit(module, f, NULL)) return false;
+    if (out_offset) *out_offset = op_offset;
+    return true;
+}
+
+static uint32_t ctx_alloc(CompileCtx *ctx) {
+    uint32_t reg = ctx->next_reg++;
+    if (ctx->next_reg > ctx->max_reg) ctx->max_reg = ctx->next_reg;
+    return reg;
+}
+
+static uint32_t ctx_alloc_range(CompileCtx *ctx, uint32_t count) {
+    if (count == 0) return 0;
+    uint32_t first = ctx->next_reg;
+    ctx->next_reg += count;
+    if (ctx->next_reg > ctx->max_reg) ctx->max_reg = ctx->next_reg;
+    return first;
+}
+
+static uint32_t ctx_mark(const CompileCtx *ctx) {
+    return ctx->next_reg;
+}
+
+static void ctx_reset(CompileCtx *ctx, uint32_t mark) {
+    if (mark >= ctx->arity + ctx->local_count && mark <= ctx->next_reg) ctx->next_reg = mark;
+}
+
+static uint32_t ctx_local_reg(const CompileCtx *ctx, uint32_t slot) {
+    return ctx->arity + slot;
+}
+
+static bool emit_named_op2(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, uint32_t b, const char *name, IdmError *err, IdmSpan span) {
+    size_t op_offset = 0;
+    if (!emit_op2(module, op, a, b, &op_offset)) return idm_error_oom(err, span);
     if (!idm_bc_note_name(module, op_offset, name)) return idm_error_oom(err, span);
     return true;
 }
 
 static bool add_const_value(IdmBytecodeModule *module, IdmValue value, uint32_t *out_index, IdmError *err, IdmSpan span);
 
-static bool emit_capture_load(IdmBytecodeModule *module, IdmCapture cap, IdmError *err, IdmSpan span) {
+static bool emit_capture_load(CompileCtx *ctx, IdmCapture cap, uint32_t dst, IdmError *err, IdmSpan span) {
     switch (cap.kind) {
         case IDM_CAP_LOCAL:
-            return emit_named_u32(module, IDM_OP_LOAD_LOCAL, cap.index, cap.name, err, span);
+            return emit_named_op2(ctx->module, IDM_OP_MOVE, dst, ctx_local_reg(ctx, cap.index), cap.name, err, span);
         case IDM_CAP_ARG:
-            if (!emit_named_u32(module, IDM_OP_LOAD_ARG, cap.index, cap.name, err, span)) return false;
-            if (cap.celled && !idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, span);
+            if (!emit_named_op2(ctx->module, IDM_OP_MOVE, dst, cap.index, cap.name, err, span)) return false;
+            if (cap.celled && !emit_op2(ctx->module, IDM_OP_MAKE_CELL, dst, dst, NULL)) return idm_error_oom(err, span);
             return true;
         case IDM_CAP_UPVALUE:
-            return emit_named_u32(module, IDM_OP_LOAD_CAPTURE, cap.index, cap.name, err, span);
+            return emit_named_op2(ctx->module, IDM_OP_LOAD_CAPTURE, dst, cap.index, cap.name, err, span);
     }
     return idm_error_set(err, span, "invalid capture kind");
 }
 
-static bool emit_load_value(IdmBytecodeModule *module, IdmValue value, IdmError *err, IdmSpan span) {
+static bool emit_load_value(CompileCtx *ctx, uint32_t dst, IdmValue value, IdmError *err, IdmSpan span) {
     uint32_t index = 0;
-    if (!idm_bc_add_const(module, value, &index)) return idm_error_oom(err, span);
-    if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, index, NULL)) return idm_error_oom(err, span);
+    if (!idm_bc_add_const(ctx->module, value, &index)) return idm_error_oom(err, span);
+    if (!emit_op2(ctx->module, IDM_OP_LOAD_CONST, dst, index, NULL)) return idm_error_oom(err, span);
     return true;
 }
 
@@ -1746,40 +1846,37 @@ static bool compile_callable_bodies(IdmCore *fn, const CompiledCallable *callabl
     return true;
 }
 
-static bool emit_callable_captures(IdmBytecodeModule *module, const CompiledCallable *callable, IdmError *err, IdmSpan span) {
+static bool emit_callable_closure(CompileCtx *ctx, const CompiledCallable *callable, uint32_t dst, IdmError *err, IdmSpan span) {
+    if (callable->capture_count > UINT32_MAX || callable->count > UINT32_MAX) return idm_error_set(err, span, "function literal is too large");
+    uint32_t first_capture = ctx_alloc_range(ctx, (uint32_t)callable->capture_count);
     for (size_t i = 0; i < callable->capture_count; i++) {
-        if (!emit_capture_load(module, callable->captures[i], err, span)) return false;
+        if (!emit_capture_load(ctx, callable->captures[i], first_capture + (uint32_t)i, err, span)) return false;
     }
-    return true;
-}
-
-static bool emit_callable_closure(IdmBytecodeModule *module, const CompiledCallable *callable, IdmError *err, IdmSpan span) {
-    if (!emit_callable_captures(module, callable, err, span)) return false;
     if (callable->count == 1u) {
         if (callable->capture_count == 0) {
-            if (!idm_bc_emit_u32(module, IDM_OP_MAKE_CLOSURE, callable->entries[0], NULL)) return idm_error_oom(err, span);
-        } else {
-            if (!idm_bc_emit_u32(module, IDM_OP_MAKE_CLOSURE_CAPTURES, callable->entries[0], NULL)) return idm_error_oom(err, span);
-            if (!idm_bc_emit(module, (uint32_t)callable->capture_count, NULL)) return idm_error_oom(err, span);
+            if (!emit_op2(ctx->module, IDM_OP_MAKE_CLOSURE, dst, callable->entries[0], NULL)) return idm_error_oom(err, span);
+        } else if (!emit_op4(ctx->module, IDM_OP_MAKE_CLOSURE_CAPTURES, dst, callable->entries[0], first_capture, (uint32_t)callable->capture_count, NULL)) {
+            return idm_error_oom(err, span);
         }
         return true;
     }
-    if (!idm_bc_emit_u32(module, IDM_OP_MAKE_MULTI_CLOSURE, (uint32_t)callable->count, NULL)) return idm_error_oom(err, span);
-    if (!idm_bc_emit(module, (uint32_t)callable->capture_count, NULL)) return idm_error_oom(err, span);
+    size_t op_offset = 0;
+    if (!emit_op4(ctx->module, IDM_OP_MAKE_MULTI_CLOSURE, dst, (uint32_t)callable->count, (uint32_t)callable->capture_count, first_capture, &op_offset)) return idm_error_oom(err, span);
+    (void)op_offset;
     for (size_t i = 0; i < callable->count; i++) {
-        if (!idm_bc_emit(module, callable->entries[i], NULL)) return idm_error_oom(err, span);
+        if (!idm_bc_emit(ctx->module, callable->entries[i], NULL)) return idm_error_oom(err, span);
     }
     return true;
 }
 
-static bool compile_callable_literal(IdmCore *fn, IdmBytecodeModule *module, IdmError *err) {
+static bool compile_callable_literal(IdmCore *fn, CompileCtx *ctx, uint32_t dst, IdmError *err) {
     CompiledCallable callable;
-    if (!compile_callable_entries(fn, module, &callable, err, fn->span)) return false;
-    bool ok = emit_callable_closure(module, &callable, err, fn->span);
+    if (!compile_callable_entries(fn, ctx->module, &callable, err, fn->span)) return false;
+    bool ok = emit_callable_closure(ctx, &callable, dst, err, fn->span);
     size_t jump_over_op = 0;
-    if (ok && !idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_over_op)) ok = idm_error_oom(err, fn->span);
-    if (ok) ok = compile_callable_bodies(fn, &callable, module, err, fn->span);
-    if (ok) ok = patch_here(module, jump_over_op + 1u, err, fn->span, fn->kind == IDM_CORE_FN ? "function literal jump" : "multi function jump");
+    if (ok && !emit_op1(ctx->module, IDM_OP_JUMP, 0, &jump_over_op)) ok = idm_error_oom(err, fn->span);
+    if (ok) ok = compile_callable_bodies(fn, &callable, ctx->module, err, fn->span);
+    if (ok) ok = patch_here(ctx->module, jump_over_op + 1u, err, fn->span, fn->kind == IDM_CORE_FN ? "function literal jump" : "multi function jump");
     compiled_callable_destroy(&callable);
     return ok;
 }
@@ -1803,7 +1900,7 @@ static void destroy_compiled_callables(CompiledCallable *callables, const bool *
     }
 }
 
-static bool compile_letrec(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err) {
+static bool compile_letrec(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail, IdmError *err) {
     size_t count = core->as.letrec.count;
     CompiledCallable *callables = count == 0 ? NULL : calloc(count, sizeof(*callables));
     bool *compiled = count == 0 ? NULL : calloc(count, sizeof(*compiled));
@@ -1819,7 +1916,7 @@ static bool compile_letrec(IdmCore *core, IdmBytecodeModule *module, bool tail, 
         for (size_t i = 0; ok && i < count; i++) {
             IdmLetRecBinding *binding = &core->as.letrec.bindings[i];
             if (!core_is_callable(binding->value)) continue;
-            ok = compile_callable_entries(binding->value, module, &callables[i], err, binding->value->span);
+            ok = compile_callable_entries(binding->value, ctx->module, &callables[i], err, binding->value->span);
             if (!ok) break;
             compiled[i] = true;
             compiled_count++;
@@ -1829,34 +1926,35 @@ static bool compile_letrec(IdmCore *core, IdmBytecodeModule *module, bool tail, 
     if (ok && core->as.letrec.env) {
         for (size_t i = 0; ok && i < count; i++) {
             IdmLetRecBinding *binding = &core->as.letrec.bindings[i];
-            if (compiled[i]) ok = emit_callable_closure(module, &callables[i], err, binding->value->span);
-            else ok = compile_expr(binding->value, module, false, err);
-            if (ok) ok = emit_named_u32(module, IDM_OP_STORE_ENV, binding->slot, binding->name, err, core->span);
+            uint32_t value_reg = ctx_alloc(ctx);
+            if (compiled[i]) ok = emit_callable_closure(ctx, &callables[i], value_reg, err, binding->value->span);
+            else ok = compile_expr(binding->value, ctx, value_reg, false, err);
+            if (ok) ok = emit_named_op2(ctx->module, IDM_OP_STORE_ENV, binding->slot, value_reg, binding->name, err, core->span);
         }
     } else if (ok) {
         if (!core->as.letrec.fill_only) {
-            uint32_t nil_const = 0;
-            if (!idm_bc_add_const(module, idm_nil(), &nil_const)) ok = idm_error_oom(err, core->span);
+            uint32_t nil_reg = ctx_alloc(ctx);
             for (size_t i = 0; ok && i < count; i++) {
-                if (!idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, nil_const, NULL) ||
-                    !idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) ok = idm_error_oom(err, core->span);
-                else ok = emit_named_u32(module, IDM_OP_STORE_LOCAL, core->as.letrec.bindings[i].slot, core->as.letrec.bindings[i].name, err, core->span);
+                uint32_t local = ctx_local_reg(ctx, core->as.letrec.bindings[i].slot);
+                if (!emit_load_value(ctx, nil_reg, idm_nil(), err, core->span) ||
+                    !emit_op2(ctx->module, IDM_OP_MAKE_CELL, local, nil_reg, NULL)) ok = idm_error_oom(err, core->span);
             }
         }
         for (size_t i = 0; ok && i < count; i++) {
-            if (!emit_named_u32(module, IDM_OP_LOAD_LOCAL, core->as.letrec.bindings[i].slot, core->as.letrec.bindings[i].name, err, core->span)) ok = false;
-            else if (!compile_expr(core->as.letrec.bindings[i].value, module, false, err)) ok = false;
-            else if (!idm_bc_emit_op(module, IDM_OP_STORE_CELL, NULL)) ok = idm_error_oom(err, core->span);
+            uint32_t value_reg = ctx_alloc(ctx);
+            uint32_t local = ctx_local_reg(ctx, core->as.letrec.bindings[i].slot);
+            if (!compile_expr(core->as.letrec.bindings[i].value, ctx, value_reg, false, err)) ok = false;
+            else if (!emit_op2(ctx->module, IDM_OP_STORE_CELL, local, value_reg, NULL)) ok = idm_error_oom(err, core->span);
         }
     }
 
     size_t jump_over_op = 0;
-    if (ok && compiled_count != 0 && !idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_over_op)) ok = idm_error_oom(err, core->span);
+    if (ok && compiled_count != 0 && !emit_op1(ctx->module, IDM_OP_JUMP, 0, &jump_over_op)) ok = idm_error_oom(err, core->span);
     for (size_t i = 0; ok && i < count; i++) {
-        if (compiled[i]) ok = compile_callable_bodies(core->as.letrec.bindings[i].value, &callables[i], module, err, core->as.letrec.bindings[i].value->span);
+        if (compiled[i]) ok = compile_callable_bodies(core->as.letrec.bindings[i].value, &callables[i], ctx->module, err, core->as.letrec.bindings[i].value->span);
     }
-    if (ok && compiled_count != 0) ok = patch_here(module, jump_over_op + 1u, err, core->span, "letrec callable body jump");
-    if (ok) ok = compile_expr(core->as.letrec.body, module, tail, err);
+    if (ok && compiled_count != 0) ok = patch_here(ctx->module, jump_over_op + 1u, err, core->span, "letrec callable body jump");
+    if (ok) ok = compile_expr(core->as.letrec.body, ctx, dst, tail, err);
 
     destroy_compiled_callables(callables, compiled, count);
     free(callables);
@@ -1864,110 +1962,121 @@ static bool compile_letrec(IdmCore *core, IdmBytecodeModule *module, bool tail, 
     return ok;
 }
 
-static bool emit_store_raised_cell(IdmBytecodeModule *module, const char *name, uint32_t slot, IdmError *err, IdmSpan span) {
-    if (!idm_bc_emit_op(module, IDM_OP_LOAD_RAISED, NULL)) return idm_error_oom(err, span);
-    if (!idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, span);
-    return emit_named_u32(module, IDM_OP_STORE_LOCAL, slot, name, err, span);
-}
-
-static bool emit_load_celled_local(IdmBytecodeModule *module, const char *name, uint32_t slot, IdmError *err, IdmSpan span) {
-    if (!emit_named_u32(module, IDM_OP_LOAD_LOCAL, slot, name, err, span)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_LOAD_CELL, NULL)) return idm_error_oom(err, span);
+static bool emit_store_raised_cell(CompileCtx *ctx, const char *name, uint32_t slot, IdmError *err, IdmSpan span) {
+    uint32_t local = ctx_local_reg(ctx, slot);
+    if (!emit_op1(ctx->module, IDM_OP_LOAD_RAISED, local, NULL)) return idm_error_oom(err, span);
+    if (!emit_op2(ctx->module, IDM_OP_MAKE_CELL, local, local, NULL)) return idm_error_oom(err, span);
+    if (!idm_bc_note_name(ctx->module, ctx->module->code_count >= 2 ? ctx->module->code_count - 2u : 0u, name)) return idm_error_oom(err, span);
     return true;
 }
 
-static bool compile_guard_rescue_only(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
-    size_t push_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
-    if (!compile_expr(core->as.guard.body, module, false, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
-    size_t jump_done_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
-    if (!patch_here(module, push_op + 1u, err, core->span, "guard rescue catch target")) return false;
-    if (!emit_store_raised_cell(module, "_rescue", core->as.guard.rescue_slot, err, core->span)) return false;
-    if (!compile_expr(core->as.guard.handler, module, false, err)) return false;
-    return patch_here(module, jump_done_op + 1u, err, core->span, "guard rescue done jump");
+static bool emit_load_celled_local(CompileCtx *ctx, const char *name, uint32_t slot, uint32_t dst, IdmError *err, IdmSpan span) {
+    uint32_t local = ctx_local_reg(ctx, slot);
+    if (!emit_named_op2(ctx->module, IDM_OP_LOAD_CELL, dst, local, name, err, span)) return false;
+    return true;
 }
 
-static bool compile_guard_ensure_only(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+static bool compile_guard_rescue_only(IdmCore *core, CompileCtx *ctx, uint32_t dst, IdmError *err) {
     size_t push_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
-    if (!compile_expr(core->as.guard.body, module, false, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
-    if (!compile_expr(core->as.guard.cleanup, module, false, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!emit_op1(ctx->module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.body, ctx, dst, false, err)) return false;
+    if (!idm_bc_emit_op(ctx->module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
     size_t jump_done_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
-    if (!patch_here(module, push_op + 1u, err, core->span, "guard ensure catch target")) return false;
-    if (!emit_store_raised_cell(module, "_ensure", core->as.guard.ensure_slot, err, core->span)) return false;
-    if (!compile_expr(core->as.guard.cleanup, module, false, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
-    if (!emit_load_celled_local(module, "_ensure", core->as.guard.ensure_slot, err, core->span)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
-    return patch_here(module, jump_done_op + 1u, err, core->span, "guard ensure done jump");
+    if (!emit_op1(ctx->module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
+    if (!patch_here(ctx->module, push_op + 1u, err, core->span, "guard rescue catch target")) return false;
+    if (!emit_store_raised_cell(ctx, "_rescue", core->as.guard.rescue_slot, err, core->span)) return false;
+    if (!compile_expr(core->as.guard.handler, ctx, dst, false, err)) return false;
+    return patch_here(ctx->module, jump_done_op + 1u, err, core->span, "guard rescue done jump");
 }
 
-static bool compile_guard_rescue_ensure(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+static bool compile_guard_ensure_only(IdmCore *core, CompileCtx *ctx, uint32_t dst, IdmError *err) {
+    uint32_t scratch = ctx_alloc(ctx);
+    size_t push_op = 0;
+    if (!emit_op1(ctx->module, IDM_OP_RESCUE_PUSH, 0, &push_op)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.body, ctx, dst, false, err)) return false;
+    if (!idm_bc_emit_op(ctx->module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.cleanup, ctx, scratch, false, err)) return false;
+    size_t jump_done_op = 0;
+    if (!emit_op1(ctx->module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
+    if (!patch_here(ctx->module, push_op + 1u, err, core->span, "guard ensure catch target")) return false;
+    if (!emit_store_raised_cell(ctx, "_ensure", core->as.guard.ensure_slot, err, core->span)) return false;
+    if (!compile_expr(core->as.guard.cleanup, ctx, scratch, false, err)) return false;
+    if (!emit_load_celled_local(ctx, "_ensure", core->as.guard.ensure_slot, scratch, err, core->span)) return false;
+    if (!emit_op1(ctx->module, IDM_OP_RAISE, scratch, NULL)) return idm_error_oom(err, core->span);
+    return patch_here(ctx->module, jump_done_op + 1u, err, core->span, "guard ensure done jump");
+}
+
+static bool compile_guard_rescue_ensure(IdmCore *core, CompileCtx *ctx, uint32_t dst, IdmError *err) {
+    uint32_t scratch = ctx_alloc(ctx);
     size_t outer_push_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &outer_push_op)) return idm_error_oom(err, core->span);
+    if (!emit_op1(ctx->module, IDM_OP_RESCUE_PUSH, 0, &outer_push_op)) return idm_error_oom(err, core->span);
     size_t inner_push_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_RESCUE_PUSH, 0, &inner_push_op)) return idm_error_oom(err, core->span);
-    if (!compile_expr(core->as.guard.body, module, false, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!emit_op1(ctx->module, IDM_OP_RESCUE_PUSH, 0, &inner_push_op)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.body, ctx, dst, false, err)) return false;
+    if (!idm_bc_emit_op(ctx->module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
     size_t jump_after_rescue_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_after_rescue_op)) return idm_error_oom(err, core->span);
-    if (!patch_here(module, inner_push_op + 1u, err, core->span, "guard rescue catch target")) return false;
-    if (!emit_store_raised_cell(module, "_rescue", core->as.guard.rescue_slot, err, core->span)) return false;
-    if (!compile_expr(core->as.guard.handler, module, false, err)) return false;
-    if (!patch_here(module, jump_after_rescue_op + 1u, err, core->span, "guard rescue done jump")) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
-    if (!compile_expr(core->as.guard.cleanup, module, false, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!emit_op1(ctx->module, IDM_OP_JUMP, 0, &jump_after_rescue_op)) return idm_error_oom(err, core->span);
+    if (!patch_here(ctx->module, inner_push_op + 1u, err, core->span, "guard rescue catch target")) return false;
+    if (!emit_store_raised_cell(ctx, "_rescue", core->as.guard.rescue_slot, err, core->span)) return false;
+    if (!compile_expr(core->as.guard.handler, ctx, dst, false, err)) return false;
+    if (!patch_here(ctx->module, jump_after_rescue_op + 1u, err, core->span, "guard rescue done jump")) return false;
+    if (!idm_bc_emit_op(ctx->module, IDM_OP_RESCUE_POP, NULL)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.guard.cleanup, ctx, scratch, false, err)) return false;
     size_t jump_done_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
-    if (!patch_here(module, outer_push_op + 1u, err, core->span, "guard ensure catch target")) return false;
-    if (!emit_store_raised_cell(module, "_ensure", core->as.guard.ensure_slot, err, core->span)) return false;
-    if (!compile_expr(core->as.guard.cleanup, module, false, err)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
-    if (!emit_load_celled_local(module, "_ensure", core->as.guard.ensure_slot, err, core->span)) return false;
-    if (!idm_bc_emit_op(module, IDM_OP_RAISE, NULL)) return idm_error_oom(err, core->span);
-    return patch_here(module, jump_done_op + 1u, err, core->span, "guard ensure done jump");
+    if (!emit_op1(ctx->module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
+    if (!patch_here(ctx->module, outer_push_op + 1u, err, core->span, "guard ensure catch target")) return false;
+    if (!emit_store_raised_cell(ctx, "_ensure", core->as.guard.ensure_slot, err, core->span)) return false;
+    if (!compile_expr(core->as.guard.cleanup, ctx, scratch, false, err)) return false;
+    if (!emit_load_celled_local(ctx, "_ensure", core->as.guard.ensure_slot, scratch, err, core->span)) return false;
+    if (!emit_op1(ctx->module, IDM_OP_RAISE, scratch, NULL)) return idm_error_oom(err, core->span);
+    return patch_here(ctx->module, jump_done_op + 1u, err, core->span, "guard ensure done jump");
 }
 
-static bool compile_guard(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+static bool compile_guard(IdmCore *core, CompileCtx *ctx, uint32_t dst, IdmError *err) {
     bool has_handler = core->as.guard.handler != NULL;
     bool has_cleanup = core->as.guard.cleanup != NULL;
     if (!core->as.guard.body || (!has_handler && !has_cleanup)) return idm_error_set(err, core->span, "guard requires a body and handler or cleanup");
-    if (has_handler && has_cleanup) return compile_guard_rescue_ensure(core, module, err);
-    if (has_handler) return compile_guard_rescue_only(core, module, err);
-    return compile_guard_ensure_only(core, module, err);
+    if (has_handler && has_cleanup) return compile_guard_rescue_ensure(core, ctx, dst, err);
+    if (has_handler) return compile_guard_rescue_only(core, ctx, dst, err);
+    return compile_guard_ensure_only(core, ctx, dst, err);
 }
 
-static bool compile_call_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err) {
-    if (!compile_expr(core->as.call.callee, module, false, err)) return false;
-    for (size_t i = 0; i < core->as.call.arg_count; i++) {
-        if (!compile_expr(core->as.call.args[i], module, false, err)) return false;
-    }
+static bool compile_call_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail, IdmError *err) {
     if (core->as.call.arg_count > UINT32_MAX) return idm_error_set(err, core->span, "too many call arguments");
-    if (!idm_bc_emit_u32(module, IDM_OP_CALL, (uint32_t)core->as.call.arg_count, NULL)) return idm_error_oom(err, core->span);
-    if (!idm_bc_emit(module, tail ? 1u : 0u, NULL)) return idm_error_oom(err, core->span);
-    return true;
-}
-
-static bool compile_list_pair_expr(IdmCore *core, IdmBytecodeModule *module, IdmOpcode op, IdmError *err) {
-    if (!compile_expr(core->as.list_pair.head, module, false, err)) return false;
-    if (!compile_expr(core->as.list_pair.tail, module, false, err)) return false;
-    if (!idm_bc_emit_op(module, op, NULL)) return idm_error_oom(err, core->span);
-    return true;
-}
-
-static bool compile_value_sequence_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
-    for (size_t i = 0; i < core->as.value_sequence.count; i++) {
-        if (!compile_expr(core->as.value_sequence.items[i], module, false, err)) return false;
+    uint32_t mark = ctx_mark(ctx);
+    uint32_t callee = ctx_alloc(ctx);
+    uint32_t argc = (uint32_t)core->as.call.arg_count;
+    uint32_t first_arg = ctx_alloc_range(ctx, argc);
+    if (!compile_expr(core->as.call.callee, ctx, callee, false, err)) return false;
+    for (uint32_t i = 0; i < argc; i++) {
+        if (!compile_expr(core->as.call.args[i], ctx, first_arg + i, false, err)) return false;
     }
+    if (!emit_op5(ctx->module, IDM_OP_CALL, dst, callee, first_arg, argc, tail ? 1u : 0u, NULL)) return idm_error_oom(err, core->span);
+    ctx_reset(ctx, mark);
+    return true;
+}
+
+static bool compile_list_pair_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, IdmOpcode op, IdmError *err) {
+    uint32_t mark = ctx_mark(ctx);
+    uint32_t head = ctx_alloc(ctx);
+    uint32_t tail = ctx_alloc(ctx);
+    if (!compile_expr(core->as.list_pair.head, ctx, head, false, err)) return false;
+    if (!compile_expr(core->as.list_pair.tail, ctx, tail, false, err)) return false;
+    if (!emit_op3(ctx->module, op, dst, head, tail, NULL)) return idm_error_oom(err, core->span);
+    ctx_reset(ctx, mark);
+    return true;
+}
+
+static bool compile_value_sequence_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, IdmError *err) {
     if (core->as.value_sequence.count > UINT32_MAX) return idm_error_set(err, core->span, "sequence has too many items");
-    if (!idm_bc_emit_u32(module, IDM_OP_MAKE_VALUE_SEQUENCE, (uint32_t)core->as.value_sequence.kind, NULL)) return idm_error_oom(err, core->span);
-    if (!idm_bc_emit(module, (uint32_t)core->as.value_sequence.count, NULL)) return idm_error_oom(err, core->span);
+    uint32_t mark = ctx_mark(ctx);
+    uint32_t count = (uint32_t)core->as.value_sequence.count;
+    uint32_t first = ctx_alloc_range(ctx, count);
+    for (uint32_t i = 0; i < count; i++) {
+        if (!compile_expr(core->as.value_sequence.items[i], ctx, first + i, false, err)) return false;
+    }
+    if (!emit_op4(ctx->module, IDM_OP_MAKE_VALUE_SEQUENCE, dst, (uint32_t)core->as.value_sequence.kind, first, count, NULL)) return idm_error_oom(err, core->span);
+    ctx_reset(ctx, mark);
     return true;
 }
 
@@ -1975,215 +2084,222 @@ static bool syntax_build_needs_payload(IdmSyntaxBuildKind kind) {
     return kind != IDM_SYNTAX_BUILD_NIL;
 }
 
-static bool compile_syntax_build_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
-    if (!compile_expr(core->as.syntax_build.ctx, module, false, err)) return false;
-    if (syntax_build_needs_payload(core->as.syntax_build.kind) && !compile_expr(core->as.syntax_build.payload, module, false, err)) return false;
-    if (!idm_bc_emit_u32(module, IDM_OP_MAKE_SYNTAX, (uint32_t)core->as.syntax_build.kind, NULL)) return idm_error_oom(err, core->span);
+static bool compile_syntax_build_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, IdmError *err) {
+    uint32_t mark = ctx_mark(ctx);
+    uint32_t ctx_reg = ctx_alloc(ctx);
+    uint32_t payload = ctx_alloc(ctx);
+    if (!compile_expr(core->as.syntax_build.ctx, ctx, ctx_reg, false, err)) return false;
+    if (syntax_build_needs_payload(core->as.syntax_build.kind)) {
+        if (!compile_expr(core->as.syntax_build.payload, ctx, payload, false, err)) return false;
+    } else if (!emit_load_value(ctx, payload, idm_nil(), err, core->span)) return false;
+    if (!emit_op4(ctx->module, IDM_OP_MAKE_SYNTAX, dst, (uint32_t)core->as.syntax_build.kind, ctx_reg, payload, NULL)) return idm_error_oom(err, core->span);
+    ctx_reset(ctx, mark);
     return true;
 }
 
-static bool compile_string_concat_expr(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
-    for (size_t i = 0; i < core->as.string_concat.count; i++) {
-        if (!compile_expr(core->as.string_concat.items[i], module, false, err)) return false;
-    }
+static bool compile_string_concat_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, IdmError *err) {
     if (core->as.string_concat.count > UINT32_MAX) return idm_error_set(err, core->span, "string interpolation has too many parts");
-    if (!idm_bc_emit_u32(module, IDM_OP_STRING_CONCAT, (uint32_t)core->as.string_concat.count, NULL)) return idm_error_oom(err, core->span);
+    uint32_t mark = ctx_mark(ctx);
+    uint32_t count = (uint32_t)core->as.string_concat.count;
+    uint32_t first = ctx_alloc_range(ctx, count);
+    for (uint32_t i = 0; i < count; i++) {
+        if (!compile_expr(core->as.string_concat.items[i], ctx, first + i, false, err)) return false;
+    }
+    if (!emit_op3(ctx->module, IDM_OP_STRING_CONCAT, dst, first, count, NULL)) return idm_error_oom(err, core->span);
+    ctx_reset(ctx, mark);
     return true;
 }
 
-static bool compile_cond_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err) {
-    if (!compile_expr(core->as.cond_expr.cond, module, false, err)) return false;
+static bool compile_cond_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail, IdmError *err) {
+    uint32_t cond = ctx_alloc(ctx);
+    if (!compile_expr(core->as.cond_expr.cond, ctx, cond, false, err)) return false;
     size_t jump_false_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_JUMP_IF_FALSE, 0, &jump_false_op)) return idm_error_oom(err, core->span);
-    if (!compile_expr(core->as.cond_expr.then_branch, module, tail, err)) return false;
+    if (!emit_op2(ctx->module, IDM_OP_JUMP_IF_FALSE, cond, 0, &jump_false_op)) return idm_error_oom(err, core->span);
+    if (!compile_expr(core->as.cond_expr.then_branch, ctx, dst, tail, err)) return false;
     size_t jump_end_op = 0;
-    if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_end_op)) return idm_error_oom(err, core->span);
-    if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-    if (!idm_bc_patch_u32(module, jump_false_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch cond false jump");
-    if (!compile_expr(core->as.cond_expr.else_branch, module, tail, err)) return false;
-    if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-    if (!idm_bc_patch_u32(module, jump_end_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch cond end jump");
+    if (!emit_op1(ctx->module, IDM_OP_JUMP, 0, &jump_end_op)) return idm_error_oom(err, core->span);
+    if (ctx->module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
+    if (!idm_bc_patch_u32(ctx->module, jump_false_op + 2u, (uint32_t)ctx->module->code_count)) return idm_error_set(err, core->span, "failed to patch cond false jump");
+    if (!compile_expr(core->as.cond_expr.else_branch, ctx, dst, tail, err)) return false;
+    if (ctx->module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
+    if (!idm_bc_patch_u32(ctx->module, jump_end_op + 1u, (uint32_t)ctx->module->code_count)) return idm_error_set(err, core->span, "failed to patch cond end jump");
     return true;
 }
 
-static bool compile_do_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err) {
-    if (core->as.do_expr.count == 0) return emit_load_value(module, idm_nil(), err, core->span);
+static bool compile_do_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail, IdmError *err) {
+    if (core->as.do_expr.count == 0) return emit_load_value(ctx, dst, idm_nil(), err, core->span);
+    uint32_t scratch = ctx_alloc(ctx);
     for (size_t i = 0; i < core->as.do_expr.count; i++) {
-        if (!compile_expr(core->as.do_expr.items[i], module, i + 1u == core->as.do_expr.count ? tail : false, err)) return false;
-        if (i + 1u < core->as.do_expr.count && !idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+        bool last = i + 1u == core->as.do_expr.count;
+        if (!compile_expr(core->as.do_expr.items[i], ctx, last ? dst : scratch, last ? tail : false, err)) return false;
     }
     return true;
 }
 
-static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, IdmError *err) {
+static bool compile_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail, IdmError *err) {
     if (!core) return idm_error_set(err, idm_span_unknown(NULL), "cannot compile null core expression");
-    if (!idm_bc_note_span(module, core->span)) return idm_error_oom(err, core->span);
+    if (!idm_bc_note_span(ctx->module, core->span)) return idm_error_oom(err, core->span);
     switch (core->kind) {
         case IDM_CORE_LITERAL: {
-            return emit_load_value(module, core->as.literal, err, core->span);
+            return emit_load_value(ctx, dst, core->as.literal, err, core->span);
         }
         case IDM_CORE_LOCAL_REF:
-            if (!emit_named_u32(module, IDM_OP_LOAD_LOCAL, core->as.slot_ref.slot, core->as.slot_ref.name, err, core->span)) return false;
-            if (core->local_celled && !idm_bc_emit_op(module, IDM_OP_LOAD_CELL, NULL)) return idm_error_oom(err, core->span);
+            if (core->local_celled) return emit_named_op2(ctx->module, IDM_OP_LOAD_CELL, dst, ctx_local_reg(ctx, core->as.slot_ref.slot), core->as.slot_ref.name, err, core->span);
+            if (!emit_named_op2(ctx->module, IDM_OP_MOVE, dst, ctx_local_reg(ctx, core->as.slot_ref.slot), core->as.slot_ref.name, err, core->span)) return false;
             return true;
         case IDM_CORE_ARG_REF:
-            return emit_named_u32(module, IDM_OP_LOAD_ARG, core->as.slot_ref.slot, core->as.slot_ref.name, err, core->span);
+            return emit_named_op2(ctx->module, IDM_OP_MOVE, dst, core->as.slot_ref.slot, core->as.slot_ref.name, err, core->span);
         case IDM_CORE_CAPTURE_REF:
-            if (!emit_named_u32(module, IDM_OP_LOAD_CAPTURE, core->as.slot_ref.slot, core->as.slot_ref.name, err, core->span)) return false;
-            if (core->local_celled && !idm_bc_emit_op(module, IDM_OP_LOAD_CELL, NULL)) return idm_error_oom(err, core->span);
+            if (!emit_named_op2(ctx->module, IDM_OP_LOAD_CAPTURE, dst, core->as.slot_ref.slot, core->as.slot_ref.name, err, core->span)) return false;
+            if (core->local_celled && !emit_op2(ctx->module, IDM_OP_LOAD_CELL, dst, dst, NULL)) return idm_error_oom(err, core->span);
             return true;
         case IDM_CORE_ENV_REF:
-            return emit_named_u32(module, IDM_OP_LOAD_ENV, core->as.slot_ref.slot, core->as.slot_ref.name, err, core->span);
+            return emit_named_op2(ctx->module, IDM_OP_LOAD_ENV, dst, core->as.slot_ref.slot, core->as.slot_ref.name, err, core->span);
         case IDM_CORE_PACKAGE_REF: {
             uint32_t key_const = 0;
-            if (!idm_bc_add_const(module, core->as.package_ref.env_key, &key_const)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_u32(module, IDM_OP_LOAD_PACKAGE_SLOT, key_const, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, core->as.package_ref.slot, NULL)) return idm_error_oom(err, core->span);
+            if (!idm_bc_add_const(ctx->module, core->as.package_ref.env_key, &key_const)) return idm_error_oom(err, core->span);
+            if (!emit_op3(ctx->module, IDM_OP_LOAD_PACKAGE_SLOT, dst, key_const, core->as.package_ref.slot, NULL)) return idm_error_oom(err, core->span);
             return true;
         }
         case IDM_CORE_CALL:
-            return compile_call_expr(core, module, tail, err);
+            return compile_call_expr(core, ctx, dst, tail, err);
         case IDM_CORE_LIST_CONS:
-            return compile_list_pair_expr(core, module, IDM_OP_LIST_CONS, err);
+            return compile_list_pair_expr(core, ctx, dst, IDM_OP_LIST_CONS, err);
         case IDM_CORE_LIST_APPEND:
-            return compile_list_pair_expr(core, module, IDM_OP_LIST_APPEND, err);
+            return compile_list_pair_expr(core, ctx, dst, IDM_OP_LIST_APPEND, err);
         case IDM_CORE_VALUE_SEQUENCE:
-            return compile_value_sequence_expr(core, module, err);
+            return compile_value_sequence_expr(core, ctx, dst, err);
         case IDM_CORE_SYNTAX_BUILD:
-            return compile_syntax_build_expr(core, module, err);
+            return compile_syntax_build_expr(core, ctx, dst, err);
         case IDM_CORE_STRING_CONCAT:
-            return compile_string_concat_expr(core, module, err);
+            return compile_string_concat_expr(core, ctx, dst, err);
         case IDM_CORE_COND:
-            return compile_cond_expr(core, module, tail, err);
+            return compile_cond_expr(core, ctx, dst, tail, err);
         case IDM_CORE_DO:
-            return compile_do_expr(core, module, tail, err);
+            return compile_do_expr(core, ctx, dst, tail, err);
         case IDM_CORE_BIND_LOCAL:
-            if (!compile_expr(core->as.bind_local.value, module, false, err)) return false;
-            if (core->local_celled && !idm_bc_emit_op(module, IDM_OP_MAKE_CELL, NULL)) return idm_error_oom(err, core->span);
-            if (!emit_named_u32(module, IDM_OP_STORE_LOCAL, core->as.bind_local.slot, core->as.bind_local.name, err, core->span)) return false;
-            return compile_expr(core->as.bind_local.body, module, tail, err);
+            if (!compile_expr(core->as.bind_local.value, ctx, ctx_local_reg(ctx, core->as.bind_local.slot), false, err)) return false;
+            if (core->local_celled && !emit_op2(ctx->module, IDM_OP_MAKE_CELL, ctx_local_reg(ctx, core->as.bind_local.slot), ctx_local_reg(ctx, core->as.bind_local.slot), NULL)) return idm_error_oom(err, core->span);
+            return compile_expr(core->as.bind_local.body, ctx, dst, tail, err);
         case IDM_CORE_FN: {
-            return compile_callable_literal(core, module, err);
+            return compile_callable_literal(core, ctx, dst, err);
         }
         case IDM_CORE_FN_MULTI: {
-            return compile_callable_literal(core, module, err);
+            return compile_callable_literal(core, ctx, dst, err);
         }
         case IDM_CORE_LETREC: {
-            return compile_letrec(core, module, tail, err);
+            return compile_letrec(core, ctx, dst, tail, err);
         }
         case IDM_CORE_RECEIVE: {
             if (!core->as.receive.receiver || !core->as.receive.timeout || !core->as.receive.timeout_body) return idm_error_set(err, core->span, "receive is missing a required component");
-            if (!compile_expr(core->as.receive.timeout, module, false, err)) return false;
-            if (!compile_expr(core->as.receive.receiver, module, false, err)) return false;
+            uint32_t timeout = ctx_alloc(ctx);
+            uint32_t receiver = ctx_alloc(ctx);
+            if (!compile_expr(core->as.receive.timeout, ctx, timeout, false, err)) return false;
+            if (!compile_expr(core->as.receive.receiver, ctx, receiver, false, err)) return false;
             size_t recv_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_RECV, 0, &recv_op)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, tail ? 1u : 0u, NULL)) return idm_error_oom(err, core->span);
+            if (!emit_op5(ctx->module, IDM_OP_RECV, dst, timeout, receiver, 0, tail ? 1u : 0u, &recv_op)) return idm_error_oom(err, core->span);
             size_t jump_done_op = 0;
-            if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, recv_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch receive timeout target");
-            if (!compile_expr(core->as.receive.timeout_body, module, tail, err)) return false;
-            if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-            if (!idm_bc_patch_u32(module, jump_done_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch receive done jump");
+            if (!emit_op1(ctx->module, IDM_OP_JUMP, 0, &jump_done_op)) return idm_error_oom(err, core->span);
+            if (ctx->module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
+            if (!idm_bc_patch_u32(ctx->module, recv_op + 4u, (uint32_t)ctx->module->code_count)) return idm_error_set(err, core->span, "failed to patch receive timeout target");
+            if (!compile_expr(core->as.receive.timeout_body, ctx, dst, tail, err)) return false;
+            if (ctx->module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
+            if (!idm_bc_patch_u32(ctx->module, jump_done_op + 1u, (uint32_t)ctx->module->code_count)) return idm_error_set(err, core->span, "failed to patch receive done jump");
             return true;
         }
         case IDM_CORE_GUARD:
-            return compile_guard(core, module, err);
+            return compile_guard(core, ctx, dst, err);
         case IDM_CORE_USE_PACKAGE: {
             uint32_t fn_off = 0;
             if (core->as.use_package.module) {
                 size_t skip_op = 0;
-                if (!idm_bc_emit_u32(module, IDM_OP_JUMP, 0, &skip_op)) return idm_error_oom(err, core->span);
+                if (!emit_op1(ctx->module, IDM_OP_JUMP, 0, &skip_op)) return idm_error_oom(err, core->span);
                 uint32_t const_off = 0;
                 uint32_t code_off = 0;
-                if (!idm_bc_link(module, core->as.use_package.module, &const_off, &fn_off, &code_off, err)) return false;
-                if (module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
-                if (!idm_bc_patch_u32(module, skip_op + 1u, (uint32_t)module->code_count)) return idm_error_set(err, core->span, "failed to patch package skip jump");
+                if (!idm_bc_link(ctx->module, core->as.use_package.module, &const_off, &fn_off, &code_off, err)) return false;
+                if (ctx->module->code_count > UINT32_MAX) return idm_error_set(err, core->span, "bytecode too large");
+                if (!idm_bc_patch_u32(ctx->module, skip_op + 1u, (uint32_t)ctx->module->code_count)) return idm_error_set(err, core->span, "failed to patch package skip jump");
             }
             uint32_t env_key_index = 0;
-            if (!idm_bc_add_const(module, core->as.use_package.env_key, &env_key_index)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit_u32(module, IDM_OP_PUSH_PACKAGE_ENV, env_key_index, NULL)) return idm_error_oom(err, core->span);
+            if (!idm_bc_add_const(ctx->module, core->as.use_package.env_key, &env_key_index)) return idm_error_oom(err, core->span);
+            if (!emit_op1(ctx->module, IDM_OP_PUSH_PACKAGE_ENV, env_key_index, NULL)) return idm_error_oom(err, core->span);
             if (core->as.use_package.module) {
-                if (!idm_bc_emit_u32(module, IDM_OP_MAKE_CLOSURE, fn_off + core->as.use_package.init_fn, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit_u32(module, IDM_OP_CALL, 0u, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit(module, 0u, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit_op(module, IDM_OP_POP, NULL)) return idm_error_oom(err, core->span);
+                uint32_t tmp = ctx_alloc(ctx);
+                uint32_t closure = ctx_alloc(ctx);
+                if (!emit_op2(ctx->module, IDM_OP_MAKE_CLOSURE, closure, fn_off + core->as.use_package.init_fn, NULL)) return idm_error_oom(err, core->span);
+                if (!emit_op5(ctx->module, IDM_OP_CALL, tmp, closure, 0u, 0u, 0u, NULL)) return idm_error_oom(err, core->span);
             }
-            if (!idm_bc_emit_op(module, IDM_OP_POP_PACKAGE_ENV, NULL)) return idm_error_oom(err, core->span);
-            return compile_expr(core->as.use_package.cont, module, tail, err);
+            if (!idm_bc_emit_op(ctx->module, IDM_OP_POP_PACKAGE_ENV, NULL)) return idm_error_oom(err, core->span);
+            return compile_expr(core->as.use_package.cont, ctx, dst, tail, err);
         }
         case IDM_CORE_DEFINE_TRAIT: {
             if (core->as.define_trait.requirement_count > UINT32_MAX) return idm_error_set(err, core->span, "trait has too many requirements");
             if (core->as.define_trait.count > UINT32_MAX) return idm_error_set(err, core->span, "trait has too many methods");
+            uint32_t first_default = ctx_alloc_range(ctx, (uint32_t)core->as.define_trait.count);
             for (size_t i = 0; i < core->as.define_trait.count; i++) {
                 IdmCoreTraitMethod *method = &core->as.define_trait.methods[i];
                 if (method->has_default) {
-                    if (!compile_expr(method->default_fn, module, false, err)) return false;
+                    if (!compile_expr(method->default_fn, ctx, first_default + (uint32_t)i, false, err)) return false;
                 } else {
-                    if (!emit_load_value(module, idm_nil(), err, core->span)) return false;
+                    if (!emit_load_value(ctx, first_default + (uint32_t)i, idm_nil(), err, core->span)) return false;
                 }
             }
             uint32_t trait_const = 0;
-            if (!add_const_value(module, core->as.define_trait.name, &trait_const, err, core->span)) return false;
-            if (!idm_bc_emit_u32(module, IDM_OP_DEFINE_TRAIT, trait_const, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, (uint32_t)core->as.define_trait.requirement_count, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, (uint32_t)core->as.define_trait.count, NULL)) return idm_error_oom(err, core->span);
+            if (!add_const_value(ctx->module, core->as.define_trait.name, &trait_const, err, core->span)) return false;
+            if (!emit_op5(ctx->module, IDM_OP_DEFINE_TRAIT, dst, first_default, trait_const, (uint32_t)core->as.define_trait.requirement_count, (uint32_t)core->as.define_trait.count, NULL)) return idm_error_oom(err, core->span);
             for (size_t i = 0; i < core->as.define_trait.requirement_count; i++) {
                 uint32_t requirement_const = 0;
-                if (!add_const_value(module, core->as.define_trait.requirements[i].name, &requirement_const, err, core->span)) return false;
-                if (!idm_bc_emit(module, requirement_const, NULL)) return idm_error_oom(err, core->span);
+                if (!add_const_value(ctx->module, core->as.define_trait.requirements[i].name, &requirement_const, err, core->span)) return false;
+                if (!idm_bc_emit(ctx->module, requirement_const, NULL)) return idm_error_oom(err, core->span);
             }
             for (size_t i = 0; i < core->as.define_trait.count; i++) {
                 IdmCoreTraitMethod *method = &core->as.define_trait.methods[i];
                 uint32_t method_const = 0;
-                if (!add_const_value(module, method->name, &method_const, err, core->span)) return false;
-                if (!idm_bc_emit(module, method_const, NULL)) return idm_error_oom(err, core->span);
-                if (!emit_arity(module, method->arity)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit(module, method->has_default ? 1u : 0u, NULL)) return idm_error_oom(err, core->span);
+                if (!add_const_value(ctx->module, method->name, &method_const, err, core->span)) return false;
+                if (!idm_bc_emit(ctx->module, method_const, NULL)) return idm_error_oom(err, core->span);
+                if (!emit_arity(ctx->module, method->arity)) return idm_error_oom(err, core->span);
+                if (!idm_bc_emit(ctx->module, method->has_default ? 1u : 0u, NULL)) return idm_error_oom(err, core->span);
             }
             return true;
         }
         case IDM_CORE_IMPLEMENT_TRAIT: {
             if (core->as.implement_trait.count > UINT32_MAX) return idm_error_set(err, core->span, "implement has too many methods");
+            uint32_t first_impl = ctx_alloc_range(ctx, (uint32_t)core->as.implement_trait.count);
             for (size_t i = 0; i < core->as.implement_trait.count; i++) {
-                if (!compile_expr(core->as.implement_trait.impls[i].impl_fn, module, false, err)) return false;
+                if (!compile_expr(core->as.implement_trait.impls[i].impl_fn, ctx, first_impl + (uint32_t)i, false, err)) return false;
             }
             uint32_t trait_const = 0;
             uint32_t type_const = 0;
             uint32_t provider_const = 0;
             uint32_t provider_key_const = 0;
-            if (!add_const_value(module, core->as.implement_trait.trait, &trait_const, err, core->span)) return false;
-            if (!add_const_value(module, core->as.implement_trait.type, &type_const, err, core->span)) return false;
-            if (!add_const_value(module, core->as.implement_trait.provider, &provider_const, err, core->span)) return false;
-            if (!add_const_value(module, core->as.implement_trait.provider_key, &provider_key_const, err, core->span)) return false;
-            if (!idm_bc_emit_u32(module, IDM_OP_IMPLEMENT_TRAIT, trait_const, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, type_const, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, provider_const, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, provider_key_const, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, (uint32_t)core->as.implement_trait.count, NULL)) return idm_error_oom(err, core->span);
+            if (!add_const_value(ctx->module, core->as.implement_trait.trait, &trait_const, err, core->span)) return false;
+            if (!add_const_value(ctx->module, core->as.implement_trait.type, &type_const, err, core->span)) return false;
+            if (!add_const_value(ctx->module, core->as.implement_trait.provider, &provider_const, err, core->span)) return false;
+            if (!add_const_value(ctx->module, core->as.implement_trait.provider_key, &provider_key_const, err, core->span)) return false;
+            if (!emit_op6(ctx->module, IDM_OP_IMPLEMENT_TRAIT, dst, first_impl, trait_const, type_const, provider_const, provider_key_const, NULL)) return idm_error_oom(err, core->span);
+            if (!idm_bc_emit(ctx->module, (uint32_t)core->as.implement_trait.count, NULL)) return idm_error_oom(err, core->span);
             for (size_t i = 0; i < core->as.implement_trait.count; i++) {
                 IdmCoreTraitImpl *impl = &core->as.implement_trait.impls[i];
                 uint32_t method_const = 0;
-                if (!add_const_value(module, impl->name, &method_const, err, core->span)) return false;
-                if (!idm_bc_emit(module, method_const, NULL)) return idm_error_oom(err, core->span);
-                if (!emit_arity(module, impl->arity)) return idm_error_oom(err, core->span);
+                if (!add_const_value(ctx->module, impl->name, &method_const, err, core->span)) return false;
+                if (!idm_bc_emit(ctx->module, method_const, NULL)) return idm_error_oom(err, core->span);
+                if (!emit_arity(ctx->module, impl->arity)) return idm_error_oom(err, core->span);
             }
             return true;
         }
         case IDM_CORE_METHOD_CALL: {
             if (core->as.method_call.arg_count == 0) return idm_error_set(err, core->span, "method call requires a receiver");
             if (core->as.method_call.arg_count > UINT32_MAX) return idm_error_set(err, core->span, "method call has too many arguments");
-            for (size_t i = 0; i < core->as.method_call.arg_count; i++) {
-                if (!compile_expr(core->as.method_call.args[i], module, false, err)) return false;
+            uint32_t argc = (uint32_t)core->as.method_call.arg_count;
+            uint32_t first_arg = ctx_alloc_range(ctx, argc);
+            for (uint32_t i = 0; i < argc; i++) {
+                if (!compile_expr(core->as.method_call.args[i], ctx, first_arg + i, false, err)) return false;
             }
             uint32_t trait_const = 0;
             uint32_t method_const = 0;
-            if (!add_const_value(module, core->as.method_call.trait, &trait_const, err, core->span)) return false;
-            if (!add_const_value(module, core->as.method_call.method, &method_const, err, core->span)) return false;
-            if (!idm_bc_emit_u32(module, IDM_OP_CALL_METHOD, trait_const, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, method_const, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, (uint32_t)core->as.method_call.arg_count, NULL)) return idm_error_oom(err, core->span);
-            if (!idm_bc_emit(module, tail ? 1u : 0u, NULL)) return idm_error_oom(err, core->span);
+            if (!add_const_value(ctx->module, core->as.method_call.trait, &trait_const, err, core->span)) return false;
+            if (!add_const_value(ctx->module, core->as.method_call.method, &method_const, err, core->span)) return false;
+            if (!emit_op6(ctx->module, IDM_OP_CALL_METHOD, dst, trait_const, method_const, first_arg, argc, tail ? 1u : 0u, NULL)) return idm_error_oom(err, core->span);
             return true;
         }
     }
@@ -2191,7 +2307,10 @@ static bool compile_expr(IdmCore *core, IdmBytecodeModule *module, bool tail, Id
 }
 
 bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
-    return compile_expr(core, module, false, err);
+    uint32_t fn = 0;
+    uint32_t locals = core_max_local_plus_one(core);
+    if (!idm_bc_add_function(module, "<expression>", 0, locals, 0, &fn)) return idm_error_oom(err, core ? core->span : idm_span_unknown(NULL));
+    return compile_function_code(module, fn, core, err, core ? core->span : idm_span_unknown(NULL), NULL, 0);
 }
 
 bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t arity, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {

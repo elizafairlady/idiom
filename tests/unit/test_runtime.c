@@ -262,8 +262,9 @@ static void test_scheduler_rejects_prepared_uninterned_module(void) {
     uint32_t main_fn = 0;
     CHECK(idm_bc_add_const(&module, idm_int(1), &c1));
     CHECK(idm_bc_add_function(&module, "main", 0, 0, 0, &main_fn));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c1, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&module, 0, c1));
+    CHECK(test_emit_return(&module, 0));
+    CHECK(idm_bc_set_function_register_count(&module, main_fn, 1));
     CHECK(idm_bc_prepare_selectors(&module, &err));
     CHECK(!idm_bc_is_finalized(&module));
     IdmScheduler *sched = idm_sched_create(&rt, &module, &err);
@@ -289,8 +290,7 @@ static void test_exec_setup_thunk_rejects_nonzero_arity(void) {
     idm_bc_init(&module);
     uint32_t fn = 0;
     CHECK(idm_bc_add_function(&module, "not-thunk", 1, 0, 0, &fn));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_return(&module, 0));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue closure = idm_closure_in_module(&rt, &module, fn, NULL, 0, rt.main_env, &err);
     CHECK(!err.present);

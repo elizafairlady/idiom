@@ -75,7 +75,7 @@ bool idm_prim_tty_restore(IdmRuntime *rt, IdmValue *out, IdmError *err) {
     return true;
 }
 
-bool idm_prim_tty_write(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+bool idm_prim_tty_write(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (!idm_is_string(args[0])) {
         idm_error_set(err, idm_span_unknown(NULL), "tty-write expects a string");
         return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "tty-write"), args[0]);

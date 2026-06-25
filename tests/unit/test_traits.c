@@ -421,8 +421,9 @@ static void test_record_ishc_roundtrip(void) {
     CHECK(idm_bc_add_function(&m1, "main", 0, 0, 0, &main_fn));
     CHECK(idm_bc_add_const(&m1, record, &record_const));
     CHECK(idm_bc_set_function_entry(&m1, main_fn, m1.code_count));
-    CHECK(idm_bc_emit_u32(&m1, IDM_OP_LOAD_CONST, record_const, NULL));
-    CHECK(idm_bc_emit_op(&m1, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_load_const(&m1, 0, record_const));
+    CHECK(test_emit_return(&m1, 0));
+    CHECK(idm_bc_set_function_register_count(&m1, main_fn, 1));
     CHECK(idm_bc_intern_literals(&rt, &m1, &err));
     IdmValue out1 = idm_nil();
     CHECK(idm_vm_run(&rt, &m1, main_fn, &out1, &err));

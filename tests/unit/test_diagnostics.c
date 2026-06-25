@@ -181,7 +181,8 @@ static void test_package_env_diagnostics(void) {
     uint32_t main_fn = 0;
     CHECK(idm_bc_add_function(&module, "main", 0, 0, 0, &main_fn));
     CHECK(idm_bc_emit_op(&module, IDM_OP_POP_PACKAGE_ENV, NULL));
-    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(test_emit_return(&module, 0));
+    CHECK(idm_bc_set_function_register_count(&module, main_fn, 1));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(!idm_vm_run(&rt, &module, main_fn, &out, &err));

@@ -5,10 +5,8 @@
 
 typedef enum {
     IDM_OP_HALT,
+    IDM_OP_MOVE,
     IDM_OP_LOAD_CONST,
-    IDM_OP_LOAD_ARG,
-    IDM_OP_LOAD_LOCAL,
-    IDM_OP_STORE_LOCAL,
     IDM_OP_LOAD_CAPTURE,
     IDM_OP_MAKE_CELL,
     IDM_OP_LOAD_CELL,
@@ -18,7 +16,6 @@ typedef enum {
     IDM_OP_MAKE_MULTI_CLOSURE,
     IDM_OP_CALL,
     IDM_OP_RETURN,
-    IDM_OP_POP,
     IDM_OP_JUMP,
     IDM_OP_JUMP_IF_FALSE,
     IDM_OP_RECV,
@@ -56,6 +53,7 @@ typedef struct {
     uint32_t arity;
     IdmArity call_arity;
     uint32_t local_count;
+    uint32_t register_count;
     size_t entry;
     bool has_guard;
     uint32_t guard_function;
@@ -106,6 +104,7 @@ bool idm_bc_is_finalized(const IdmBytecodeModule *module);
 bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t arity, uint32_t local_count, size_t entry, uint32_t *out_index);
 bool idm_bc_add_primitive_function(IdmBytecodeModule *module, const char *name, IdmArity arity, uint32_t primitive, uint32_t *out_index);
 bool idm_bc_set_function_entry(IdmBytecodeModule *module, uint32_t function_index, size_t entry);
+bool idm_bc_set_function_register_count(IdmBytecodeModule *module, uint32_t function_index, uint32_t register_count);
 bool idm_bc_note_span(IdmBytecodeModule *module, IdmSpan span);
 bool idm_bc_note_name(IdmBytecodeModule *module, size_t offset, const char *name);
 IdmSpan idm_bc_span_at(const IdmBytecodeModule *module, size_t ip);
