@@ -1,4 +1,4 @@
 defn k a -> 10
 defmacro m %`(m %,a) -> %`(k %,a)
 defn k a -> 20
-m 0
+println (m 0)

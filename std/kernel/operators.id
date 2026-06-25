@@ -1,3 +1,5 @@
+package kernel
+
 operator == precedence: 30 assoc: left capture: :infix -> eq?
 operator != precedence: 30 assoc: left capture: :infix -> neq?
 operator < precedence: 30 assoc: left capture: :infix -> lt?

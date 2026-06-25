@@ -5,7 +5,7 @@ use std/regex
 
 defn texts do
   '() -> '()
-  (list h . t) -> cons (text-of h) (texts t)
+  '(h . t) -> cons (text-of h) (texts t)
 end
 
 suite do

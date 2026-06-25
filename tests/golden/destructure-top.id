@@ -1,4 +1,4 @@
 {a b} = {1 2}
 defn later x -> add x b
 {:ok v} = {:ok 39}
-later (add v a)
+println (later (add v a))

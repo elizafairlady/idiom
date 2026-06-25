@@ -1,27 +1,77 @@
+package kernel
+
+core-syntax do do
+  stx -> syntax-error stx "unterminated command"
+end
+
 export defmacro operator stx do
   defn empty-opts -> %`%{}
 
-  defn known-options stx opts -> do
-    data = syntax->datum opts
-    unknown = dict-del (dict-del (dict-del data :precedence) :assoc) :capture
-    if (gt? (dict-size unknown) 0) do
-      syntax-error stx "unknown operator keyword '#{first (dict-keys unknown)}'"
+  defn option-key-name do
+    stx key when (syntax-atom? key) -> syntax-atom-text key
+    stx _ -> syntax-error stx "operator options must use keyword keys"
+  end
+
+  defn known-option-key? do
+    "precedence" -> :true
+    "assoc" -> :true
+    "capture" -> :true
+    _ -> :false
+  end
+
+  defn check-known-options do
+    stx opts i n when (eq? i n) -> opts
+    stx opts i n -> do
+      key = option-key-name stx (syntax-nth opts i)
+      if (eq? (known-option-key? key) :false) do
+        syntax-error stx "unknown operator keyword '#{key}'"
+      end
+      check-known-options stx opts (add i 2) n
     end
-    data
+  end
+
+  defn known-options stx opts -> do
+    if (eq? (syntax-kind opts) :dict) do
+      check-known-options stx opts 0 (syntax-length opts)
+    else do
+      syntax-error stx "operator options must be a keyword dictionary"
+    end
+    opts
+  end
+
+  defn option-get do
+    stx opts key default i n when (eq? i n) -> default
+    stx opts key default i n -> do
+      candidate = option-key-name stx (syntax-nth opts i)
+      if (eq? candidate key) do
+        syntax-nth opts (add i 1)
+      else do
+        option-get stx opts key default (add i 2) n
+      end
+    end
+  end
+
+  defn option-value stx opts key default ->
+    option-get stx opts key default 0 (syntax-length opts)
+
+  defn assoc-text do
+    stx value when (syntax-word? value) -> syntax-word-text value
+    stx value when (syntax-atom? value) -> syntax-atom-text value
+    stx _ -> syntax-error stx "operator assoc must be left, right, or none"
   end
 
   defn precedence-of do
-    stx data -> match (dict-get data :precedence 50) do
-      p when (int? p) -> p
+    stx opts -> match (option-value stx opts "precedence" (make-syntax-int stx 50)) do
+      p when (syntax-int? p) -> syntax-int-value p
       _ -> syntax-error stx "operator precedence must be an integer 0..255"
     end
   end
 
   defn assoc-of do
-    stx data -> match (dict-get data :assoc 'left) do
-      'left -> "left"
-      'right -> "right"
-      'none -> "none"
+    stx opts -> match (assoc-text stx (option-value stx opts "assoc" (make-syntax-word stx "left"))) do
+      "left" -> "left"
+      "right" -> "right"
+      "none" -> "none"
       _ -> syntax-error stx "operator assoc must be left, right, or none"
     end
   end
@@ -32,58 +82,45 @@ export defmacro operator stx do
     _ _ -> :false
   end
 
-  defn syntax-quote-node ctx item -> make-syntax-list ctx (list (make-syntax-word ctx "%-syntax") item)
+  defn string-syntax? p -> and (syntax? p) (eq? (syntax-kind p) :string)
 
   defn capture-part-text do
-    stx v when (atom? v) -> "#{v}"
-    stx v when (string? v) -> v
-    stx v when (int? v) -> "#{v}"
+    stx v when (syntax-atom? v) -> syntax-atom-text v
+    stx v when (string-syntax? v) -> syntax-string-text v
+    stx v when (syntax-int? v) -> "#{syntax-int-value v}"
     stx _ -> syntax-error stx "operator capture must use atoms, strings, integers, tuples, or grouped expressions"
-  end
-
-  defn capture-join-data do
-    stx '() "" -> ""
-    stx '() acc -> acc
-    stx (list v . rest) "" -> capture-join-data stx rest (capture-part-text stx v)
-    stx (list v . rest) acc -> capture-join-data stx rest "${acc} #{capture-part-text stx v}"
   end
 
   defn capture-join-syntax do
     stx v i len "" when (eq? i len) -> ""
     stx v i len acc when (eq? i len) -> acc
-    stx v i len "" -> capture-join-syntax stx v (add i 1) len (capture-part-text stx (syntax->datum (syntax-nth v i)))
-    stx v i len acc -> capture-join-syntax stx v (add i 1) len "${acc} #{capture-part-text stx (syntax->datum (syntax-nth v i))}"
-  end
-
-  defn capture-data-text do
-    stx v when (tuple? v) -> capture-join-data stx (tuple-to-list v) ""
-    stx v -> capture-part-text stx v
+    stx v i len "" -> capture-join-syntax stx v (add i 1) len (capture-part-text stx (syntax-nth v i))
+    stx v i len acc -> capture-join-syntax stx v (add i 1) len "${acc} #{capture-part-text stx (syntax-nth v i)}"
   end
 
   defn capture-text do
     stx v when (head-is? v "%-group") -> capture-text stx (syntax-nth v 1)
     stx v when (and (head-is? v "%-expr") (gt? (syntax-length v) 1)) -> capture-join-syntax stx v 1 (syntax-length v) ""
-    stx v -> capture-data-text stx (syntax->datum v)
+    stx v when (eq? (syntax-kind v) :tuple) -> capture-join-syntax stx v 0 (syntax-length v) ""
+    stx v -> capture-part-text stx v
   end
 
   defn capture-of do
-    stx opts -> match opts do
-      %`%{:capture %,capture} -> capture-text stx capture
-      _ -> "infix"
+    stx opts -> match (option-value stx opts "capture" :nil) do
+      :nil -> "infix"
+      capture -> capture-text stx capture
     end
   end
 
   defn option-values stx opts -> do
     data = known-options stx opts
-    {(precedence-of stx data) (assoc-of stx data) (capture-of stx opts)}
+    {(precedence-of stx data) (assoc-of stx data) (capture-of stx data)}
   end
 
   defn emit-target stx name opts target -> do
     {p a c} = option-values stx opts
     %`do
-      for-syntax do
-        expander-register-operator %,(syntax-quote-node stx name) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,(syntax-quote-node stx target)
-      end
+      core-operator %,name %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,target
     end
   end
 
@@ -92,9 +129,7 @@ export defmacro operator stx do
     {p a c} = option-values stx opts
     %`do
       defn %,target %,body
-      for-syntax do
-        expander-register-operator %,(syntax-quote-node stx name) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,(syntax-quote-node stx target)
-      end
+      core-operator %,name %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,target
     end
   end
 
@@ -107,9 +142,7 @@ export defmacro operator stx do
     {p a c} = option-values stx opts
     %`do
       defmacro %,target %,@tail
-      for-syntax do
-        expander-register-operator %,(syntax-quote-node stx name) %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,(syntax-quote-node stx target)
-      end
+      core-operator %,name %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,target
     end
   end
 

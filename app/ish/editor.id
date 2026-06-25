@@ -4,6 +4,7 @@ import std/tea as Tea
 use std/string
 use std/string/runes
 use std/term
+use std/system with [chdir env-get pwd time-ms]
 import std/file as File
 
 defn sget state k -> dict-get state k :nil
@@ -89,13 +90,13 @@ end
 
 defn list-len do
   '() -> 0
-  (list _ . t) -> add 1 (list-len t)
+  '(_ . t) -> add 1 (list-len t)
 end
 
 defn nth-entry do
   '() _ -> ""
-  (list h . _) 0 -> h
-  (list _ . t) n -> nth-entry t (sub n 1)
+  '(h . _) 0 -> h
+  '(_ . t) n -> nth-entry t (sub n 1)
 end
 
 defn show-history state pos text ->
@@ -129,13 +130,13 @@ end
 defn drop-entries do
   xs 0 -> xs
   '() _ -> '()
-  (list _ . t) n -> drop-entries t (sub n 1)
+  '(_ . t) n -> drop-entries t (sub n 1)
 end
 
 defn search-scan do
   '() _q _i -> :nil
-  (list h . _) q i when (contains? h q) -> {i h}
-  (list _ . t) q i -> search-scan t q (add i 1)
+  '(h . _) q i when (contains? h q) -> {i h}
+  '(_ . t) q i -> search-scan t q (add i 1)
 end
 
 defn search-apply state from do
@@ -234,14 +235,14 @@ end
 export defn push-history do
   state "" -> state
   state line -> match (sget state :history) do
-    (list h . _) when (eq? h line) -> sput state :hist-pos (sub 0 1)
+    '(h . _) when (eq? h line) -> sput state :hist-pos (sub 0 1)
     _ -> state |> sput :history (cons line (sget state :history)) |> sput :hist-pos (sub 0 1)
   end
 end
 
 defn locate do
-  (list h . t) c i when (gt? c (len h)) -> locate t (sub c (add (len h) 1)) (add i 1)
-  (list _ . _) c i -> {i c}
+  '(h . t) c i when (gt? c (len h)) -> locate t (sub c (add (len h) 1)) (add i 1)
+  '(_ . _) c i -> {i c}
   '() c i -> {i c}
 end
 
@@ -253,18 +254,18 @@ end
 defn rows-upto do
   _state '() _i _cols _n acc -> acc
   _state _lines _i _cols 0 acc -> acc
-  state (list h . t) i cols n acc -> rows-upto state t (add i 1) cols (sub n 1) (add acc (line-rows (add (visible-len (prompt-for state i)) (width h)) cols))
+  state '(h . t) i cols n acc -> rows-upto state t (add i 1) cols (sub n 1) (add acc (line-rows (add (visible-len (prompt-for state i)) (width h)) cols))
 end
 
 defn render-lines do
   _state '() _i -> '()
-  state (list h . t) i -> cons "#{prompt-for state i}${h}" (render-lines state t (add i 1))
+  state '(h . t) i -> cons "#{prompt-for state i}${h}" (render-lines state t (add i 1))
 end
 
 defn join-crlf do
   '() -> ""
-  (list h) -> h
-  (list h . t) -> "${h}\r\n#{join-crlf t}"
+  '(h) -> h
+  '(h . t) -> "${h}\r\n#{join-crlf t}"
 end
 
 export defn redraw state do

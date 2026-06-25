@@ -1,3 +1,4 @@
+use std/system with [env-set]
 use app/ish
 activate Shell
 mkdir -p build/shell-redir-golden
@@ -8,4 +9,4 @@ r = cat tgt.txt
 println r
 echo beta 2> e2.log
 rm -f tgt.txt e2.log
-:done
+println :done

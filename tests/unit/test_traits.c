@@ -280,12 +280,13 @@ static void test_trait_bytecode_roundtrip(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt1, "<trait-ishc>", src, &core, &err));
+    CHECK(idm_expand_source_string(&rt1, "<trait-ishc>", src, &core, &err));
     CHECK(!err.present);
     IdmBytecodeModule m1;
     idm_bc_init(&m1);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &m1, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt1, &m1, &err));
     CHECK(!err.present);
     IdmBuffer dis;
     idm_buf_init(&dis);
@@ -422,6 +423,7 @@ static void test_record_ishc_roundtrip(void) {
     CHECK(idm_bc_set_function_entry(&m1, main_fn, m1.code_count));
     CHECK(idm_bc_emit_u32(&m1, IDM_OP_LOAD_CONST, record_const, NULL));
     CHECK(idm_bc_emit_op(&m1, IDM_OP_RETURN, NULL));
+    CHECK(idm_bc_intern_literals(&rt, &m1, &err));
     IdmValue out1 = idm_nil();
     CHECK(idm_vm_run(&rt, &m1, main_fn, &out1, &err));
     CHECK(idm_value_equal(record, out1));

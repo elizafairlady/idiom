@@ -6,4 +6,4 @@ b = false || echo rescue
 println b
 c = false && echo skipped
 println c
-:done
+println :done

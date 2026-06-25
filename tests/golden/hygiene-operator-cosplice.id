@@ -4,4 +4,4 @@ defmacro defop %`(defop %,name) -> %`(do
   end
 end)
 defop <*+>
-inspect (6 <*+> 7)
+println (inspect (6 <*+> 7))

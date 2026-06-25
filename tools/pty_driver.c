@@ -48,8 +48,18 @@ static void drain(int master, int timeout_ms) {
     }
 }
 
+static int wait_timeout_ms(void) {
+    const char *env = getenv("PTY_WAIT_MS");
+    if (!env || !*env) return 30000;
+    char *end = NULL;
+    long value = strtol(env, &end, 10);
+    if (end == env || value < 10 || value > 300000) return 30000;
+    return (int)value;
+}
+
 static void wait_for(int master, const char *text) {
-    for (int i = 0; i < 500; i++) {
+    int remaining = wait_timeout_ms();
+    while (remaining > 0) {
         if (g_seen) {
             char *m = strstr(g_seen + g_wait_pos, text);
             if (m) {
@@ -58,6 +68,7 @@ static void wait_for(int master, const char *text) {
             }
         }
         drain(master, 10);
+        remaining -= 10;
     }
     fprintf(stderr, "pty_driver: timed out waiting for '%s'\n", text);
     exit(2);

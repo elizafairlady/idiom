@@ -20,18 +20,35 @@ suite do
     assert-eq (list a b c) (list 1 2 3)
   end
   test "list-and-cons-patterns" do
-    (list x y) = list 10 20
+    '(x y) = list 10 20
     assert-eq (add x y) 30
-    (list h . t) = list 1 2 3
+    '(h . t) = list 1 2 3
     assert-eq h 1
     assert-eq t (list 2 3)
     '() = list
     f = fn do
       '() -> :empty
-      (list _ . _) -> :cons
+      '(_ . _) -> :cons
     end
     assert-eq (f (list)) :empty
     assert-eq (f (list 1)) :cons
+  end
+  test "quoted-list-patterns-bind" do
+    '(x y) = '(10 20)
+    assert-eq (add x y) 30
+    '(h . t) = '(1 2 3)
+    assert-eq h 1
+    assert-eq t '(2 3)
+    '(:ok payload) = '(:ok 42)
+    assert-eq payload 42
+    f = fn do
+      '(:pair {a b}) -> add a b
+      '(:head h . rest) -> {h rest}
+      '() -> :empty
+    end
+    assert-eq (f '(:pair {4 5})) 9
+    assert-eq (f '(:head 7 8 9)) {7 '(8 9)}
+    assert-eq (f '()) :empty
   end
   test "vector-and-dict-patterns" do
     [v1 v2] = [7 8]
@@ -46,7 +63,7 @@ suite do
   test "maranget-selector-fallthrough-and-arity" do
     f = fn do
       '(1 2) when :false -> :literal-guard
-      (list a b) -> {:list a b}
+      '(a b) -> {:list a b}
       x y -> {:two x y}
       x -> {:one x}
     end
@@ -70,7 +87,7 @@ suite do
   test "bracket-patterns-match-vectors-only" do
     g = fn do
       [a b] -> {:vec a b}
-      (list a b) -> {:list a b}
+      '(a b) -> {:list a b}
     end
     assert-eq (g [1 2]) {:vec 1 2}
     assert-eq (g (list 1 2)) {:list 1 2}
@@ -185,5 +202,6 @@ suite do
   end
   test "paren-group-rejected-in-pattern" do
     assert-expand-error "{a (b c)} = {1 2}\na" "unsupported pattern"
+    assert-expand-error "match '(1) do\n  (list x) -> x\nend\n" "unsupported pattern"
   end
 end

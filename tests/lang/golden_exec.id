@@ -1,4 +1,5 @@
 use std/test
+use std/system with [cd]
 activate Test
 
 suite do

@@ -2,4 +2,4 @@ use app/ish
 activate Shell
 a = printf one &
 b = printf two &
-{(await a) (await b)}
+println {(await a) (await b)}

@@ -21,36 +21,23 @@ end
 
 defmacro destr-list do
   %`(destr-list %,e) -> %`(do
-    (list lha . lht) = %,e
+    '(lha . lht) = %,e
     {lha lht}
   end)
 end
 
 defmacro destr-vec do
   %`(destr-vec %,e) -> %`(do
-    (list lva lvb) = vector-to-list %,e
+    '(lva lvb) = vector-to-list %,e
     add lva lvb
   end)
 end
 
-defmacro defmm2 do
-  %`(defmm2 %,n) -> do
-    expander-register-macro n (fn do %`(_ %,a) -> %`(add %,a 1) end)
-    %`:nil
-  end
+defmacro inc2 do
+  %`(inc2 %,a) -> %`(add %,a 1)
 end
-defmm2 inc2
 
-defmacro gen3 do
-  %`(gen3 %,a) -> %`do
-    defmacro %,a s2 do
-      expander-register-macro (syntax-nth s2 2) (fn s3 -> make-syntax-int s3 7)
-      make-syntax-int s2 0
-    end
-  end
-end
-gen3 mk3
-mk3 leaf3
+defmacro leaf3 s3 -> make-syntax-int s3 7
 
 defmacro nest3 do
   %`(nest3 %,n) -> do
@@ -166,9 +153,8 @@ end
 defext int Zp zz
 
 for-syntax do
-  defn mk-lit v -> fn s -> make-syntax-int s v
-  expander-register-macro %'forty (mk-lit 40)
-  expander-register-macro %'two (mk-lit 2)
+  defmacro forty s -> make-syntax-int s 40
+  defmacro two s -> make-syntax-int s 2
 end
 
 for-syntax do
@@ -187,7 +173,7 @@ suite do
     end
     assert-inspect got "{:user :user}"
   end
-  test "three-level macro-defining-macro chain" do
+  test "phase macro declarations remain available" do
     assert-eq (leaf3 q) 7
   end
   test "recursive macro introducing a binder each round" do
@@ -211,7 +197,7 @@ suite do
     end
     assert-eq got 42
   end
-  test "registered-from-transformer macro ignores caller add shadow" do
+  test "declared macro ignores caller add shadow" do
     got = do
       defn add a b -> :user-add
       inc2 41
@@ -344,13 +330,13 @@ suite do
   test "spliced implement installs a method" do
     assert-eq (zz 5) :spliced-impl
   end
-  test "expander-register-macro pair from one for-syntax block" do
+  test "defmacro pair from one for-syntax block" do
     assert-eq (add (forty x) (two x)) 42
   end
   test "later for-syntax definition wins (same phase rebind)" do
     assert-eq (which-fs q) 2
   end
-  test "use imports runtime names into its block" do
+  test "use binds runtime slots into its block" do
     got = do
       use tests/pkg/exporter
       dbl 21
@@ -375,7 +361,7 @@ suite do
     end
     assert-eq got 42
   end
-  test "package grammar ignores caller str/append shadows" do
+  test "package core syntax ignores caller str/append shadows" do
     got = do
       use tests/pkg/htmldsl
       activate HtmlDsl
@@ -422,6 +408,21 @@ suite do
   end
   test "macro-introduced names not visible after splice" do
     assert-expand-error "defmacro m stx -> %`(do\n    defn hidden-fn v -> v\n  end)\nm x\nhidden-fn 1\n" "unbound identifier 'hidden-fn'"
+  end
+  test "macro operator with caller name is visible" do
+    got = do
+      defmacro install-op stx -> match stx do
+        %`(install-op %,name) -> %`do
+          operator %,name precedence: 50 assoc: left capture: :infix -> add
+        end
+      end
+      install-op <++>
+      40 <++> 2
+    end
+    assert-eq got 42
+  end
+  test "macro-invented core operator name is hygienic" do
+    assert-expand-error "defmacro install-op stx -> %`do\n  core-operator <++> 50 \"left\" \"infix\" add\nend\ninstall-op x\n40 <++> 2\n" "unbound identifier '<++>'"
   end
   test "two providers of one surface in one context collide" do
     assert-expand-error "use tests/pkg/exporter\nuse tests/pkg/exporter2\nactivate Exporter\nactivate Exporter2\nanswer x" "already active in this context"
@@ -477,7 +478,7 @@ suite do
   end
   test "list pattern head is recognized by name even when shadowed" do
     list = fn a b -> [a b]
-    (list pa pb) = '(8 9)
+    '(pa pb) = '(8 9)
     assert-eq (add pa pb) 17
     assert-eq (list 1 2) [1 2]
   end

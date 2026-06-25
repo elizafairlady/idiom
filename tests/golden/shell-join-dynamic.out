@@ -1,3 +1,3 @@
 {:ok 0 "premid.post --flag=mid mid/leaf\n" ""}
 {:ok 0 "lit*mid\n" ""}
-:done
+done

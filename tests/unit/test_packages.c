@@ -191,6 +191,7 @@ static void test_directory_package_declaration_prep(void) {
     remove("build/orderlesspkg.ic");
     CHECK(write_text_file("build/orderlessdep.id",
         "package orderlessdep\n"
+        "export defn bump x -> 1000\n"
         "export defn depadd x -> add x 10\n"));
     CHECK(write_text_file("build/orderlesspkg/a_use.id",
         "package orderlesspkg\n"
@@ -263,9 +264,9 @@ static void test_stale_cache_runs_no_phase_init(void) {
     CHECK(idm_bc_emit_u32(art.module, IDM_OP_LOAD_CONST, nil_const, NULL));
     CHECK(idm_bc_emit_op(art.module, IDM_OP_RETURN, NULL));
 
-    IdmNamespace *phase_ns = idm_fresh_phase_namespace(&rt, &err);
-    CHECK(phase_ns != NULL && !err.present);
-    art.phase_env = idm_phase_env_create(&rt, phase_ns);
+    IdmEnv *phase_runtime_env = idm_fresh_phase_runtime_env(&rt, &err);
+    CHECK(phase_runtime_env != NULL && !err.present);
+    art.phase_env = idm_phase_env_create(&rt, phase_runtime_env);
     CHECK(art.phase_env != NULL);
     IdmBytecodeModule *phase = malloc(sizeof(*phase));
     CHECK(phase != NULL);
@@ -275,13 +276,17 @@ static void test_stale_cache_runs_no_phase_init(void) {
     CHECK(idm_bc_add_const(phase, idm_string(&rt, marker, &err), &path_const));
     CHECK(idm_bc_add_const(phase, idm_string(&rt, "ran", &err), &text_const));
     CHECK(!err.present);
+    uint32_t file_write_fn = 0;
+    CHECK(idm_bc_add_primitive_function(phase, idm_primitive_name(IDM_PRIM_FILE_WRITE), idm_primitive_arity(IDM_PRIM_FILE_WRITE), (uint32_t)IDM_PRIM_FILE_WRITE, &file_write_fn));
     uint32_t phase_fn = 0;
     CHECK(idm_bc_add_function(phase, "phase-init", 0, 0, 0, &phase_fn));
+    CHECK(idm_bc_emit_u32(phase, IDM_OP_MAKE_CLOSURE, file_write_fn, NULL));
     CHECK(idm_bc_emit_u32(phase, IDM_OP_LOAD_CONST, path_const, NULL));
     CHECK(idm_bc_emit_u32(phase, IDM_OP_LOAD_CONST, text_const, NULL));
-    CHECK(idm_bc_emit_u32(phase, IDM_OP_PRIM_CALL, (uint32_t)IDM_PRIM_FILE_WRITE, NULL));
-    CHECK(idm_bc_emit(phase, 2u, NULL));
+    CHECK(idm_bc_emit_u32(phase, IDM_OP_CALL, 2u, NULL));
+    CHECK(idm_bc_emit(phase, 0u, NULL));
     CHECK(idm_bc_emit_op(phase, IDM_OP_RETURN, NULL));
+    CHECK(idm_bc_intern_literals(&rt, phase, &err));
     CHECK(idm_phase_env_add_module(art.phase_env, phase, phase_fn, &err));
 
     IdmBuffer blob;
@@ -297,7 +302,7 @@ static void test_stale_cache_runs_no_phase_init(void) {
     idm_buf_destroy(&blob);
 
     IdmArtifact fresh;
-    CHECK(idm_artifact_cache_load(&rt, "build/stalecache", art.src_hash, &fresh));
+    CHECK(idm_artifact_cache_load(&rt, "build/stalecache", art.src_hash, &fresh, NULL, NULL));
     FILE *probe = fopen(marker, "rb");
     CHECK(probe != NULL);
     if (probe) fclose(probe);
@@ -307,7 +312,7 @@ static void test_stale_cache_runs_no_phase_init(void) {
     unsigned char stale_hash[32];
     idm_sha256("different-src", 13u, stale_hash);
     IdmArtifact stale;
-    CHECK(!idm_artifact_cache_load(&rt, "build/stalecache", stale_hash, &stale));
+    CHECK(!idm_artifact_cache_load(&rt, "build/stalecache", stale_hash, &stale, NULL, NULL));
     probe = fopen(marker, "rb");
     CHECK(probe == NULL);
     if (probe) fclose(probe);
@@ -432,6 +437,7 @@ static void test_read_set_roundtrip(void) {
         CHECK(back.deps[i].kind == art.deps[i].kind);
         CHECK(memcmp(back.deps[i].hash, art.deps[i].hash, 32u) == 0);
     }
+    CHECK(!idm_artifact_dep_verified(&rt, &back.deps[0]));
     idm_buf_destroy(&blob);
     idm_artifact_destroy(&back);
     idm_artifact_destroy(&art);
@@ -467,6 +473,141 @@ static void test_idiompath_lookup(void) {
     }
 }
 
+static void test_phase_env_rejects_prepared_uninterned_module(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmEnv *phase_runtime_env = idm_fresh_phase_runtime_env(&rt, &err);
+    CHECK(phase_runtime_env != NULL);
+    IdmPhaseEnv *env = idm_phase_env_create(&rt, phase_runtime_env);
+    CHECK(env != NULL);
+    IdmBytecodeModule *module = malloc(sizeof(*module));
+    CHECK(module != NULL);
+    idm_bc_init(module);
+    uint32_t c1 = 0;
+    uint32_t main_fn = 0;
+    CHECK(idm_bc_add_const(module, idm_int(1), &c1));
+    CHECK(idm_bc_add_function(module, "phase", 0, 0, 0, &main_fn));
+    CHECK(idm_bc_emit_u32(module, IDM_OP_LOAD_CONST, c1, NULL));
+    CHECK(idm_bc_emit_op(module, IDM_OP_RETURN, NULL));
+    CHECK(idm_bc_prepare_selectors(module, &err));
+    CHECK(!idm_phase_env_add_module(env, module, main_fn, &err));
+    CHECK(err.present && err.message && strstr(err.message, "finalized") != NULL);
+    idm_error_clear(&err);
+    CHECK(idm_bc_intern_literals(&rt, module, &err));
+    CHECK(idm_phase_env_add_module(env, module, main_fn, &err));
+    CHECK(!err.present);
+    idm_phase_env_release(env);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static IdmSyntax *test_tuple2(const char *tag, IdmSyntax *item, IdmSpan span) {
+    IdmSyntax *tuple = idm_syn_tuple(span);
+    IdmSyntax *head = idm_syn_atom(tag, span);
+    if (!tuple || !head || !item) {
+        idm_syn_free(tuple);
+        idm_syn_free(head);
+        idm_syn_free(item);
+        return NULL;
+    }
+    if (!idm_syn_append(tuple, head)) {
+        idm_syn_free(head);
+        idm_syn_free(item);
+        idm_syn_free(tuple);
+        return NULL;
+    }
+    if (!idm_syn_append(tuple, item)) {
+        idm_syn_free(item);
+        idm_syn_free(tuple);
+        return NULL;
+    }
+    return tuple;
+}
+
+static bool test_make_grammar_rule(IdmGrammarRule *rule, const char *name, IdmSpan span) {
+    memset(rule, 0, sizeof(*rule));
+    rule->name = idm_strdup(name);
+    rule->kind = (uint8_t)IDM_GRAMMAR_RULE_TOKEN;
+    IdmSyntax *regex_source = idm_syn_string("x", span);
+    IdmSyntax *capture_name = idm_syn_word(name, span);
+    IdmSyntax *pattern = test_tuple2("regex", regex_source, span);
+    IdmSyntax *constructor = test_tuple2("capture", capture_name, span);
+    IdmError err;
+    idm_error_init(&err);
+    bool ok = rule->name && pattern && constructor &&
+              idm_grammar_terminal_from_ir(pattern, &rule->terminal, &err) &&
+              idm_reader_ctor_compile_ir(constructor, &rule->constructor, &err);
+    if (!ok) {
+        idm_grammar_rule_destroy(rule);
+    }
+    idm_syn_free(pattern);
+    idm_syn_free(constructor);
+    idm_error_clear(&err);
+    return ok;
+}
+
+static void test_artifact_rejects_duplicate_grammar_surfaces(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmArtifact art;
+    memset(&art, 0, sizeof(art));
+    idm_sha256("dup-grammar-surfaces", 20u, art.src_hash);
+    art.grammar_count = 2u;
+    art.grammars = calloc(art.grammar_count, sizeof(*art.grammars));
+    CHECK(art.grammars != NULL);
+    for (size_t i = 0; i < art.grammar_count; i++) {
+        art.grammars[i].name = idm_strdup("ReaderSurface");
+        art.grammars[i].mode = (uint8_t)IDM_GRAMMAR_MODE_EXTEND;
+        art.grammars[i].rule_count = 1u;
+        art.grammars[i].rules = calloc(1u, sizeof(*art.grammars[i].rules));
+        CHECK(art.grammars[i].name != NULL);
+        CHECK(art.grammars[i].rules != NULL);
+        CHECK(test_make_grammar_rule(&art.grammars[i].rules[0], i == 0 ? "a" : "b", idm_span_unknown(NULL)));
+    }
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(!idm_artifact_serialize(&art, &blob, &err));
+    CHECK(err.present && err.message && strstr(err.message, "declares surface") != NULL);
+    idm_buf_destroy(&blob);
+    idm_artifact_destroy(&art);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_artifact_rejects_missing_source_reader_grammar(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmArtifact art;
+    memset(&art, 0, sizeof(art));
+    idm_sha256("missing-source-reader", 21u, art.src_hash);
+    art.source_reader = idm_strdup("MissingReader");
+    art.grammar_count = 1u;
+    art.grammars = calloc(art.grammar_count, sizeof(*art.grammars));
+    CHECK(art.source_reader != NULL);
+    CHECK(art.grammars != NULL);
+    art.grammars[0].name = idm_strdup("PresentReader");
+    art.grammars[0].mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    art.grammars[0].rule_count = 1u;
+    art.grammars[0].rules = calloc(1u, sizeof(*art.grammars[0].rules));
+    CHECK(art.grammars[0].name != NULL);
+    CHECK(art.grammars[0].rules != NULL);
+    CHECK(test_make_grammar_rule(&art.grammars[0].rules[0], "a", idm_span_unknown(NULL)));
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(!idm_artifact_serialize(&art, &blob, &err));
+    CHECK(err.present && err.message && strstr(err.message, "has no core-grammar") != NULL);
+    idm_buf_destroy(&blob);
+    idm_artifact_destroy(&art);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
 void run_package_suite(void) {
     test_kernel_runtime_exports();
     test_kernel_uses_package_declaration_prep();
@@ -480,4 +621,7 @@ void run_package_suite(void) {
     test_read_set_roundtrip();
     test_package_cycle_detected();
     test_idiompath_lookup();
+    test_phase_env_rejects_prepared_uninterned_module();
+    test_artifact_rejects_duplicate_grammar_surfaces();
+    test_artifact_rejects_missing_source_reader_grammar();
 }

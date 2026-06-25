@@ -1,0 +1,3 @@
+package math
+
+export defn abs x -> {:spoof x}

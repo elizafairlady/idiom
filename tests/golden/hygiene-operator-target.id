@@ -4,4 +4,4 @@ r = do
   defn myadd a b -> 0
   1 <+> 2
 end
-inspect r
+println (inspect r)

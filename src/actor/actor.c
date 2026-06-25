@@ -280,7 +280,8 @@ IdmScheduler *idm_sched_create(IdmRuntime *rt, const IdmBytecodeModule *module, 
     }
     sched->rt = rt;
     sched->module = module;
-    if (module && !idm_bc_intern_literals(rt, (IdmBytecodeModule *)module, err)) {
+    if (module && !idm_bc_is_finalized(module)) {
+        idm_error_set(err, idm_span_unknown(NULL), "scheduler module is not finalized");
         free(sched);
         return NULL;
     }

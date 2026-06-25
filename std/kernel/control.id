@@ -1,9 +1,52 @@
-export defmacro if do
-  %`(if %,condition %,then_body) -> %`(cond %,condition %,then_body :nil)
-  %`(if %,condition %,then_body else %,else_body) -> %`(cond %,condition %,then_body %,else_body)
-  %`(if %,condition %,then_body else if %,condition2 %,then_body2 else %,else_body2) ->
-    %`(cond %,condition %,then_body (if %,condition2 %,then_body2 else %,else_body2))
-  stx -> syntax-error stx "if expects: if COND BODY [else BODY]"
+package kernel
+
+export defmacro if stx do
+  defn rev do
+    '() acc -> acc
+    '(h . t) acc -> rev t (cons h acc)
+  end
+
+  defn head-is? do
+    node name when (and (syntax? node) (syntax-list? node)) ->
+      and (gt? (syntax-length node) 0) (and (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name))
+    _ _ -> :false
+  end
+
+  defn word-is? do
+    node name when (syntax-word? node) -> eq? (syntax-word-text node) name
+    _ _ -> :false
+  end
+
+  defn condition do
+    '() -> syntax-error stx "if condition is empty"
+    '(one) -> one
+    parts -> make-syntax-expr stx parts
+  end
+
+  defn emit-else do
+    conds then_body '(else_body) -> %`(cond %,(condition conds) %,then_body %,else_body)
+    conds then_body '(head . rest) when (word-is? head "if") -> %`(cond %,(condition conds) %,then_body %,(scan rest '()))
+    _ _ _ -> syntax-error stx "if expects: if COND BODY [else BODY]"
+  end
+
+  defn emit-rest do
+    conds then_body '() -> %`(cond %,(condition conds) %,then_body :nil)
+    conds then_body '(head . rest) when (word-is? head "else") -> emit-else conds then_body rest
+    _ _ _ -> syntax-error stx "if expects: if COND BODY [else BODY]"
+  end
+
+  defn scan do
+    '() _ -> syntax-error stx "if expects: if COND BODY [else BODY]"
+    '(head . rest) acc when (head-is? head "%-body") -> emit-rest (rev acc '()) head rest
+    '(head . rest) acc -> scan rest (cons head acc)
+  end
+
+  match stx do
+    %`(if %,condition %,then_body) -> %`(cond %,condition %,then_body :nil)
+    %`(if %,condition %,then_body else %,else_body) -> %`(cond %,condition %,then_body %,else_body)
+    %`(if %,@tail) -> scan tail '()
+    _ -> syntax-error stx "if expects: if COND BODY [else BODY]"
+  end
 end
 
 export defmacro match do
@@ -24,7 +67,7 @@ export defmacro unless do
 end
 
 export defmacro not? do
-  %`(not? %,value) -> %`(cond (ok? %,value) :false :true)
+  %`(not? %,value) -> %`(cond %,value :false :true)
 end
 
 export defmacro and do

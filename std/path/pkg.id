@@ -1,6 +1,7 @@
 package path
 
 use std/string
+use std/system with [pwd]
 
 export defn join do
   a b when (eq? a "") -> b

@@ -1,11 +1,11 @@
 package yaml
 
 export protocol Yaml do
-  grammar do
+  core-syntax yaml do
     %`(yaml %,body) -> do
       defn rev do
         '() acc -> acc
-        (list h . t) acc -> rev t (cons h acc)
+        '(h . t) acc -> rev t (cons h acc)
       end
 
       defn scalar-word w -> match (syntax-word-text w) do

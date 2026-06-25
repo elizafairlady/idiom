@@ -12,19 +12,19 @@ export defn rule-name do
 end
 
 defn find-rule do
-  (list {:rule n d a} . _) name when (eq? n name) -> {:rule n d a}
-  (list _ . t) name -> find-rule t name
+  '({:rule n d a} . _) name when (eq? n name) -> {:rule n d a}
+  '(_ . t) name -> find-rule t name
   '() name -> error {:unknown-target name}
 end
 
 defn done? do
   '() _ -> :false
-  (list {n _} . t) name -> cond (eq? n name) :true (done? t name)
+  '({n _} . t) name -> cond (eq? n name) :true (done? t name)
 end
 
 defn build-list do
   rules '() done -> done
-  rules (list d . ds) done -> build-list rules ds (build-into rules d done)
+  rules '(d . ds) done -> build-list rules ds (build-into rules d done)
 end
 
 defn build-into do

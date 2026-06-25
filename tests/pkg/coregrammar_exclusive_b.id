@@ -1,0 +1,7 @@
+package coregrammar_exclusive_b
+
+export protocol GrammarExclusiveB do
+  core-grammar ReaderExclusive :exclusive [
+    {:token integer {:regex "[0-9]+"} {:capture integer}}
+  ]
+end

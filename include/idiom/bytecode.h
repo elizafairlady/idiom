@@ -17,67 +17,29 @@ typedef enum {
     IDM_OP_MAKE_CLOSURE_CAPTURES,
     IDM_OP_MAKE_MULTI_CLOSURE,
     IDM_OP_CALL,
-    IDM_OP_TAIL_CALL,
     IDM_OP_RETURN,
     IDM_OP_POP,
     IDM_OP_JUMP,
     IDM_OP_JUMP_IF_FALSE,
-    IDM_OP_PRIM_CALL,
-    IDM_OP_SELF,
-    IDM_OP_SPAWN,
-    IDM_OP_SEND,
-    IDM_OP_EXIT,
-    IDM_OP_LINK,
-    IDM_OP_UNLINK,
-    IDM_OP_MONITOR,
-    IDM_OP_DEMONITOR,
-    IDM_OP_TRAP_EXIT,
     IDM_OP_RECV,
-    IDM_OP_EXEC,
     IDM_OP_RESCUE_PUSH,
     IDM_OP_RESCUE_POP,
     IDM_OP_RAISE,
     IDM_OP_LOAD_RAISED,
-    IDM_OP_LOAD_GLOBAL,
-    IDM_OP_STORE_GLOBAL,
-    IDM_OP_AWAIT,
-    IDM_OP_APPLY,
-    IDM_OP_ENTER_NAMESPACE,
-    IDM_OP_TRANSFER_NAMESPACE,
-    IDM_OP_LEAVE_NAMESPACE,
+    IDM_OP_LOAD_ENV,
+    IDM_OP_STORE_ENV,
+    IDM_OP_LOAD_PACKAGE_SLOT,
+    IDM_OP_PUSH_PACKAGE_ENV,
+    IDM_OP_POP_PACKAGE_ENV,
     IDM_OP_DEFINE_TRAIT,
     IDM_OP_IMPLEMENT_TRAIT,
     IDM_OP_CALL_METHOD,
-    IDM_OP_TAIL_CALL_METHOD,
-    IDM_OP_EXIT_SIGNAL,
-    IDM_OP_SPAWN_LINK,
-    IDM_OP_SPAWN_MONITOR,
-    IDM_OP_TAIL_RECV,
-    IDM_OP_REGEX_TEST,
-    IDM_OP_REGEX_EXEC,
-    IDM_OP_REGEX_SCAN,
-    IDM_OP_NUM_ADD,
-    IDM_OP_NUM_SUB,
-    IDM_OP_NUM_MUL,
-    IDM_OP_NUM_DIV,
-    IDM_OP_NUM_MOD,
-    IDM_OP_NUM_POW,
-    IDM_OP_NUM_NEG,
-    IDM_OP_NUM_LT,
-    IDM_OP_NUM_GT,
-    IDM_OP_NUM_LTE,
-    IDM_OP_NUM_GTE,
-    IDM_OP_EQ,
-    IDM_OP_NEQ
+    IDM_OP_LIST_CONS,
+    IDM_OP_LIST_APPEND,
+    IDM_OP_MAKE_VALUE_SEQUENCE,
+    IDM_OP_MAKE_SYNTAX,
+    IDM_OP_STRING_CONCAT,
 } IdmOpcode;
-
-typedef enum {
-    IDM_NS_TRANSFER_PARENT_TO_CHILD = 0,
-    IDM_NS_TRANSFER_CHILD_TO_PARENT = 1
-} IdmNamespaceTransferDirection;
-
-#define IDM_CALL_DIRECT_FLAG 0x80000000u
-#define IDM_CALL_ARGC_MASK 0x7fffffffu
 
 typedef struct {
     uint32_t offset;
@@ -85,17 +47,26 @@ typedef struct {
 } IdmBcNameNote;
 
 typedef struct {
+    uint32_t offset;
+    IdmPatternSelector *selector;
+} IdmBcSelectorSite;
+
+typedef struct {
     char *name;
     uint32_t arity;
+    IdmArity call_arity;
     uint32_t local_count;
     size_t entry;
     bool has_guard;
     uint32_t guard_function;
+    bool primitive_backed;
+    uint32_t primitive;
     IdmPattern **param_patterns;
     uint32_t pattern_count;
     IdmPatternLocal *pattern_locals;
     uint32_t pattern_local_count;
     bool trivial_match;
+    IdmPatternSelector *selector;
 } IdmBcFunction;
 
 typedef struct IdmBytecodeModule {
@@ -117,17 +88,30 @@ typedef struct IdmBytecodeModule {
     IdmBcNameNote *name_notes;
     size_t name_note_count;
     size_t name_note_cap;
+    IdmBcSelectorSite *selector_sites;
+    size_t selector_site_count;
+    size_t selector_site_cap;
+    IdmPatternSelector **selector_by_offset;
+    size_t selector_by_offset_count;
+    bool selectors_prepared;
+    bool literals_interned;
+    uint64_t selector_generation;
 } IdmBytecodeModule;
 
 void idm_bc_init(IdmBytecodeModule *module);
 void idm_bc_destroy(IdmBytecodeModule *module);
 bool idm_bc_add_const(IdmBytecodeModule *module, IdmValue value, uint32_t *out_index);
 bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError *err);
+bool idm_bc_is_finalized(const IdmBytecodeModule *module);
 bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t arity, uint32_t local_count, size_t entry, uint32_t *out_index);
+bool idm_bc_add_primitive_function(IdmBytecodeModule *module, const char *name, IdmArity arity, uint32_t primitive, uint32_t *out_index);
 bool idm_bc_set_function_entry(IdmBytecodeModule *module, uint32_t function_index, size_t entry);
 bool idm_bc_note_span(IdmBytecodeModule *module, IdmSpan span);
 bool idm_bc_note_name(IdmBytecodeModule *module, size_t offset, const char *name);
 IdmSpan idm_bc_span_at(const IdmBytecodeModule *module, size_t ip);
+bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err);
+IdmPatternSelector *idm_bc_selector_at(const IdmBytecodeModule *module, size_t offset);
+bool idm_bc_build_selector_for_entries(const IdmBytecodeModule *module, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err);
 bool idm_bc_set_function_patterns_take(IdmBytecodeModule *module, uint32_t function_index, IdmPattern **patterns, uint32_t pattern_count);
 bool idm_bc_set_function_pattern_locals_take(IdmBytecodeModule *module, uint32_t function_index, IdmPatternLocal *locals, uint32_t local_count);
 bool idm_bc_set_function_guard(IdmBytecodeModule *module, uint32_t function_index, uint32_t guard_function);

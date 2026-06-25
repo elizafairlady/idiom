@@ -10,16 +10,41 @@ typedef enum {
 } IdmRegexFlags;
 
 typedef struct IdmRegex IdmRegex;
+typedef struct IdmRegexSet IdmRegexSet;
 typedef struct IdmRegexResult IdmRegexResult;
+
+typedef struct {
+    bool set;
+    size_t start;
+    size_t end;
+} IdmRegexCaptureRange;
+
+typedef struct {
+    bool matched;
+    size_t index;
+    size_t end;
+    IdmRegexCaptureRange *captures;
+    size_t capture_count;
+} IdmRegexSetResult;
 
 bool idm_regex_compile(const char *source, size_t source_len, uint32_t flags, IdmRegex **out, IdmError *err);
 IdmRegex *idm_regex_clone(const IdmRegex *rx, IdmError *err);
 void idm_regex_free(IdmRegex *rx);
+bool idm_regex_set_compile(const IdmRegex *const *items, size_t count, IdmRegexSet **out, IdmError *err);
+void idm_regex_set_free(IdmRegexSet *set);
+void idm_regex_set_result_destroy(IdmRegexSetResult *result);
+size_t idm_regex_set_count(const IdmRegexSet *set);
 size_t idm_regex_footprint(const IdmRegex *rx);
 const char *idm_regex_source(const IdmRegex *rx, size_t *out_len);
 uint32_t idm_regex_flags(const IdmRegex *rx);
 size_t idm_regex_group_count(const IdmRegex *rx);
 const char *idm_regex_group_name(const IdmRegex *rx, size_t index);
+bool idm_regex_nullable(const IdmRegex *rx);
+size_t idm_regex_set_group_count(const IdmRegexSet *set, size_t item_index);
+const char *idm_regex_set_group_name(const IdmRegexSet *set, size_t item_index, size_t group_index);
+bool idm_regex_set_matches_empty(const IdmRegexSet *set, bool *out, IdmError *err);
+bool idm_regex_set_serialize(IdmBuffer *out, const IdmRegexSet *set, IdmError *err);
+bool idm_regex_set_deserialize(IdmByteReader *r, IdmRegexSet **out, IdmError *err);
 
 void idm_regex_result_free(IdmRegexResult *result);
 IdmRegexResult *idm_regex_result_clone(const IdmRegexResult *result);
@@ -28,6 +53,9 @@ size_t idm_regex_result_footprint(const IdmRegexResult *result);
 IdmValue idm_regex_result_subject_value(const IdmRegexResult *result);
 
 bool idm_regex_test_bytes(const IdmRegex *rx, const char *input, size_t input_len, bool *out_matched, IdmError *err);
+bool idm_regex_match_at(const IdmRegex *rx, const char *input, size_t input_len, size_t offset, size_t *out_end, IdmError *err);
+bool idm_regex_set_match_at(const IdmRegexSet *set, const char *input, size_t input_len, size_t offset, size_t *out_index, size_t *out_end, bool *out_matched, IdmError *err);
+bool idm_regex_set_exec_at(const IdmRegexSet *set, const char *input, size_t input_len, size_t offset, IdmRegexSetResult *out, IdmError *err);
 bool idm_regex_exec_at_subject(const IdmRegex *rx, IdmValue subject, const char *input, size_t input_len, size_t offset, bool full, IdmRegexResult **out, IdmError *err);
 bool idm_regex_scan_subject(const IdmRegex *rx, IdmValue subject, const char *input, size_t input_len, size_t offset, IdmRegexResult **out, IdmError *err);
 

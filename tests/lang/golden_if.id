@@ -76,4 +76,15 @@ suite do
     end
     assert-eq got :then
   end
+  test "if-condition-paren-elision" do
+    defn truthy n -> n == 42
+    got = if 40 + 2 |> truthy do
+      :then
+    else if 10 * 4 == 40 do
+      :wrong
+    else do
+      :else
+    end
+    assert-eq got :then
+  end
 end

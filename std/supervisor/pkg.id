@@ -2,6 +2,7 @@ package supervisor
 
 import std/map as Map
 use std/enum
+use std/system with [time-ms]
 
 export defn start do
   specs -> start specs 3 5000
@@ -29,7 +30,7 @@ defn spawn-child f -> spawn-link &f
 
 defn start-children do
   '() children -> &children
-  (list {id f restart} . rest) children -> start-children rest (Map.put children (spawn-child &f) {&id &f &restart})
+  '({id f restart} . rest) children -> start-children rest (Map.put children (spawn-child &f) {&id &f &restart})
 end
 
 defn loop state -> match state do

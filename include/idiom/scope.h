@@ -20,13 +20,13 @@ typedef struct {
 
 typedef enum {
     IDM_BIND_SPACE_DEFAULT,
-    IDM_BIND_SPACE_PACKAGE,
     IDM_BIND_SPACE_OPERATOR,
     IDM_BIND_SPACE_SHELL,
     IDM_BIND_SPACE_LABEL,
     IDM_BIND_SPACE_PROTOCOL,
     IDM_BIND_SPACE_TRAIT,
     IDM_BIND_SPACE_TYPE,
+    IDM_BIND_SPACE_CORE_SYNTAX,
     IDM_BIND_SPACE_GRAMMAR,
     IDM_BIND_SPACE_METHOD
 } IdmBindingSpace;
@@ -35,15 +35,16 @@ typedef enum {
     IDM_BIND_VALUE,
     IDM_BIND_CORE_FORM,
     IDM_BIND_TRANSFORMER,
-    IDM_BIND_PACKAGE,
     IDM_BIND_OPERATOR,
     IDM_BIND_SHELL_FORM,
     IDM_BIND_LOCAL,
     IDM_BIND_ARG,
-    IDM_BIND_GLOBAL,
+    IDM_BIND_ENV,
+    IDM_BIND_PACKAGE_SLOT,
     IDM_BIND_PROTOCOL,
     IDM_BIND_TRAIT,
     IDM_BIND_TYPE,
+    IDM_BIND_GRAMMAR,
     IDM_BIND_METHOD
 } IdmBindingKind;
 
@@ -70,6 +71,8 @@ typedef struct {
     uint32_t payload;
     uint32_t frame_id;
     IdmArity arity;
+    bool primitive_backed;
+    uint32_t primitive;
 } IdmBinding;
 
 typedef struct {
@@ -104,6 +107,7 @@ void idm_binding_table_init(IdmBindingTable *table);
 void idm_binding_table_destroy(IdmBindingTable *table);
 bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id);
 bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id);
+bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, uint32_t primitive, IdmBindingId *out_id);
 void idm_binding_table_truncate(IdmBindingTable *table, size_t count);
 IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding);
 

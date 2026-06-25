@@ -1,9 +1,8 @@
 #include "internal.h"
 
 static bool expand_macro_syntax_only(ExpandContext *ctx, const IdmSyntax *syntax, IdmSyntax **out_syntax, IdmError *err), bind_macro_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *name, uint32_t payload, IdmSpan span, IdmError *err), phase_syntax_fn_compile(ExpandContext *ctx, PhaseSyntaxFn *out, IdmCore *fn, const char *debug_name, IdmSpan span, IdmError *err);
-static const char *operator_decl_token_text(const IdmSyntax *syn);
 static MacroDef *macro_slot(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err);
-static void phase_syntax_fn_import(ExpandContext *ctx, PhaseSyntaxFn *out, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env);
+static void phase_syntax_fn_import(ExpandContext *ctx, PhaseSyntaxFn *out, IdmModuleRef *module, uint32_t function_index, IdmPhaseEnv *phase_env);
 static bool phase_syntax_callable_arity_one(const IdmCore *fn);
 
 bool run_phase_core(ExpandContext *ctx, IdmCore *core, IdmError *err) {
@@ -11,16 +10,15 @@ bool run_phase_core(ExpandContext *ctx, IdmCore *core, IdmError *err) {
     if (!module) return idm_error_oom(err, idm_span_unknown(NULL));
     idm_bc_init(module);
     uint32_t main_fn = 0;
-    if (!idm_core_compile_main(core, module, &main_fn, err)) {
+    if (!idm_core_compile_main(core, module, &main_fn, err) ||
+        !idm_bc_intern_literals(ctx->rt, module, err)) {
         idm_bc_destroy(module); free(module); return false;
     }
-    IdmNamespace *old_main_ns = ctx->rt->main_ns;
     int old_trait_phase = ctx->rt->trait_phase;
-    if (ctx->phase_ns) ctx->rt->main_ns = ctx->phase_ns;
     ctx->rt->trait_phase = 1;
     IdmValue ignored = idm_nil();
-    bool ok = idm_vm_run(ctx->rt, module, main_fn, &ignored, err);
-    ctx->rt->main_ns = old_main_ns;
+    IdmEnv *phase_runtime_env = ctx->phase_env ? ctx->phase_env->env : ctx->rt->main_env;
+    bool ok = idm_vm_run_in_env(ctx->rt, module, main_fn, phase_runtime_env, &ignored, err);
     ctx->rt->trait_phase = old_trait_phase;
     if (ok) {
         if (!idm_phase_env_add_module(ctx->phase_env, module, main_fn, err)) {
@@ -44,32 +42,75 @@ bool resolve_transformer(ExpandContext *ctx, const IdmSyntax *head, uint32_t *ou
     return true;
 }
 
-bool resolve_head_grammar(ExpandContext *ctx, const IdmSyntax *head, uint32_t *out_grammar_index, IdmError *err) {
+bool resolve_head_core_syntax(ExpandContext *ctx, const IdmSyntax *head, uint32_t *out_core_syntax_index, IdmError *err) {
     if (!head || head->kind != IDM_SYN_WORD) return false;
+    const char *head_name = head->as.text;
+    const char *fallback_name = "_";
     const IdmScopeSet *scopes = idm_syn_scope_set(head, 0);
-    if (scopes) {
-        const GrammarDef *best = NULL;
-        for (size_t i = 0; i < ctx->grammar_count; i++) {
-            const GrammarDef *candidate = &ctx->grammars[i];
-            if (!idm_scope_set_subset(&candidate->scopes, scopes)) continue;
+    for (int pass = 0; pass < 2; pass++) {
+        const char *want = pass == 0 ? head_name : fallback_name;
+        const CoreSyntaxDef *best = NULL;
+        for (size_t i = 0; i < ctx->core_syntax_count; i++) {
+            const CoreSyntaxDef *candidate = &ctx->core_syntax[i];
+            if (!candidate->name || strcmp(candidate->name, want) != 0) continue;
+            if (scopes) {
+                if (!idm_scope_set_subset(&candidate->scopes, scopes)) continue;
+            } else if (candidate->scopes.count != 0) {
+                continue;
+            }
             if (!best || idm_scope_set_subset(&best->scopes, &candidate->scopes)) best = candidate;
         }
-        if (!best) return false;
-        for (size_t i = 0; i < ctx->grammar_count; i++) {
-            const GrammarDef *candidate = &ctx->grammars[i];
-            if (!idm_scope_set_subset(&candidate->scopes, scopes)) continue;
-            if (!idm_scope_set_subset(&candidate->scopes, &best->scopes)) {
-                expand_error(err, head->span, "ambiguous grammar for '%s'", head->as.text); return false;
+        if (!best) continue;
+        if (scopes) {
+            for (size_t i = 0; i < ctx->core_syntax_count; i++) {
+                const CoreSyntaxDef *candidate = &ctx->core_syntax[i];
+                if (!candidate->name || strcmp(candidate->name, want) != 0) continue;
+                if (!idm_scope_set_subset(&candidate->scopes, scopes)) continue;
+                if (!idm_scope_set_subset(&candidate->scopes, &best->scopes)) {
+                    expand_error(err, head->span, "ambiguous core syntax for '%s'", head->as.text); return false;
+                }
             }
         }
-        *out_grammar_index = (uint32_t)(best - ctx->grammars);
+        *out_core_syntax_index = (uint32_t)(best - ctx->core_syntax);
         return true;
     }
-    for (size_t i = ctx->grammar_count; i > 0; i--) {
-        const GrammarDef *candidate = &ctx->grammars[i - 1u];
-        if (candidate->scopes.count == 0) { *out_grammar_index = (uint32_t)(i - 1u); return true; }
-    }
     return false;
+}
+
+static void core_syntax_def_clear_local(CoreSyntaxDef *def) {
+    if (!def) return;
+    free(def->name);
+    idm_scope_set_destroy(&def->scopes);
+    phase_syntax_fn_destroy(&def->fn);
+    memset(def, 0, sizeof(*def));
+}
+
+static bool core_syntax_def_append(ExpandContext *ctx, CoreSyntaxDef **items, size_t *count, size_t *cap, const char *name, const IdmScopeSet *scopes, const PhaseSyntaxFn *fn, IdmError *err) {
+    (void)ctx;
+    if (*count == *cap) {
+        size_t next_cap = *cap ? *cap * 2u : 4u;
+        CoreSyntaxDef *next = realloc(*items, next_cap * sizeof(*next));
+        if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
+        *items = next;
+        *cap = next_cap;
+    }
+    CoreSyntaxDef *def = &(*items)[*count];
+    memset(def, 0, sizeof(*def));
+    def->name = idm_strdup(name);
+    if (!def->name) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (scopes && !idm_scope_set_copy(&def->scopes, scopes)) {
+        core_syntax_def_clear_local(def);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    if (fn) {
+        def->fn.module = idm_module_ref_retain(fn->module);
+        def->fn.function_index = fn->function_index;
+        def->fn.phase_env = idm_phase_env_retain(fn->phase_env);
+        def->fn.closure_backed = fn->closure_backed;
+        def->fn.closure = fn->closure;
+    }
+    (*count)++;
+    return true;
 }
 
 static bool phase_syntax_call(IdmRuntime *rt, const IdmSyntax *use_syntax, const PhaseSyntaxFn *fn, IdmSyntax **out_syntax, IdmError *err) {
@@ -77,21 +118,17 @@ static bool phase_syntax_call(IdmRuntime *rt, const IdmSyntax *use_syntax, const
     IdmValue arg = idm_syntax_value(rt, use_syntax, err);
     if (err && err->present) return false;
     IdmValue result = idm_nil();
-    IdmNamespace *old_main_ns = rt->main_ns;
     int old_trait_phase = rt->trait_phase;
-    IdmNamespace *call_ns = fn->phase_env ? fn->phase_env->ns : fn->phase_ns;
-    if (call_ns) rt->main_ns = call_ns;
+    IdmEnv *call_env = fn->phase_env ? fn->phase_env->env : rt->main_env;
     rt->trait_phase = 1;
     IdmValue callee = fn->closure_backed
         ? fn->closure
-        : idm_closure_in_module(rt, &fn->module->module, fn->function_index, NULL, 0, call_ns, err);
+        : idm_closure_in_module(rt, &fn->module->module, fn->function_index, NULL, 0, call_env, err);
     if (err && err->present) {
-        rt->main_ns = old_main_ns;
         rt->trait_phase = old_trait_phase;
         return false;
     }
     bool ok = idm_vm_call_closure(rt, callee, &arg, 1, &result, err);
-    rt->main_ns = old_main_ns;
     rt->trait_phase = old_trait_phase;
     if (!ok) return false;
     const IdmSyntax *result_syntax = idm_syntax_get(result, err);
@@ -104,9 +141,9 @@ bool local_macro_invoke(void *user, IdmRuntime *rt, uint32_t payload, const IdmS
     ExpandContext *ctx = user; if (payload >= ctx->macro_count) return idm_error_set(err, use_syntax ? use_syntax->span : idm_span_unknown(NULL), "macro transformer payload %u is out of bounds", payload);
     return phase_syntax_call(rt, use_syntax, &ctx->macros[payload].fn, out_syntax, err); }
 
-static bool local_grammar_invoke(ExpandContext *ctx, IdmRuntime *rt, uint32_t grammar_index, const IdmSyntax *use_syntax, IdmSyntax **out_syntax, IdmError *err) {
-    if (grammar_index >= ctx->grammar_count) return idm_error_set(err, use_syntax ? use_syntax->span : idm_span_unknown(NULL), "grammar index %u is out of bounds", grammar_index);
-    return phase_syntax_call(rt, use_syntax, &ctx->grammars[grammar_index].fn, out_syntax, err); }
+static bool local_core_syntax_invoke(ExpandContext *ctx, IdmRuntime *rt, uint32_t core_syntax_index, const IdmSyntax *use_syntax, IdmSyntax **out_syntax, IdmError *err) {
+    if (core_syntax_index >= ctx->core_syntax_count) return idm_error_set(err, use_syntax ? use_syntax->span : idm_span_unknown(NULL), "core syntax index %u is out of bounds", core_syntax_index);
+    return phase_syntax_call(rt, use_syntax, &ctx->core_syntax[core_syntax_index].fn, out_syntax, err); }
 
 typedef bool (*SyntaxSurfaceInvokeFn)(ExpandContext *ctx, uint32_t payload, const IdmSyntax *use_copy, const IdmSyntax *head, IdmSyntax **out_syntax, IdmError *err);
 
@@ -116,7 +153,7 @@ static bool invoke_macro_payload(ExpandContext *ctx, uint32_t payload, const Idm
     return runner->invoke(runner->user, ctx->rt, payload, use_copy, out_syntax, err);
 }
 
-static bool invoke_grammar_payload(ExpandContext *ctx, uint32_t grammar_index, const IdmSyntax *use_copy, const IdmSyntax *head, IdmSyntax **out_syntax, IdmError *err) { (void)head; return local_grammar_invoke(ctx, ctx->rt, grammar_index, use_copy, out_syntax, err); }
+static bool invoke_core_syntax_payload(ExpandContext *ctx, uint32_t core_syntax_index, const IdmSyntax *use_copy, const IdmSyntax *head, IdmSyntax **out_syntax, IdmError *err) { (void)head; return local_core_syntax_invoke(ctx, ctx->rt, core_syntax_index, use_copy, out_syntax, err); }
 
 static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, const char *depth_action, const char *note_action, SyntaxSurfaceInvokeFn invoke, IdmSyntax **out_syntax, IdmError *err) {
     if (ctx->surface_depth >= 128) return expand_error(err, head->span, "%s '%s'", depth_action, head->as.text);
@@ -162,7 +199,7 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
 
 bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, payload, "macro expansion depth exceeded while expanding", "in expansion of", invoke_macro_payload, out_syntax, err); }
 
-static bool invoke_grammar_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t grammar_index, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, grammar_index, "grammar expansion depth exceeded while expanding", "in grammar expansion of", invoke_grammar_payload, out_syntax, err); }
+static bool invoke_core_syntax_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t core_syntax_index, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, core_syntax_index, "core syntax expansion depth exceeded while expanding", "in core syntax expansion of", invoke_core_syntax_payload, out_syntax, err); }
 
 IdmCore *expand_macro_use(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmError *err) {
     IdmSyntax *expanded_syntax = NULL;
@@ -233,7 +270,13 @@ static bool phase_syntax_callable_arity_one(const IdmCore *fn) {
     if (fn->kind == IDM_CORE_FN) return fn->as.fn.arity == 1;
     if (fn->kind != IDM_CORE_FN_MULTI || fn->as.fn_multi.count == 0) return false;
     for (size_t i = 0; i < fn->as.fn_multi.count; i++) {
-        if (fn->as.fn_multi.clauses[i].arity != 1) return false;
+        const IdmFnClause *clause = &fn->as.fn_multi.clauses[i];
+        if (clause->primitive_backed) {
+            IdmArity one = idm_arity_exact(1u);
+            if (!idm_arity_equal(&clause->call_arity, &one)) return false;
+        } else if (clause->arity != 1) {
+            return false;
+        }
     }
     return true;
 }
@@ -272,11 +315,11 @@ IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items
     return core;
 }
 
-IdmCore *expand_grammar_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t grammar_index, IdmError *err) {
+IdmCore *expand_core_syntax_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t core_syntax_index, IdmError *err) {
     IdmSyntax *use = syntax_use_from_parts(ctx, items, start, end, err);
     if (!use) return NULL;
     IdmSyntax *expanded_syntax = NULL;
-    if (!invoke_grammar_to_syntax(ctx, use, items[start], grammar_index, &expanded_syntax, err)) {
+    if (!invoke_core_syntax_to_syntax(ctx, use, items[start], core_syntax_index, &expanded_syntax, err)) {
         idm_syn_free(use);
         return NULL;
     }
@@ -288,8 +331,23 @@ IdmCore *expand_grammar_use_from_parts(ExpandContext *ctx, IdmSyntax *const *ite
     return expanded;
 }
 
+static bool materialize_phase_runtime_inits(ExpandContext *ctx, IdmSpan span, IdmError *err) {
+    if (!ctx->phase_env || ctx->phase_runtime_init_mark_count >= ctx->runtime_init_mark_count) return true;
+    size_t first_mark = ctx->phase_runtime_init_mark_count;
+    IdmCore *body = idm_core_literal(idm_nil(), span);
+    if (!body) return idm_error_oom(err, span);
+    int saved_phase = ctx->phase;
+    ctx->phase = 1;
+    IdmCore *wrapped = wrap_phase_runtime_inits_since(ctx, body, first_mark, err);
+    bool ok = wrapped != NULL && run_phase_core(ctx, wrapped, err);
+    ctx->phase = saved_phase;
+    idm_core_free(wrapped);
+    if (ok) ctx->phase_runtime_init_mark_count = ctx->runtime_init_mark_count;
+    return ok;
+}
+
 static bool phase_syntax_fn_compile(ExpandContext *ctx, PhaseSyntaxFn *out, IdmCore *fn, const char *debug_name, IdmSpan span, IdmError *err) {
-    out->phase_ns = ctx->phase_ns ? ctx->phase_ns : ctx->rt->main_ns;
+    if (!materialize_phase_runtime_inits(ctx, span, err)) return false;
     out->phase_env = idm_phase_env_retain(ctx->phase_env);
     out->module = idm_module_ref_create(ctx->rt);
     if (!out->module) return idm_error_oom(err, span);
@@ -302,10 +360,9 @@ static bool phase_syntax_fn_compile(ExpandContext *ctx, PhaseSyntaxFn *out, IdmC
     return true;
 }
 
-static void phase_syntax_fn_import(ExpandContext *ctx, PhaseSyntaxFn *out, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env) {
+static void phase_syntax_fn_import(ExpandContext *ctx, PhaseSyntaxFn *out, IdmModuleRef *module, uint32_t function_index, IdmPhaseEnv *phase_env) {
     out->module = idm_module_ref_retain(module);
     out->function_index = function_index;
-    out->phase_ns = phase_ns ? phase_ns : ctx->phase_ns;
     out->phase_env = idm_phase_env_retain(phase_env ? phase_env : ctx->phase_env);
 }
 
@@ -353,20 +410,31 @@ bool register_macro(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *f
     return true;
 }
 
-static bool register_grammar_named(ExpandContext *ctx, IdmCore *fn, IdmSpan span, const char *surface, IdmError *err) {
-    const char *name = surface ? surface : "grammar";
-    if (!fn || (fn->kind != IDM_CORE_FN && fn->kind != IDM_CORE_FN_MULTI)) return idm_error_set(err, span, "%s must compile to a transformer function", name);
-    if (!phase_syntax_callable_arity_one(fn)) return idm_error_set(err, span, "%s transformer must accept exactly one syntax argument", name);
+static bool register_core_syntax_named(ExpandContext *ctx, const char *name, IdmCore *fn, IdmSpan span, IdmError *err) {
+    if (!name || !*name) return idm_error_set(err, span, "core-syntax name must be non-empty");
+    if (!fn || (fn->kind != IDM_CORE_FN && fn->kind != IDM_CORE_FN_MULTI)) return idm_error_set(err, span, "core-syntax %s must compile to a transformer function", name);
+    if (!phase_syntax_callable_arity_one(fn)) return idm_error_set(err, span, "core-syntax %s transformer must accept exactly one syntax argument", name);
     size_t capture_count = fn->kind == IDM_CORE_FN ? fn->as.fn.capture_count : fn->as.fn_multi.capture_count;
-    if (capture_count != 0) return idm_error_set(err, span, "%s transformer captures require phase environment support", name);
-    if (ctx->decl_grammar) return idm_error_set(err, span, "only one %s may be declared per protocol", name);
-    if (!phase_syntax_fn_compile(ctx, &ctx->decl_grammar_impl, fn, name, span, err)) return false;
-    ctx->decl_grammar = true;
-    return true;
+    if (capture_count != 0) return idm_error_set(err, span, "core-syntax %s transformer captures require phase environment support", name);
+    for (size_t i = 0; i < ctx->decl_core_syntax_count; i++) {
+        if (ctx->decl_core_syntax[i].name && strcmp(ctx->decl_core_syntax[i].name, name) == 0) {
+            return idm_error_set(err, span, "core-syntax %s is already declared in this protocol", name);
+        }
+    }
+    PhaseSyntaxFn compiled;
+    memset(&compiled, 0, sizeof(compiled));
+    if (!phase_syntax_fn_compile(ctx, &compiled, fn, name, span, err)) return false;
+    IdmScopeSet scopes;
+    idm_scope_set_init(&scopes);
+    bool ok = core_syntax_def_append(ctx, &ctx->decl_core_syntax, &ctx->decl_core_syntax_count, &ctx->decl_core_syntax_cap, name, &scopes, &compiled, err);
+    idm_scope_set_destroy(&scopes);
+    phase_syntax_fn_destroy(&compiled);
+    return ok;
 }
 
-bool register_grammar(ExpandContext *ctx, IdmCore *fn, IdmSpan span, IdmError *err) {
-    return register_grammar_named(ctx, fn, span, "grammar", err);
+bool register_core_syntax(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmCore *fn, IdmSpan span, IdmError *err) {
+    if (!name_syntax || name_syntax->kind != IDM_SYN_WORD) return idm_error_set(err, span, "core-syntax expects a head name");
+    return register_core_syntax_named(ctx, name_syntax->as.text, fn, span, err);
 }
 
 bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_syntax, IdmValue transformer, IdmError *err) {
@@ -392,10 +460,7 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
     }
     MacroDef *macro = macro_slot(ctx, name, name_syntax->span, err);
     if (!macro) return false;
-    if (!idm_bc_intern_literals(rt, (IdmBytecodeModule *)closure_module, err)) {
-        macro_def_destroy(macro);
-        return false;
-    }
+    if (!idm_bc_is_finalized(closure_module)) { macro_def_destroy(macro); return idm_error_set(err, name_syntax->span, "macro transformer module is not finalized"); }
     transformer = idm_value_copy(rt, &rt->immortal, transformer, err);
     if (err->present) {
         macro_def_destroy(macro);
@@ -404,7 +469,6 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
     macro->fn.closure_backed = true;
     macro->fn.closure = transformer;
     macro->exported = false;
-    macro->fn.phase_ns = ctx->phase_ns ? ctx->phase_ns : ctx->rt->main_ns;
     macro->fn.phase_env = idm_phase_env_retain(ctx->phase_env);
     uint32_t payload = (uint32_t)ctx->macro_count;
     if (!bind_macro_surface(ctx, name_syntax, name, payload, name_syntax->span, err)) {
@@ -415,10 +479,10 @@ bool register_macro_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_s
     return true;
 }
 
-static bool install_imported_macro_impl(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, bool hidden, IdmError *err) {
+static bool install_imported_macro_impl(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, bool hidden, IdmError *err) {
     MacroDef *macro = macro_slot(ctx, name, idm_span_unknown(NULL), err);
     if (!macro) return false;
-    phase_syntax_fn_import(ctx, &macro->fn, module, function_index, phase_ns, phase_env);
+    phase_syntax_fn_import(ctx, &macro->fn, module, function_index, phase_env);
     macro->exported = false;
     macro->hidden = hidden;
     uint32_t payload = (uint32_t)ctx->macro_count;
@@ -431,31 +495,307 @@ static bool install_imported_macro_impl(ExpandContext *ctx, const char *name, co
     return true;
 }
 
-bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
-    return install_imported_macro_impl(ctx, name, scopes, module, function_index, phase_ns, phase_env, provider, provider_key, false, err);
+bool install_imported_macro(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
+    return install_imported_macro_impl(ctx, name, scopes, module, function_index, phase_env, provider, provider_key, false, err);
 }
 
-bool install_imported_grammar(ExpandContext *ctx, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmNamespace *phase_ns, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
+bool install_imported_core_syntax(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, IdmModuleRef *module, uint32_t function_index, IdmPhaseEnv *phase_env, const char *provider, const char *provider_key, IdmError *err) {
+    if (!name || !*name) return idm_error_set(err, idm_span_unknown(NULL), "core-syntax import requires a name");
     const IdmScopeSet *binding_scopes = scopes ? scopes : &ctx->empty_scopes;
-    int guard = surface_install_guard(ctx, provider, provider_key, "grammar", "grammar", IDM_BIND_SPACE_GRAMMAR, binding_scopes, err);
+    int guard = surface_install_guard(ctx, provider, provider_key, name, name, IDM_BIND_SPACE_CORE_SYNTAX, binding_scopes, err);
     if (guard <= 0) return guard == 0;
+    PhaseSyntaxFn imported;
+    memset(&imported, 0, sizeof(imported));
+    phase_syntax_fn_import(ctx, &imported, module, function_index, phase_env);
+    bool ok = core_syntax_def_append(ctx, &ctx->core_syntax, &ctx->core_syntax_count, &ctx->core_syntax_cap, name, binding_scopes, &imported, err);
+    phase_syntax_fn_destroy(&imported);
+    return ok;
+}
+
+static bool grammar_terminal_copy(IdmGrammarTerminal *dst, const IdmGrammarTerminal *src, IdmError *err, IdmSpan span) {
+    memset(dst, 0, sizeof(*dst));
+    dst->kind = src->kind;
+    dst->flags = src->flags;
+    if (src->text) {
+        dst->text = idm_strdup(src->text);
+        if (!dst->text) {
+            idm_grammar_terminal_destroy(dst);
+            return idm_error_oom(err, span);
+        }
+    }
+    return true;
+}
+
+static bool grammar_rule_copy_relocated(IdmGrammarRule *dst, const IdmGrammarRule *src, IdmScopeId min_id, int64_t delta, IdmError *err, IdmSpan span) {
+    memset(dst, 0, sizeof(*dst));
+    dst->name = idm_strdup(src->name);
+    dst->kind = src->kind;
+    if (!grammar_terminal_copy(&dst->terminal, &src->terminal, err, span)) {
+        idm_grammar_rule_destroy(dst);
+        return false;
+    }
+    if (!idm_reader_pattern_program_copy(&dst->pattern, &src->pattern, err, span) ||
+        !idm_reader_ctor_program_copy(&dst->constructor, &src->constructor, err, span)) {
+        idm_grammar_rule_destroy(dst);
+        return false;
+    }
+    if (!dst->name) {
+        idm_grammar_rule_destroy(dst);
+        return idm_error_oom(err, span);
+    }
+    idm_reader_pattern_program_relocate(&dst->pattern, min_id, delta);
+    idm_reader_ctor_program_relocate(&dst->constructor, min_id, delta);
+    return true;
+}
+
+static bool grammar_rules_copy_relocated(IdmGrammarRule **out, const IdmGrammarRule *src, size_t count, IdmScopeId min_id, int64_t delta, IdmError *err, IdmSpan span) {
+    *out = NULL;
+    if (count == 0) return true;
+    IdmGrammarRule *rules = calloc(count, sizeof(*rules));
+    if (!rules) return idm_error_oom(err, span);
+    for (size_t i = 0; i < count; i++) {
+        if (!grammar_rule_copy_relocated(&rules[i], &src[i], min_id, delta, err, span)) {
+            for (size_t j = 0; j <= i; j++) idm_grammar_rule_destroy(&rules[j]);
+            free(rules);
+            return false;
+        }
+    }
+    *out = rules;
+    return true;
+}
+
+static int grammar_install_check(ExpandContext *ctx, const char *name, const IdmPkgGrammar *incoming, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err) {
+    for (size_t i = 0; i < ctx->grammar_count; i++) {
+        GrammarDef *existing = &ctx->grammars[i];
+        if (!existing->artifact.name || strcmp(existing->artifact.name, name) != 0 || !idm_scope_set_equal(&existing->binding_scopes, binding_scopes)) continue;
+        bool same_provider = existing->provider && provider && strcmp(existing->provider, provider) == 0 &&
+                             existing->provider_key && provider_key && strcmp(existing->provider_key, provider_key) == 0;
+        if (same_provider) return 0;
+        if (existing->artifact.mode == IDM_GRAMMAR_MODE_EXTEND && incoming->mode == IDM_GRAMMAR_MODE_EXTEND) {
+            for (size_t r = 0; r < incoming->rule_count; r++) {
+                for (size_t e = 0; e < existing->artifact.rule_count; e++) {
+                    if (strcmp(incoming->rules[r].name, existing->artifact.rules[e].name) == 0) {
+                        idm_error_set(err, idm_span_unknown(NULL), "grammar surface '%s' rule '%s' from '%s' conflicts with active provider '%s'", name, incoming->rules[r].name, provider ? provider : "<unknown>", existing->provider ? existing->provider : "<unknown>");
+                        return -1;
+                    }
+                }
+            }
+            continue;
+        }
+        idm_error_set(err, idm_span_unknown(NULL), "grammar surface '%s' from '%s' is already active in this context; activating '%s' would conflict", name, existing->provider ? existing->provider : "<unknown>", provider ? provider : "<unknown>");
+        return -1;
+    }
+    return 1;
+}
+
+static GrammarDef *grammar_slot(ExpandContext *ctx, IdmSpan span, IdmError *err) {
     if (ctx->grammar_count == ctx->grammar_cap) {
         size_t cap = ctx->grammar_cap ? ctx->grammar_cap * 2u : 4u;
         GrammarDef *grammars = realloc(ctx->grammars, cap * sizeof(*grammars));
-        if (!grammars) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (!grammars) {
+            idm_error_oom(err, span);
+            return NULL;
+        }
         ctx->grammars = grammars;
         ctx->grammar_cap = cap;
     }
     GrammarDef *grammar = &ctx->grammars[ctx->grammar_count];
     memset(grammar, 0, sizeof(*grammar));
-    if (!idm_scope_set_copy(&grammar->scopes, binding_scopes)) {
-        idm_scope_set_destroy(&grammar->scopes);
-        memset(grammar, 0, sizeof(*grammar));
+    return grammar;
+}
+
+static bool grammar_bind(ExpandContext *ctx, const char *name, const IdmScopeSet *binding_scopes, uint32_t payload, IdmSpan span, IdmError *err) {
+    if (!idm_binding_table_add(&ctx->bindings, name, 0, IDM_BIND_SPACE_GRAMMAR, IDM_BIND_GRAMMAR, binding_scopes, payload, ctx->frame, NULL)) {
+        return idm_error_oom(err, span);
+    }
+    return true;
+}
+
+bool register_grammar(ExpandContext *ctx, const IdmSyntax *name_syntax, uint8_t mode, IdmGrammarRule *rules, size_t rule_count, bool exported, IdmError *err) {
+    if (!name_syntax || name_syntax->kind != IDM_SYN_WORD) return idm_error_set(err, name_syntax ? name_syntax->span : idm_span_unknown(NULL), "grammar expects a name");
+    if (mode > (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE) return idm_error_set(err, name_syntax->span, "invalid grammar mode");
+    if (rule_count == 0) return idm_error_set(err, name_syntax->span, "grammar '%s' must contain at least one rule", name_syntax->as.text);
+    if (ctx->phase != 0) {
+        for (size_t i = 0; i < rule_count; i++) idm_grammar_rule_destroy(&rules[i]);
+        free(rules);
+        return idm_error_set(err, name_syntax->span, "core-grammar declarations are phase-0 reader artifact declarations");
+    }
+    for (size_t i = 0; i < rule_count; i++) {
+        if (!idm_grammar_rule_validate(&rules[i], err, name_syntax->span)) {
+            for (size_t j = 0; j < rule_count; j++) idm_grammar_rule_destroy(&rules[j]);
+            free(rules);
+            return false;
+        }
+        for (size_t j = 0; j < i; j++) {
+            if (strcmp(rules[i].name, rules[j].name) == 0) {
+                bool reported = idm_error_set(err, name_syntax->span, "grammar '%s' declares rule '%s' more than once", name_syntax->as.text, rules[i].name);
+                for (size_t k = 0; k < rule_count; k++) idm_grammar_rule_destroy(&rules[k]);
+                free(rules);
+                return reported;
+            }
+        }
+    }
+    IdmScopeSet decl_scopes;
+    if (!binder_scopes_pruned(ctx, name_syntax, &decl_scopes)) {
+        for (size_t i = 0; i < rule_count; i++) idm_grammar_rule_destroy(&rules[i]);
+        free(rules);
+        return idm_error_oom(err, name_syntax->span);
+    }
+    for (size_t i = 0; i < ctx->decl_grammar_count; i++) {
+        IdmPkgGrammar *existing = &ctx->decl_grammars[i];
+        if (!existing->name || strcmp(existing->name, name_syntax->as.text) != 0) continue;
+        if (!idm_scope_set_equal(&existing->scopes, &decl_scopes)) {
+            idm_scope_set_destroy(&decl_scopes);
+            for (size_t k = 0; k < rule_count; k++) idm_grammar_rule_destroy(&rules[k]);
+            free(rules);
+            return idm_error_set(err, name_syntax->span, "grammar surface '%s' is already declared with different scopes in this artifact", name_syntax->as.text);
+        }
+        if (existing->mode != IDM_GRAMMAR_MODE_EXTEND || mode != IDM_GRAMMAR_MODE_EXTEND) {
+            idm_scope_set_destroy(&decl_scopes);
+            for (size_t k = 0; k < rule_count; k++) idm_grammar_rule_destroy(&rules[k]);
+            free(rules);
+            return idm_error_set(err, name_syntax->span, "grammar surface '%s' is already declared in this artifact", name_syntax->as.text);
+        }
+        for (size_t r = 0; r < rule_count; r++) {
+            for (size_t e = 0; e < existing->rule_count; e++) {
+                if (strcmp(rules[r].name, existing->rules[e].name) == 0) {
+                    bool reported = idm_error_set(err, name_syntax->span, "grammar '%s' declares rule '%s' more than once", name_syntax->as.text, rules[r].name);
+                    idm_scope_set_destroy(&decl_scopes);
+                    for (size_t k = 0; k < rule_count; k++) idm_grammar_rule_destroy(&rules[k]);
+                    free(rules);
+                    return reported;
+                }
+            }
+        }
+        IdmGrammarRule *merged = realloc(existing->rules, (existing->rule_count + rule_count) * sizeof(*merged));
+        if (!merged) {
+            idm_scope_set_destroy(&decl_scopes);
+            for (size_t k = 0; k < rule_count; k++) idm_grammar_rule_destroy(&rules[k]);
+            free(rules);
+            return idm_error_oom(err, name_syntax->span);
+        }
+        existing->rules = merged;
+        memcpy(existing->rules + existing->rule_count, rules, rule_count * sizeof(*rules));
+        existing->rule_count += rule_count;
+        existing->exported = existing->exported || exported;
+        idm_scope_set_destroy(&decl_scopes);
+        free(rules);
+        return true;
+    }
+    if (ctx->decl_grammar_count == ctx->decl_grammar_cap) {
+        size_t cap = ctx->decl_grammar_cap ? ctx->decl_grammar_cap * 2u : 4u;
+        IdmPkgGrammar *grammars = realloc(ctx->decl_grammars, cap * sizeof(*grammars));
+        if (!grammars) {
+            idm_scope_set_destroy(&decl_scopes);
+            for (size_t i = 0; i < rule_count; i++) idm_grammar_rule_destroy(&rules[i]);
+            free(rules);
+            return idm_error_oom(err, name_syntax->span);
+        }
+        ctx->decl_grammars = grammars;
+        ctx->decl_grammar_cap = cap;
+    }
+    IdmPkgGrammar *dst = &ctx->decl_grammars[ctx->decl_grammar_count];
+    memset(dst, 0, sizeof(*dst));
+    dst->name = idm_strdup(name_syntax->as.text);
+    dst->mode = mode;
+    dst->rules = rules;
+    dst->rule_count = rule_count;
+    dst->exported = exported;
+    bool ok = dst->name && idm_scope_set_copy(&dst->scopes, &decl_scopes);
+    idm_scope_set_destroy(&decl_scopes);
+    if (!ok) {
+        idm_pkg_grammar_destroy(dst);
+        return idm_error_oom(err, name_syntax->span);
+    }
+    ctx->decl_grammar_count++;
+    return true;
+}
+
+bool install_imported_grammar(ExpandContext *ctx, const IdmPkgGrammar *grammar, const IdmScopeSet *scopes, const char *name, const char *provider, const char *provider_key, IdmScopeId min_id, int64_t delta, IdmError *err) {
+    if (!grammar || !grammar->name || !*grammar->name) return idm_error_set(err, idm_span_unknown(NULL), "grammar import requires a name");
+    if (ctx->phase != 0) return idm_error_set(err, idm_span_unknown(NULL), "grammar artifacts can only be activated at phase 0");
+    if (!name || !*name) name = grammar->name;
+    const IdmScopeSet *binding_scopes = scopes ? scopes : &ctx->empty_scopes;
+    int check = grammar_install_check(ctx, name, grammar, binding_scopes, provider, provider_key, err);
+    if (check <= 0) return check == 0;
+    SurfaceCheckpoint checkpoint;
+    surface_checkpoint(ctx, &checkpoint);
+    GrammarDef *dst = grammar_slot(ctx, idm_span_unknown(NULL), err);
+    if (!dst) return false;
+    dst->artifact.name = idm_strdup(name);
+    dst->artifact.mode = grammar->mode;
+    dst->artifact.exported = false;
+    dst->provider = idm_strdup(provider ? provider : "");
+    dst->provider_key = idm_strdup(provider_key ? provider_key : "");
+    bool ok = dst->artifact.name && dst->provider && dst->provider_key &&
+              idm_scope_set_copy(&dst->artifact.scopes, &grammar->scopes) &&
+              idm_scope_set_copy(&dst->binding_scopes, binding_scopes);
+    if (ok) idm_scope_set_relocate(&dst->artifact.scopes, min_id, delta);
+    if (ok) ok = grammar_rules_copy_relocated(&dst->artifact.rules, grammar->rules, grammar->rule_count, min_id, delta, err, idm_span_unknown(NULL));
+    if (ok) dst->artifact.rule_count = grammar->rule_count;
+    uint32_t payload = (uint32_t)ctx->grammar_count;
+    ok = ok && grammar_bind(ctx, dst->artifact.name, binding_scopes, payload, idm_span_unknown(NULL), err);
+    if (!ok) {
+        surface_rollback(ctx, &checkpoint);
+        if (err && err->present) return false;
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
-    phase_syntax_fn_import(ctx, &grammar->fn, module, function_index, phase_ns, phase_env);
     ctx->grammar_count++;
     return true;
+}
+
+bool install_artifact_grammars(ExpandContext *ctx, const IdmPkgGrammar *grammars, size_t grammar_count, const IdmScopeSet *scopes, const char *qualifier, IdmScopeId min_id, int64_t delta, const char *provider, const char *provider_key, IdmError *err) {
+    for (size_t i = 0; i < grammar_count; i++) {
+        const IdmPkgGrammar *entry = &grammars[i];
+        char *qualified = NULL;
+        const char *bind_name = entry->name;
+        if (qualifier) {
+            IdmBuffer qb;
+            idm_buf_init(&qb);
+            if (!idm_buf_append(&qb, qualifier) || !idm_buf_append_char(&qb, '.') || !idm_buf_append(&qb, entry->name)) {
+                idm_buf_destroy(&qb);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            qualified = idm_buf_take(&qb);
+            bind_name = qualified;
+        }
+        bool ok = install_imported_grammar(ctx, entry, scopes, bind_name, provider, provider_key, min_id, delta, err);
+        free(qualified);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+bool ctx_reader_artifact_from_active_grammars(ExpandContext *ctx, const char *surface, IdmReaderArtifact **out, IdmError *err) {
+    *out = NULL;
+    if (!surface || surface[0] == '\0') return idm_error_set(err, idm_span_unknown(NULL), "reader artifact requires a surface name");
+    const IdmScopeSet *surface_scopes = NULL;
+    size_t count = 0;
+    for (size_t i = 0; i < ctx->grammar_count; i++) {
+        const GrammarDef *entry = &ctx->grammars[i];
+        if (!entry->artifact.name || strcmp(entry->artifact.name, surface) != 0) continue;
+        if (!surface_scopes) surface_scopes = &entry->binding_scopes;
+        else if (!idm_scope_set_equal(surface_scopes, &entry->binding_scopes)) {
+            return idm_error_set(err, idm_span_unknown(NULL), "reader artifact surface '%s' is active in multiple binding scopes", surface);
+        }
+        count++;
+    }
+    if (count == 0) return idm_error_set(err, idm_span_unknown(NULL), "reader artifact surface '%s' has no active grammar contributors", surface);
+    IdmReaderGrammarSource *sources = calloc(count, sizeof(*sources));
+    if (!sources) return idm_error_oom(err, idm_span_unknown(NULL));
+    size_t index = 0;
+    for (size_t i = 0; i < ctx->grammar_count; i++) {
+        const GrammarDef *entry = &ctx->grammars[i];
+        if (!entry->artifact.name || strcmp(entry->artifact.name, surface) != 0) continue;
+        sources[index].grammar = &entry->artifact;
+        sources[index].provider = entry->provider;
+        sources[index].provider_key = entry->provider_key;
+        sources[index].binding_scopes = &entry->binding_scopes;
+        index++;
+    }
+    bool ok = idm_reader_artifact_from_sources(surface, sources, count, out, err);
+    free(sources);
+    return ok;
 }
 
 bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err) {
@@ -463,48 +803,9 @@ bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, con
     surface_checkpoint(ctx, &checkpoint);
     bool ok = true;
     if (op->target_module) {
-        ok = install_imported_macro_impl(ctx, op->target_name, &op->scopes, op->target_module, op->target_function_index, op->target_phase_ns, op->target_phase_env, provider, provider_key, true, err);
+        ok = install_imported_macro_impl(ctx, op->target_name, &op->scopes, op->target_module, op->target_function_index, op->target_phase_env, provider, provider_key, true, err);
     }
     ok = ok && register_operator(ctx, op->name, op->capture ? op->capture : "infix", op->precedence, op->assoc, op->target_name, &op->scopes, binding_scopes ? binding_scopes : &ctx->empty_scopes, provider, provider_key, false, err);
     if (!ok) surface_rollback(ctx, &checkpoint);
-    return ok;
-}
-
-static const char *operator_decl_token_text(const IdmSyntax *syn) {
-    if (!syn) return NULL;
-    if (syn->kind == IDM_SYN_WORD) return syn->as.text;
-    if (syn_is_form(syn, "%-word") && syn->as.seq.count == 2 && syn->as.seq.items[1]->kind == IDM_SYN_STRING) return syn->as.seq.items[1]->as.text;
-    return NULL;
-}
-
-bool register_operator_callback(void *user, IdmRuntime *rt, const IdmSyntax *name_syntax, int64_t precedence, const char *assoc_text, const char *capture_text, const IdmSyntax *target_syntax, IdmError *err) {
-    (void)rt;
-    ExpandContext *ctx = user;
-    const char *name = operator_decl_token_text(name_syntax);
-    if (!name) return idm_error_set(err, name_syntax->span, "operator name must be a symbol");
-    if (!capture_text || !*capture_text) return idm_error_set(err, name_syntax->span, "operator capture must be non-empty");
-    if (precedence < 0 || precedence > 255) return idm_error_set(err, name_syntax->span, "operator precedence must be an integer 0..255");
-    IdmOpAssoc assoc;
-    if (strcmp(assoc_text, "left") == 0) assoc = IDM_OP_ASSOC_LEFT;
-    else if (strcmp(assoc_text, "right") == 0) assoc = IDM_OP_ASSOC_RIGHT;
-    else if (strcmp(assoc_text, "none") == 0) assoc = IDM_OP_ASSOC_NONE;
-    else return idm_error_set(err, name_syntax->span, "operator assoc must be left, right, or none");
-    const char *target = operator_decl_token_text(target_syntax);
-    if (!target) return idm_error_set(err, target_syntax->span, "operator target must be an identifier");
-    IdmScopeSet decl_scopes;
-    if (!binder_scopes_pruned(ctx, name_syntax, &decl_scopes)) return idm_error_oom(err, name_syntax->span);
-    IdmScopeSet target_scopes;
-    if (!syntax_scopes_copy(&target_scopes, target_syntax)) {
-        idm_scope_set_destroy(&decl_scopes);
-        return idm_error_oom(err, target_syntax->span);
-    }
-    if (ctx->rt->macro_intro_active && !idm_scope_set_flip(&target_scopes, ctx->rt->macro_intro_scope)) {
-        idm_scope_set_destroy(&decl_scopes);
-        idm_scope_set_destroy(&target_scopes);
-        return idm_error_oom(err, target_syntax->span);
-    }
-    bool ok = register_operator(ctx, name, capture_text, (uint8_t)precedence, assoc, target, &target_scopes, &decl_scopes, ctx->unit, ctx->unit_key, true, err);
-    idm_scope_set_destroy(&decl_scopes);
-    idm_scope_set_destroy(&target_scopes);
     return ok;
 }

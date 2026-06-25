@@ -9,8 +9,12 @@ typedef enum {
     IDM_CORE_ARG_REF,
     IDM_CORE_LOCAL_REF,
     IDM_CORE_CAPTURE_REF,
-    IDM_CORE_PRIMITIVE,
     IDM_CORE_CALL,
+    IDM_CORE_LIST_CONS,
+    IDM_CORE_LIST_APPEND,
+    IDM_CORE_VALUE_SEQUENCE,
+    IDM_CORE_SYNTAX_BUILD,
+    IDM_CORE_STRING_CONCAT,
     IDM_CORE_COND,
     IDM_CORE_DO,
     IDM_CORE_BIND_LOCAL,
@@ -19,7 +23,8 @@ typedef enum {
     IDM_CORE_LETREC,
     IDM_CORE_RECEIVE,
     IDM_CORE_GUARD,
-    IDM_CORE_GLOBAL_REF,
+    IDM_CORE_ENV_REF,
+    IDM_CORE_PACKAGE_REF,
     IDM_CORE_USE_PACKAGE,
     IDM_CORE_DEFINE_TRAIT,
     IDM_CORE_IMPLEMENT_TRAIT,
@@ -40,6 +45,7 @@ typedef enum {
     IDM_PRIM_GT,
     IDM_PRIM_LTE,
     IDM_PRIM_GTE,
+    IDM_PRIM_COND,
     IDM_PRIM_OK,
     IDM_PRIM_CONS,
     IDM_PRIM_FIRST,
@@ -56,8 +62,6 @@ typedef enum {
     IDM_PRIM_TUPLE_TO_LIST,
     IDM_PRIM_APPLY,
     IDM_PRIM_SYNTAX_KIND,
-    IDM_PRIM_SYNTAX_TO_DATUM,
-    IDM_PRIM_DATUM_TO_SYNTAX,
     IDM_PRIM_SYNTAX_PROPERTY,
     IDM_PRIM_SYNTAX_SET_PROPERTY,
     IDM_PRIM_SYNTAX_ORIGIN,
@@ -117,9 +121,7 @@ typedef enum {
     IDM_PRIM_SYNTAX_ADJACENT_PRED,
     IDM_PRIM_SYNTAX_STRING_TEXT,
     IDM_PRIM_STR_CONTAINS,
-    IDM_PRIM_EXPANDER_REGISTER_OPERATOR,
-    IDM_PRIM_EXPANDER_REGISTER_MACRO,
-    IDM_PRIM_EXPANDER_SURFACE,
+    IDM_PRIM_INTERNAL_REGISTER_MACRO,
     IDM_PRIM_EXPAND_CHECK,
     IDM_PRIM_INSPECT,
     IDM_PRIM_STR_LEN,
@@ -222,7 +224,6 @@ typedef enum {
     IDM_PRIM_PID_P,
     IDM_PRIM_REF_P,
     IDM_PRIM_PORT_P,
-    IDM_PRIM_PRIMITIVE_P,
     IDM_PRIM_REGEX_P,
     IDM_PRIM_REGEX_RESULT_P,
     IDM_PRIM_COMPARE,
@@ -256,7 +257,9 @@ typedef enum {
     IDM_PRIM_BIT_LENGTH,
     IDM_PRIM_TO_INT,
     IDM_PRIM_TO_FLOAT,
-    IDM_PRIM_FILE_OPEN
+    IDM_PRIM_FILE_OPEN,
+    IDM_PRIM_SYNTAX_FLOAT_VALUE,
+    IDM_PRIM_MAKE_SYNTAX_NIL
 } IdmPrimitive;
 
 typedef struct {
@@ -303,13 +306,22 @@ typedef struct {
 } IdmCoreSlot;
 
 typedef struct {
+    char *name;
+    IdmValue env_key;
+    uint32_t slot;
+} IdmCorePackageSlot;
+
+typedef struct {
     uint32_t arity;
+    IdmArity call_arity;
     IdmPattern **param_patterns;
     uint32_t pattern_count;
     IdmPatternLocal *pattern_locals;
     uint32_t pattern_local_count;
     IdmCore *guard;
     IdmCore *body;
+    bool primitive_backed;
+    IdmPrimitive primitive;
 } IdmFnClause;
 
 typedef struct {
@@ -325,13 +337,33 @@ struct IdmCore {
     union {
         IdmValue literal;
         IdmCoreSlot slot_ref;
-        IdmPrimitive primitive;
+        IdmCorePackageSlot package_ref;
         struct {
             IdmCore *callee;
             IdmCore **args;
             size_t arg_count;
             size_t arg_cap;
         } call;
+        struct {
+            IdmCore *head;
+            IdmCore *tail;
+        } list_pair;
+        struct {
+            IdmValueSequenceKind kind;
+            IdmCore **items;
+            size_t count;
+            size_t cap;
+        } value_sequence;
+        struct {
+            IdmSyntaxBuildKind kind;
+            IdmCore *ctx;
+            IdmCore *payload;
+        } syntax_build;
+        struct {
+            IdmCore **items;
+            size_t count;
+            size_t cap;
+        } string_concat;
         struct {
             IdmCore *cond;
             IdmCore *then_branch;
@@ -375,7 +407,7 @@ struct IdmCore {
             size_t count;
             size_t cap;
             IdmCore *body;
-            bool global;
+            bool env;
             bool fill_only;
         } letrec;
         struct {
@@ -391,17 +423,9 @@ struct IdmCore {
             uint32_t ensure_slot;
         } guard;
         struct {
-            IdmValue name;
+            IdmValue env_key;
             IdmBytecodeModule *module;
             uint32_t init_fn;
-            uint32_t *import_src;
-            uint32_t *import_dst;
-            char **import_names;
-            size_t import_count;
-            uint32_t *export_src;
-            uint32_t *export_dst;
-            char **export_names;
-            size_t export_count;
             IdmCore *cont;
         } use_package;
         struct {
@@ -436,9 +460,16 @@ IdmCore *idm_core_literal(IdmValue value, IdmSpan span);
 IdmCore *idm_core_arg_ref(const char *name, uint32_t slot, IdmSpan span);
 IdmCore *idm_core_local_ref(const char *name, uint32_t slot, IdmSpan span);
 IdmCore *idm_core_capture_ref(const char *name, uint32_t slot, IdmSpan span);
-IdmCore *idm_core_primitive(IdmPrimitive primitive, IdmSpan span);
+IdmCore *idm_core_primitive_backed_fn(const char *name, IdmPrimitive primitive, IdmArity arity, IdmSpan span);
 IdmCore *idm_core_call(IdmCore *callee, IdmSpan span);
 bool idm_core_call_add_arg(IdmCore *call, IdmCore *arg);
+IdmCore *idm_core_list_cons(IdmCore *head, IdmCore *tail, IdmSpan span);
+IdmCore *idm_core_list_append(IdmCore *head, IdmCore *tail, IdmSpan span);
+IdmCore *idm_core_value_sequence(IdmValueSequenceKind kind, IdmSpan span);
+bool idm_core_value_sequence_add(IdmCore *core, IdmCore *item);
+IdmCore *idm_core_syntax_build(IdmSyntaxBuildKind kind, IdmCore *ctx, IdmCore *payload, IdmSpan span);
+IdmCore *idm_core_string_concat(IdmSpan span);
+bool idm_core_string_concat_add(IdmCore *core, IdmCore *item);
 IdmCore *idm_core_cond(IdmCore *cond, IdmCore *then_branch, IdmCore *else_branch, IdmSpan span);
 IdmCore *idm_core_do(IdmSpan span);
 bool idm_core_do_add(IdmCore *do_expr, IdmCore *item);
@@ -454,12 +485,13 @@ bool idm_core_fn_multi_add_clause_take(IdmCore *multi, uint32_t arity, IdmPatter
 IdmCore *idm_core_letrec(IdmSpan span);
 bool idm_core_letrec_add(IdmCore *letrec, const char *name, uint32_t slot, IdmCore *value);
 bool idm_core_letrec_set_body(IdmCore *letrec, IdmCore *body);
-void idm_core_letrec_set_global(IdmCore *letrec);
+void idm_core_letrec_set_env(IdmCore *letrec);
 void idm_core_letrec_set_fill_only(IdmCore *letrec);
-IdmCore *idm_core_global_ref(const char *name, uint32_t id, IdmSpan span);
+IdmCore *idm_core_env_ref(const char *name, uint32_t id, IdmSpan span);
+IdmCore *idm_core_package_ref(const char *name, IdmValue env_key, uint32_t slot, IdmSpan span);
 IdmCore *idm_core_receive(IdmCore *receiver, IdmCore *timeout, IdmCore *timeout_body, IdmSpan span);
 IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, IdmCore *cleanup, uint32_t ensure_slot, IdmSpan span);
-IdmCore *idm_core_use_package(IdmValue name, IdmBytecodeModule *module, uint32_t init_fn, uint32_t *import_src, uint32_t *import_dst, char **import_names, size_t import_count, uint32_t *export_src, uint32_t *export_dst, char **export_names, size_t export_count, IdmCore *cont, IdmSpan span);
+IdmCore *idm_core_use_package(IdmValue env_key, IdmBytecodeModule *module, uint32_t init_fn, IdmCore *cont, IdmSpan span);
 IdmCore *idm_core_define_trait(IdmValue name, IdmSpan span);
 bool idm_core_define_trait_add_requirement(IdmCore *core, IdmValue requirement);
 bool idm_core_define_trait_add_method(IdmCore *core, IdmValue method, IdmArity arity, IdmCore *default_fn);
@@ -482,6 +514,7 @@ bool idm_checked_mul(int64_t a, int64_t b, int64_t *out);
 bool idm_checked_pow(int64_t base, int64_t exponent, int64_t *out);
 size_t idm_primitive_count(void);
 const IdmPrimitiveInfo *idm_primitive_info(IdmPrimitive primitive);
+IdmArity idm_primitive_arity(IdmPrimitive primitive);
 const char *idm_primitive_home(IdmPrimitive primitive);
 
 #endif

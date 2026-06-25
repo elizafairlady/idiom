@@ -35,10 +35,15 @@ static void check_repl_value(IdmRepl *repl, const char *source, const char *expe
     IdmValue thunk = idm_nil();
     uint64_t token = 0;
     IdmValue out = idm_nil();
-    bool ok = idm_repl_compile(repl, source, &thunk, &token, &err) == IDM_REPL_OK && idm_repl_run(repl, thunk, &out, &err);
+    IdmBuffer full;
+    idm_buf_init(&full);
+    bool built = idm_buf_append(&full, "use std/term with [tty? tty-raw! tty-restore! tty-read tty-read-line]\n") &&
+                 idm_buf_append(&full, source);
+    bool ok = built && idm_repl_compile(repl, full.data ? full.data : "", &thunk, &token, &err) == IDM_REPL_OK && idm_repl_run(repl, thunk, &out, &err);
     if (!ok) {
         fprintf(stderr, "tty eval failed for '%s': %s\n", source, err.message ? err.message : "?");
         failures++;
+        idm_buf_destroy(&full);
         idm_error_clear(&err);
         return;
     }
@@ -47,6 +52,7 @@ static void check_repl_value(IdmRepl *repl, const char *source, const char *expe
     CHECK(idm_value_write(&buf, out));
     CHECK_STR(buf.data ? buf.data : "", expect);
     idm_buf_destroy(&buf);
+    idm_buf_destroy(&full);
     idm_error_clear(&err);
 }
 

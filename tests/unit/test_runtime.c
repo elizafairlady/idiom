@@ -54,12 +54,13 @@ static void test_gc_stress(void) {
         "defn loop n -> cond (eq? n 0) (sum keep) (do (map [1 2 3 4 5] (fn x -> mul x x)); (loop (sub n 1)) end)\n"
         "loop 200\n";
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<gc>", src, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<gc>", src, &core, &err));
     CHECK(!err.present);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(!err.present);
     IdmScheduler *sched = idm_sched_create(&rt, &module, &err);
     CHECK(sched != NULL);
@@ -106,13 +107,14 @@ static void test_gc_recurring_collection(void) {
         "defn big n s -> cond (eq? n 0) s (big (sub n 1) (str s s))\n"
         "defn loop k -> cond (eq? k 0) 0 (do (big 12 \"aaaaaaaaaaaaaaaa\"); (loop (sub k 1)) end)\n"
         "loop 80\n";
-    CHECK(idm_expand_string(&rt, "<gc-recurring>", src, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<gc-recurring>", src, &core, &err));
     CHECK(!err.present);
     size_t baseline = idm_heap_bytes(&rt.heap);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmScheduler *sched = idm_sched_create(&rt, &module, &err);
     CHECK(sched != NULL);
     IdmValue out = idm_nil();
@@ -185,11 +187,12 @@ static void test_temp_registry_backstop(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<backstop>", "make-procsub-temp\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<backstop>", "make-procsub-temp\n", &core, &err));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmScheduler *sched = idm_sched_create(&rt, &module, &err);
     CHECK(sched != NULL);
     IdmValue out = idm_nil();
@@ -218,6 +221,7 @@ static void test_actor_cwd_env_scoping(void) {
     char before[4096];
     CHECK(getcwd(before, sizeof(before)) != NULL);
     check_sched_value_written(&rt,
+        "use std/system with [cd pwd]\n"
         "cd \"/tmp\"\n"
         "pwd\n",
         "\"/tmp\"");
@@ -225,6 +229,7 @@ static void test_actor_cwd_env_scoping(void) {
     CHECK(getcwd(after, sizeof(after)) != NULL);
     CHECK_STR(after, before);
     check_sched_value_written(&rt,
+        "use std/system with [env-get env-set]\n"
         "env-set \"IDM_F5_UNIT\" \"scoped\"\n"
         "env-get \"IDM_F5_UNIT\"\n",
         "\"scoped\"");
@@ -246,6 +251,59 @@ static void test_port_capture_limit(void) {
     idm_runtime_destroy(&rt);
 }
 
+static void test_scheduler_rejects_prepared_uninterned_module(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    uint32_t c1 = 0;
+    uint32_t main_fn = 0;
+    CHECK(idm_bc_add_const(&module, idm_int(1), &c1));
+    CHECK(idm_bc_add_function(&module, "main", 0, 0, 0, &main_fn));
+    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c1, NULL));
+    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(idm_bc_prepare_selectors(&module, &err));
+    CHECK(!idm_bc_is_finalized(&module));
+    IdmScheduler *sched = idm_sched_create(&rt, &module, &err);
+    CHECK(sched == NULL);
+    CHECK(err.present && err.message && strstr(err.message, "finalized") != NULL);
+    idm_error_clear(&err);
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
+    sched = idm_sched_create(&rt, &module, &err);
+    CHECK(sched != NULL);
+    CHECK(!err.present);
+    idm_sched_destroy(sched);
+    idm_bc_destroy(&module);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_exec_setup_thunk_rejects_nonzero_arity(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    uint32_t fn = 0;
+    CHECK(idm_bc_add_function(&module, "not-thunk", 1, 0, 0, &fn));
+    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
+    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
+    IdmValue closure = idm_closure_in_module(&rt, &module, fn, NULL, 0, rt.main_env, &err);
+    CHECK(!err.present);
+    IdmExec *exec = idm_exec_create(&rt, &module, NULL, NULL, idm_vm_default_limits(), &err);
+    CHECK(exec != NULL);
+    CHECK(!idm_exec_setup_thunk(exec, closure, &err));
+    CHECK(err.present && err.message && strstr(err.message, "zero-arity") != NULL);
+    idm_exec_destroy(exec);
+    idm_bc_destroy(&module);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
 void run_runtime_suite(void) {
     test_gc_stress();
     test_heap_accounting_sweep();
@@ -255,4 +313,6 @@ void run_runtime_suite(void) {
     test_temp_registry_backstop();
     test_actor_cwd_env_scoping();
     test_port_capture_limit();
+    test_scheduler_rejects_prepared_uninterned_module();
+    test_exec_setup_thunk_rejects_nonzero_arity();
 }

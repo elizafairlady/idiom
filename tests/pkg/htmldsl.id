@@ -1,5 +1,5 @@
 export protocol HtmlDsl do
-  grammar do
+  core-syntax _ do
     %`(%,tag %,@parts) -> do
       defn body? do
         p when (syntax-list? p) ->
@@ -21,18 +21,18 @@ export protocol HtmlDsl do
       end
 
       defn attrs-of do
-        (list a . t) when (attr-dict? a) -> append (dict-attrs a 0 (syntax-length a)) (attrs-of t)
-        (list a v . t) when (syntax-atom? a) ->
+        '(a . t) when (attr-dict? a) -> append (dict-attrs a 0 (syntax-length a)) (attrs-of t)
+        '(a v . t) when (syntax-atom? a) ->
           cons %`(str " " %,(make-syntax-string tag (syntax-atom-text a)) "=\"" %,v "\"") (attrs-of t)
-        (list _ . t) -> attrs-of t
+        '(_ . t) -> attrs-of t
         '() -> '()
       end
 
       defn kids-of do
-        (list a . t) when (attr-dict? a) -> kids-of t
-        (list a _ . t) when (syntax-atom? a) -> kids-of t
-        (list b . t) when (body? b) -> append (body-children b 1 (syntax-length b)) (kids-of t)
-        (list c . t) -> cons c (kids-of t)
+        '(a . t) when (attr-dict? a) -> kids-of t
+        '(a _ . t) when (syntax-atom? a) -> kids-of t
+        '(b . t) when (body? b) -> append (body-children b 1 (syntax-length b)) (kids-of t)
+        '(c . t) -> cons c (kids-of t)
         '() -> '()
       end
 

@@ -1,4 +1,5 @@
 use std/test
+use std/string
 activate Test
 
 for-syntax do
@@ -6,6 +7,7 @@ for-syntax do
 end
 defn tmp x -> add x 1
 defmacro from-phase stx -> make-syntax-int stx (tmp 1)
+defmacro from-byte stx -> make-syntax-int stx (byte "ABC" 0)
 
 for-syntax do
   for-syntax do
@@ -27,6 +29,10 @@ for-syntax do
     make-syntax-int stx (f 2)
   end
 end
+for-syntax do
+  use tests/pkg/phasepkg
+end
+defmacro from-package-slot stx -> make-syntax-int stx (phase-value 0)
 
 suite do
   test "same-name-both-phases" do
@@ -34,6 +40,12 @@ suite do
   end
   test "for-syntax-helper-from-transformer" do
     assert-eq (from-phase x) 101
+  end
+  test "runtime-imported-primitive-backed-function-at-phase-one" do
+    assert-eq (from-byte x) 65
+  end
+  test "package-runtime-slot-materialized-at-phase-one" do
+    assert-eq (from-package-slot x) 42
   end
   test "phase-one-absent-at-runtime" do
     assert-expand-error "for-syntax do\n  defn ph x -> x\nend\nph 1\n" "unbound identifier 'ph'"
@@ -53,7 +65,7 @@ suite do
   test "exported-defmacro-capture-rejected" do
     assert-expand-error "for-syntax do\n  y = 1\n  export defmacro capm stx -> make-syntax-int stx y\nend\n" "cannot capture for-syntax locals"
   end
-  test "exported-defmacro-references-package-for-syntax-global" do
+  test "exported-defmacro-references-package-for-syntax-env" do
     assert-compiles "protocol CapP do\n  for-syntax do\n    y = 1\n    export defmacro capm stx -> make-syntax-int stx y\n  end\nend\n"
   end
   test "runtime-absent-at-phase-one" do

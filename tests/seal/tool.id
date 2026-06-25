@@ -1,5 +1,6 @@
 use std/string
 use std/enum
+use std/system with [args]
 use app/ish
 activate Shell
 

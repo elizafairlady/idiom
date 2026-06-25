@@ -48,7 +48,7 @@ if [ "$MODE" != "san" ]; then
     if [ -s build/cli-eval.err ] || ! grep -qx '42' build/cli-eval.out; then
         echo "CLI FAIL: eval"; cat build/cli-eval.err; fail=1
     fi
-    printf 'use std/string\nargs |> join "," |> println\n' | "$IDIOMC" run - -- alpha beta > build/cli-run-stdin.out 2>build/cli-run-stdin.err
+    printf 'use std/string\nuse std/system with [args]\nargs |> join "," |> println\n' | "$IDIOMC" run - -- alpha beta > build/cli-run-stdin.out 2>build/cli-run-stdin.err
     if [ -s build/cli-run-stdin.err ] || ! grep -qx 'alpha,beta' build/cli-run-stdin.out; then
         echo "CLI FAIL: run stdin args"; cat build/cli-run-stdin.err; fail=1
     fi
@@ -63,8 +63,7 @@ if [ "$MODE" != "san" ]; then
         IDIOMMAXPROCS=1 "$IDIOMC" test tests/app >/dev/null 2>build/app-n1.err || { echo "APP FAIL (IDIOMMAXPROCS=1)"; cat build/app-n1.err; fail=1; }
     fi
     echo "lang suites passed (IDIOMMAXPROCS=1)"
-    # actor-reap floor: 1,000,000 spawn+join must stay flat (corpses-not-reaped would be ~590MB).
-    "$IDIOMC" tests/perf/actor-reap.id >/dev/null 2>&1 &
+    "$IDIOMC" tests/stress/actor_reap.id >/dev/null 2>&1 &
     reap_pid=$!; reap_peak=0
     while kill -0 "$reap_pid" 2>/dev/null; do
         r=$(awk '/VmRSS/{print $2}' "/proc/$reap_pid/status" 2>/dev/null)
@@ -92,18 +91,18 @@ fi
 for f in tests/golden/*.id; do
     name=$(basename "$f" .id)
     if [ "$MODE" != "san" ]; then
-        "$IDIOMC" eval "$(cat "$f")" >"build/golden-$name.out" 2>"build/golden-$name.err"
+        "$IDIOMC" "$f" >"build/golden-$name.out" 2>"build/golden-$name.err"
         if [ -s "build/golden-$name.err" ]; then
             echo "GOLDEN STDERR: $name"; cat "build/golden-$name.err"; fail=1
         else
             pin_check "tests/golden/$name.out" "build/golden-$name.out" "GOLDEN FAIL: $name"
         fi
     else
-        "$IDIOMC" eval "$(cat "$f")" >/dev/null 2>"build/san-golden-$name.err" || true
+        "$IDIOMC" "$f" >/dev/null 2>"build/san-golden-$name.err" || true
         san_check "build/san-golden-$name.err" "golden $name"
     fi
 done
-[ "$MODE" != "san" ] && echo "goldens passed ($(ls tests/golden/*.id | wc -l) cases)"
+[ "$MODE" != "san" ] && echo "golden source files passed ($(ls tests/golden/*.id | wc -l) cases)"
 
 for f in tests/run/*.id; do
     name=$(basename "$f" .id)
@@ -245,7 +244,13 @@ if [ "$MODE" != "san" ]; then
             echo "SEAL RUN FAIL"; cat build/sealed-run.err; fail=1
         else
             pin_check "tests/seal/tool.out" "build/sealed-run.out" "SEAL RUN FAIL"
-            [ "$MODE" = "output" ] && [ "$fail" -eq 0 ] && echo "sealed program passed (1 case)"
+            env -u IDIOMROOT -u IDIOMPATH IDIOMCACHE=0 "$PWD/$IDIOMC" build/sealed-tool one two > build/sealed-run-nocache.out 2>build/sealed-run-nocache.err
+            if [ -s build/sealed-run-nocache.err ]; then
+                echo "SEAL RUN NOCACHE FAIL"; cat build/sealed-run-nocache.err; fail=1
+            else
+                pin_check "tests/seal/tool.out" "build/sealed-run-nocache.out" "SEAL RUN NOCACHE FAIL"
+            fi
+            [ "$MODE" = "output" ] && [ "$fail" -eq 0 ] && echo "sealed program passed (2 cases)"
         fi
     fi
 
@@ -265,9 +270,16 @@ if [ "$MODE" != "san" ]; then
 activate Shell'
     "$IDIOMC" dump surface "$ISH_PRELUDE" > build/dump-surface-shell.out 2>/dev/null
     pin_check tests/dump/surface-shell.out build/dump-surface-shell.out "DUMP FAIL: surface-shell"
+    GRAMMAR_PRELUDE='use tests/pkg/coregrammar_ext_a
+use tests/pkg/coregrammar_ext_b
+activate GrammarExtA
+activate GrammarExtA
+activate GrammarExtB'
+    "$IDIOMC" dump surface "$GRAMMAR_PRELUDE" > build/dump-surface-grammar.out 2>/dev/null
+    pin_check tests/dump/surface-grammar.out build/dump-surface-grammar.out "DUMP FAIL: surface-grammar"
 
     printf 'foo bar\n' | "$IDIOMC" dump reader - >/dev/null || fail=1
-    printf '%s\necho hello\n' "$ISH_PRELUDE" | "$IDIOMC" dump core - | grep -q 'prim exec' || { echo "PIN FAIL: exec"; fail=1; }
+    printf '%s\necho hello\n' "$ISH_PRELUDE" | "$IDIOMC" dump core - | grep -q '(fn-multi exec' || { echo "PIN FAIL: exec"; fail=1; }
     printf '%s\nls -la | wc -l\n' "$ISH_PRELUDE" | "$IDIOMC" dump core - | grep -q ':pipeline' || { echo "PIN FAIL: pipeline"; fail=1; }
     printf 'echo hello\n' | "$IDIOMC" dump core - 2>&1 | grep -q "unbound identifier 'echo'" || { echo "PIN FAIL: no-shell"; fail=1; }
     printf '%s\nls *.zz\n' "$ISH_PRELUDE" | "$IDIOMC" dump core - | grep -q ':glob' || { echo "PIN FAIL: glob"; fail=1; }

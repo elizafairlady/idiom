@@ -66,7 +66,7 @@ defn classify do
   _ -> 0
 end
 
-defn loop i n acc -> if (i >= n) do acc else do
+defn loop i n acc -> if i >= n do acc else do
   a = i % 8
   b = (i / 8) % 8
   loop (i + 1) n ((acc + (classify {a b i})) % 1000000007)

@@ -1,4 +1,5 @@
 use std/test
+use std/system with [cd pwd]
 activate Test
 use std/enum
 
@@ -97,7 +98,7 @@ suite do
       end
       defn dropn do
         parts 0 -> parts
-        (list _ . t) k -> dropn t (sub k 1)
+        '(_ . t) k -> dropn t (sub k 1)
       end
       {(fact 5) (classify (sub 0 3)) (classify 0) (classify 7) (dropn '(1 2 3 4) 2)}
     end
@@ -160,16 +161,8 @@ suite do
     end
     assert-inspect got "42"
   end
-  test "expander-prim-runtime" do
-    got = do
-      try do
-        s = %'(x)
-        expander-register-operator s 50 "left" "infix" s
-        :unreachable
-        rescue r -> :caught
-      end
-    end
-    assert-inspect got ":caught"
+  test "operator-registration-primitive-removed" do
+    assert-expand-error "expander-register-operator %'(x) 50 \"left\" \"infix\" %'(x)" "unbound identifier 'expander-register-operator'"
   end
   test "export-macro" do
     got = do
@@ -478,12 +471,12 @@ suite do
     end
     assert-inspect got "42"
   end
-  test "register-macro" do
+  test "for-syntax defmacro captures phase locals" do
     got = do
       for-syntax do
         defn lit s v -> make-syntax-int s v
         base = 40
-        expander-register-macro %'answer (fn s -> lit s (add base 2))
+        defmacro answer s -> lit s (add base 2)
       end
       answer x
     end

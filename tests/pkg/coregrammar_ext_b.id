@@ -1,0 +1,8 @@
+package coregrammar_ext_b
+
+export protocol GrammarExtB do
+  core-grammar ReaderSurface :extend [
+    {:token integer {:regex "[0-9]+"} {:capture integer}}
+    {:form integer-expr {:capture integer {:ref integer}} {:emit-form "%-expr" [{:capture integer}]}}
+  ]
+end

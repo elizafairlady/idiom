@@ -10,40 +10,38 @@ defn imax do
   _ b -> b
 end
 
-defn seed i n acc -> if (gte? i n) do
+defn seed i n acc -> if i >= n do
   acc
 else do
-  seed (add i 1) n "#{acc}line ${i} alpha beta gamma\n"
+  seed (i + 1) n "#{acc}line ${i} alpha beta gamma\n"
 end
 
-defn checksum s i acc -> if (gte? i (Str.len s)) do
+defn checksum s i acc -> if i >= Str.len s do
   acc
 else do
-  checksum s (add i 1) (mod (add (mul acc 33) (Str.byte s i)) 1000000007)
+  checksum s (i + 1) (((acc * 33) + (Str.byte s i)) % 1000000007)
 end
 
 defn insert-at b p text -> "#{Str.slice b 0 p}${text}#{Str.slice b p (Str.len b)}"
 
 defn delete-at b p n do
-  e = imin (Str.len b) (add p n)
+  e = imin (Str.len b) (p + n)
   "#{Str.slice b 0 p}#{Str.slice b e (Str.len b)}"
 end
 
-defn op-pos i len -> mod (add (mul i 37) (div i 7)) (add len 1)
+defn op-pos i len -> ((i * 37) + (i / 7)) % (len + 1)
 
-defn step i state do
-  b = tuple-get state 0
-  p = tuple-get state 1
+defn step i {b p} do
   n = Str.len b
-  op = mod i 8
+  op = i % 8
   match op do
     0 -> do
       b2 = insert-at b p "x"
-      {b2 (add p 1)}
+      {b2 (p + 1)}
     end
     1 -> do
       b2 = insert-at b p "\n"
-      {b2 (add p 1)}
+      {b2 (p + 1)}
     end
     2 -> {b (op-pos i n)}
     3 -> do
@@ -52,25 +50,23 @@ defn step i state do
     end
     4 -> do
       b2 = insert-at b p "()"
-      {b2 (add p 2)}
+      {b2 (p + 2)}
     end
-    5 -> {b (imax 0 (sub p (add 1 (mod i 5))))}
+    5 -> {b (imax 0 (p - (1 + (i % 5))))}
     6 -> do
       b2 = cond (lt? p n) (delete-at b p 3) b
       {b2 (imin p (Str.len b2))}
     end
-    _ -> {b (imin n (add p (add 1 (mod i 7))))}
+    _ -> {b (imin n (p + 1 + (i % 7)))}
   end
 end
 
-defn loop i n state -> if (gte? i n) do
+defn loop i n state -> if i >= n do
   state
 else do
-  loop (add i 1) n (step i state)
+  loop (i + 1) n (step i state)
 end
 
 initial = seed 0 160 ""
-result = loop 0 2500 {initial 0}
-text = tuple-get result 0
-point = tuple-get result 1
-println (mod (add (checksum text 0 0) (add (mul (Str.len text) 17) point)) 1000000007)
+{text point} = loop 0 2500 {initial 0}
+println (((checksum text 0 0) + ((Str.len text) * 17) + point) % 1000000007)

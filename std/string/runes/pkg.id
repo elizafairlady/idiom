@@ -30,9 +30,9 @@ defn in? cp lo hi -> and (gte? cp lo) (lte? cp hi)
 
 defn combining-scan do
   '() _cp -> :false
-  (list {lo _hi} . _) cp when (lt? cp lo) -> :false
-  (list {_lo hi} . _) cp when (lte? cp hi) -> :true
-  (list _ . t) cp -> combining-scan t cp
+  '({lo _hi} . _) cp when (lt? cp lo) -> :false
+  '({_lo hi} . _) cp when (lte? cp hi) -> :true
+  '(_ . t) cp -> combining-scan t cp
 end
 
 defn combining? cp -> combining-scan combining-ranges cp
@@ -64,7 +64,7 @@ end
 
 defn width-runes do
   '() acc -> acc
-  (list cp . t) acc -> width-runes t (add acc (char-width cp))
+  '(cp . t) acc -> width-runes t (add acc (char-width cp))
 end
 
 export defn width s -> width-runes (str-to-list s) 0

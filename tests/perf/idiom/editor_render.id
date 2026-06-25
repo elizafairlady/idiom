@@ -10,61 +10,52 @@ defn imax do
   _ b -> b
 end
 
-defn checksum s i n acc -> if (gte? i n) do
+defn checksum s i n acc -> if i >= n do
   acc
 else do
-  checksum s (add i 1) n (mod (add (mul acc 131) (Str.byte s i)) 1000000007)
+  checksum s (i + 1) n (((acc * 131) + (Str.byte s i)) % 1000000007)
 end
 
-defn line-text i -> "line ${i} :: alpha beta gamma ${(mod i 17)}"
+defn line-text i -> "line ${i} :: alpha beta gamma ${i % 17}"
 
 defn render-line row width acc do
   text = line-text row
   n = imin width (Str.len text)
-  mod (add (mul acc 17) (checksum text 0 n 0)) 1000000007
+  ((acc * 17) + (checksum text 0 n 0)) % 1000000007
 end
 
-defn render-range row stop width acc -> if (gte? row stop) do
+defn render-range row stop width acc -> if row >= stop do
   acc
 else do
-  render-range (add row 1) stop width (render-line row width acc)
+  render-range (row + 1) stop width (render-line row width acc)
 end
 
-defn render-state state acc do
-  top = tuple-get state 0
-  height = tuple-get state 2
-  width = tuple-get state 3
-  split = tuple-get state 4
+defn render-state {top _point height width split} acc do
   first-stop = add top (cond (gt? split 0) split height)
   acc1 = render-range top first-stop width acc
   cond (gt? split 0) (render-range (add top split) (add top height) width acc1) acc1
 end
 
-defn update-state i state do
-  top = tuple-get state 0
-  point = tuple-get state 1
-  height = tuple-get state 2
-  width = tuple-get state 3
-  split = tuple-get state 4
-  match (mod i 10) do
-    0 -> {top (imin 999 (add point 1)) height width split}
-    1 -> {top (imax 0 (sub point 1)) height width split}
-    2 -> {(imin 960 (add top 1)) point height width split}
-    3 -> {(imax 0 (sub top 1)) point height width split}
-    4 -> {top point height (add 40 (mod i 50)) split}
-    5 -> {top point (add 12 (mod i 15)) width split}
-    6 -> {top point height width (cond (eq? split 0) (div height 2) 0)}
+defn update-state i {top point height width split} do
+  match (i % 10) do
+    0 -> {top (imin 999 (point + 1)) height width split}
+    1 -> {top (imax 0 (point - 1)) height width split}
+    2 -> {(imin 960 (top + 1)) point height width split}
+    3 -> {(imax 0 (top - 1)) point height width split}
+    4 -> {top point height (40 + (i % 50)) split}
+    5 -> {top point (12 + (i % 15)) width split}
+    6 -> {top point height width (cond (split == 0) (height / 2) 0)}
     7 -> {point point height width split}
-    8 -> {top (mod (mul i 37) 1000) height width split}
+    8 -> {top ((i * 37) % 1000) height width split}
     _ -> {top point height width split}
   end
 end
 
-defn loop i n state acc -> if (gte? i n) do
+defn loop i n state acc -> if i >= n do
   acc
 else do
   next = update-state i state
-  loop (add i 1) n next (render-state next acc)
+  loop (i + 1) n next (render-state next acc)
 end
 
 println (loop 0 4000 {0 0 24 80 0} 0)

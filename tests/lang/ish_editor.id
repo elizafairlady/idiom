@@ -10,7 +10,7 @@ defn with-buffer state text cursor -> dict-put (dict-put state :buffer text) :cu
 
 defn feed do
   state '() -> state
-  state (list k . rest) -> match (step state k) do
+  state '(k . rest) -> match (step state k) do
     {_ st} -> feed st rest
   end
 end

@@ -2,7 +2,7 @@ use std/regex
 
 rx = compile! "([[:alpha:]]+|_+)[0-9]{2,3}"
 
-defn loop i n acc -> if (i >= n) do acc else do
+defn loop i n acc -> if i >= n do acc else do
   loop (i + 1) n (acc + (cond (rx.test? "xxab123--__99--zz7") 1 0))
 end
 

@@ -6,15 +6,19 @@ char *dump_reader(const char *src) {
     IdmError err;
     idm_error_init(&err);
     IdmSyntax *program = NULL;
-    if (!idm_reader_read_string("<test>", src, &program, &err)) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    if (!idm_expand_read_source_string(&rt, "<test>", src, &program, &err)) {
         idm_error_fprint(stderr, &err);
         idm_error_clear(&err);
+        idm_runtime_destroy(&rt);
         return NULL;
     }
     IdmBuffer buf;
     idm_buf_init(&buf);
     CHECK(idm_syn_dump(&buf, program));
     idm_syn_free(program);
+    idm_runtime_destroy(&rt);
     return idm_buf_take(&buf);
 }
 
@@ -22,7 +26,7 @@ void check_operator_eval(IdmRuntime *rt, const char *source, const char *expect_
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(rt, "<operator-surface-test>", source, &core, &err));
+    CHECK(idm_expand_source_string(rt, "<operator-surface-test>", source, &core, &err));
     CHECK(!err.present);
     if (expect_dump) {
         IdmBuffer dump;
@@ -35,6 +39,7 @@ void check_operator_eval(IdmRuntime *rt, const char *source, const char *expect_
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(rt, &module, main_fn, &out, &err));
     CHECK(!err.present);
@@ -48,12 +53,13 @@ void check_value_written(IdmRuntime *rt, const char *source, const char *expect_
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(rt, "<quote-test>", source, &core, &err));
+    CHECK(idm_expand_source_string(rt, "<quote-test>", source, &core, &err));
     CHECK(!err.present);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(rt, &module, main_fn, &out, &err));
     CHECK(!err.present);
@@ -71,7 +77,7 @@ void expect_expand_error_note_rt(IdmRuntime *rt, const char *label, const char *
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(!idm_expand_string(rt, label, source, &core, &err));
+    CHECK(!idm_expand_source_string(rt, label, source, &core, &err));
     CHECK(err.present);
     if (err.message && !strstr(err.message, expect_message)) {
         fprintf(stderr, "FAIL %s: expected error containing \"%s\", got \"%s\"\n", label, expect_message, err.message);
@@ -89,12 +95,13 @@ void expect_runtime_error_note(IdmRuntime *rt, const char *label, const char *so
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(rt, label, source, &core, &err));
+    CHECK(idm_expand_source_string(rt, label, source, &core, &err));
     CHECK(!err.present);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(!idm_vm_run(rt, &module, main_fn, &out, &err));
     CHECK(err.present);
@@ -115,13 +122,14 @@ void expect_runtime_error_contains(IdmRuntime *rt, const char *label, const char
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(rt, label, source, &core, &err));
+    CHECK(idm_expand_source_string(rt, label, source, &core, &err));
     CHECK(!err.present);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(!err.present);
+    CHECK(idm_bc_intern_literals(rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(!idm_vm_run(rt, &module, main_fn, &out, &err));
     CHECK(err.present);
@@ -139,7 +147,7 @@ void expect_expand_result_rt(IdmRuntime *rt, const char *label, const char *sour
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    bool ok = idm_expand_string(rt, label, source, &core, &err);
+    bool ok = idm_expand_source_string(rt, label, source, &core, &err);
     CHECK(ok == should_succeed);
     if (should_succeed) CHECK(!err.present && core != NULL);
     else CHECK(err.present && core == NULL);
@@ -151,7 +159,7 @@ void expect_expand_error_rt(IdmRuntime *rt, const char *label, const char *sourc
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    bool ok = idm_expand_string(rt, label, source, &core, &err);
+    bool ok = idm_expand_source_string(rt, label, source, &core, &err);
     CHECK(!ok && err.present && core == NULL);
     CHECK(err.message != NULL);
     if (err.message && !strstr(err.message, expect_substring)) {
@@ -173,12 +181,13 @@ void check_sched_value_written(IdmRuntime *rt, const char *source, const char *e
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(rt, "<sched-test>", source, &core, &err));
+    CHECK(idm_expand_source_string(rt, "<sched-test>", source, &core, &err));
     CHECK(!err.present);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(rt, &module, &err));
     IdmScheduler *sched = idm_sched_create(rt, &module, &err);
     CHECK(sched != NULL);
     IdmValue out = idm_nil();

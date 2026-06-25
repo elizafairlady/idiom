@@ -1,6 +1,7 @@
 #include "idiom/bytecode.h"
 
 #include "idiom/core.h"
+#include "idiom/prims.h"
 #include "idiom/regex.h"
 #include "idiom/syntax.h"
 #include "idiom/value.h"
@@ -8,9 +9,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IDM_IC_VERSION 17u
+#define IDM_IC_VERSION 34u
 
 static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err);
+
+static bool valid_value_sequence_kind(uint32_t kind) {
+    return kind <= (uint32_t)IDM_VALUE_SEQ_DICT;
+}
+
+static bool valid_syntax_build_kind(uint32_t kind) {
+    return kind <= (uint32_t)IDM_SYNTAX_BUILD_GROUP;
+}
 
 static bool verify_arity_operands(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, IdmError *err) {
     uint32_t ignored = 0;
@@ -33,6 +42,98 @@ static bool copy_arity_operands(const IdmBytecodeModule *src, IdmBytecodeModule 
         if (!idm_bc_emit(dst, src->code[(*ip)++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
     }
     return true;
+}
+
+static bool put_serialized_arity(IdmBuffer *out, IdmArity arity) {
+    return idm_buf_put_u8(out, (uint8_t)arity.kind) &&
+           idm_buf_put_u32(out, arity.min) &&
+           idm_buf_put_u32(out, arity.max) &&
+           idm_buf_put_u64(out, arity.mask);
+}
+
+static IdmArity read_serialized_arity(IdmByteReader *r) {
+    IdmArity arity;
+    arity.kind = (IdmArityKind)idm_rd_u8(r);
+    arity.min = idm_rd_u32(r);
+    arity.max = idm_rd_u32(r);
+    arity.mask = idm_rd_u64(r);
+    return arity;
+}
+
+static bool primitive_by_home_name(const char *home, const char *name, IdmPrimitive *out) {
+    if (!home || !name) return false;
+    for (size_t i = 0; i < idm_primitive_count(); i++) {
+        IdmPrimitive primitive = (IdmPrimitive)i;
+        const IdmPrimitiveInfo *info = idm_primitive_info(primitive);
+        if (info && strcmp(idm_primitive_home(primitive), home) == 0 && strcmp(info->name, name) == 0) {
+            if (out) *out = primitive;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool put_primitive_ref(IdmBuffer *out, uint32_t primitive, IdmError *err) {
+    const IdmPrimitiveInfo *info = idm_primitive_info((IdmPrimitive)primitive);
+    if (!info) return idm_error_set(err, idm_span_unknown(NULL), "unknown primitive %u", primitive);
+    const char *home = idm_primitive_home((IdmPrimitive)primitive);
+    if (!idm_buf_put_str(out, home, strlen(home)) ||
+        !idm_buf_put_str(out, info->name, strlen(info->name))) return idm_error_oom(err, idm_span_unknown(NULL));
+    return true;
+}
+
+static bool read_primitive_ref(IdmByteReader *r, IdmPrimitive *out, IdmError *err) {
+    char *home = idm_rd_string(r, NULL);
+    char *name = idm_rd_string(r, NULL);
+    if (!home || !name) {
+        free(home);
+        free(name);
+        return idm_error_set(err, idm_span_unknown(NULL), "truncated primitive reference");
+    }
+    bool ok = primitive_by_home_name(home, name, out);
+    if (!ok) idm_error_set(err, idm_span_unknown(NULL), "unknown primitive '%s/%s'", home, name);
+    free(home);
+    free(name);
+    return ok;
+}
+
+static void selector_sites_clear(IdmBytecodeModule *module) {
+    for (size_t i = 0; i < module->selector_site_count; i++) idm_pattern_selector_free(module->selector_sites[i].selector);
+    free(module->selector_sites);
+    module->selector_sites = NULL;
+    module->selector_site_count = 0;
+    module->selector_site_cap = 0;
+    free(module->selector_by_offset);
+    module->selector_by_offset = NULL;
+    module->selector_by_offset_count = 0;
+    module->selectors_prepared = false;
+}
+
+static void function_selectors_clear(IdmBytecodeModule *module) {
+    for (size_t i = 0; i < module->function_count; i++) {
+        idm_pattern_selector_free(module->functions[i].selector);
+        module->functions[i].selector = NULL;
+    }
+}
+
+static void selectors_clear(IdmBytecodeModule *module) {
+    selector_sites_clear(module);
+    function_selectors_clear(module);
+    module->selectors_prepared = false;
+    module->selector_generation++;
+}
+
+static void selectors_invalidate(IdmBytecodeModule *module) {
+    if (module->selectors_prepared || module->selector_site_count != 0 || module->selector_by_offset || module->selector_by_offset_count != 0) {
+        selectors_clear(module);
+        return;
+    }
+    module->selectors_prepared = false;
+}
+
+static void module_mutated(IdmBytecodeModule *module) {
+    module->literals_interned = false;
+    selectors_invalidate(module);
 }
 
 static bool span_file_index(IdmBytecodeModule *module, const char *file, uint32_t *out_index) {
@@ -154,6 +255,14 @@ void idm_bc_init(IdmBytecodeModule *module) {
     module->name_notes = NULL;
     module->name_note_count = 0;
     module->name_note_cap = 0;
+    module->selector_sites = NULL;
+    module->selector_site_count = 0;
+    module->selector_site_cap = 0;
+    module->selector_by_offset = NULL;
+    module->selector_by_offset_count = 0;
+    module->selectors_prepared = false;
+    module->literals_interned = false;
+    module->selector_generation = 0;
 }
 
 void idm_bc_destroy(IdmBytecodeModule *module) {
@@ -166,12 +275,14 @@ void idm_bc_destroy(IdmBytecodeModule *module) {
     for (size_t i = 0; i < module->name_note_count; i++) free(module->name_notes[i].name);
     free(module->name_notes);
     for (size_t i = 0; i < module->function_count; i++) {
+        idm_pattern_selector_free(module->functions[i].selector);
         free(module->functions[i].name);
         for (uint32_t p = 0; p < module->functions[i].pattern_count; p++) idm_pat_free(module->functions[i].param_patterns[p]);
         free(module->functions[i].param_patterns);
         for (uint32_t p = 0; p < module->functions[i].pattern_local_count; p++) free(module->functions[i].pattern_locals[p].name);
         free(module->functions[i].pattern_locals);
     }
+    selector_sites_clear(module);
     free(module->functions);
     idm_bc_init(module);
 }
@@ -187,6 +298,7 @@ bool idm_bc_add_const(IdmBytecodeModule *module, IdmValue value, uint32_t *out_i
     if (module->const_count > UINT32_MAX) return false;
     uint32_t index = (uint32_t)module->const_count;
     module->constants[module->const_count++] = value;
+    module_mutated(module);
     if (out_index) *out_index = index;
     return true;
 }
@@ -227,6 +339,15 @@ static bool intern_pattern_literals(IdmRuntime *rt, IdmPattern *pat, IdmError *e
 
 bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError *err) {
     if (!module) return true;
+    if (module->literals_interned && module->selectors_prepared) {
+        for (size_t i = 0; i < module->const_count; i++) {
+            module->constants[i] = idm_value_copy(rt, &rt->immortal, module->constants[i], err);
+            if (err->present) return false;
+        }
+        return true;
+    }
+    selectors_clear(module);
+    module->literals_interned = false;
     for (size_t i = 0; i < module->const_count; i++) {
         module->constants[i] = idm_value_copy(rt, &rt->immortal, module->constants[i], err);
         if (err->present) return false;
@@ -236,7 +357,12 @@ bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError 
         for (uint32_t p = 0; p < fn->pattern_count; p++)
             if (!intern_pattern_literals(rt, fn->param_patterns[p], err)) return false;
     }
-    return true;
+    module->literals_interned = true;
+    return idm_bc_prepare_selectors(module, err);
+}
+
+bool idm_bc_is_finalized(const IdmBytecodeModule *module) {
+    return module && module->literals_interned && module->selectors_prepared;
 }
 
 bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t arity, uint32_t local_count, size_t entry, uint32_t *out_index) {
@@ -252,16 +378,53 @@ bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t a
     module->functions[index].name = idm_strdup(name ? name : "<anonymous>");
     if (!module->functions[index].name) return false;
     module->functions[index].arity = arity;
+    module->functions[index].call_arity = idm_arity_exact(arity);
     module->functions[index].local_count = local_count;
     module->functions[index].entry = entry;
     module->functions[index].has_guard = false;
     module->functions[index].guard_function = UINT32_MAX;
+    module->functions[index].primitive_backed = false;
+    module->functions[index].primitive = 0;
     module->functions[index].param_patterns = NULL;
     module->functions[index].pattern_count = 0;
     module->functions[index].pattern_locals = NULL;
     module->functions[index].pattern_local_count = 0;
     module->functions[index].trivial_match = false;
+    module->functions[index].selector = NULL;
     module->function_count++;
+    module_mutated(module);
+    if (out_index) *out_index = index;
+    return true;
+}
+
+bool idm_bc_add_primitive_function(IdmBytecodeModule *module, const char *name, IdmArity arity, uint32_t primitive, uint32_t *out_index) {
+    if (module->function_count == module->function_cap) {
+        size_t cap = module->function_cap ? module->function_cap * 2u : 8u;
+        IdmBcFunction *next = realloc(module->functions, cap * sizeof(*next));
+        if (!next) return false;
+        module->functions = next;
+        module->function_cap = cap;
+    }
+    if (module->function_count > UINT32_MAX) return false;
+    uint32_t index = (uint32_t)module->function_count;
+    module->functions[index].name = idm_strdup(name ? name : "<primitive>");
+    if (!module->functions[index].name) return false;
+    module->functions[index].arity = arity.min;
+    module->functions[index].call_arity = arity;
+    module->functions[index].local_count = 0;
+    module->functions[index].entry = 0;
+    module->functions[index].has_guard = false;
+    module->functions[index].guard_function = UINT32_MAX;
+    module->functions[index].primitive_backed = true;
+    module->functions[index].primitive = primitive;
+    module->functions[index].param_patterns = NULL;
+    module->functions[index].pattern_count = 0;
+    module->functions[index].pattern_locals = NULL;
+    module->functions[index].pattern_local_count = 0;
+    module->functions[index].trivial_match = true;
+    module->functions[index].selector = NULL;
+    module->function_count++;
+    module_mutated(module);
     if (out_index) *out_index = index;
     return true;
 }
@@ -269,6 +432,7 @@ bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t a
 bool idm_bc_set_function_entry(IdmBytecodeModule *module, uint32_t function_index, size_t entry) {
     if (function_index >= module->function_count) return false;
     module->functions[function_index].entry = entry;
+    module_mutated(module);
     return true;
 }
 
@@ -292,6 +456,7 @@ bool idm_bc_set_function_patterns_take(IdmBytecodeModule *module, uint32_t funct
             }
         }
     }
+    module_mutated(module);
     return true;
 }
 
@@ -302,6 +467,7 @@ bool idm_bc_set_function_pattern_locals_take(IdmBytecodeModule *module, uint32_t
     free(fn->pattern_locals);
     fn->pattern_locals = locals;
     fn->pattern_local_count = local_count;
+    module_mutated(module);
     return true;
 }
 
@@ -309,6 +475,7 @@ bool idm_bc_set_function_guard(IdmBytecodeModule *module, uint32_t function_inde
     if (function_index >= module->function_count || guard_function >= module->function_count) return false;
     module->functions[function_index].has_guard = true;
     module->functions[function_index].guard_function = guard_function;
+    module_mutated(module);
     return true;
 }
 
@@ -322,6 +489,7 @@ bool idm_bc_emit(IdmBytecodeModule *module, uint32_t word, size_t *out_offset) {
     }
     if (out_offset) *out_offset = module->code_count;
     module->code[module->code_count++] = word;
+    module_mutated(module);
     return true;
 }
 
@@ -340,6 +508,7 @@ bool idm_bc_emit_u32(IdmBytecodeModule *module, IdmOpcode op, uint32_t operand, 
 bool idm_bc_patch_u32(IdmBytecodeModule *module, size_t operand_offset, uint32_t operand) {
     if (operand_offset >= module->code_count) return false;
     module->code[operand_offset] = operand;
+    module_mutated(module);
     return true;
 }
 
@@ -358,78 +527,235 @@ const char *idm_opcode_name(IdmOpcode op) {
         case IDM_OP_MAKE_CLOSURE_CAPTURES: return "MAKE_CLOSURE_CAPTURES";
         case IDM_OP_MAKE_MULTI_CLOSURE: return "MAKE_MULTI_CLOSURE";
         case IDM_OP_CALL: return "CALL";
-        case IDM_OP_TAIL_CALL: return "TAIL_CALL";
         case IDM_OP_RETURN: return "RETURN";
         case IDM_OP_POP: return "POP";
         case IDM_OP_JUMP: return "JUMP";
         case IDM_OP_JUMP_IF_FALSE: return "JUMP_IF_FALSE";
-        case IDM_OP_PRIM_CALL: return "PRIM_CALL";
-        case IDM_OP_SELF: return "SELF";
-        case IDM_OP_SPAWN: return "SPAWN";
-        case IDM_OP_SPAWN_LINK: return "SPAWN_LINK";
-        case IDM_OP_SPAWN_MONITOR: return "SPAWN_MONITOR";
-        case IDM_OP_SEND: return "SEND";
-        case IDM_OP_EXIT: return "EXIT";
-        case IDM_OP_EXIT_SIGNAL: return "EXIT_SIGNAL";
-        case IDM_OP_LINK: return "LINK";
-        case IDM_OP_UNLINK: return "UNLINK";
-        case IDM_OP_MONITOR: return "MONITOR";
-        case IDM_OP_DEMONITOR: return "DEMONITOR";
-        case IDM_OP_TRAP_EXIT: return "TRAP_EXIT";
         case IDM_OP_RECV: return "RECV";
-        case IDM_OP_TAIL_RECV: return "TAIL_RECV";
-        case IDM_OP_EXEC: return "EXEC";
         case IDM_OP_RESCUE_PUSH: return "RESCUE_PUSH";
         case IDM_OP_RESCUE_POP: return "RESCUE_POP";
         case IDM_OP_RAISE: return "RAISE";
         case IDM_OP_LOAD_RAISED: return "LOAD_RAISED";
-        case IDM_OP_LOAD_GLOBAL: return "LOAD_GLOBAL";
-        case IDM_OP_STORE_GLOBAL: return "STORE_GLOBAL";
-        case IDM_OP_AWAIT: return "AWAIT";
-        case IDM_OP_APPLY: return "APPLY";
-        case IDM_OP_ENTER_NAMESPACE: return "ENTER_NAMESPACE";
-        case IDM_OP_TRANSFER_NAMESPACE: return "TRANSFER_NAMESPACE";
-        case IDM_OP_LEAVE_NAMESPACE: return "LEAVE_NAMESPACE";
+        case IDM_OP_LOAD_ENV: return "LOAD_ENV";
+        case IDM_OP_STORE_ENV: return "STORE_ENV";
+        case IDM_OP_LOAD_PACKAGE_SLOT: return "LOAD_PACKAGE_SLOT";
+        case IDM_OP_PUSH_PACKAGE_ENV: return "PUSH_PACKAGE_ENV";
+        case IDM_OP_POP_PACKAGE_ENV: return "POP_PACKAGE_ENV";
         case IDM_OP_DEFINE_TRAIT: return "DEFINE_TRAIT";
         case IDM_OP_IMPLEMENT_TRAIT: return "IMPLEMENT_TRAIT";
         case IDM_OP_CALL_METHOD: return "CALL_METHOD";
-        case IDM_OP_TAIL_CALL_METHOD: return "TAIL_CALL_METHOD";
-        case IDM_OP_REGEX_TEST: return "REGEX_TEST";
-        case IDM_OP_REGEX_EXEC: return "REGEX_EXEC";
-        case IDM_OP_REGEX_SCAN: return "REGEX_SCAN";
-        case IDM_OP_NUM_ADD: return "NUM_ADD";
-        case IDM_OP_NUM_SUB: return "NUM_SUB";
-        case IDM_OP_NUM_MUL: return "NUM_MUL";
-        case IDM_OP_NUM_DIV: return "NUM_DIV";
-        case IDM_OP_NUM_MOD: return "NUM_MOD";
-        case IDM_OP_NUM_POW: return "NUM_POW";
-        case IDM_OP_NUM_NEG: return "NUM_NEG";
-        case IDM_OP_NUM_LT: return "NUM_LT";
-        case IDM_OP_NUM_GT: return "NUM_GT";
-        case IDM_OP_NUM_LTE: return "NUM_LTE";
-        case IDM_OP_NUM_GTE: return "NUM_GTE";
-        case IDM_OP_EQ: return "EQ";
-        case IDM_OP_NEQ: return "NEQ";
+        case IDM_OP_LIST_CONS: return "LIST_CONS";
+        case IDM_OP_LIST_APPEND: return "LIST_APPEND";
+        case IDM_OP_MAKE_VALUE_SEQUENCE: return "MAKE_VALUE_SEQUENCE";
+        case IDM_OP_MAKE_SYNTAX: return "MAKE_SYNTAX";
+        case IDM_OP_STRING_CONCAT: return "STRING_CONCAT";
     }
     return "<bad-op>";
-}
-
-static const char *namespace_transfer_direction_name(uint32_t direction) {
-    switch ((IdmNamespaceTransferDirection)direction) {
-        case IDM_NS_TRANSFER_PARENT_TO_CHILD: return "parent->child";
-        case IDM_NS_TRANSFER_CHILD_TO_PARENT: return "child->parent";
-    }
-    return "<bad-direction>";
-}
-
-static bool verify_namespace_transfer_direction(uint32_t direction, IdmError *err) {
-    if (direction == (uint32_t)IDM_NS_TRANSFER_PARENT_TO_CHILD || direction == (uint32_t)IDM_NS_TRANSFER_CHILD_TO_PARENT) return true;
-    return idm_error_set(err, idm_span_unknown(NULL), "TRANSFER_NAMESPACE direction %u is invalid", direction);
 }
 
 static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err) {
     if (*ip >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s missing operand", idm_opcode_name(op));
     *operand = module->code[(*ip)++];
+    return true;
+}
+
+bool idm_bc_build_selector_for_entries(const IdmBytecodeModule *module, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err) {
+    *out = NULL;
+    if (!module) return idm_error_set(err, idm_span_unknown(NULL), "closure requires a module");
+    if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "selector requires at least one entry");
+    IdmPatternSelectorClause *clauses = calloc(entry_count, sizeof(*clauses));
+    if (!clauses) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < entry_count; i++) {
+        uint32_t index = entries[i];
+        if (index >= module->function_count) {
+            free(clauses);
+            return idm_error_set(err, idm_span_unknown(NULL), "closure references invalid function %u", index);
+        }
+        const IdmBcFunction *fn = &module->functions[index];
+        clauses[i].function_index = index;
+        clauses[i].arity = fn->call_arity;
+        clauses[i].patterns = fn->param_patterns;
+        clauses[i].pattern_count = fn->pattern_count;
+        clauses[i].pattern_locals = fn->pattern_locals;
+        clauses[i].pattern_local_count = fn->pattern_local_count;
+        clauses[i].trivial_match = fn->trivial_match;
+        clauses[i].has_guard = fn->has_guard;
+    }
+    bool ok = idm_pattern_selector_build(clauses, entry_count, out, err);
+    free(clauses);
+    return ok;
+}
+
+static bool selector_site_add_take(IdmBytecodeModule *module, size_t offset, IdmPatternSelector *selector, IdmError *err) {
+    if (offset > UINT32_MAX) {
+        idm_pattern_selector_free(selector);
+        return idm_error_set(err, idm_span_unknown(NULL), "selector site offset is out of bounds");
+    }
+    if (offset >= module->selector_by_offset_count) {
+        idm_pattern_selector_free(selector);
+        return idm_error_set(err, idm_span_unknown(NULL), "selector site offset is out of bounds");
+    }
+    if (module->selector_site_count == module->selector_site_cap) {
+        size_t cap = module->selector_site_cap ? module->selector_site_cap * 2u : 16u;
+        IdmBcSelectorSite *grown = realloc(module->selector_sites, cap * sizeof(*grown));
+        if (!grown) {
+            idm_pattern_selector_free(selector);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        module->selector_sites = grown;
+        module->selector_site_cap = cap;
+    }
+    module->selector_sites[module->selector_site_count].offset = (uint32_t)offset;
+    module->selector_sites[module->selector_site_count].selector = selector;
+    module->selector_site_count++;
+    module->selector_by_offset[offset] = selector;
+    return true;
+}
+
+static bool selector_site_for_entries(IdmBytecodeModule *module, size_t offset, const uint32_t *entries, size_t entry_count, IdmError *err) {
+    IdmPatternSelector *selector = NULL;
+    if (!idm_bc_build_selector_for_entries(module, entries, entry_count, &selector, err)) return false;
+    return selector_site_add_take(module, offset, selector, err);
+}
+
+IdmPatternSelector *idm_bc_selector_at(const IdmBytecodeModule *module, size_t offset) {
+    if (!module || offset >= module->selector_by_offset_count) return NULL;
+    return module->selector_by_offset[offset];
+}
+
+static bool skip_arity_words(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, IdmError *err) {
+    uint32_t ignored = 0;
+    for (size_t i = 0; i < 5u; i++) {
+        if (!verify_operand(module, ip, op, &ignored, err)) return false;
+    }
+    return true;
+}
+
+bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err) {
+    if (module->selectors_prepared) return true;
+    selectors_clear(module);
+    module->selector_by_offset_count = module->code_count;
+    module->selector_by_offset = module->code_count == 0 ? NULL : calloc(module->code_count, sizeof(*module->selector_by_offset));
+    if (module->code_count != 0 && !module->selector_by_offset) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < module->function_count; i++) {
+        uint32_t entry = (uint32_t)i;
+        if (!idm_bc_build_selector_for_entries(module, &entry, 1u, &module->functions[i].selector, err)) {
+            selectors_clear(module);
+            return false;
+        }
+    }
+    size_t ip = 0;
+    while (ip < module->code_count) {
+        size_t offset = ip;
+        IdmOpcode op = (IdmOpcode)module->code[ip++];
+        uint32_t operand = 0;
+        switch (op) {
+            case IDM_OP_HALT:
+            case IDM_OP_RETURN:
+            case IDM_OP_POP:
+            case IDM_OP_MAKE_CELL:
+            case IDM_OP_LOAD_CELL:
+            case IDM_OP_STORE_CELL:
+            case IDM_OP_RESCUE_POP:
+            case IDM_OP_RAISE:
+            case IDM_OP_LOAD_RAISED:
+            case IDM_OP_POP_PACKAGE_ENV:
+            case IDM_OP_LIST_CONS:
+            case IDM_OP_LIST_APPEND:
+                break;
+            case IDM_OP_DEFINE_TRAIT: {
+                uint32_t requirement_count = 0;
+                uint32_t method_count = 0;
+                if (!verify_operand(module, &ip, op, &operand, err) ||
+                    !verify_operand(module, &ip, op, &requirement_count, err) ||
+                    !verify_operand(module, &ip, op, &method_count, err)) return false;
+                for (uint32_t i = 0; i < requirement_count; i++) {
+                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                }
+                for (uint32_t i = 0; i < method_count; i++) {
+                    if (!verify_operand(module, &ip, op, &operand, err) ||
+                        !skip_arity_words(module, &ip, op, err) ||
+                        !verify_operand(module, &ip, op, &operand, err)) return false;
+                }
+                break;
+            }
+            case IDM_OP_IMPLEMENT_TRAIT: {
+                uint32_t method_count = 0;
+                for (size_t i = 0; i < 4u; i++) {
+                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                }
+                if (!verify_operand(module, &ip, op, &method_count, err)) return false;
+                for (uint32_t i = 0; i < method_count; i++) {
+                    if (!verify_operand(module, &ip, op, &operand, err) ||
+                        !skip_arity_words(module, &ip, op, err)) return false;
+                }
+                break;
+            }
+            case IDM_OP_CALL_METHOD:
+                for (size_t i = 0; i < 4u; i++) {
+                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                }
+                break;
+            case IDM_OP_LOAD_CONST:
+            case IDM_OP_LOAD_ARG:
+            case IDM_OP_LOAD_LOCAL:
+            case IDM_OP_STORE_LOCAL:
+            case IDM_OP_LOAD_CAPTURE:
+            case IDM_OP_LOAD_ENV:
+            case IDM_OP_STORE_ENV:
+            case IDM_OP_JUMP:
+            case IDM_OP_JUMP_IF_FALSE:
+            case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_PUSH_PACKAGE_ENV:
+            case IDM_OP_STRING_CONCAT:
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                break;
+            case IDM_OP_LOAD_PACKAGE_SLOT:
+                if (!verify_operand(module, &ip, op, &operand, err) ||
+                    !verify_operand(module, &ip, op, &operand, err)) return false;
+                break;
+            case IDM_OP_RECV:
+                if (!verify_operand(module, &ip, op, &operand, err) ||
+                    !verify_operand(module, &ip, op, &operand, err)) return false;
+                break;
+            case IDM_OP_MAKE_VALUE_SEQUENCE:
+                if (!verify_operand(module, &ip, op, &operand, err) ||
+                    !verify_operand(module, &ip, op, &operand, err)) return false;
+                break;
+            case IDM_OP_MAKE_SYNTAX:
+                if (!verify_operand(module, &ip, op, &operand, err)) return false;
+                break;
+            case IDM_OP_MAKE_CLOSURE:
+                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
+                if (!selector_site_for_entries(module, offset, &operand, 1u, err)) { selectors_clear(module); return false; }
+                break;
+            case IDM_OP_MAKE_CLOSURE_CAPTURES:
+                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
+                if (!selector_site_for_entries(module, offset, &operand, 1u, err)) { selectors_clear(module); return false; }
+                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
+                break;
+            case IDM_OP_MAKE_MULTI_CLOSURE: {
+                uint32_t entry_count = 0;
+                uint32_t capture_count = 0;
+                if (!verify_operand(module, &ip, op, &entry_count, err) ||
+                    !verify_operand(module, &ip, op, &capture_count, err)) { selectors_clear(module); return false; }
+                (void)capture_count;
+                if (ip + entry_count > module->code_count) { selectors_clear(module); return idm_error_set(err, idm_span_unknown(NULL), "MAKE_MULTI_CLOSURE entries out of bounds"); }
+                if (!selector_site_for_entries(module, offset, &module->code[ip], entry_count, err)) { selectors_clear(module); return false; }
+                ip += entry_count;
+                break;
+            }
+            case IDM_OP_CALL: {
+                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
+                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
+                break;
+            }
+            default:
+                selectors_clear(module);
+                return idm_error_set(err, idm_span_unknown(NULL), "selector preparation: invalid opcode %u at offset %zu", (unsigned)op, offset);
+        }
+    }
+    module->selectors_prepared = true;
     return true;
 }
 
@@ -446,44 +772,12 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
             case IDM_OP_MAKE_CELL:
             case IDM_OP_LOAD_CELL:
             case IDM_OP_STORE_CELL:
-            case IDM_OP_SELF:
-            case IDM_OP_SPAWN:
-            case IDM_OP_SPAWN_LINK:
-            case IDM_OP_SPAWN_MONITOR:
-            case IDM_OP_SEND:
-            case IDM_OP_EXIT:
-            case IDM_OP_EXIT_SIGNAL:
-            case IDM_OP_LINK:
-            case IDM_OP_UNLINK:
-            case IDM_OP_MONITOR:
-            case IDM_OP_DEMONITOR:
-            case IDM_OP_TRAP_EXIT:
-            case IDM_OP_EXEC:
-            case IDM_OP_AWAIT:
-            case IDM_OP_APPLY:
-            case IDM_OP_LEAVE_NAMESPACE:
             case IDM_OP_RESCUE_POP:
             case IDM_OP_RAISE:
             case IDM_OP_LOAD_RAISED:
-            case IDM_OP_REGEX_TEST:
-            case IDM_OP_REGEX_SCAN:
-            case IDM_OP_NUM_ADD:
-            case IDM_OP_NUM_SUB:
-            case IDM_OP_NUM_MUL:
-            case IDM_OP_NUM_DIV:
-            case IDM_OP_NUM_MOD:
-            case IDM_OP_NUM_POW:
-            case IDM_OP_NUM_NEG:
-            case IDM_OP_NUM_LT:
-            case IDM_OP_NUM_GT:
-            case IDM_OP_NUM_LTE:
-            case IDM_OP_NUM_GTE:
-            case IDM_OP_EQ:
-            case IDM_OP_NEQ:
-                break;
-            case IDM_OP_REGEX_EXEC:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand > 1u) return idm_error_set(err, idm_span_unknown(NULL), "REGEX_EXEC mode %u is invalid", operand);
+            case IDM_OP_POP_PACKAGE_ENV:
+            case IDM_OP_LIST_CONS:
+            case IDM_OP_LIST_APPEND:
                 break;
             case IDM_OP_DEFINE_TRAIT: {
                 uint32_t trait_const = 0;
@@ -532,44 +826,29 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
                 }
                 break;
             }
-            case IDM_OP_CALL_METHOD:
-            case IDM_OP_TAIL_CALL_METHOD: {
+            case IDM_OP_CALL_METHOD: {
                 uint32_t trait_const = 0;
                 uint32_t method_const = 0;
-                uint32_t ignored = 0;
+                uint32_t argc = 0;
+                uint32_t tail_flag = 0;
                 if (!verify_operand(module, &ip, op, &trait_const, err)) return false;
                 if (trait_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "CALL_METHOD trait constant %u out of bounds", trait_const);
                 if (!verify_operand(module, &ip, op, &method_const, err)) return false;
                 if (method_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "CALL_METHOD method constant %u out of bounds", method_const);
-                if (!verify_operand(module, &ip, op, &ignored, err)) return false;
+                if (!verify_operand(module, &ip, op, &argc, err)) return false;
+                (void)argc;
+                if (!verify_operand(module, &ip, op, &tail_flag, err)) return false;
+                if (tail_flag > 1u) return idm_error_set(err, idm_span_unknown(NULL), "CALL_METHOD tail flag must be 0 or 1");
                 break;
             }
-            case IDM_OP_PRIM_CALL:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= idm_primitive_count()) return idm_error_set(err, idm_span_unknown(NULL), "PRIM_CALL primitive %u out of bounds", operand);
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
             case IDM_OP_LOAD_CONST:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_CONST index %u out of bounds", operand);
                 break;
-            case IDM_OP_ENTER_NAMESPACE:
+            case IDM_OP_PUSH_PACKAGE_ENV:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "ENTER_NAMESPACE index %u out of bounds", operand);
+                if (operand >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "PUSH_PACKAGE_ENV index %u out of bounds", operand);
                 break;
-            case IDM_OP_TRANSFER_NAMESPACE: {
-                uint32_t direction = 0;
-                uint32_t count = 0;
-                if (!verify_operand(module, &ip, op, &direction, err)) return false;
-                if (!verify_namespace_transfer_direction(direction, err)) return false;
-                if (!verify_operand(module, &ip, op, &count, err)) return false;
-                if (count == 0) return idm_error_set(err, idm_span_unknown(NULL), "TRANSFER_NAMESPACE requires at least one transfer");
-                for (uint32_t i = 0; i < count; i++) {
-                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                    if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                }
-                break;
-            }
             case IDM_OP_MAKE_CLOSURE:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_CLOSURE function %u out of bounds", operand);
@@ -578,25 +857,40 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
             case IDM_OP_LOAD_LOCAL:
             case IDM_OP_STORE_LOCAL:
             case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_LOAD_GLOBAL:
-            case IDM_OP_STORE_GLOBAL:
+            case IDM_OP_LOAD_ENV:
+            case IDM_OP_STORE_ENV:
+            case IDM_OP_STRING_CONCAT:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 break;
-            case IDM_OP_CALL:
-            case IDM_OP_TAIL_CALL: {
+            case IDM_OP_LOAD_PACKAGE_SLOT: {
+                uint32_t key_const = 0;
+                if (!verify_operand(module, &ip, op, &key_const, err)) return false;
+                if (key_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_PACKAGE_SLOT key constant %u out of bounds", key_const);
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if ((operand & IDM_CALL_DIRECT_FLAG) == 0) break;
-                uint32_t entry_count = 0;
-                uint32_t capture_count = 0;
-                if (!verify_operand(module, &ip, op, &entry_count, err)) return false;
-                if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "%s direct call requires at least one entry", idm_opcode_name(op));
-                if (!verify_operand(module, &ip, op, &capture_count, err)) return false;
-                (void)capture_count;
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    uint32_t entry = 0;
-                    if (!verify_operand(module, &ip, op, &entry, err)) return false;
-                    if (entry >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "%s direct function %u out of bounds", idm_opcode_name(op), entry);
-                }
+                break;
+            }
+            case IDM_OP_CALL: {
+                uint32_t argc = 0;
+                uint32_t tail_flag = 0;
+                if (!verify_operand(module, &ip, op, &argc, err)) return false;
+                (void)argc;
+                if (!verify_operand(module, &ip, op, &tail_flag, err)) return false;
+                if (tail_flag > 1u) return idm_error_set(err, idm_span_unknown(NULL), "CALL tail flag must be 0 or 1");
+                break;
+            }
+            case IDM_OP_MAKE_VALUE_SEQUENCE: {
+                uint32_t kind = 0;
+                uint32_t count = 0;
+                if (!verify_operand(module, &ip, op, &kind, err)) return false;
+                if (!valid_value_sequence_kind(kind)) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_VALUE_SEQUENCE kind %u is invalid", kind);
+                if (!verify_operand(module, &ip, op, &count, err)) return false;
+                (void)count;
+                break;
+            }
+            case IDM_OP_MAKE_SYNTAX: {
+                uint32_t kind = 0;
+                if (!verify_operand(module, &ip, op, &kind, err)) return false;
+                if (!valid_syntax_build_kind(kind)) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_SYNTAX kind %u is invalid", kind);
                 break;
             }
             case IDM_OP_MAKE_MULTI_CLOSURE: {
@@ -620,13 +914,21 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
                 break;
             case IDM_OP_JUMP:
             case IDM_OP_JUMP_IF_FALSE:
-            case IDM_OP_RECV:
-            case IDM_OP_TAIL_RECV:
             case IDM_OP_RESCUE_PUSH:
                 if (!verify_operand(module, &ip, op, &operand, err)) return false;
                 if (operand >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u out of bounds", idm_opcode_name(op), operand);
                 targets[(*target_count)++] = operand;
                 break;
+            case IDM_OP_RECV: {
+                uint32_t target = 0;
+                uint32_t tail_flag = 0;
+                if (!verify_operand(module, &ip, op, &target, err)) return false;
+                if (target >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "RECV target %u out of bounds", target);
+                targets[(*target_count)++] = target;
+                if (!verify_operand(module, &ip, op, &tail_flag, err)) return false;
+                if (tail_flag > 1u) return idm_error_set(err, idm_span_unknown(NULL), "RECV tail flag must be 0 or 1");
+                break;
+            }
             default:
                 return idm_error_set(err, idm_span_unknown(NULL), "invalid opcode %u at offset %zu", (unsigned)op, ip - 1u);
         }
@@ -637,9 +939,9 @@ static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start
 bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
     if (module->function_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "bytecode module has no functions");
     for (size_t i = 0; i < module->function_count; i++) {
-        if (module->functions[i].entry >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu entry is out of bounds", i);
+        if (!module->functions[i].primitive_backed && module->functions[i].entry >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu entry is out of bounds", i);
         if (module->functions[i].has_guard && module->functions[i].guard_function >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard function is out of bounds", i);
-        if (module->functions[i].has_guard && module->functions[module->functions[i].guard_function].arity != module->functions[i].arity) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard arity mismatch", i);
+        if (module->functions[i].has_guard && !idm_arity_equal(&module->functions[module->functions[i].guard_function].call_arity, &module->functions[i].call_arity)) return idm_error_set(err, idm_span_unknown(NULL), "function %zu guard arity mismatch", i);
     }
     size_t slots = module->code_count ? module->code_count : 1u;
     unsigned char *is_start = calloc(slots, 1u);
@@ -648,6 +950,7 @@ bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err) {
     size_t target_count = 0;
     bool ok = verify_scan(module, is_start, targets, &target_count, err);
     for (size_t i = 0; ok && i < module->function_count; i++) {
+        if (module->functions[i].primitive_backed) continue;
         if (!is_start[module->functions[i].entry]) ok = idm_error_set(err, idm_span_unknown(NULL), "function %zu entry %zu is not an instruction boundary", i, module->functions[i].entry);
     }
     for (size_t i = 0; ok && i < target_count; i++) {
@@ -685,7 +988,10 @@ static bool append_name_note(IdmBuffer *buf, const IdmBytecodeModule *module, si
 
 bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
     for (size_t i = 0; i < module->function_count; i++) {
-        if (!idm_buf_appendf(buf, "fn %zu %s/%u entry=%zu locals=%u", i, module->functions[i].name, module->functions[i].arity, module->functions[i].entry, module->functions[i].local_count)) return false;
+        if (!idm_buf_appendf(buf, "fn %zu %s/", i, module->functions[i].name) ||
+            !idm_arity_describe(buf, &module->functions[i].call_arity) ||
+            !idm_buf_appendf(buf, " entry=%zu locals=%u", module->functions[i].entry, module->functions[i].local_count)) return false;
+        if (module->functions[i].primitive_backed && !idm_buf_appendf(buf, " primitive=%u", module->functions[i].primitive)) return false;
         if (module->functions[i].has_guard) {
             uint32_t guard = module->functions[i].guard_function;
             if (guard < module->function_count) {
@@ -709,14 +1015,10 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
             case IDM_OP_MAKE_CLOSURE_CAPTURES:
             case IDM_OP_JUMP:
             case IDM_OP_JUMP_IF_FALSE:
-            case IDM_OP_PRIM_CALL:
-            case IDM_OP_RECV:
-            case IDM_OP_TAIL_RECV:
             case IDM_OP_RESCUE_PUSH:
-            case IDM_OP_LOAD_GLOBAL:
-            case IDM_OP_STORE_GLOBAL:
-            case IDM_OP_ENTER_NAMESPACE:
-            case IDM_OP_REGEX_EXEC:
+            case IDM_OP_LOAD_ENV:
+            case IDM_OP_STORE_ENV:
+            case IDM_OP_STRING_CONCAT:
                 if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                 uint32_t operand = module->code[ip++];
                 if (op == IDM_OP_MAKE_CLOSURE || op == IDM_OP_MAKE_CLOSURE_CAPTURES) {
@@ -727,40 +1029,37 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 if (op == IDM_OP_MAKE_CLOSURE_CAPTURES) {
                     if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
                     if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
-                } else if (op == IDM_OP_PRIM_CALL) {
-                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
                 }
                 break;
-            case IDM_OP_CALL:
-            case IDM_OP_TAIL_CALL: {
-                if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t operand = module->code[ip++];
-                if ((operand & IDM_CALL_DIRECT_FLAG) == 0) {
-                    if (!idm_buf_appendf(buf, " %u", operand)) return false;
-                    break;
-                }
+            case IDM_OP_LOAD_PACKAGE_SLOT:
                 if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t entry_count = module->code[ip++];
-                uint32_t capture_count = module->code[ip++];
-                if (!idm_buf_appendf(buf, " direct argc=%u captures=%u entries=%u", operand & IDM_CALL_ARGC_MASK, capture_count, entry_count)) return false;
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    if (!append_function_ref(buf, module, module->code[ip++])) return false;
-                }
+                if (!idm_buf_appendf(buf, " key=%u slot=%u", module->code[ip], module->code[ip + 1u])) return false;
+                ip += 2u;
+                break;
+            case IDM_OP_RECV:
+                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " %u tail=%u", module->code[ip], module->code[ip + 1u])) return false;
+                ip += 2u;
+                break;
+            case IDM_OP_MAKE_VALUE_SEQUENCE:
+                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " kind=%u count=%u", module->code[ip], module->code[ip + 1u])) return false;
+                ip += 2u;
+                break;
+            case IDM_OP_MAKE_SYNTAX:
+                if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " kind=%u", module->code[ip++])) return false;
+                break;
+            case IDM_OP_CALL: {
+                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " %u tail=%u", module->code[ip], module->code[ip + 1u])) return false;
+                ip += 2u;
                 break;
             }
-            case IDM_OP_TRANSFER_NAMESPACE: {
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t direction = module->code[ip++];
-                uint32_t count = module->code[ip++];
-                if (!idm_buf_appendf(buf, " %s %u", namespace_transfer_direction_name(direction), count)) return false;
-                for (uint32_t i = 0; i < count; i++) {
-                    if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    uint32_t src = module->code[ip++];
-                    uint32_t dst = module->code[ip++];
-                    if (!idm_buf_appendf(buf, " %u->%u", src, dst)) return false;
-                }
+            case IDM_OP_PUSH_PACKAGE_ENV: {
+                if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
+                uint32_t name_const = module->code[ip++];
+                if (!idm_buf_appendf(buf, " name=%u", name_const)) return false;
                 break;
             }
             case IDM_OP_MAKE_MULTI_CLOSURE: {
@@ -809,10 +1108,9 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
                 break;
             }
             case IDM_OP_CALL_METHOD:
-            case IDM_OP_TAIL_CALL_METHOD:
-                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " %u %u %u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
-                ip += 3u;
+                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
+                if (!idm_buf_appendf(buf, " %u %u %u tail=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u])) return false;
+                ip += 4u;
                 break;
             default:
                 break;
@@ -861,8 +1159,6 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
             }
             return true;
         }
-        case IDM_VAL_PRIMITIVE:
-            return idm_buf_put_u8(out, 10u) && idm_buf_put_u32(out, (uint32_t)v.as.id);
         case IDM_VAL_RECORD: {
             IdmError ignore;
             idm_error_init(&ignore);
@@ -965,6 +1261,115 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned de
     }
 }
 
+static bool serialize_code_word(IdmBuffer *out, const IdmBytecodeModule *module, size_t *ip, IdmError *err) {
+    if (*ip >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic code stream");
+    if (!idm_buf_put_u32(out, module->code[(*ip)++])) return idm_error_oom(err, idm_span_unknown(NULL));
+    return true;
+}
+
+static bool serialize_code_arity(IdmBuffer *out, const IdmBytecodeModule *module, size_t *ip, IdmError *err) {
+    for (size_t i = 0; i < 5u; i++) {
+        if (!serialize_code_word(out, module, ip, err)) return false;
+    }
+    return true;
+}
+
+static bool serialize_code(IdmBuffer *out, const IdmBytecodeModule *module, IdmError *err) {
+    if (!idm_buf_put_u64(out, (uint64_t)module->code_count)) return idm_error_oom(err, idm_span_unknown(NULL));
+    size_t ip = 0;
+    while (ip < module->code_count) {
+        IdmOpcode op = (IdmOpcode)module->code[ip++];
+        if (!idm_buf_put_u32(out, (uint32_t)op)) return idm_error_oom(err, idm_span_unknown(NULL));
+        switch (op) {
+            case IDM_OP_LOAD_CONST:
+            case IDM_OP_LOAD_ARG:
+            case IDM_OP_LOAD_LOCAL:
+            case IDM_OP_STORE_LOCAL:
+            case IDM_OP_LOAD_CAPTURE:
+            case IDM_OP_MAKE_CLOSURE:
+            case IDM_OP_JUMP:
+            case IDM_OP_JUMP_IF_FALSE:
+            case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_LOAD_ENV:
+            case IDM_OP_STORE_ENV:
+            case IDM_OP_PUSH_PACKAGE_ENV:
+            case IDM_OP_STRING_CONCAT:
+                if (!serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_LOAD_PACKAGE_SLOT:
+                if (!serialize_code_word(out, module, &ip, err) ||
+                    !serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_RECV:
+                if (!serialize_code_word(out, module, &ip, err) ||
+                    !serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_MAKE_VALUE_SEQUENCE:
+                if (!serialize_code_word(out, module, &ip, err) ||
+                    !serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_MAKE_SYNTAX:
+                if (!serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_MAKE_CLOSURE_CAPTURES:
+                if (!serialize_code_word(out, module, &ip, err) ||
+                    !serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_CALL:
+                if (!serialize_code_word(out, module, &ip, err) ||
+                    !serialize_code_word(out, module, &ip, err)) return false;
+                break;
+            case IDM_OP_MAKE_MULTI_CLOSURE: {
+                if (ip + 2u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic multi closure");
+                uint32_t entry_count = module->code[ip++];
+                uint32_t capture_count = module->code[ip++];
+                if (!idm_buf_put_u32(out, entry_count) || !idm_buf_put_u32(out, capture_count)) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (uint32_t i = 0; i < entry_count; i++) {
+                    if (!serialize_code_word(out, module, &ip, err)) return false;
+                }
+                break;
+            }
+            case IDM_OP_DEFINE_TRAIT: {
+                if (ip + 3u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic trait definition");
+                uint32_t requirement_count = module->code[ip + 1u];
+                uint32_t method_count = module->code[ip + 2u];
+                for (size_t i = 0; i < 3u; i++) {
+                    if (!serialize_code_word(out, module, &ip, err)) return false;
+                }
+                for (uint32_t i = 0; i < requirement_count; i++) {
+                    if (!serialize_code_word(out, module, &ip, err)) return false;
+                }
+                for (uint32_t i = 0; i < method_count; i++) {
+                    if (!serialize_code_word(out, module, &ip, err) ||
+                        !serialize_code_arity(out, module, &ip, err) ||
+                        !serialize_code_word(out, module, &ip, err)) return false;
+                }
+                break;
+            }
+            case IDM_OP_IMPLEMENT_TRAIT: {
+                if (ip + 5u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic trait implementation");
+                uint32_t method_count = module->code[ip + 4u];
+                for (size_t i = 0; i < 5u; i++) {
+                    if (!serialize_code_word(out, module, &ip, err)) return false;
+                }
+                for (uint32_t i = 0; i < method_count; i++) {
+                    if (!serialize_code_word(out, module, &ip, err) ||
+                        !serialize_code_arity(out, module, &ip, err)) return false;
+                }
+                break;
+            }
+            case IDM_OP_CALL_METHOD:
+                for (size_t i = 0; i < 4u; i++) {
+                    if (!serialize_code_word(out, module, &ip, err)) return false;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    return true;
+}
+
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err) {
     if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, IDM_IC_VERSION)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u32(out, (uint32_t)module->const_count)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -975,6 +1380,11 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
         if (!idm_buf_put_str(out, f->name ? f->name : "", f->name ? strlen(f->name) : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!idm_buf_put_u32(out, f->arity) || !idm_buf_put_u32(out, f->local_count) || !idm_buf_put_u64(out, (uint64_t)f->entry)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!idm_buf_put_u8(out, f->has_guard ? 1u : 0u) || !idm_buf_put_u32(out, f->guard_function)) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (!put_serialized_arity(out, f->call_arity) ||
+            !idm_buf_put_u8(out, f->primitive_backed ? 1u : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (f->primitive_backed) {
+            if (!put_primitive_ref(out, f->primitive, err)) return false;
+        } else if (!idm_buf_put_str(out, "", 0u) || !idm_buf_put_str(out, "", 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!idm_buf_put_u32(out, f->pattern_count)) return idm_error_oom(err, idm_span_unknown(NULL));
         for (uint32_t p = 0; p < f->pattern_count; p++) if (!serialize_pattern(out, f->param_patterns[p], 0u, err)) return false;
         if (!idm_buf_put_u32(out, f->pattern_local_count)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -982,8 +1392,7 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
             if (!idm_buf_put_str(out, f->pattern_locals[p].name, strlen(f->pattern_locals[p].name)) || !idm_buf_put_u32(out, f->pattern_locals[p].slot)) return idm_error_oom(err, idm_span_unknown(NULL));
         }
     }
-    if (!idm_buf_put_u64(out, (uint64_t)module->code_count)) return idm_error_oom(err, idm_span_unknown(NULL));
-    for (size_t i = 0; i < module->code_count; i++) if (!idm_buf_put_u32(out, module->code[i])) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!serialize_code(out, module, err)) return false;
     if (!idm_buf_put_u32(out, (uint32_t)module->span_file_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->span_file_count; i++) {
         if (!idm_buf_put_str(out, module->span_files[i], strlen(module->span_files[i]))) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1043,7 +1452,6 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
             free(entries);
             return !(err && err->present);
         }
-        case 10u: { uint32_t p = idm_rd_u32(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated primitive"); *out = idm_primitive_value(p); return true; }
         case 11u: {
             char *type = idm_rd_string(r, NULL);
             if (!type) return idm_error_set(err, idm_span_unknown(NULL), "truncated record type");
@@ -1244,6 +1652,126 @@ static IdmPattern *deserialize_pattern(IdmRuntime *rt, IdmByteReader *r, unsigne
     }
 }
 
+static bool deserialize_code_word(IdmBytecodeModule *module, IdmByteReader *r, IdmError *err) {
+    uint32_t word = idm_rd_u32(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic code");
+    if (!idm_bc_emit(module, word, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+    return true;
+}
+
+static bool deserialize_code_arity(IdmBytecodeModule *module, IdmByteReader *r, IdmError *err) {
+    for (size_t i = 0; i < 5u; i++) {
+        if (!deserialize_code_word(module, r, err)) return false;
+    }
+    return true;
+}
+
+static bool deserialize_code(IdmBytecodeModule *module, IdmByteReader *r, uint64_t code_count, IdmError *err) {
+    while (module->code_count < code_count && r->ok) {
+        uint32_t raw_op = idm_rd_u32(r);
+        if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic opcode");
+        IdmOpcode op = (IdmOpcode)raw_op;
+        if (!idm_bc_emit(module, raw_op, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+        switch (op) {
+            case IDM_OP_LOAD_CONST:
+            case IDM_OP_LOAD_ARG:
+            case IDM_OP_LOAD_LOCAL:
+            case IDM_OP_STORE_LOCAL:
+            case IDM_OP_LOAD_CAPTURE:
+            case IDM_OP_MAKE_CLOSURE:
+            case IDM_OP_JUMP:
+            case IDM_OP_JUMP_IF_FALSE:
+            case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_LOAD_ENV:
+            case IDM_OP_STORE_ENV:
+            case IDM_OP_PUSH_PACKAGE_ENV:
+            case IDM_OP_STRING_CONCAT:
+                if (!deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_LOAD_PACKAGE_SLOT:
+                if (!deserialize_code_word(module, r, err) ||
+                    !deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_RECV:
+                if (!deserialize_code_word(module, r, err) ||
+                    !deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_MAKE_VALUE_SEQUENCE:
+                if (!deserialize_code_word(module, r, err) ||
+                    !deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_MAKE_SYNTAX:
+                if (!deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_MAKE_CLOSURE_CAPTURES:
+                if (!deserialize_code_word(module, r, err) ||
+                    !deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_CALL:
+                if (!deserialize_code_word(module, r, err) ||
+                    !deserialize_code_word(module, r, err)) return false;
+                break;
+            case IDM_OP_MAKE_MULTI_CLOSURE: {
+                uint32_t entry_count = idm_rd_u32(r);
+                uint32_t capture_count = idm_rd_u32(r);
+                if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic multi closure");
+                if (!idm_bc_emit(module, entry_count, NULL) ||
+                    !idm_bc_emit(module, capture_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (uint32_t i = 0; i < entry_count; i++) {
+                    if (!deserialize_code_word(module, r, err)) return false;
+                }
+                break;
+            }
+            case IDM_OP_DEFINE_TRAIT: {
+                uint32_t trait_const = idm_rd_u32(r);
+                uint32_t requirement_count = idm_rd_u32(r);
+                uint32_t method_count = idm_rd_u32(r);
+                if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic trait definition");
+                if (!idm_bc_emit(module, trait_const, NULL) ||
+                    !idm_bc_emit(module, requirement_count, NULL) ||
+                    !idm_bc_emit(module, method_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (uint32_t i = 0; i < requirement_count; i++) {
+                    if (!deserialize_code_word(module, r, err)) return false;
+                }
+                for (uint32_t i = 0; i < method_count; i++) {
+                    if (!deserialize_code_word(module, r, err) ||
+                        !deserialize_code_arity(module, r, err) ||
+                        !deserialize_code_word(module, r, err)) return false;
+                }
+                break;
+            }
+            case IDM_OP_IMPLEMENT_TRAIT: {
+                uint32_t trait_const = idm_rd_u32(r);
+                uint32_t type_const = idm_rd_u32(r);
+                uint32_t provider_const = idm_rd_u32(r);
+                uint32_t provider_key_const = idm_rd_u32(r);
+                uint32_t method_count = idm_rd_u32(r);
+                if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic trait implementation");
+                if (!idm_bc_emit(module, trait_const, NULL) ||
+                    !idm_bc_emit(module, type_const, NULL) ||
+                    !idm_bc_emit(module, provider_const, NULL) ||
+                    !idm_bc_emit(module, provider_key_const, NULL) ||
+                    !idm_bc_emit(module, method_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (uint32_t i = 0; i < method_count; i++) {
+                    if (!deserialize_code_word(module, r, err) ||
+                        !deserialize_code_arity(module, r, err)) return false;
+                }
+                break;
+            }
+            case IDM_OP_CALL_METHOD:
+                for (size_t i = 0; i < 4u; i++) {
+                    if (!deserialize_code_word(module, r, err)) return false;
+                }
+                break;
+            default:
+                break;
+        }
+    }
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic code");
+    if (module->code_count != code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic code length");
+    return true;
+}
+
 bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, IdmBytecodeModule *module, IdmError *err) {
     idm_bc_init(module);
     IdmByteReader r = { data, len, 0u, true };
@@ -1272,8 +1800,36 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
         uint64_t entry = idm_rd_u64(&r);
         uint8_t has_guard = idm_rd_u8(&r);
         uint32_t guard_function = idm_rd_u32(&r);
+        IdmArity call_arity = read_serialized_arity(&r);
+        uint8_t primitive_backed = idm_rd_u8(&r);
+        IdmPrimitive primitive = 0;
+        if (primitive_backed) {
+            if (!read_primitive_ref(&r, &primitive, err)) {
+                free(name);
+                free(deferred_guards);
+                idm_bc_destroy(module);
+                return false;
+            }
+        } else {
+            char *primitive_home = idm_rd_string(&r, NULL);
+            char *primitive_name = idm_rd_string(&r, NULL);
+            if (!primitive_home || !primitive_name) {
+                free(primitive_home);
+                free(primitive_name);
+                free(name);
+                free(deferred_guards);
+                idm_bc_destroy(module);
+                return idm_error_set(err, idm_span_unknown(NULL), "truncated primitive function reference");
+            }
+            free(primitive_home);
+            free(primitive_name);
+        }
         uint32_t idx = 0;
-        if (!r.ok || !idm_bc_add_function(module, name, arity, local_count, (size_t)entry, &idx)) { free(name); free(deferred_guards); idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic function"); }
+        bool added = primitive_backed
+            ? idm_bc_add_primitive_function(module, name, call_arity, (uint32_t)primitive, &idx)
+            : idm_bc_add_function(module, name, arity, local_count, (size_t)entry, &idx);
+        if (!r.ok || !added) { free(name); free(deferred_guards); idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic function"); }
+        module->functions[idx].call_arity = call_arity;
         free(name);
         if (has_guard) deferred_guards[idx] = guard_function;
         uint32_t pattern_count = idm_rd_u32(&r);
@@ -1320,10 +1876,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     }
     free(deferred_guards);
     uint64_t code_count = idm_rd_u64(&r);
-    for (uint64_t i = 0; i < code_count && r.ok; i++) {
-        uint32_t word = idm_rd_u32(&r);
-        if (!r.ok || !idm_bc_emit(module, word, NULL)) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic code"); }
-    }
+    if (!deserialize_code(module, &r, code_count, err)) { idm_bc_destroy(module); return false; }
     uint32_t span_file_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < span_file_count && r.ok; i++) {
         char *name = idm_rd_string(&r, NULL);
@@ -1379,20 +1932,11 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
         if (!idm_bc_emit(dst, (uint32_t)op, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
         switch (op) {
             case IDM_OP_HALT: case IDM_OP_RETURN: case IDM_OP_POP: case IDM_OP_MAKE_CELL: case IDM_OP_LOAD_CELL:
-            case IDM_OP_STORE_CELL: case IDM_OP_SELF: case IDM_OP_SPAWN: case IDM_OP_SEND: case IDM_OP_EXIT:
-            case IDM_OP_SPAWN_LINK: case IDM_OP_SPAWN_MONITOR:
-            case IDM_OP_EXIT_SIGNAL:
-            case IDM_OP_LINK: case IDM_OP_UNLINK: case IDM_OP_MONITOR: case IDM_OP_DEMONITOR: case IDM_OP_TRAP_EXIT:
-            case IDM_OP_EXEC: case IDM_OP_AWAIT: case IDM_OP_APPLY: case IDM_OP_LEAVE_NAMESPACE:
+            case IDM_OP_STORE_CELL:
             case IDM_OP_RESCUE_POP: case IDM_OP_RAISE: case IDM_OP_LOAD_RAISED:
-            case IDM_OP_REGEX_TEST: case IDM_OP_REGEX_SCAN:
-            case IDM_OP_NUM_ADD: case IDM_OP_NUM_SUB: case IDM_OP_NUM_MUL: case IDM_OP_NUM_DIV:
-            case IDM_OP_NUM_MOD: case IDM_OP_NUM_POW: case IDM_OP_NUM_NEG:
-            case IDM_OP_NUM_LT: case IDM_OP_NUM_GT: case IDM_OP_NUM_LTE: case IDM_OP_NUM_GTE:
-            case IDM_OP_EQ: case IDM_OP_NEQ:
-                break;
-            case IDM_OP_REGEX_EXEC:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+            case IDM_OP_POP_PACKAGE_ENV:
+            case IDM_OP_LIST_CONS:
+            case IDM_OP_LIST_APPEND:
                 break;
             case IDM_OP_DEFINE_TRAIT: {
                 uint32_t trait_const = src->code[ip++];
@@ -1428,45 +1972,33 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
                 break;
             }
             case IDM_OP_CALL_METHOD:
-            case IDM_OP_TAIL_CALL_METHOD:
-                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL) || !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) || !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             case IDM_OP_LOAD_CONST:
-            case IDM_OP_ENTER_NAMESPACE:
                 if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
-            case IDM_OP_TRANSFER_NAMESPACE: {
-                uint32_t direction = src->code[ip++];
-                uint32_t count = src->code[ip++];
-                if (!idm_bc_emit(dst, direction, NULL) || !idm_bc_emit(dst, count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < count; i++) {
-                    if (!idm_bc_emit(dst, src->code[ip++], NULL) || !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                }
+            case IDM_OP_LOAD_PACKAGE_SLOT:
+                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
-            }
+            case IDM_OP_PUSH_PACKAGE_ENV:
+                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
             case IDM_OP_MAKE_CLOSURE:
                 if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             case IDM_OP_LOAD_ARG: case IDM_OP_LOAD_LOCAL: case IDM_OP_STORE_LOCAL: case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_LOAD_GLOBAL: case IDM_OP_STORE_GLOBAL:
+            case IDM_OP_LOAD_ENV: case IDM_OP_STORE_ENV: case IDM_OP_STRING_CONCAT:
                 if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
-            case IDM_OP_CALL:
-            case IDM_OP_TAIL_CALL: {
-                uint32_t operand = src->code[ip++];
-                if (!idm_bc_emit(dst, operand, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                if ((operand & IDM_CALL_DIRECT_FLAG) == 0) break;
-                uint32_t entry_count = src->code[ip++];
-                uint32_t capture_count = src->code[ip++];
-                if (!idm_bc_emit(dst, entry_count, NULL) || !idm_bc_emit(dst, capture_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                }
+            case IDM_OP_CALL: {
+                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             }
-            case IDM_OP_PRIM_CALL:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) || !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
             case IDM_OP_MAKE_CLOSURE_CAPTURES:
                 if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL) || !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
@@ -1477,8 +2009,19 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
                 for (uint32_t i = 0; i < entry_count; i++) if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             }
-            case IDM_OP_JUMP: case IDM_OP_JUMP_IF_FALSE: case IDM_OP_RECV: case IDM_OP_TAIL_RECV: case IDM_OP_RESCUE_PUSH:
+            case IDM_OP_JUMP: case IDM_OP_JUMP_IF_FALSE: case IDM_OP_RESCUE_PUSH:
                 if (!idm_bc_emit(dst, src->code[ip++] + code_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case IDM_OP_RECV:
+                if (!idm_bc_emit(dst, src->code[ip++] + code_off, NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case IDM_OP_MAKE_VALUE_SEQUENCE:
+                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
+                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case IDM_OP_MAKE_SYNTAX:
+                if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
                 break;
             default:
                 return idm_error_set(err, idm_span_unknown(NULL), "relocation: invalid opcode %u", (unsigned)op);
@@ -1525,7 +2068,11 @@ bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t 
     for (size_t i = 0; i < src->function_count; i++) {
         const IdmBcFunction *sf = &src->functions[i];
         uint32_t nf = 0;
-        if (!idm_bc_add_function(dst, sf->name, sf->arity, sf->local_count, sf->entry + code_off, &nf)) return idm_error_oom(err, idm_span_unknown(NULL));
+        bool added = sf->primitive_backed
+            ? idm_bc_add_primitive_function(dst, sf->name, sf->call_arity, sf->primitive, &nf)
+            : idm_bc_add_function(dst, sf->name, sf->arity, sf->local_count, sf->entry + code_off, &nf);
+        if (!added) return idm_error_oom(err, idm_span_unknown(NULL));
+        dst->functions[nf].call_arity = sf->call_arity;
         if (sf->pattern_count != 0) {
             IdmPattern **clones = malloc((size_t)sf->pattern_count * sizeof(*clones));
             if (!clones) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1706,6 +2253,8 @@ static bool pattern_relocate_syntax(IdmRuntime *rt, IdmPattern *pat, IdmScopeId 
 
 bool idm_bc_relocate_syntax_scopes(IdmRuntime *rt, IdmBytecodeModule *module, IdmScopeId min_id, int64_t delta, IdmError *err) {
     if (delta == 0) return true;
+    selectors_clear(module);
+    module->literals_interned = false;
     for (size_t i = 0; i < module->const_count; i++) {
         bool changed = false;
         IdmValue replaced;

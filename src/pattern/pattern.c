@@ -1,5 +1,6 @@
 #include "idiom/pattern.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -77,7 +78,7 @@ typedef struct {
 
 typedef struct {
     uint32_t function_index;
-    uint32_t arity;
+    IdmArity arity;
     bool has_guard;
     SelCell *cells;
     size_t cell_count;
@@ -136,12 +137,14 @@ struct SelNode {
 };
 
 typedef struct {
-    uint32_t arity;
+    IdmArity arity;
     SelNode *node;
+    bool unconditional;
+    uint32_t function_index;
 } SelArityCase;
 
 struct IdmPatternSelector {
-    size_t refcount;
+    atomic_size_t refcount;
     SelAccess *accesses;
     size_t access_count;
     size_t access_cap;
@@ -149,6 +152,7 @@ struct IdmPatternSelector {
     size_t pattern_count;
     SelArityCase *arities;
     size_t arity_count;
+    bool has_unconditional;
 };
 
 static IdmPattern *pat_alloc(IdmPatternKind kind, IdmSpan span) {
@@ -585,36 +589,6 @@ static void bindings_truncate(IdmPatternBindings *bindings, size_t count) {
     bindings->count = count;
 }
 
-static bool dict_key_in_entries(IdmValue key, const IdmDictPatternEntry *entries, size_t count) {
-    for (size_t i = 0; i < count; i++) {
-        if (idm_value_equal(key, entries[i].key)) return true;
-    }
-    return false;
-}
-
-static bool dict_rest_value(IdmRuntime *rt, IdmValue value, const IdmDictPatternEntry *entries, size_t count, IdmValue *out, IdmError *err, IdmSpan span) {
-    if (!rt) return idm_error_set(err, span, "runtime required for dict rest pattern");
-    size_t n = idm_dict_count(value);
-    IdmDictEntry *rest = n == 0 ? NULL : calloc(n, sizeof(*rest));
-    if (n != 0 && !rest) return idm_error_oom(err, span);
-    size_t rest_count = 0;
-    for (size_t i = 0; i < n; i++) {
-        IdmValue key = idm_nil();
-        IdmValue val = idm_nil();
-        if (!idm_dict_entry(value, i, &key, &val)) {
-            free(rest);
-            return idm_error_set(err, span, "dict rest pattern failed to read entry");
-        }
-        if (dict_key_in_entries(key, entries, count)) continue;
-        rest[rest_count].key = key;
-        rest[rest_count].value = val;
-        rest_count++;
-    }
-    *out = idm_dict(rt, rest, rest_count, err);
-    free(rest);
-    return !(err && err->present);
-}
-
 static bool sel_dict_key_in_entries(IdmValue key, const SelDictEntry *entries, size_t count) {
     for (size_t i = 0; i < count; i++) {
         if (idm_value_equal(key, entries[i].key)) return true;
@@ -885,128 +859,6 @@ static bool syntax_pattern_match(IdmRuntime *rt, const IdmSyntaxPattern *pat, co
                 if (err && err->present) break;
             }
             if (ok) ok = syntax_pattern_bind_rest(rt, bindings, pat->as.seq.rest_name, pat->as.seq.rest_slot, syn, prefix, suffix_start, err, pat->span);
-            break;
-        }
-    }
-    if (!ok) bindings_truncate(bindings, checkpoint);
-    return ok;
-}
-
-bool idm_pattern_match(IdmRuntime *rt, IdmPattern *pat, IdmValue value, IdmPatternBindings *bindings, IdmError *err) {
-    if (!pat) return idm_error_set(err, idm_span_unknown(NULL), "cannot match null pattern");
-    size_t checkpoint = bindings->count;
-    bool ok = false;
-    switch (pat->kind) {
-        case IDM_PAT_WILDCARD:
-            ok = true;
-            break;
-        case IDM_PAT_BIND:
-        {
-            const IdmValue *existing = idm_pattern_bindings_get(bindings, pat->as.name);
-            if (existing) ok = idm_value_equal(*existing, value);
-            else {
-                ok = idm_pattern_bindings_add(bindings, pat->as.name, value);
-                if (!ok) idm_error_oom(err, pat->span);
-            }
-            break;
-        }
-        case IDM_PAT_PIN: {
-            const IdmValue *pinned = idm_pattern_bindings_get(bindings, pat->as.name);
-            ok = pinned && idm_value_equal(*pinned, value);
-            break;
-        }
-        case IDM_PAT_LITERAL:
-            ok = idm_value_equal(pat->as.literal, value);
-            break;
-        case IDM_PAT_PAIR: {
-            if (!idm_is_pair(value)) {
-                ok = false;
-                break;
-            }
-            IdmValue car = idm_car(value, err);
-            IdmValue cdr = idm_cdr(value, err);
-            if (err && err->present) {
-                ok = false;
-                break;
-            }
-            ok = idm_pattern_match(rt, pat->as.pair.left, car, bindings, err) &&
-                 idm_pattern_match(rt, pat->as.pair.right, cdr, bindings, err);
-            break;
-        }
-        case IDM_PAT_LIST: {
-            IdmValue cur = value;
-            ok = true;
-            for (size_t i = 0; i < pat->as.seq.count; i++) {
-                if (!idm_is_pair(cur)) { ok = false; break; }
-                IdmValue car = idm_car(cur, err);
-                IdmValue cdr = idm_cdr(cur, err);
-                if (err && err->present) { ok = false; break; }
-                if (!idm_pattern_match(rt, pat->as.seq.items[i], car, bindings, err)) { ok = false; break; }
-                cur = cdr;
-            }
-            ok = ok && idm_is_empty_list(cur);
-            break;
-        }
-        case IDM_PAT_VECTOR:
-        case IDM_PAT_TUPLE: {
-            if ((pat->kind == IDM_PAT_VECTOR && !idm_is_vector(value)) || (pat->kind == IDM_PAT_TUPLE && !idm_is_tuple(value))) {
-                ok = false;
-                break;
-            }
-            if (idm_sequence_count(value) != pat->as.seq.count) { ok = false; break; }
-            ok = true;
-            for (size_t i = 0; i < pat->as.seq.count; i++) {
-                IdmValue item = idm_sequence_item(value, i, err);
-                if (err && err->present) { ok = false; break; }
-                if (!idm_pattern_match(rt, pat->as.seq.items[i], item, bindings, err)) { ok = false; break; }
-            }
-            break;
-        }
-        case IDM_PAT_VECTOR_REST:
-        case IDM_PAT_TUPLE_REST: {
-            bool want_vector = pat->kind == IDM_PAT_VECTOR_REST;
-            if ((want_vector && !idm_is_vector(value)) || (!want_vector && !idm_is_tuple(value))) { ok = false; break; }
-            size_t n = idm_sequence_count(value);
-            if (n < pat->as.seq_rest.count) { ok = false; break; }
-            ok = true;
-            for (size_t i = 0; i < pat->as.seq_rest.count; i++) {
-                IdmValue item = idm_sequence_item(value, i, err);
-                if (err && err->present) { ok = false; break; }
-                if (!idm_pattern_match(rt, pat->as.seq_rest.items[i], item, bindings, err)) { ok = false; break; }
-            }
-            if (!ok) break;
-            size_t rest_count = n - pat->as.seq_rest.count;
-            IdmValue *rest_items = rest_count == 0 ? NULL : calloc(rest_count, sizeof(*rest_items));
-            if (rest_count != 0 && !rest_items) return idm_error_oom(err, pat->span);
-            for (size_t i = 0; i < rest_count; i++) rest_items[i] = idm_sequence_item(value, pat->as.seq_rest.count + i, err);
-            if (!rt) {
-                free(rest_items);
-                return idm_error_set(err, pat->span, "runtime required for vector/tuple rest pattern");
-            }
-            IdmValue rest_value = want_vector ? idm_vector(rt, rest_items, rest_count, err) : idm_tuple(rt, rest_items, rest_count, err);
-            free(rest_items);
-            if (err && err->present) return false;
-            ok = idm_pattern_match(rt, pat->as.seq_rest.rest, rest_value, bindings, err);
-            break;
-        }
-        case IDM_PAT_DICT: {
-            if (!idm_is_dict(value)) { ok = false; break; }
-            ok = true;
-            for (size_t i = 0; i < pat->as.dict.count; i++) {
-                IdmValue item = idm_nil();
-                if (!idm_dict_get(value, pat->as.dict.entries[i].key, &item)) { ok = false; break; }
-                if (!idm_pattern_match(rt, pat->as.dict.entries[i].pattern, item, bindings, err)) { ok = false; break; }
-            }
-            if (ok && pat->as.dict.rest) {
-                IdmValue rest = idm_nil();
-                if (!dict_rest_value(rt, value, pat->as.dict.entries, pat->as.dict.count, &rest, err, pat->span)) return false;
-                ok = idm_pattern_match(rt, pat->as.dict.rest, rest, bindings, err);
-            }
-            break;
-        }
-        case IDM_PAT_SYNTAX: {
-            if (value.tag != IDM_VAL_SYNTAX) { ok = false; break; }
-            ok = syntax_pattern_match(rt, pat->as.syntax, idm_syntax_value_get(value), bindings, err);
             break;
         }
     }
@@ -1343,7 +1195,6 @@ static bool literal_can_be_disjoint_ctor(IdmValue value) {
         case IDM_VAL_PID:
         case IDM_VAL_REF:
         case IDM_VAL_PORT:
-        case IDM_VAL_PRIMITIVE:
             return true;
         case IDM_VAL_PAIR:
         case IDM_VAL_TUPLE:
@@ -1794,6 +1645,13 @@ static SelNode *compile_rows(IdmPatternSelector *selector, const SelRow *rows, s
     return node;
 }
 
+static bool sel_node_unconditional(const SelNode *node, uint32_t *out_function_index) {
+    if (!node || node->kind != SEL_NODE_TRY) return false;
+    if (node->as.try_row.action_count != 0 || node->as.try_row.residual_count != 0 || node->as.try_row.has_guard) return false;
+    *out_function_index = node->as.try_row.function_index;
+    return true;
+}
+
 static bool selector_eval_access(IdmRuntime *rt, const IdmPatternSelector *selector, const IdmValue *args, uint32_t argc, uint32_t access_id, IdmValue *out, bool *out_available, IdmError *err) {
     *out_available = false;
     if (access_id >= selector->access_count) return idm_error_set(err, idm_span_unknown(NULL), "pattern access out of bounds");
@@ -2059,15 +1917,15 @@ bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t 
     *out = NULL;
     IdmPatternSelector *selector = calloc(1u, sizeof(*selector));
     if (!selector) return idm_error_oom(err, idm_span_unknown(NULL));
-    selector->refcount = 1u;
+    atomic_init(&selector->refcount, 1u);
 
-    uint32_t *arities = NULL;
+    IdmArity *arities = NULL;
     size_t arity_count = 0;
     for (size_t i = 0; i < clause_count; i++) {
         bool seen = false;
-        for (size_t j = 0; j < arity_count; j++) if (arities[j] == clauses[i].arity) { seen = true; break; }
+        for (size_t j = 0; j < arity_count; j++) if (idm_arity_equal(&arities[j], &clauses[i].arity)) { seen = true; break; }
         if (seen) continue;
-        uint32_t *next = realloc(arities, (arity_count + 1u) * sizeof(*next));
+        IdmArity *next = realloc(arities, (arity_count + 1u) * sizeof(*next));
         if (!next) { free(arities); idm_pattern_selector_free(selector); return idm_error_oom(err, idm_span_unknown(NULL)); }
         arities = next;
         arities[arity_count++] = clauses[i].arity;
@@ -2082,17 +1940,22 @@ bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t 
     selector->arity_count = arity_count;
 
     for (size_t a = 0; a < arity_count; a++) {
-        uint32_t arity = arities[a];
+        IdmArity arity = arities[a];
         SelRow *rows = NULL;
         size_t row_count = 0;
         for (size_t c = 0; c < clause_count; c++) {
-            if (clauses[c].arity != arity) continue;
-            if (clauses[c].pattern_count != 0 && clauses[c].pattern_count != arity) {
+            if (!idm_arity_equal(&clauses[c].arity, &arity)) continue;
+            if (clauses[c].pattern_count != 0 &&
+                (arity.min != clauses[c].pattern_count ||
+                 arity.max != clauses[c].pattern_count ||
+                 !idm_arity_accepts(&arity, clauses[c].pattern_count))) {
                 rows_destroy(rows, row_count);
                 free(arities);
                 idm_pattern_selector_free(selector);
                 return idm_error_set(err, idm_span_unknown(NULL), "function pattern metadata arity mismatch");
             }
+            uint32_t exact_arity = clauses[c].pattern_count;
+            if (clauses[c].pattern_count == 0) exact_arity = arity.min;
             SelRow row;
             memset(&row, 0, sizeof(row));
             row.function_index = clauses[c].function_index;
@@ -2100,15 +1963,15 @@ bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t 
             row.has_guard = clauses[c].has_guard;
             bool trivial_no_bindings = clauses[c].trivial_match && clauses[c].pattern_local_count == 0;
             if (clauses[c].pattern_count != 0 && !trivial_no_bindings) {
-                row.cells = calloc(arity, sizeof(*row.cells));
+                row.cells = calloc(exact_arity, sizeof(*row.cells));
                 if (!row.cells) {
                     rows_destroy(rows, row_count);
                     free(arities);
                     idm_pattern_selector_free(selector);
                     return idm_error_oom(err, idm_span_unknown(NULL));
                 }
-                row.cell_count = arity;
-                for (uint32_t p = 0; p < arity; p++) {
+                row.cell_count = exact_arity;
+                for (uint32_t p = 0; p < exact_arity; p++) {
                     uint32_t root = 0;
                     SelPat *pat = sel_pat_from_idm(clauses[c].patterns[p], clauses[c].pattern_locals, clauses[c].pattern_local_count, err);
                     if (!pat || !selector_add_pattern_root(selector, pat, err, clauses[c].patterns[p]->span) ||
@@ -2138,6 +2001,8 @@ bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t 
             idm_pattern_selector_free(selector);
             return false;
         }
+        selector->arities[a].unconditional = sel_node_unconditional(selector->arities[a].node, &selector->arities[a].function_index);
+        if (selector->arities[a].unconditional) selector->has_unconditional = true;
     }
 
     free(arities);
@@ -2146,15 +2011,12 @@ bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t 
 }
 
 void idm_pattern_selector_retain(IdmPatternSelector *selector) {
-    if (selector) selector->refcount++;
+    if (selector) atomic_fetch_add_explicit(&selector->refcount, 1u, memory_order_relaxed);
 }
 
 void idm_pattern_selector_free(IdmPatternSelector *selector) {
     if (!selector) return;
-    if (selector->refcount > 1u) {
-        selector->refcount--;
-        return;
-    }
+    if (atomic_fetch_sub_explicit(&selector->refcount, 1u, memory_order_acq_rel) != 1u) return;
     for (size_t i = 0; i < selector->arity_count; i++) sel_node_free(selector->arities[i].node);
     free(selector->arities);
     for (size_t i = 0; i < selector->pattern_count; i++) sel_pat_free(selector->patterns[i]);
@@ -2168,16 +2030,21 @@ bool idm_pattern_selector_select(IdmRuntime *rt, const IdmPatternSelector *selec
     *out_has_bindings = false;
     *out_matched = false;
     if (!selector) return true;
-    const SelNode *root = NULL;
+    const SelArityCase *arity_case = NULL;
     for (size_t i = 0; i < selector->arity_count; i++) {
-        if (selector->arities[i].arity == argc) {
-            root = selector->arities[i].node;
+        if (idm_arity_accepts(&selector->arities[i].arity, argc)) {
+            arity_case = &selector->arities[i];
             break;
         }
     }
-    if (!root) return true;
+    if (!arity_case) return true;
+    if (arity_case->unconditional) {
+        *out_function_index = arity_case->function_index;
+        *out_matched = true;
+        return true;
+    }
     size_t checkpoint = out_bindings->count;
-    if (!selector_exec_node(rt, selector, root, args, argc, guard, guard_user, out_function_index, out_bindings, out_matched, err)) {
+    if (!selector_exec_node(rt, selector, arity_case->node, args, argc, guard, guard_user, out_function_index, out_bindings, out_matched, err)) {
         bindings_truncate(out_bindings, checkpoint);
         return false;
     }

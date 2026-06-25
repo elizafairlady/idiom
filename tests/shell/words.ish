@@ -1,4 +1,5 @@
 #!/usr/bin/env ish
+use std/system with [env-set]
 mkdir -p build/shell-words
 cd "build/shell-words"
 echo joined output > out1.txt

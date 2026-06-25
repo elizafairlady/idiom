@@ -40,7 +40,7 @@ suite do
     assert-eq got %{:servers '(%{:name "api" :ports (80 443)} %{:name "web" :ports (8080)})}
   end
 
-  test "the body is read by idiom, validated by the grammar" do
+  test "the body is read by idiom, validated by core syntax" do
     assert-expand-error "use tests/pkg/yaml\nactivate Yaml\nyaml\n" "yaml expects a single mapping body"
   end
 end

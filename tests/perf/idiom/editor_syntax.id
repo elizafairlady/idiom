@@ -6,10 +6,10 @@ rx-string = compile! "\"[^\"]*\""
 rx-number = compile! "[0-9]+"
 rx-word = compile! "[A-Za-z_][A-Za-z0-9_]*"
 
-defn sample i n acc -> if (gte? i n) do
+defn sample i n acc -> if i >= n do
   acc
 else do
-  sample (add i 1) n "#{acc}def name_${i} = \"value${i}\" # comment ${i}\n"
+  sample (i + 1) n "#{acc}def name_${i} = \"value${i}\" # comment ${i}\n"
 end
 
 defn choose best hit kind -> match hit do
@@ -19,7 +19,7 @@ defn choose best hit kind -> match hit do
     e = end-of m
     match best do
       :nil -> {s e kind}
-      {bs _be _bk} when (lt? s bs) -> {s e kind}
+      {bs _be _bk} when (s < bs) -> {s e kind}
       _ -> best
     end
   end
@@ -32,22 +32,22 @@ defn scan-one text pos do
   choose b3 (scan-from rx-word text pos) 4
 end
 
-defn scan-loop text pos acc -> if (gte? pos (Str.len text)) do
+defn scan-loop text pos acc -> if pos >= Str.len text do
   acc
 else do
   match (scan-one text pos) do
     :nil -> acc
     {s e kind} -> do
-      acc2 = mod (add acc (add (mul s 3) (add (mul e 5) (mul kind 7)))) 1000000007
-      scan-loop text (cond (gt? e s) e (add s 1)) acc2
+      acc2 = (acc + (s * 3) + (e * 5) + (kind * 7)) % 1000000007
+      scan-loop text (cond (e > s) e (s + 1)) acc2
     end
   end
 end
 
-defn rounds text i n acc -> if (gte? i n) do
+defn rounds text i n acc -> if i >= n do
   acc
 else do
-  rounds text (add i 1) n (mod (add acc (scan-loop text 0 0)) 1000000007)
+  rounds text (i + 1) n ((acc + (scan-loop text 0 0)) % 1000000007)
 end
 
 text = sample 0 120 ""

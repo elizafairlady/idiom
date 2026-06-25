@@ -75,25 +75,25 @@ defn hist-unescape s -> cond (contains? s "\\") (unescape-scan s 0 "") s
 
 defn parse-rev do
   '() acc -> acc
-  (list "" . t) acc -> parse-rev t acc
-  (list h . t) acc when (starts-with? h "#") -> parse-rev t acc
-  (list h . t) acc -> parse-rev t (cons (hist-unescape h) acc)
+  '("" . t) acc -> parse-rev t acc
+  '(h . t) acc when (starts-with? h "#") -> parse-rev t acc
+  '(h . t) acc -> parse-rev t (cons (hist-unescape h) acc)
 end
 
 defn take-n do
   '() _n -> '()
   _xs 0 -> '()
-  (list h . t) n -> cons h (take-n t (sub n 1))
+  '(h . t) n -> cons h (take-n t (sub n 1))
 end
 
 defn rev-app do
   '() acc -> acc
-  (list h . t) acc -> rev-app t (cons h acc)
+  '(h . t) acc -> rev-app t (cons h acc)
 end
 
 defn render-oldest-first do
   '() acc -> acc
-  (list h . t) acc -> render-oldest-first t "${acc}#{hist-escape h}\n"
+  '(h . t) acc -> render-oldest-first t "${acc}#{hist-escape h}\n"
 end
 
 defn history-load shell do

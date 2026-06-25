@@ -84,7 +84,7 @@ suite do
         0 -> :done
         n -> do
           r = try do raise {:v n (build 200 '())}; rescue e -> e end
-          match r do {:v k (list h . _)} -> cond (and (eq? k n) (eq? h 1)) (hammer (n - 1)) :corrupt end
+          match r do {:v k '(h . _)} -> cond (and (eq? k n) (eq? h 1)) (hammer (n - 1)) :corrupt end
         end
       end
       hammer 5000

@@ -2,7 +2,7 @@
 
 static IdmCore *string_literal(ExpandContext *ctx, const char *text, IdmSpan span, IdmError *err);
 static IdmCore *syntax_context_literal(ExpandContext *ctx, const IdmSyntax *template_ctx, IdmError *err);
-static IdmCore *syntax_constructor_call(ExpandContext *ctx, IdmPrimitive primitive, const IdmSyntax *template_ctx, IdmError *err);
+static IdmCore *syntax_build_core(ExpandContext *ctx, IdmSyntaxBuildKind kind, IdmCore *payload, const IdmSyntax *template_ctx, IdmSpan span, IdmError *err);
 static IdmCore *quasisyntax_items_list(ExpandContext *ctx, IdmSyntax *const *items, size_t count, const IdmSyntax *template_ctx, IdmError *err);
 static IdmCore *quasisyntax_template(ExpandContext *ctx, const IdmSyntax *template, const IdmSyntax *template_ctx, IdmError *err);
 static bool quote_datum_list(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmValue *out, IdmError *err);
@@ -10,7 +10,7 @@ static const char *quote_symbol_for_head(const char *head);
 static bool quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, IdmError *err);
 static IdmCore *datum_constant(ExpandContext *ctx, const IdmSyntax *t, IdmError *err);
 static IdmCore *quasiquote_list(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmSpan span, IdmError *err);
-static IdmCore *quasiquote_container(ExpandContext *ctx, const IdmSyntax *t, IdmPrimitive prim, IdmError *err);
+static IdmCore *quasiquote_container(ExpandContext *ctx, const IdmSyntax *t, IdmValueSequenceKind kind, IdmError *err);
 static IdmCore *quasiquote_template(ExpandContext *ctx, const IdmSyntax *t, IdmError *err);
 
 static IdmCore *string_literal(ExpandContext *ctx, const char *text, IdmSpan span, IdmError *err) {
@@ -25,11 +25,21 @@ static IdmCore *syntax_context_literal(ExpandContext *ctx, const IdmSyntax *temp
     return idm_core_literal(value, template_ctx->span);
 }
 
-static IdmCore *syntax_constructor_call(ExpandContext *ctx, IdmPrimitive primitive, const IdmSyntax *template_ctx, IdmError *err) {
-    IdmCore *call = expand_primitive_call(primitive, template_ctx->span, err);
-    if (!call) { idm_error_oom(err, template_ctx->span); return NULL; }
-    if (!core_call_add_arg_or_free(call, syntax_context_literal(ctx, template_ctx, err), err, template_ctx->span)) return NULL;
-    return call;
+static IdmCore *syntax_build_core(ExpandContext *ctx, IdmSyntaxBuildKind kind, IdmCore *payload, const IdmSyntax *template_ctx, IdmSpan span, IdmError *err) {
+    if (kind != IDM_SYNTAX_BUILD_NIL && !payload) {
+        if (!(err && err->present)) idm_error_oom(err, span);
+        return NULL;
+    }
+    IdmCore *context = syntax_context_literal(ctx, template_ctx, err);
+    if (!context) { idm_core_free(payload); return NULL; }
+    IdmCore *core = idm_core_syntax_build(kind, context, payload, span);
+    if (!core) {
+        idm_core_free(context);
+        idm_core_free(payload);
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    return core;
 }
 
 static IdmCore *quasisyntax_items_list(ExpandContext *ctx, IdmSyntax *const *items, size_t count, const IdmSyntax *template_ctx, IdmError *err) {
@@ -47,15 +57,15 @@ static IdmCore *quasisyntax_items_list(ExpandContext *ctx, IdmSyntax *const *ite
             }
             IdmCore *spliced = expand_syntax(ctx, splice_item->as.seq.items[1], err);
             if (!spliced) { idm_core_free(tail); return NULL; }
-            IdmCore *call = expand_primitive_call(IDM_PRIM_APPEND, splice_item->span, err);
-            if (!call || !core_call_add_arg_or_free(call, spliced, err, splice_item->span) || !core_call_add_arg_or_free(call, tail, err, splice_item->span)) return NULL;
-            tail = call;
+            IdmCore *append = idm_core_list_append(spliced, tail, splice_item->span);
+            if (!append) { idm_core_free(spliced); idm_core_free(tail); idm_error_oom(err, splice_item->span); return NULL; }
+            tail = append;
         } else {
             IdmCore *value = quasisyntax_template(ctx, item, template_ctx, err);
             if (!value) { idm_core_free(tail); return NULL; }
-            IdmCore *call = expand_primitive_call(IDM_PRIM_CONS, item->span, err);
-            if (!call || !core_call_add_arg_or_free(call, value, err, item->span) || !core_call_add_arg_or_free(call, tail, err, item->span)) return NULL;
-            tail = call;
+            IdmCore *cons = idm_core_list_cons(value, tail, item->span);
+            if (!cons) { idm_core_free(value); idm_core_free(tail); idm_error_oom(err, item->span); return NULL; }
+            tail = cons;
         }
     }
     return tail;
@@ -73,64 +83,42 @@ static IdmCore *quasisyntax_template(ExpandContext *ctx, const IdmSyntax *templa
     if (syn_is_form(template, "%-expr") || syn_is_form(template, "%-body")) {
         IdmCore *items = quasisyntax_items_list(ctx, template->as.seq.items + 1, template->as.seq.count - 1u, template_ctx, err);
         if (!items) return NULL;
-        IdmPrimitive prim = syn_is_form(template, "%-expr") ? IDM_PRIM_MAKE_SYNTAX_EXPR : IDM_PRIM_MAKE_SYNTAX_BODY;
-        IdmCore *call = syntax_constructor_call(ctx, prim, template_ctx, err);
-        if (!call) { idm_core_free(items); return NULL; }
-        if (!core_call_add_arg_or_free(call, items, err, template->span)) return NULL;
-        return call;
+        IdmSyntaxBuildKind kind = syn_is_form(template, "%-expr") ? IDM_SYNTAX_BUILD_EXPR : IDM_SYNTAX_BUILD_BODY;
+        return syntax_build_core(ctx, kind, items, template_ctx, template->span, err);
     }
     if (syn_is_form(template, "%-group")) {
         if (template->as.seq.count != 2) return expand_error(err, template->span, "%-group expects one child");
         IdmCore *child = quasisyntax_template(ctx, template->as.seq.items[1], template_ctx, err);
         if (!child) return NULL;
-        IdmCore *call = syntax_constructor_call(ctx, IDM_PRIM_MAKE_SYNTAX_GROUP, template_ctx, err);
-        if (!call) { idm_core_free(child); return NULL; }
-        if (!core_call_add_arg_or_free(call, child, err, template->span)) return NULL;
-        return call;
+        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_GROUP, child, template_ctx, template->span, err);
     }
 
     if (template->kind == IDM_SYN_WORD) {
-        IdmCore *call = syntax_constructor_call(ctx, IDM_PRIM_MAKE_SYNTAX_WORD, template_ctx, err);
-        if (!call) return NULL;
-        if (!core_call_add_arg_or_free(call, string_literal(ctx, template->as.text, template->span, err), err, template->span)) return NULL;
-        return call;
+        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_WORD, string_literal(ctx, template->as.text, template->span, err), template_ctx, template->span, err);
     }
     if (template->kind == IDM_SYN_ATOM) {
-        IdmCore *call = syntax_constructor_call(ctx, IDM_PRIM_MAKE_SYNTAX_ATOM, template_ctx, err);
-        if (!call) return NULL;
-        if (!core_call_add_arg_or_free(call, string_literal(ctx, template->as.text, template->span, err), err, template->span)) return NULL;
-        return call;
+        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_ATOM, string_literal(ctx, template->as.text, template->span, err), template_ctx, template->span, err);
     }
     if (template->kind == IDM_SYN_INT) {
-        IdmCore *call = syntax_constructor_call(ctx, IDM_PRIM_MAKE_SYNTAX_INT, template_ctx, err);
-        if (!call) return NULL;
-        if (!core_call_add_arg_or_free(call, idm_core_literal(idm_int(template->as.integer), template->span), err, template->span)) return NULL;
-        return call;
+        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_INT, idm_core_literal(idm_int(template->as.integer), template->span), template_ctx, template->span, err);
+    }
+    if (template->kind == IDM_SYN_FLOAT) {
+        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_FLOAT, idm_core_literal(idm_float(template->as.real), template->span), template_ctx, template->span, err);
     }
     if (template->kind == IDM_SYN_STRING) {
-        IdmCore *call = syntax_constructor_call(ctx, IDM_PRIM_MAKE_SYNTAX_STRING, template_ctx, err);
-        if (!call) return NULL;
-        if (!core_call_add_arg_or_free(call, string_literal(ctx, template->as.text, template->span, err), err, template->span)) return NULL;
-        return call;
+        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_STRING, string_literal(ctx, template->as.text, template->span, err), template_ctx, template->span, err);
     }
     if (template->kind == IDM_SYN_NIL) {
-        IdmCore *call = expand_primitive_call(IDM_PRIM_DATUM_TO_SYNTAX, template->span, err);
-        if (!call) { idm_error_oom(err, template->span); return NULL; }
-        if (!core_call_add_arg_or_free(call, syntax_context_literal(ctx, template_ctx, err), err, template->span)) return NULL;
-        if (!core_call_add_arg_or_free(call, idm_core_literal(idm_nil(), template->span), err, template->span)) return NULL;
-        return call;
+        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_NIL, NULL, template_ctx, template->span, err);
     }
     if (template->kind == IDM_SYN_LIST || template->kind == IDM_SYN_VECTOR || template->kind == IDM_SYN_TUPLE || template->kind == IDM_SYN_DICT) {
         IdmCore *items = quasisyntax_items_list(ctx, template->as.seq.items, template->as.seq.count, template_ctx, err);
         if (!items) return NULL;
-        IdmPrimitive prim = template->kind == IDM_SYN_LIST ? IDM_PRIM_MAKE_SYNTAX_LIST :
-                            template->kind == IDM_SYN_VECTOR ? IDM_PRIM_MAKE_SYNTAX_VECTOR :
-                            template->kind == IDM_SYN_TUPLE ? IDM_PRIM_MAKE_SYNTAX_TUPLE :
-                            IDM_PRIM_MAKE_SYNTAX_DICT;
-        IdmCore *call = syntax_constructor_call(ctx, prim, template_ctx, err);
-        if (!call) { idm_core_free(items); return NULL; }
-        if (!core_call_add_arg_or_free(call, items, err, template->span)) return NULL;
-        return call;
+        IdmSyntaxBuildKind kind = template->kind == IDM_SYN_LIST ? IDM_SYNTAX_BUILD_LIST :
+                                  template->kind == IDM_SYN_VECTOR ? IDM_SYNTAX_BUILD_VECTOR :
+                                  template->kind == IDM_SYN_TUPLE ? IDM_SYNTAX_BUILD_TUPLE :
+                                  IDM_SYNTAX_BUILD_DICT;
+        return syntax_build_core(ctx, kind, items, template_ctx, template->span, err);
     }
     return expand_error(err, template->span, "unsupported quasisyntax template node");
 }
@@ -245,32 +233,32 @@ static IdmCore *quasiquote_list(ExpandContext *ctx, IdmSyntax *const *items, siz
             if (item->as.seq.count != 2) { idm_core_free(tail); return expand_error(err, item->span, "unquote-splicing expects one expression"); }
             IdmCore *spliced = expand_syntax(ctx, item->as.seq.items[1], err);
             if (!spliced) { idm_core_free(tail); return NULL; }
-            IdmCore *call = expand_primitive_call(IDM_PRIM_APPEND, item->span, err);
-            if (!call || !core_call_add_arg_or_free(call, spliced, err, item->span) || !core_call_add_arg_or_free(call, tail, err, item->span)) return NULL;
-            tail = call;
+            IdmCore *append = idm_core_list_append(spliced, tail, item->span);
+            if (!append) { idm_core_free(spliced); idm_core_free(tail); idm_error_oom(err, item->span); return NULL; }
+            tail = append;
         } else {
             IdmCore *value = quasiquote_template(ctx, item, err);
             if (!value) { idm_core_free(tail); return NULL; }
-            IdmCore *call = expand_primitive_call(IDM_PRIM_CONS, item->span, err);
-            if (!call || !core_call_add_arg_or_free(call, value, err, item->span) || !core_call_add_arg_or_free(call, tail, err, item->span)) return NULL;
-            tail = call;
+            IdmCore *cons = idm_core_list_cons(value, tail, item->span);
+            if (!cons) { idm_core_free(value); idm_core_free(tail); idm_error_oom(err, item->span); return NULL; }
+            tail = cons;
         }
     }
     return tail;
 }
 
-static IdmCore *quasiquote_container(ExpandContext *ctx, const IdmSyntax *t, IdmPrimitive prim, IdmError *err) {
-    IdmCore *call = expand_primitive_call(prim, t->span, err);
-    if (!call) return NULL;
+static IdmCore *quasiquote_container(ExpandContext *ctx, const IdmSyntax *t, IdmValueSequenceKind kind, IdmError *err) {
+    IdmCore *seq = idm_core_value_sequence(kind, t->span);
+    if (!seq) { idm_error_oom(err, t->span); return NULL; }
     for (size_t i = 0; i < t->as.seq.count; i++) {
         IdmCore *elem = quasiquote_template(ctx, t->as.seq.items[i], err);
         if (!elem) {
-            idm_core_free(call);
+            idm_core_free(seq);
             return NULL;
         }
-        if (!core_call_add_arg_or_free(call, elem, err, t->span)) return NULL;
+        if (!idm_core_value_sequence_add(seq, elem)) { idm_core_free(elem); idm_core_free(seq); idm_error_oom(err, t->span); return NULL; }
     }
-    return call;
+    return seq;
 }
 
 static IdmCore *quasiquote_template(ExpandContext *ctx, const IdmSyntax *t, IdmError *err) {
@@ -287,11 +275,11 @@ static IdmCore *quasiquote_template(ExpandContext *ctx, const IdmSyntax *t, IdmE
         case IDM_SYN_FLOAT:
         case IDM_SYN_STRING:
             return datum_constant(ctx, t, err);
-        case IDM_SYN_VECTOR: return quasiquote_container(ctx, t, IDM_PRIM_VECTOR, err);
-        case IDM_SYN_TUPLE: return quasiquote_container(ctx, t, IDM_PRIM_TUPLE, err);
+        case IDM_SYN_VECTOR: return quasiquote_container(ctx, t, IDM_VALUE_SEQ_VECTOR, err);
+        case IDM_SYN_TUPLE: return quasiquote_container(ctx, t, IDM_VALUE_SEQ_TUPLE, err);
         case IDM_SYN_DICT:
             if (t->as.seq.count % 2u != 0) return expand_error(err, t->span, "dict literal requires key/value pairs");
-            return quasiquote_container(ctx, t, IDM_PRIM_DICT, err);
+            return quasiquote_container(ctx, t, IDM_VALUE_SEQ_DICT, err);
         case IDM_SYN_LIST: {
             if (t->as.seq.count == 0) return datum_constant(ctx, t, err);
             const char *head = t->as.seq.items[0]->kind == IDM_SYN_WORD ? t->as.seq.items[0]->as.text : "";
@@ -314,21 +302,24 @@ IdmCore *expand_form_quasiquote(ExpandContext *ctx, const IdmSyntax *syn, IdmErr
 }
 
 IdmCore *expand_form_string(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
-    IdmCore *call = expand_primitive_call(IDM_PRIM_STR, syn->span, err);
-    if (!call) return NULL;
     if (syn->as.seq.count <= 1) {
-        IdmCore *empty = string_literal(ctx, "", syn->span, err);
-        if (!empty) { idm_core_free(call); return NULL; }
-        return core_call_add_arg_or_free(call, empty, err, syn->span) ? call : NULL;
+        return string_literal(ctx, "", syn->span, err);
     }
+    IdmCore *concat = idm_core_string_concat(syn->span);
+    if (!concat) { idm_error_oom(err, syn->span); return NULL; }
     for (size_t i = 1; i < syn->as.seq.count; i++) {
         const IdmSyntax *part = syn->as.seq.items[i];
         IdmCore *pc = expand_syntax(ctx, part, err);
         if (!pc) {
-            idm_core_free(call);
+            idm_core_free(concat);
             return NULL;
         }
-        if (!core_call_add_arg_or_free(call, pc, err, syn->span)) return NULL;
+        if (!idm_core_string_concat_add(concat, pc)) {
+            idm_core_free(pc);
+            idm_core_free(concat);
+            idm_error_oom(err, syn->span);
+            return NULL;
+        }
     }
-    return call;
+    return concat;
 }

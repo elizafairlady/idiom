@@ -85,6 +85,8 @@ typedef enum {
 
 typedef struct {
     RxInstKind kind;
+    uint32_t flags;
+    size_t accept_id;
     union {
         unsigned char literal;
         RxClass cls;
@@ -135,6 +137,13 @@ struct IdmRegex {
     size_t group_count;
 };
 
+struct IdmRegexSet {
+    RxProg *prog;
+    size_t count;
+    char ***group_names;
+    size_t *group_counts;
+};
+
 struct IdmRegexResult {
     char *subject;
     size_t subject_len;
@@ -182,15 +191,18 @@ typedef struct {
 typedef struct {
     bool matched;
     size_t end;
+    size_t accept_id;
     RxCapture *captures;
 } RxMatch;
 
 enum { RX_STACK_CAPTURE_LIMIT = 16 };
 enum { RX_MAX_CLOSURE_DEPTH = 10000 };
+enum { RX_PROG_WIRE_VERSION = 1 };
 
 static void node_free(RxNode *node);
 static bool parse_alt(RxParser *p, RxNode **out);
 static void prog_free(RxProg *prog);
+static bool prog_build_test_closures(RxProg *prog, IdmError *err);
 static bool regex_start_candidate(const RxProg *prog, const char *s, size_t len, size_t pos);
 
 static bool require_string_arg(IdmRuntime *rt, const char *name, IdmValue v, const char **out, size_t *out_len, IdmError *err) {
@@ -969,6 +981,7 @@ static bool prog_emit_simple(RxProg *prog, RxInstKind kind, size_t *out_index, I
     RxInst inst;
     memset(&inst, 0, sizeof(inst));
     inst.kind = kind;
+    inst.flags = prog->flags;
     return prog_emit(prog, inst, out_index, err);
 }
 
@@ -1077,6 +1090,7 @@ static bool compile_node(RxProg *prog, const RxNode *node, IdmError *err) {
     if (!node) return true;
     RxInst inst;
     memset(&inst, 0, sizeof(inst));
+    inst.flags = prog->flags;
     switch (node->kind) {
         case RX_EMPTY:
             return true;
@@ -1233,6 +1247,219 @@ static bool compile_regex_program(IdmRegex *rx, IdmError *err) {
     return true;
 }
 
+static bool rx_put_start_info(IdmBuffer *out, const RxStartInfo *start, IdmError *err) {
+    if (!idm_buf_put_u8(out, start->any ? 1u : 0u) ||
+        !idm_buf_put_u8(out, start->nullable ? 1u : 0u) ||
+        !idm_buf_put_u8(out, start->anchored_start ? 1u : 0u) ||
+        !idm_buf_append_n(out, (const char *)start->bytes, sizeof(start->bytes))) {
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
+}
+
+static bool rx_read_bytes(IdmByteReader *r, void *dst, size_t len, IdmError *err, const char *what) {
+    if (len > r->len - r->pos) {
+        r->ok = false;
+        return idm_error_set(err, idm_span_unknown(NULL), "truncated %s", what);
+    }
+    memcpy(dst, r->data + r->pos, len);
+    r->pos += len;
+    return true;
+}
+
+static bool rx_read_start_info(IdmByteReader *r, RxStartInfo *start, IdmError *err) {
+    memset(start, 0, sizeof(*start));
+    uint8_t any = idm_rd_u8(r);
+    uint8_t nullable = idm_rd_u8(r);
+    uint8_t anchored = idm_rd_u8(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated regex program start info");
+    if (any > 1u || nullable > 1u || anchored > 1u) return idm_error_set(err, idm_span_unknown(NULL), "invalid regex program start info");
+    start->any = any != 0;
+    start->nullable = nullable != 0;
+    start->anchored_start = anchored != 0;
+    return rx_read_bytes(r, start->bytes, sizeof(start->bytes), err, "regex program start bytes");
+}
+
+static bool rx_put_class(IdmBuffer *out, const RxClass *cls, IdmError *err) {
+    if (!idm_buf_put_u8(out, cls->negated ? 1u : 0u) ||
+        !idm_buf_append_n(out, (const char *)cls->bits, sizeof(cls->bits))) {
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
+}
+
+static bool rx_read_class(IdmByteReader *r, RxClass *cls, IdmError *err) {
+    memset(cls, 0, sizeof(*cls));
+    uint8_t negated = idm_rd_u8(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated regex class");
+    if (negated > 1u) return idm_error_set(err, idm_span_unknown(NULL), "invalid regex class");
+    cls->negated = negated != 0;
+    return rx_read_bytes(r, cls->bits, sizeof(cls->bits), err, "regex class");
+}
+
+static bool rx_prog_serialize_at(IdmBuffer *out, const RxProg *prog, IdmError *err, unsigned depth) {
+    if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "regex program nested too deeply");
+    if (!prog || prog->count > UINT32_MAX || prog->capture_count > UINT32_MAX) return idm_error_set(err, idm_span_unknown(NULL), "regex program is incomplete");
+    if (!idm_buf_put_u32(out, RX_PROG_WIRE_VERSION) ||
+        !idm_buf_put_u32(out, (uint32_t)prog->flags) ||
+        !idm_buf_put_u32(out, (uint32_t)prog->capture_count) ||
+        !rx_put_start_info(out, &prog->start, err) ||
+        !idm_buf_put_u32(out, (uint32_t)prog->count)) return false;
+    for (size_t i = 0; i < prog->count; i++) {
+        const RxInst *inst = &prog->insts[i];
+        if (!idm_buf_put_u8(out, (uint8_t)inst->kind) ||
+            !idm_buf_put_u32(out, inst->flags) ||
+            !idm_buf_put_u32(out, (uint32_t)inst->accept_id)) return idm_error_oom(err, idm_span_unknown(NULL));
+        switch (inst->kind) {
+            case RXI_MATCH:
+                break;
+            case RXI_CHAR:
+                if (!idm_buf_put_u8(out, inst->as.literal)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case RXI_DOT:
+            case RXI_ASSERT_START:
+            case RXI_ASSERT_END:
+                break;
+            case RXI_CLASS:
+                if (!rx_put_class(out, &inst->as.cls, err)) return false;
+                break;
+            case RXI_JUMP:
+                if (!idm_buf_put_u32(out, (uint32_t)inst->as.target)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case RXI_SPLIT:
+                if (!idm_buf_put_u32(out, (uint32_t)inst->as.split.first) ||
+                    !idm_buf_put_u32(out, (uint32_t)inst->as.split.second)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case RXI_SAVE:
+                if (!idm_buf_put_u32(out, (uint32_t)inst->as.save_slot)) return idm_error_oom(err, idm_span_unknown(NULL));
+                break;
+            case RXI_LOOK:
+                if (!idm_buf_put_u8(out, (uint8_t)inst->as.look.kind) ||
+                    !rx_prog_serialize_at(out, inst->as.look.prog, err, depth + 1u)) return false;
+                break;
+        }
+    }
+    return true;
+}
+
+static bool rx_prog_validate(const RxProg *prog, size_t accept_count, IdmError *err) {
+    if (!prog || prog->count == 0 || !prog->insts) return idm_error_set(err, idm_span_unknown(NULL), "regex program is empty");
+    for (size_t i = 0; i < prog->count; i++) {
+        const RxInst *inst = &prog->insts[i];
+        if (inst->kind > RXI_LOOK) return idm_error_set(err, idm_span_unknown(NULL), "invalid regex program opcode");
+        if (inst->kind == RXI_MATCH && inst->accept_id >= accept_count) return idm_error_set(err, idm_span_unknown(NULL), "regex program accept id out of bounds");
+        if (inst->kind == RXI_JUMP && inst->as.target >= prog->count) return idm_error_set(err, idm_span_unknown(NULL), "regex program jump target out of bounds");
+        if (inst->kind == RXI_SPLIT && (inst->as.split.first >= prog->count || inst->as.split.second >= prog->count)) return idm_error_set(err, idm_span_unknown(NULL), "regex program split target out of bounds");
+        if (inst->kind == RXI_SAVE && inst->as.save_slot / 2u >= prog->capture_count) return idm_error_set(err, idm_span_unknown(NULL), "regex program save slot out of bounds");
+        if (inst->kind == RXI_LOOK) {
+            if (inst->as.look.kind > RX_LOOK_BEHIND_NEG) return idm_error_set(err, idm_span_unknown(NULL), "regex program lookaround kind is invalid");
+            if (!rx_prog_validate(inst->as.look.prog, accept_count, err)) return false;
+        }
+    }
+    return true;
+}
+
+static bool rx_prog_deserialize_at(IdmByteReader *r, RxProg **out, IdmError *err, unsigned depth) {
+    *out = NULL;
+    if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "regex program nested too deeply");
+    uint32_t version = idm_rd_u32(r);
+    uint32_t flags = idm_rd_u32(r);
+    uint32_t capture_count = idm_rd_u32(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated regex program header");
+    if (version != RX_PROG_WIRE_VERSION) return idm_error_set(err, idm_span_unknown(NULL), "regex program version %u unsupported", version);
+    RxProg *prog = prog_new(capture_count, flags, err);
+    if (!prog) return false;
+    if (!rx_read_start_info(r, &prog->start, err)) {
+        prog_free(prog);
+        return false;
+    }
+    uint32_t count = idm_rd_u32(r);
+    if (!r->ok) {
+        prog_free(prog);
+        return idm_error_set(err, idm_span_unknown(NULL), "truncated regex program instruction count");
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        RxInst inst;
+        memset(&inst, 0, sizeof(inst));
+        inst.kind = (RxInstKind)idm_rd_u8(r);
+        inst.flags = idm_rd_u32(r);
+        inst.accept_id = idm_rd_u32(r);
+        if (!r->ok || inst.kind > RXI_LOOK) {
+            prog_free(prog);
+            return idm_error_set(err, idm_span_unknown(NULL), "truncated regex program instruction");
+        }
+        switch (inst.kind) {
+            case RXI_MATCH:
+                break;
+            case RXI_CHAR:
+                inst.as.literal = idm_rd_u8(r);
+                if (!r->ok) {
+                    prog_free(prog);
+                    return idm_error_set(err, idm_span_unknown(NULL), "truncated regex char instruction");
+                }
+                break;
+            case RXI_DOT:
+            case RXI_ASSERT_START:
+            case RXI_ASSERT_END:
+                break;
+            case RXI_CLASS:
+                if (!rx_read_class(r, &inst.as.cls, err)) {
+                    prog_free(prog);
+                    return false;
+                }
+                break;
+            case RXI_JUMP:
+                inst.as.target = idm_rd_u32(r);
+                if (!r->ok) {
+                    prog_free(prog);
+                    return idm_error_set(err, idm_span_unknown(NULL), "truncated regex jump instruction");
+                }
+                break;
+            case RXI_SPLIT:
+                inst.as.split.first = idm_rd_u32(r);
+                inst.as.split.second = idm_rd_u32(r);
+                if (!r->ok) {
+                    prog_free(prog);
+                    return idm_error_set(err, idm_span_unknown(NULL), "truncated regex split instruction");
+                }
+                break;
+            case RXI_SAVE:
+                inst.as.save_slot = idm_rd_u32(r);
+                if (!r->ok) {
+                    prog_free(prog);
+                    return idm_error_set(err, idm_span_unknown(NULL), "truncated regex save instruction");
+                }
+                break;
+            case RXI_LOOK:
+                inst.as.look.kind = (RxLookKind)idm_rd_u8(r);
+                if (!r->ok) {
+                    prog_free(prog);
+                    return idm_error_set(err, idm_span_unknown(NULL), "truncated regex look instruction");
+                }
+                if (inst.as.look.kind > RX_LOOK_BEHIND_NEG) {
+                    prog_free(prog);
+                    return idm_error_set(err, idm_span_unknown(NULL), "invalid regex look instruction");
+                }
+                if (!rx_prog_deserialize_at(r, &inst.as.look.prog, err, depth + 1u)) {
+                    prog_free(prog);
+                    return false;
+                }
+                break;
+        }
+        if (!prog_emit(prog, inst, NULL, err)) {
+            if (inst.kind == RXI_LOOK) prog_free(inst.as.look.prog);
+            prog_free(prog);
+            return false;
+        }
+    }
+    if (!prog_build_test_closures(prog, err)) {
+        prog_free(prog);
+        return false;
+    }
+    *out = prog;
+    return true;
+}
+
 static void prog_free(RxProg *prog) {
     if (!prog) return;
     for (size_t i = 0; i < prog->count; i++) {
@@ -1244,6 +1471,130 @@ static void prog_free(RxProg *prog) {
     }
     free(prog->insts);
     free(prog);
+}
+
+static bool prog_copy_into(RxProg *dst, const RxProg *src, size_t accept_id, IdmError *err);
+
+static RxProg *prog_clone_with_accept(const RxProg *src, size_t accept_id, IdmError *err) {
+    if (!src) return NULL;
+    RxProg *copy = prog_new(src->capture_count, src->flags, err);
+    if (!copy) return NULL;
+    copy->start = src->start;
+    if (!prog_copy_into(copy, src, accept_id, err)) {
+        prog_free(copy);
+        return NULL;
+    }
+    return copy;
+}
+
+static bool prog_copy_into(RxProg *dst, const RxProg *src, size_t accept_id, IdmError *err) {
+    if (!dst || !src) return idm_error_set(err, idm_span_unknown(NULL), "regex program copy requires source and destination");
+    size_t offset = dst->count;
+    for (size_t i = 0; i < src->count; i++) {
+        RxInst inst = src->insts[i];
+        if (inst.kind == RXI_JUMP) {
+            inst.as.target += offset;
+        } else if (inst.kind == RXI_SPLIT) {
+            inst.as.split.first += offset;
+            inst.as.split.second += offset;
+        } else if (inst.kind == RXI_MATCH) {
+            inst.accept_id = accept_id;
+        } else if (inst.kind == RXI_LOOK) {
+            inst.as.look.prog = prog_clone_with_accept(inst.as.look.prog, accept_id, err);
+            if (!inst.as.look.prog) return false;
+        }
+        if (!prog_emit(dst, inst, NULL, err)) {
+            if (inst.kind == RXI_LOOK) prog_free(inst.as.look.prog);
+            return false;
+        }
+    }
+    return true;
+}
+
+void idm_regex_set_free(IdmRegexSet *set) {
+    if (!set) return;
+    prog_free(set->prog);
+    if (set->group_names) {
+        for (size_t i = 0; i < set->count; i++) {
+            if (!set->group_names[i]) continue;
+            for (size_t g = 0; g <= set->group_counts[i]; g++) free(set->group_names[i][g]);
+            free(set->group_names[i]);
+        }
+        free(set->group_names);
+    }
+    free(set->group_counts);
+    free(set);
+}
+
+static bool regex_set_copy_group_names(IdmRegexSet *set, const IdmRegex *const *items, size_t count, IdmError *err) {
+    set->group_counts = calloc(count, sizeof(*set->group_counts));
+    set->group_names = calloc(count, sizeof(*set->group_names));
+    if (!set->group_counts || !set->group_names) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < count; i++) {
+        set->group_counts[i] = items[i]->group_count;
+        if (items[i]->group_count == 0) continue;
+        set->group_names[i] = calloc(items[i]->group_count + 1u, sizeof(*set->group_names[i]));
+        if (!set->group_names[i]) return idm_error_oom(err, idm_span_unknown(NULL));
+        for (size_t g = 1; g <= items[i]->group_count; g++) {
+            if (!items[i]->group_names[g]) continue;
+            set->group_names[i][g] = idm_strdup(items[i]->group_names[g]);
+            if (!set->group_names[i][g]) return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+    }
+    return true;
+}
+
+bool idm_regex_set_compile(const IdmRegex *const *items, size_t count, IdmRegexSet **out, IdmError *err) {
+    *out = NULL;
+    if (count == 0 || !items) return idm_error_set(err, idm_span_unknown(NULL), "regex set requires at least one regex");
+    size_t capture_count = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (!items[i] || !items[i]->prog) return idm_error_set(err, idm_span_unknown(NULL), "regex set item is incomplete");
+        if (items[i]->prog->capture_count > capture_count) capture_count = items[i]->prog->capture_count;
+    }
+    IdmRegexSet *set = calloc(1u, sizeof(*set));
+    if (!set) return idm_error_oom(err, idm_span_unknown(NULL));
+    set->count = count;
+    if (!regex_set_copy_group_names(set, items, count, err)) {
+        idm_regex_set_free(set);
+        return false;
+    }
+    set->prog = prog_new(capture_count, 0, err);
+    if (!set->prog) {
+        idm_regex_set_free(set);
+        return false;
+    }
+    size_t split_count = count > 1u ? count - 1u : 0u;
+    size_t *starts = calloc(count, sizeof(*starts));
+    if (!starts) {
+        idm_regex_set_free(set);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    for (size_t i = 0; i < split_count; i++) {
+        RxInst split;
+        memset(&split, 0, sizeof(split));
+        split.kind = RXI_SPLIT;
+        if (!prog_emit(set->prog, split, NULL, err)) {
+            free(starts);
+            idm_regex_set_free(set);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < count; i++) {
+        starts[i] = set->prog->count;
+        if (!prog_copy_into(set->prog, items[i]->prog, i, err)) {
+            free(starts);
+            idm_regex_set_free(set);
+            return false;
+        }
+    }
+    for (size_t i = 0; i < split_count; i++) {
+        set->prog->insts[i].as.split.first = starts[i];
+        set->prog->insts[i].as.split.second = i + 1u < split_count ? i + 1u : starts[i + 1u];
+    }
+    free(starts);
+    *out = set;
+    return true;
 }
 
 static size_t prog_footprint(const RxProg *prog) {
@@ -1347,10 +1698,11 @@ static void match_destroy(RxMatch *match) {
     match->captures = NULL;
     match->matched = false;
     match->end = 0;
+    match->accept_id = 0;
 }
 
-static bool match_take_best(RxMatch *match, size_t end, const RxCapture *captures, size_t capture_count, IdmError *err) {
-    if (match->matched && end <= match->end) return true;
+static bool match_take_best(RxMatch *match, size_t end, size_t accept_id, const RxCapture *captures, size_t capture_count, IdmError *err) {
+    if (match->matched && (end < match->end || (end == match->end && accept_id >= match->accept_id))) return true;
     RxCapture *copy = capture_count == 0 ? NULL : malloc(capture_count * sizeof(*copy));
     if (capture_count != 0 && !copy) return idm_error_oom(err, idm_span_unknown(NULL));
     if (capture_count != 0) memcpy(copy, captures, capture_count * sizeof(*copy));
@@ -1358,6 +1710,7 @@ static bool match_take_best(RxMatch *match, size_t end, const RxCapture *capture
     match->captures = copy;
     match->matched = true;
     match->end = end;
+    match->accept_id = accept_id;
     return true;
 }
 
@@ -1385,13 +1738,13 @@ static IdmRegexResult *result_alloc_inline(size_t capture_count, IdmError *err) 
     return result;
 }
 
-static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, RxMatch *out, IdmError *err);
+static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, bool capture, RxMatch *out, IdmError *err);
 static bool nfa_test_run(const RxProg *prog, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, bool *out_matched, IdmError *err);
 static bool nfa_test_search(const RxProg *prog, const char *s, size_t len, size_t offset, bool *out_matched, IdmError *err);
 
 static bool look_matches(const RxProg *prog, const char *s, size_t len, size_t pos, IdmError *err) {
     RxMatch match = {0};
-    bool ok = nfa_run(prog, s, len, pos, false, 0, &match, err);
+    bool ok = nfa_run(prog, s, len, pos, false, 0, false, &match, err);
     bool matched = ok && match.matched;
     match_destroy(&match);
     return ok && matched;
@@ -1400,7 +1753,7 @@ static bool look_matches(const RxProg *prog, const char *s, size_t len, size_t p
 static bool lookbehind_matches(const RxProg *prog, const char *s, size_t len, size_t pos, IdmError *err) {
     for (size_t start = 0; start <= pos; start++) {
         RxMatch match = {0};
-        bool ok = nfa_run(prog, s, len, start, true, pos, &match, err);
+        bool ok = nfa_run(prog, s, len, start, true, pos, false, &match, err);
         bool matched = ok && match.matched;
         match_destroy(&match);
         if (!ok) return false;
@@ -1624,7 +1977,7 @@ static bool nfa_test_search(const RxProg *prog, const char *s, size_t len, size_
     return ok;
 }
 
-static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char *seen, const char *s, size_t len, size_t pc, size_t pos, const RxCapture *captures, unsigned depth, IdmError *err) {
+static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char *seen, const char *s, size_t len, size_t pc, size_t pos, const RxCapture *captures, bool capture, unsigned depth, IdmError *err) {
     size_t key = 0;
     if (!nfa_seen_key(prog, len, pc, pos, &key, err)) return false;
     if (seen[key]) return true;
@@ -1634,11 +1987,12 @@ static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char
     const RxInst *inst = &prog->insts[pc];
     switch (inst->kind) {
         case RXI_JUMP:
-            return nfa_add_closure(prog, vec, seen, s, len, inst->as.target, pos, captures, depth + 1u, err);
+            return nfa_add_closure(prog, vec, seen, s, len, inst->as.target, pos, captures, capture, depth + 1u, err);
         case RXI_SPLIT:
-            return nfa_add_closure(prog, vec, seen, s, len, inst->as.split.first, pos, captures, depth + 1u, err)
-                && nfa_add_closure(prog, vec, seen, s, len, inst->as.split.second, pos, captures, depth + 1u, err);
+            return nfa_add_closure(prog, vec, seen, s, len, inst->as.split.first, pos, captures, capture, depth + 1u, err)
+                && nfa_add_closure(prog, vec, seen, s, len, inst->as.split.second, pos, captures, capture, depth + 1u, err);
         case RXI_SAVE: {
+            if (!capture) return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, capture, depth + 1u, err);
             RxCapture stack_next[RX_STACK_CAPTURE_LIMIT];
             RxCapture *next = prog->capture_count <= RX_STACK_CAPTURE_LIMIT ? stack_next : malloc(prog->capture_count * sizeof(*next));
             if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1653,17 +2007,17 @@ static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char
                     next[capture].end = pos;
                 }
             }
-            bool ok = nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, next, depth + 1u, err);
+            bool ok = nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, next, capture, depth + 1u, err);
             if (next != stack_next) free(next);
             return ok;
         }
         case RXI_ASSERT_START:
-            if (pos == 0 || ((prog->flags & IDM_REGEX_MULTILINE) != 0 && at_line_start(s, pos)))
-                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, depth + 1u, err);
+            if (pos == 0 || ((inst->flags & IDM_REGEX_MULTILINE) != 0 && at_line_start(s, pos)))
+                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, capture, depth + 1u, err);
             return true;
         case RXI_ASSERT_END:
-            if (pos == len || ((prog->flags & IDM_REGEX_MULTILINE) != 0 && at_line_end(s, len, pos)))
-                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, depth + 1u, err);
+            if (pos == len || ((inst->flags & IDM_REGEX_MULTILINE) != 0 && at_line_end(s, len, pos)))
+                return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, capture, depth + 1u, err);
             return true;
         case RXI_LOOK: {
             bool matched = false;
@@ -1679,7 +2033,7 @@ static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char
             }
             if (err && err->present) return false;
             bool pass = (inst->as.look.kind == RX_LOOK_AHEAD_POS || inst->as.look.kind == RX_LOOK_BEHIND_POS) ? matched : !matched;
-            if (pass) return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, depth + 1u, err);
+            if (pass) return nfa_add_closure(prog, vec, seen, s, len, pc + 1u, pos, captures, capture, depth + 1u, err);
             return true;
         }
         case RXI_MATCH:
@@ -1691,7 +2045,7 @@ static bool nfa_add_closure(const RxProg *prog, RxVmStateVec *vec, unsigned char
     return true;
 }
 
-static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, RxMatch *out, IdmError *err) {
+static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, bool capture, RxMatch *out, IdmError *err) {
     memset(out, 0, sizeof(*out));
     if (!prog || offset > len || (exact_end && end_pos > len)) return true;
     if (prog->count == 0) return true;
@@ -1703,17 +2057,18 @@ static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset
     if (!seen) return idm_error_oom(err, idm_span_unknown(NULL));
     if (seen == seen_stack) memset(seen_stack, 0, seen_count);
 
+    size_t capture_count = capture ? prog->capture_count : 0u;
     RxCapture initial_stack[RX_STACK_CAPTURE_LIMIT];
-    RxCapture *initial = prog->capture_count <= RX_STACK_CAPTURE_LIMIT ? initial_stack : calloc(prog->capture_count, sizeof(*initial));
+    RxCapture *initial = capture_count <= RX_STACK_CAPTURE_LIMIT ? initial_stack : calloc(capture_count, sizeof(*initial));
     if (!initial) {
         if (seen != seen_stack) free(seen);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
-    if (initial == initial_stack) memset(initial_stack, 0, prog->capture_count * sizeof(*initial_stack));
+    if (initial == initial_stack) memset(initial_stack, 0, capture_count * sizeof(*initial_stack));
 
-    RxVmStateVec active = { .capture_count = prog->capture_count };
-    RxVmStateVec next = { .capture_count = prog->capture_count };
-    bool ok = nfa_add_closure(prog, &active, seen, s, len, 0, offset, initial, 0u, err);
+    RxVmStateVec active = { .capture_count = capture_count };
+    RxVmStateVec next = { .capture_count = capture_count };
+    bool ok = nfa_add_closure(prog, &active, seen, s, len, 0, offset, initial, capture, 0u, err);
     if (initial != initial_stack) free(initial);
     while (ok && active.count != 0) {
         state_vec_clear(&next);
@@ -1723,19 +2078,19 @@ static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset
             const RxInst *inst = &prog->insts[state->pc];
             switch (inst->kind) {
                 case RXI_MATCH:
-                    if ((!exact_end || state->pos == end_pos) && !match_take_best(out, state->pos, captures, prog->capture_count, err)) ok = false;
+                    if ((!exact_end || state->pos == end_pos) && !match_take_best(out, state->pos, inst->accept_id, captures, capture_count, err)) ok = false;
                     break;
                 case RXI_CHAR:
-                    if (state->pos < len && char_eq((unsigned char)s[state->pos], inst->as.literal, prog->flags))
-                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, 0u, err);
+                    if (state->pos < len && char_eq((unsigned char)s[state->pos], inst->as.literal, inst->flags))
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, capture, 0u, err);
                     break;
                 case RXI_DOT:
-                    if (state->pos < len && ((prog->flags & IDM_REGEX_DOTALL) != 0 || s[state->pos] != '\n'))
-                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, 0u, err);
+                    if (state->pos < len && ((inst->flags & IDM_REGEX_DOTALL) != 0 || s[state->pos] != '\n'))
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, capture, 0u, err);
                     break;
                 case RXI_CLASS:
                     if (state->pos < len && cls_has(&inst->as.cls, (unsigned char)s[state->pos]))
-                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, 0u, err);
+                        ok = nfa_add_closure(prog, &next, seen, s, len, state->pc + 1u, state->pos + 1u, captures, capture, 0u, err);
                     break;
                 case RXI_JUMP:
                 case RXI_SPLIT:
@@ -1816,7 +2171,7 @@ static bool scan_at_raw(const IdmRegex *rx, IdmValue subject, const char *s, siz
     *out = NULL;
     if (offset > len) return true;
     RxMatch match = {0};
-    bool ok = nfa_run(rx->prog, s, len, offset, full, len, &match, err);
+    bool ok = nfa_run(rx->prog, s, len, offset, full, len, true, &match, err);
     if (!ok) return false;
     if (match.matched) *out = result_new(rx, subject, s, len, offset, &match, err);
     match_destroy(&match);
@@ -1849,6 +2204,176 @@ bool idm_regex_test_bytes(const IdmRegex *rx, const char *input, size_t input_le
         return true;
     }
     return nfa_test_search(rx->prog, input, input_len, 0, out_matched, err);
+}
+
+bool idm_regex_match_at(const IdmRegex *rx, const char *input, size_t input_len, size_t offset, size_t *out_end, IdmError *err) {
+    if (out_end) *out_end = offset;
+    if (!rx) return true;
+    RxMatch match = {0};
+    bool ok = nfa_run(rx->prog, input, input_len, offset, false, 0, false, &match, err);
+    if (ok && match.matched && out_end) *out_end = match.end;
+    match_destroy(&match);
+    return ok;
+}
+
+bool idm_regex_set_match_at(const IdmRegexSet *set, const char *input, size_t input_len, size_t offset, size_t *out_index, size_t *out_end, bool *out_matched, IdmError *err) {
+    if (out_index) *out_index = 0;
+    if (out_end) *out_end = offset;
+    if (out_matched) *out_matched = false;
+    if (!set || !set->prog) return true;
+    RxMatch match = {0};
+    bool ok = nfa_run(set->prog, input, input_len, offset, false, 0, false, &match, err);
+    if (ok && match.matched) {
+        if (match.accept_id >= set->count) {
+            match_destroy(&match);
+            return idm_error_set(err, idm_span_unknown(NULL), "regex set accept id out of bounds");
+        }
+        if (out_index) *out_index = match.accept_id;
+        if (out_end) *out_end = match.end;
+        if (out_matched) *out_matched = true;
+    }
+    match_destroy(&match);
+    return ok;
+}
+
+bool idm_regex_set_exec_at(const IdmRegexSet *set, const char *input, size_t input_len, size_t offset, IdmRegexSetResult *out, IdmError *err) {
+    if (!out) return idm_error_set(err, idm_span_unknown(NULL), "regex set result is required");
+    memset(out, 0, sizeof(*out));
+    out->end = offset;
+    if (!set || !set->prog) return true;
+    RxMatch match = {0};
+    bool ok = nfa_run(set->prog, input, input_len, offset, false, 0, true, &match, err);
+    if (ok && match.matched) {
+        if (match.accept_id >= set->count) {
+            match_destroy(&match);
+            return idm_error_set(err, idm_span_unknown(NULL), "regex set accept id out of bounds");
+        }
+        size_t group_count = idm_regex_set_group_count(set, match.accept_id);
+        size_t capture_count = group_count + 1u;
+        IdmRegexCaptureRange *captures = calloc(capture_count, sizeof(*captures));
+        if (!captures) {
+            match_destroy(&match);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        captures[0].set = true;
+        captures[0].start = offset;
+        captures[0].end = match.end;
+        for (size_t i = 1; i < capture_count; i++) {
+            if (!match.captures || i >= set->prog->capture_count || !match.captures[i].set) continue;
+            captures[i].set = true;
+            captures[i].start = match.captures[i].start;
+            captures[i].end = match.captures[i].end;
+        }
+        out->matched = true;
+        out->index = match.accept_id;
+        out->end = match.end;
+        out->captures = captures;
+        out->capture_count = capture_count;
+    }
+    match_destroy(&match);
+    return ok;
+}
+
+size_t idm_regex_set_count(const IdmRegexSet *set) {
+    return set ? set->count : 0;
+}
+
+bool idm_regex_set_matches_empty(const IdmRegexSet *set, bool *out, IdmError *err) {
+    if (out) *out = false;
+    if (!set || !set->prog) return true;
+    RxMatch match = {0};
+    bool ok = nfa_run(set->prog, "", 0, 0, false, 0, false, &match, err);
+    if (ok && out) *out = match.matched && match.end == 0;
+    match_destroy(&match);
+    return ok;
+}
+
+static bool rx_put_nullable_string(IdmBuffer *out, const char *text, IdmError *err) {
+    if (!idm_buf_put_u8(out, text ? 1u : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (text && !idm_buf_put_str(out, text, strlen(text))) return idm_error_oom(err, idm_span_unknown(NULL));
+    return true;
+}
+
+static bool rx_read_nullable_string(IdmByteReader *r, char **out, IdmError *err) {
+    *out = NULL;
+    uint8_t has = idm_rd_u8(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated regex set string");
+    if (has > 1u) return idm_error_set(err, idm_span_unknown(NULL), "invalid regex set string marker");
+    if (!has) return true;
+    char *text = idm_rd_string(r, NULL);
+    if (!text) return idm_error_set(err, idm_span_unknown(NULL), "truncated regex set string");
+    *out = text;
+    return true;
+}
+
+bool idm_regex_set_serialize(IdmBuffer *out, const IdmRegexSet *set, IdmError *err) {
+    if (!set || !set->prog || set->count == 0 || set->count > UINT32_MAX) return idm_error_set(err, idm_span_unknown(NULL), "regex set is incomplete");
+    if (!idm_buf_append_n(out, "RXST", 4u) || !idm_buf_put_u32(out, (uint32_t)set->count)) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < set->count; i++) {
+        size_t group_count = set->group_counts ? set->group_counts[i] : 0u;
+        if (group_count > UINT32_MAX || !idm_buf_put_u32(out, (uint32_t)group_count)) return idm_error_oom(err, idm_span_unknown(NULL));
+        for (size_t g = 1u; g <= group_count; g++) {
+            const char *name = set->group_names && set->group_names[i] ? set->group_names[i][g] : NULL;
+            if (!rx_put_nullable_string(out, name, err)) return false;
+        }
+    }
+    return rx_prog_serialize_at(out, set->prog, err, 0u);
+}
+
+bool idm_regex_set_deserialize(IdmByteReader *r, IdmRegexSet **out, IdmError *err) {
+    *out = NULL;
+    unsigned char magic[4];
+    if (!rx_read_bytes(r, magic, sizeof(magic), err, "regex set magic")) return false;
+    if (memcmp(magic, "RXST", 4u) != 0) return idm_error_set(err, idm_span_unknown(NULL), "not a regex set");
+    uint32_t count = idm_rd_u32(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated regex set header");
+    if (count == 0) return idm_error_set(err, idm_span_unknown(NULL), "regex set is empty");
+    IdmRegexSet *set = calloc(1u, sizeof(*set));
+    if (!set) return idm_error_oom(err, idm_span_unknown(NULL));
+    set->count = count;
+    set->group_counts = calloc(count, sizeof(*set->group_counts));
+    set->group_names = calloc(count, sizeof(*set->group_names));
+    if (!set->group_counts || !set->group_names) {
+        idm_regex_set_free(set);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    size_t max_group_count = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t group_count = idm_rd_u32(r);
+        if (!r->ok) {
+            idm_regex_set_free(set);
+            return idm_error_set(err, idm_span_unknown(NULL), "truncated regex set group count");
+        }
+        set->group_counts[i] = group_count;
+        if (group_count > max_group_count) max_group_count = group_count;
+        if (group_count != 0) {
+            set->group_names[i] = calloc((size_t)group_count + 1u, sizeof(*set->group_names[i]));
+            if (!set->group_names[i]) {
+                idm_regex_set_free(set);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+        }
+        for (uint32_t g = 1u; g <= group_count; g++) {
+            if (!rx_read_nullable_string(r, &set->group_names[i][g], err)) {
+                idm_regex_set_free(set);
+                return false;
+            }
+        }
+    }
+    if (!rx_prog_deserialize_at(r, &set->prog, err, 0u)) {
+        idm_regex_set_free(set);
+        return false;
+    }
+    if (set->prog->capture_count < max_group_count + 1u) {
+        idm_regex_set_free(set);
+        return idm_error_set(err, idm_span_unknown(NULL), "regex set capture table is too small");
+    }
+    if (!rx_prog_validate(set->prog, set->count, err)) {
+        idm_regex_set_free(set);
+        return false;
+    }
+    *out = set;
+    return true;
 }
 
 bool idm_regex_exec_at_subject(const IdmRegex *rx, IdmValue subject, const char *input, size_t input_len, size_t offset, bool full, IdmRegexResult **out, IdmError *err) {
@@ -1962,6 +2487,26 @@ size_t idm_regex_group_count(const IdmRegex *rx) {
 const char *idm_regex_group_name(const IdmRegex *rx, size_t index) {
     if (!rx || index > rx->group_count) return NULL;
     return rx->group_names[index];
+}
+
+bool idm_regex_nullable(const IdmRegex *rx) {
+    return rx && rx->prog && rx->prog->start.nullable;
+}
+
+size_t idm_regex_set_group_count(const IdmRegexSet *set, size_t item_index) {
+    if (!set || item_index >= set->count || !set->group_counts) return 0;
+    return set->group_counts[item_index];
+}
+
+const char *idm_regex_set_group_name(const IdmRegexSet *set, size_t item_index, size_t group_index) {
+    if (!set || item_index >= set->count || !set->group_names || !set->group_counts || group_index > set->group_counts[item_index]) return NULL;
+    return set->group_names[item_index] ? set->group_names[item_index][group_index] : NULL;
+}
+
+void idm_regex_set_result_destroy(IdmRegexSetResult *result) {
+    if (!result) return;
+    free(result->captures);
+    memset(result, 0, sizeof(*result));
 }
 
 void idm_regex_result_free(IdmRegexResult *result) {

@@ -65,7 +65,7 @@ defn file-chunk-size -> 65536
 
 defn reverse-into do
   '() acc -> acc
-  (list h . t) acc -> reverse-into t (cons &h acc)
+  '(h . t) acc -> reverse-into t (cons &h acc)
 end
 
 defn make-page lines -> Page lines (List.length lines)
@@ -76,14 +76,14 @@ defn build-pages do
   '() _chunk 0 pages -> List.reverse pages
   '() chunk n pages -> List.reverse (flush-page chunk n pages)
   xs chunk n pages when (gte? n (page-size)) -> build-pages xs '() 0 (flush-page chunk n pages)
-  (list h . t) chunk n pages -> build-pages t (cons &h chunk) (add n 1) pages
+  '(h . t) chunk n pages -> build-pages t (cons &h chunk) (add n 1) pages
 end
 
 defn pages-from-lines lines -> build-pages lines '() 0 '()
 
 defn pages-to-lines-rev do
   '() acc -> acc
-  (list page . rest) acc -> pages-to-lines-rev rest (reverse-into page.lines acc)
+  '(page . rest) acc -> pages-to-lines-rev rest (reverse-into page.lines acc)
 end
 
 defn pages-to-lines pages -> List.reverse (pages-to-lines-rev pages '())
@@ -117,13 +117,13 @@ end
 
 defn build-rest do
   b '() -> b
-  b (list last) -> build-set-pending b last
-  b (list h . t) -> build-rest (build-add-line b h) t
+  b '(last) -> build-set-pending b last
+  b '(h . t) -> build-rest (build-add-line b h) t
 end
 
 defn build-feed-chunk chunk b -> match (Str.split chunk "\n") do
-  (list only) -> build-set-pending b "#{b.pending}${only}"
-  (list first . rest) ->
+  '(only) -> build-set-pending b "#{b.pending}${only}"
+  '(first . rest) ->
     build-rest (build-add-line (build-set-pending b "") "#{b.pending}${first}") rest
 end
 
@@ -143,8 +143,8 @@ defn last-row buffer -> imax 0 (sub (line-count buffer) 1)
 
 defn line-at-pages do
   '() _row -> ""
-  (list page . _rest) row when (lt? row page.count) -> List.nth-or page.lines row ""
-  (list page . rest) row -> line-at-pages rest (sub row page.count)
+  '(page . _rest) row when (lt? row page.count) -> List.nth-or page.lines row ""
+  '(page . rest) row -> line-at-pages rest (sub row page.count)
 end
 
 export defn buffer-line buffer row -> line-at-pages buffer.pages row
@@ -154,18 +154,18 @@ defn line-at buffer row -> buffer-line buffer row
 defn collect-page-window do
   _lines _skip n acc when (lte? n 0) -> {acc 0}
   '() _skip n acc -> {acc n}
-  (list _h . t) skip n acc when (gt? skip 0) ->
+  '(_h . t) skip n acc when (gt? skip 0) ->
     collect-page-window t (sub skip 1) n acc
-  (list h . t) _skip n acc ->
+  '(h . t) _skip n acc ->
     collect-page-window t 0 (sub n 1) (cons &h acc)
 end
 
 defn window-pages do
   _pages _skip n acc when (lte? n 0) -> List.reverse acc
   '() _skip _n acc -> List.reverse acc
-  (list page . rest) skip n acc when (gte? skip page.count) ->
+  '(page . rest) skip n acc when (gte? skip page.count) ->
     window-pages rest (sub skip page.count) n acc
-  (list page . rest) skip n acc -> match (collect-page-window page.lines skip n acc) do
+  '(page . rest) skip n acc -> match (collect-page-window page.lines skip n acc) do
     {acc2 remaining} -> window-pages rest 0 remaining acc2
   end
 end
@@ -175,18 +175,18 @@ defn buffer-window buffer start count ->
 
 defn replace-line-pages do
   '() _row text -> pages-from-lines (list text)
-  (list page . rest) row text when (lt? row page.count) ->
+  '(page . rest) row text when (lt? row page.count) ->
     cons (Page (List.replace-at page.lines row text) page.count) rest
-  (list page . rest) row text -> cons page (replace-line-pages rest (sub row page.count) text)
+  '(page . rest) row text -> cons page (replace-line-pages rest (sub row page.count) text)
 end
 
 defn replace-line buffer row text -> Buffer (replace-line-pages buffer.pages row text) buffer.count
 
 defn insert-line-pages do
   '() _row text -> pages-from-lines (list text)
-  (list page . rest) row text when (lte? row page.count) ->
+  '(page . rest) row text when (lte? row page.count) ->
     List.concat (pages-from-lines (List.insert-at page.lines row text)) rest
-  (list page . rest) row text -> cons page (insert-line-pages rest (sub row page.count) text)
+  '(page . rest) row text -> cons page (insert-line-pages rest (sub row page.count) text)
 end
 
 defn insert-line buffer row text ->
@@ -196,9 +196,9 @@ defn non-empty-pages lines -> cond (List.empty? lines) '() (pages-from-lines lin
 
 defn delete-line-pages do
   '() _row -> '()
-  (list page . rest) row when (lt? row page.count) ->
+  '(page . rest) row when (lt? row page.count) ->
     List.concat (non-empty-pages (List.delete-at page.lines row)) rest
-  (list page . rest) row -> cons page (delete-line-pages rest (sub row page.count))
+  '(page . rest) row -> cons page (delete-line-pages rest (sub row page.count))
 end
 
 defn delete-line buffer row ->
@@ -206,13 +206,13 @@ defn delete-line buffer row ->
 
 defn replace-line-with-lines-pages do
   '() _row lines -> pages-from-lines lines
-  (list page . rest) row lines when (lt? row page.count) -> do
+  '(page . rest) row lines when (lt? row page.count) -> do
     before = List.take page.lines row
     after = List.drop page.lines (add row 1)
     local = List.concat before (List.concat lines after)
     List.concat (pages-from-lines local) rest
   end
-  (list page . rest) row lines -> cons page (replace-line-with-lines-pages rest (sub row page.count) lines)
+  '(page . rest) row lines -> cons page (replace-line-with-lines-pages rest (sub row page.count) lines)
 end
 
 defn replace-line-with-lines buffer row lines ->
@@ -297,8 +297,8 @@ defn line-insert line col text -> "#{slice line 0 col}${text}#{slice line col (l
 
 defn append-suffix-last do
   '() suffix -> list suffix
-  (list h) suffix -> list "#{h}${suffix}"
-  (list h . t) suffix -> cons h (append-suffix-last t suffix)
+  '(h) suffix -> list "#{h}${suffix}"
+  '(h . t) suffix -> cons h (append-suffix-last t suffix)
 end
 
 defn insert-lines-for current col parts do
@@ -306,15 +306,15 @@ defn insert-lines-for current col parts do
   after = slice current col (len current)
   match parts do
     '() -> list current
-    (list only) -> list "#{before}${only}${after}"
-    (list first . rest) -> cons "#{before}${first}" (append-suffix-last rest after)
+    '(only) -> list "#{before}${only}${after}"
+    '(first . rest) -> cons "#{before}${first}" (append-suffix-last rest after)
   end
 end
 
 defn last-piece do
   '() -> ""
-  (list h) -> h
-  (list _ . t) -> last-piece t
+  '(h) -> h
+  '(_ . t) -> last-piece t
 end
 
 export defn insert-text editor text do
@@ -324,7 +324,7 @@ export defn insert-text editor text do
   b = replace-line-with-lines editor.buffer editor.row inserted
   row2 = add editor.row (sub (List.length parts) 1)
   col2 = match parts do
-    (list _only) -> add editor.col (len text)
+    '(_only) -> add editor.col (len text)
     _ -> len (last-piece parts)
   end
   mark-edit editor b row2 col2
@@ -411,9 +411,9 @@ defn paste-cut editor -> cond (eq? editor.cut "") editor (insert-text editor edi
 
 defn find-forward-lines do
   '() _query _skip _col _row -> :nil
-  (list _line . rest) query skip col row when (gt? skip 0) ->
+  '(_line . rest) query skip col row when (gt? skip 0) ->
     find-forward-lines rest query (sub skip 1) col (add row 1)
-  (list line . rest) query _skip col row -> match (Str.find-from line query col) do
+  '(line . rest) query _skip col row -> match (Str.find-from line query col) do
     :nil -> find-forward-lines rest query 0 0 (add row 1)
     at -> {row at}
   end
@@ -421,9 +421,9 @@ end
 
 defn find-forward-pages do
   '() _query _row _col _base -> :nil
-  (list page . rest) query row col base when (gte? row page.count) ->
+  '(page . rest) query row col base when (gte? row page.count) ->
     find-forward-pages rest query (sub row page.count) col (add base page.count)
-  (list page . rest) query row col base -> match (find-forward-lines page.lines query row col (add base row)) do
+  '(page . rest) query row col base -> match (find-forward-lines page.lines query row col (add base row)) do
     :nil -> find-forward-pages rest query 0 0 (add base page.count)
     found -> found
   end
@@ -571,7 +571,7 @@ defn page-save-text page first? ->
 
 defn save-pages do
   _port '() _first? -> :ok
-  port (list page . rest) first? -> do
+  port '(page . rest) first? -> do
     text = page-save-text page first?
     match (File.write-port-all port text) do
       {:ok _count} -> save-pages port rest :false
@@ -609,7 +609,7 @@ defn dirty-mark editor -> cond (editor.dirty) " *" ""
 defn clip-runes do
   '() _start _stop _pos acc -> acc
   _runes _start stop pos acc when (gte? pos stop) -> acc
-  (list h . t) start stop pos acc -> do
+  '(h . t) start stop pos acc -> do
     ch = ord->str h
     w = imax 1 (width ch)
     next = add pos w
@@ -652,7 +652,7 @@ defn render-body-lines do
   editor _lines i limit acc when (gte? i limit) -> acc
   editor '() i limit acc ->
     render-body-lines editor '() (add i 1) limit "#{acc}#{body-line-text editor "~"}\r\n"
-  editor (list line . rest) i limit acc ->
+  editor '(line . rest) i limit acc ->
     render-body-lines editor rest (add i 1) limit "#{acc}#{body-line-text editor line}\r\n"
 end
 
@@ -750,7 +750,7 @@ end
 
 defn main-path do
   '() -> ""
-  (list path . _rest) -> path
+  '(path . _rest) -> path
 end
 
 export defn main argv -> run (main-path argv)

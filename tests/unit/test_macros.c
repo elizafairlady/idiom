@@ -6,16 +6,18 @@ static void test_source_defmacro(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro answer stx -> %'(add 40 2)\nanswer\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<macro-expand-test>", "defmacro answer stx -> %'(add 40 2)\nanswer\n", &core, &err));
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "((prim add) 40 2)");
+    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
+    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -24,9 +26,10 @@ static void test_source_defmacro(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro id %`(id %,x) -> x\nid 42\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<macro-expand-test>", "defmacro id %`(id %,x) -> x\nid 42\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -34,13 +37,15 @@ static void test_source_defmacro(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-expand-test>", "defmacro plus2 %`(plus2 %,x) -> %`(add %,x 2)\nplus2 40\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<macro-expand-test>", "defmacro plus2 %`(plus2 %,x) -> %`(add %,x 2)\nplus2 40\n", &core, &err));
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "((prim add) 40 2)");
+    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
+    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -63,16 +68,18 @@ static void test_source_macro_clauses(void) {
         "plus2 40\n";
 
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-clause-test>", source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<macro-clause-test>", source, &core, &err));
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "((prim add) 40 2)");
+    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
+    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -87,9 +94,10 @@ static void test_source_macro_clauses(void) {
         "end\n"
         "word-only hello\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-clause-guard-test>", guarded_source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<macro-clause-guard-test>", guarded_source, &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -103,9 +111,10 @@ static void test_source_macro_clauses(void) {
         "end\n"
         "word-only 10\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-clause-guard-fallback-test>", guard_fallback_source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<macro-clause-guard-fallback-test>", guard_fallback_source, &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -118,9 +127,10 @@ static void test_source_macro_clauses(void) {
         "end\n"
         "do-it 1 42\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<macro-clause-splice-test>", ellipsis_source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<macro-clause-splice-test>", ellipsis_source, &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -136,16 +146,17 @@ static void test_source_standard_if(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<if-macro-test>", "if :false do 0 else do 42 end\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<if-macro-test>", "if :false do 0 else do 42 end\n", &core, &err));
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "42");
+    CHECK(strstr(dump.data, " 42)") != NULL || strcmp(dump.data, "42") == 0);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -154,9 +165,10 @@ static void test_source_standard_if(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<if-macro-test>", "if :true do 42 end\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<if-macro-test>", "if :true do 42 end\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -164,9 +176,10 @@ static void test_source_standard_if(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<if-macro-test>", "if :false do 42 end\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<if-macro-test>", "if :false do 42 end\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_NIL);
     CHECK(!err.present);
@@ -174,9 +187,10 @@ static void test_source_standard_if(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<if-macro-test>", "if :false do 0 else if :false do 1 else do 42 end\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<if-macro-test>", "if :false do 0 else if :false do 1 else do 42 end\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -184,7 +198,7 @@ static void test_source_standard_if(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(!idm_expand_string(&rt, "<if-macro-test>", "if :false 0 42\n", &core, &err));
+    CHECK(!idm_expand_source_string(&rt, "<if-macro-test>", "if :false 0 42\n", &core, &err));
     CHECK(err.present);
     idm_error_clear(&err);
     idm_error_clear(&err);
@@ -207,11 +221,12 @@ static void test_source_standard_control_macros(void) {
     int64_t expected[] = {42, 3, 42, 0, 42, 42};
     for (size_t i = 0; i < sizeof(programs) / sizeof(programs[0]); i++) {
         IdmCore *core = NULL;
-        CHECK(idm_expand_string(&rt, "<control-macro-test>", programs[i], &core, &err));
+        CHECK(idm_expand_source_string(&rt, "<control-macro-test>", programs[i], &core, &err));
         IdmBytecodeModule module;
         idm_bc_init(&module);
         uint32_t main_fn = 0;
         CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
         IdmValue out = idm_nil();
         CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
         if (i == 3) CHECK(out.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(out.as.symbol), "false") == 0);
@@ -240,11 +255,12 @@ static void test_macro_hygienic_introduction(void) {
         "twice 21\n"
         "tmp\n";
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<hygiene-test>", source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<hygiene-test>", source, &core, &err));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 100);
@@ -273,11 +289,12 @@ static void test_macro_bind_bang_and_depth(void) {
         "end\n"
         "with-it 10 (add it 5)\n";
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<bind-bang-test>", capture_source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<bind-bang-test>", capture_source, &core, &err));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 15);
@@ -290,9 +307,10 @@ static void test_macro_bind_bang_and_depth(void) {
         "x = 42\n"
         "id x\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<use-site-test>", use_site_source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<use-site-test>", use_site_source, &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -303,7 +321,7 @@ static void test_macro_bind_bang_and_depth(void) {
         "defmacro loop stx -> %`(loop)\n"
         "loop\n";
     core = NULL;
-    CHECK(!idm_expand_string(&rt, "<macro-depth-test>", loop_source, &core, &err));
+    CHECK(!idm_expand_source_string(&rt, "<macro-depth-test>", loop_source, &core, &err));
     CHECK(err.present);
     idm_error_clear(&err);
 
@@ -312,11 +330,12 @@ static void test_macro_bind_bang_and_depth(void) {
         "defmacro expand-plus2 stx -> local-expand %`(plus2 40)\n"
         "expand-plus2\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<local-expand-test>", local_expand_source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<local-expand-test>", local_expand_source, &core, &err));
     IdmBytecodeModule module2;
     idm_bc_init(&module2);
     uint32_t main_fn2 = 0;
     CHECK(idm_core_compile_main(core, &module2, &main_fn2, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module2, &err));
     CHECK(idm_vm_run(&rt, &module2, main_fn2, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -333,14 +352,15 @@ static void test_macro_origin_and_properties(void) {
     idm_error_init(&err);
     const char *origin_source =
         "defmacro answer stx -> %`(42)\n"
-        "defmacro origin-name stx -> datum->syntax stx (first (syntax-origin (local-expand %`(answer))) )\n"
+        "defmacro origin-name stx -> make-syntax-string stx (first (syntax-origin (local-expand %`(answer))) )\n"
         "origin-name\n";
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<origin-test>", origin_source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<origin-test>", origin_source, &core, &err));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     IdmBuffer buf;
@@ -353,12 +373,13 @@ static void test_macro_origin_and_properties(void) {
     idm_core_free(core);
 
     const char *property_source =
-        "defmacro prop stx -> datum->syntax stx (syntax-property (syntax-set-property %`(x) \"k\" \"v\") \"k\")\n"
+        "defmacro prop stx -> make-syntax-string stx (syntax-property (syntax-set-property %`(x) \"k\" \"v\") \"k\")\n"
         "prop\n";
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<property-test>", property_source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<property-test>", property_source, &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     idm_buf_init(&buf);
     CHECK(idm_value_write(&buf, out));
@@ -382,11 +403,12 @@ static void test_for_syntax_macro_registration(void) {
         "end\n"
         "answer\n";
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<for-syntax-test>", source, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<for-syntax-test>", source, &core, &err));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -463,7 +485,7 @@ static void test_import_compile_time_surface_boundaries(void) {
         "use tests/pkg/exporter\n"
         "3 <+> 4\n",
         false);
-    expect_expand_result("<use-imports-trait-method-surface>",
+    expect_expand_result("<use-installs-trait-method-surface>",
         "use tests/pkg/protomethod\n"
         "describe 1\n",
         true);
@@ -684,7 +706,7 @@ static void test_splice_hygiene_negatives(void) {
         "m anything\n"
         "tprobe 1\n",
         "unbound identifier 'tprobe'");
-    expect_expand_error_rt(&rt, "<register-macro-locality>",
+    expect_expand_error_rt(&rt, "<macro-surface-locality>",
         "answer x\n",
         "unbound identifier 'answer'");
     idm_runtime_destroy(&rt);

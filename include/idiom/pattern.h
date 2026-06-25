@@ -76,7 +76,7 @@ typedef struct {
 
 typedef struct {
     uint32_t function_index;
-    uint32_t arity;
+    IdmArity arity;
     IdmPattern *const *patterns;
     uint32_t pattern_count;
     const IdmPatternLocal *pattern_locals;
@@ -127,7 +127,6 @@ const IdmValue *idm_pattern_bindings_get(const IdmPatternBindings *bindings, con
 const IdmValue *idm_pattern_bindings_get_slot(const IdmPatternBindings *bindings, uint32_t slot);
 bool idm_pattern_bindings_add(IdmPatternBindings *bindings, const char *name, IdmValue value);
 bool idm_pattern_bindings_add_slot(IdmPatternBindings *bindings, const char *name, uint32_t slot, IdmValue value);
-bool idm_pattern_match(IdmRuntime *rt, IdmPattern *pat, IdmValue value, IdmPatternBindings *bindings, IdmError *err);
 
 bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t clause_count, IdmPatternSelector **out, IdmError *err);
 void idm_pattern_selector_retain(IdmPatternSelector *selector);

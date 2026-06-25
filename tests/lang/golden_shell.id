@@ -1,4 +1,5 @@
 use std/test
+use std/system with [cd env-set pwd]
 activate Test
 
 suite do
@@ -108,7 +109,7 @@ suite do
     end
     assert-inspect got "{:ok 0 \"hello\\n\" \"\"}"
   end
-  test "word-syntax-requires-grammar" do
-    assert-expand-error "\$(echo hi)" "word syntax requires a grammar"
+  test "word-syntax-requires-core-syntax" do
+    assert-expand-error "\$(echo hi)" "word syntax requires core syntax"
   end
 end

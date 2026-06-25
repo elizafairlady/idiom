@@ -1,0 +1,98 @@
+use std/test
+activate Test
+
+suite do
+  test "extension core grammar artifacts compose" do
+    got = do
+      use tests/pkg/coregrammar_ext_a
+      use tests/pkg/coregrammar_ext_b
+      activate GrammarExtA
+      activate GrammarExtB
+      :ok
+    end
+    assert-eq got :ok
+  end
+
+  test "extension core grammar rule names must be disjoint" do
+    assert-expand-error "use tests/pkg/coregrammar_ext_a\nuse tests/pkg/coregrammar_ext_dup\nactivate GrammarExtA\nactivate GrammarExtDup\n:ok" "rule 'ident'"
+  end
+
+  test "literal core grammar terminals become artifacts" do
+    got = do
+      use tests/pkg/coregrammar_literal
+      activate GrammarLiteral
+      :ok
+    end
+    assert-eq got :ok
+  end
+
+  test "skip core grammar terminals become artifacts" do
+    got = do
+      use tests/pkg/coregrammar_skip
+      activate GrammarSkip
+      :ok
+    end
+    assert-eq got :ok
+  end
+
+  test "exclusive core grammar artifacts conflict" do
+    assert-expand-error "use tests/pkg/coregrammar_exclusive_a\nuse tests/pkg/coregrammar_exclusive_b\nactivate GrammarExclusiveA\nactivate GrammarExclusiveB\n:ok" "grammar surface 'ReaderExclusive'"
+  end
+
+  test "core grammar validates regex terminals before artifact emission" do
+    assert-expand-error "package bad_regex\nexport protocol BadRegex do\n  core-grammar BadReader :extend [{:token broken {:regex \"(\"} {:capture broken}}]\nend\n" "regex parse error"
+  end
+
+  test "core grammar signatures are tuples not vectors" do
+    assert-expand-error "package bad_shape\nexport protocol BadShape do\n  core-grammar BadReader :extend [[:token broken {:regex \"x\"} {:capture broken}]]\nend\n" "core-grammar rule expects"
+  end
+
+  test "core grammar tags are atoms not words" do
+    assert-expand-error "package bad_tag\nexport protocol BadTag do\n  core-grammar BadReader :extend [{token broken {:regex \"x\"} {:capture broken}}]\nend\n" "got '<non-atom>'"
+  end
+
+  test "core grammar is a phase zero artifact declaration" do
+    assert-expand-error "for-syntax do\n  core-grammar BadReader :extend [{:token bad {:regex \"x\"} {:capture bad}}]\nend\n" "phase-0 reader artifact"
+  end
+
+  test "core reader is a phase zero artifact declaration" do
+    assert-expand-error "for-syntax do\n  core-reader :source BadReader\nend\n" "phase-0 reader artifact"
+  end
+
+  test "core reader source must name a declared grammar" do
+    assert-expand-error "package bad_source_reader\ncore-reader :source MissingReader\n" "has no core-grammar"
+  end
+
+  test "grammar artifacts activate only at phase zero" do
+    assert-expand-error "use tests/pkg/coregrammar_ext_a\nfor-syntax do\n  activate GrammarExtA\nend\n" "phase 0"
+  end
+
+  test "source grammar do form lowers to core grammar artifact" do
+    got = do
+      use tests/pkg/coregrammar_surface
+      activate GrammarSurface
+      :ok
+    end
+    assert-eq got :ok
+  end
+
+  test "source grammar do form validates rule shape" do
+    assert-expand-error "package bad_surface_grammar\nexport protocol BadSurfaceGrammar do\n  grammar BadReader extend do\n    token broken {:regex \"x\"}\n  end\nend\n" "grammar token rule expects"
+  end
+
+  test "source grammar mode is a word" do
+    assert-expand-error "package bad_surface_mode\ngrammar BadReader :extend do\n  token ident {:regex \"[A-Za-z]+\"} -> {:capture ident}\nend\n" "grammar mode must be extend or exclusive"
+  end
+
+  test "core reader source must select a complete reader artifact" do
+    assert-expand-error "use tests/pkg/coregrammar_surface_incomplete_reader\n:ok\n" "has no 'program' start rule"
+  end
+
+  test "source-authored pydiom reader artifact compiles" do
+    got = do
+      use tests/pkg/pydiom_reader
+      :ok
+    end
+    assert-eq got :ok
+  end
+end

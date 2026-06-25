@@ -1,3 +1,5 @@
+use std/port with [port-close-input port-read port-status port-write]
+
 defn wait-done do
   _p 0 -> :timeout
   p n -> match (port-status p) do
@@ -28,4 +30,4 @@ after_done = port-read p2 :stdout 1024
 eof = port-read p2 :stdout 1024
 result2 = await p2
 
-{w data closed result waited after_done eof result2}
+println {w data closed result waited after_done eof result2}

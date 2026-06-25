@@ -2,6 +2,7 @@ use std/test
 activate Test
 import std/file as File
 use std/enum
+use std/port with [port-status]
 
 defn collect-chunk chunk acc -> "#{acc}${chunk}"
 

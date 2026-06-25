@@ -143,15 +143,7 @@ static bool append_display(IdmBuffer *buf, IdmValue v) {
 }
 
 static bool prim_str(IdmRuntime *rt, IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
-    if (argc == 1 && args[0].tag == IDM_VAL_STRING) { *out = args[0]; return true; }
-    IdmBuffer buf;
-    idm_buf_init(&buf);
-    for (uint32_t i = 0; i < argc; i++) {
-        if (!append_display(&buf, args[i])) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
-    }
-    *out = idm_string_n(rt, buf.data ? buf.data : "", buf.len, err);
-    idm_buf_destroy(&buf);
-    return !(err && err->present);
+    return idm_string_concat_display(rt, args, argc, out, err);
 }
 
 static bool prim_chomp(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
@@ -821,7 +813,6 @@ static int cmp_value_total(IdmValue a, IdmValue b) {
         case IDM_VAL_PID:
         case IDM_VAL_REF:
         case IDM_VAL_PORT:
-        case IDM_VAL_PRIMITIVE:
             return (a.as.id > b.as.id) - (a.as.id < b.as.id);
         case IDM_VAL_SYNTAX:
         case IDM_VAL_CELL:
@@ -899,7 +890,6 @@ static bool prim_type_pred(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, Id
         case IDM_PRIM_PID_P: result = args[0].tag == IDM_VAL_PID; break;
         case IDM_PRIM_REF_P: result = args[0].tag == IDM_VAL_REF; break;
         case IDM_PRIM_PORT_P: result = args[0].tag == IDM_VAL_PORT; break;
-        case IDM_PRIM_PRIMITIVE_P: result = args[0].tag == IDM_VAL_PRIMITIVE; break;
         case IDM_PRIM_REGEX_P: result = args[0].tag == IDM_VAL_REGEX; break;
         case IDM_PRIM_REGEX_RESULT_P: result = args[0].tag == IDM_VAL_REGEX_RESULT; break;
         default: break;
@@ -953,67 +943,12 @@ static bool prim_syntax_kind(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmE
     return true;
 }
 
-static bool prim_syntax_to_datum_impl(IdmRuntime *rt, IdmSyntax *syn, IdmValue *out, IdmError *err) {
-    switch (syn->kind) {
-        case IDM_SYN_NIL: *out = idm_nil(); return true;
-        case IDM_SYN_WORD: *out = idm_word(rt, syn->as.text); return true;
-        case IDM_SYN_ATOM: *out = idm_atom(rt, syn->as.text); return true;
-        case IDM_SYN_INT: *out = idm_int(syn->as.integer); return true;
-        case IDM_SYN_FLOAT: *out = idm_float(syn->as.real); return true;
-        case IDM_SYN_STRING: *out = idm_string(rt, syn->as.text, err); return !(err && err->present);
-        case IDM_SYN_LIST: {
-            IdmValue list = idm_empty_list();
-            for (size_t i = syn->as.seq.count; i > 0; i--) {
-                IdmValue item = idm_nil();
-                if (!prim_syntax_to_datum_impl(rt, syn->as.seq.items[i - 1u], &item, err)) return false;
-                list = idm_cons(rt, item, list, err);
-                if (err && err->present) return false;
-            }
-            *out = list;
-            return true;
-        }
-        case IDM_SYN_VECTOR:
-        case IDM_SYN_TUPLE: {
-            IdmValue *items = syn->as.seq.count == 0 ? NULL : calloc(syn->as.seq.count, sizeof(*items));
-            if (syn->as.seq.count != 0 && !items) return idm_error_oom(err, syn->span);
-            for (size_t i = 0; i < syn->as.seq.count; i++) {
-                if (!prim_syntax_to_datum_impl(rt, syn->as.seq.items[i], &items[i], err)) { free(items); return false; }
-            }
-            *out = syn->kind == IDM_SYN_VECTOR ? idm_vector(rt, items, syn->as.seq.count, err) : idm_tuple(rt, items, syn->as.seq.count, err);
-            free(items);
-            return !(err && err->present);
-        }
-        case IDM_SYN_DICT: {
-            if (syn->as.seq.count % 2u != 0) return idm_error_set(err, syn->span, "dict syntax requires key/value pairs");
-            size_t count = syn->as.seq.count / 2u;
-            IdmDictEntry *entries = count == 0 ? NULL : calloc(count, sizeof(*entries));
-            if (count != 0 && !entries) return idm_error_oom(err, syn->span);
-            for (size_t i = 0; i < count; i++) {
-                if (!prim_syntax_to_datum_impl(rt, syn->as.seq.items[i * 2u], &entries[i].key, err)) { free(entries); return false; }
-                if (!prim_syntax_to_datum_impl(rt, syn->as.seq.items[i * 2u + 1u], &entries[i].value, err)) { free(entries); return false; }
-            }
-            *out = idm_dict(rt, entries, count, err);
-            free(entries);
-            return !(err && err->present);
-        }
-    }
-    return idm_error_set(err, syn->span, "unknown syntax kind");
-}
-
-static bool prim_syntax_to_datum(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *syn = require_syntax(args[0], err);
-    if (!syn) return false;
-    return prim_syntax_to_datum_impl(rt, syn, out, err);
-}
-
 static bool wrap_owned_syntax(IdmRuntime *rt, IdmSyntax *syn, IdmValue *out, IdmError *err) {
     if (!syn) return false;
     *out = idm_syntax_value(rt, syn, err);
     idm_syn_free(syn);
     return !(err && err->present);
 }
-
-static IdmSyntax *syntax_from_datum_impl(IdmSyntax *ctx, IdmValue datum, IdmError *err);
 
 static bool copy_scopes_from(IdmSyntax *dst, const IdmSyntax *src) {
     if (!src) return true;
@@ -1024,103 +959,6 @@ static bool copy_scopes_from(IdmSyntax *dst, const IdmSyntax *src) {
         }
     }
     return true;
-}
-
-static bool add_active_intro_scope(IdmRuntime *rt, IdmSyntax *syn) {
-    if (!rt->macro_intro_active) return true;
-    const IdmScopeSet *set = idm_syn_scope_set(syn, 0);
-    if (!set || !idm_scope_set_contains(set, rt->macro_intro_scope)) return true;
-    return idm_syn_scope_flip(syn, 0, rt->macro_intro_scope);
-}
-
-static IdmSyntax *syntax_from_datum_impl(IdmSyntax *ctx, IdmValue datum, IdmError *err) {
-    IdmSpan span = ctx ? ctx->span : idm_span_unknown(NULL);
-    IdmSyntax *out = NULL;
-    switch (datum.tag) {
-        case IDM_VAL_NIL: out = idm_syn_nil(span); break;
-        case IDM_VAL_EMPTY_LIST: out = idm_syn_list(span); break;
-        case IDM_VAL_INT: out = idm_syn_int(datum.as.i, span); break;
-        case IDM_VAL_WORD: out = idm_syn_word(idm_symbol_text(datum.as.symbol), span); break;
-        case IDM_VAL_ATOM: out = idm_syn_atom(idm_symbol_text(datum.as.symbol), span); break;
-        case IDM_VAL_STRING: out = idm_syn_string(idm_string_bytes(datum), span); break;
-        case IDM_VAL_PAIR: {
-            out = idm_syn_list(span);
-            if (!out) break;
-            IdmValue cur = datum;
-            while (idm_is_pair(cur)) {
-                IdmValue car = idm_car(cur, err);
-                if (err && err->present) { idm_syn_free(out); return NULL; }
-                IdmSyntax *child = syntax_from_datum_impl(ctx, car, err);
-                if (!child || !idm_syn_append(out, child)) { idm_syn_free(child); idm_syn_free(out); return NULL; }
-                cur = idm_cdr(cur, err);
-                if (err && err->present) { idm_syn_free(out); return NULL; }
-            }
-            if (!idm_is_empty_list(cur)) { idm_syn_free(out); idm_error_set(err, span, "datum->syntax requires a proper list"); return NULL; }
-            break;
-        }
-        case IDM_VAL_TUPLE: {
-            out = idm_syn_tuple(span);
-            if (!out) break;
-            for (size_t i = 0; i < idm_sequence_count(datum); i++) {
-                IdmValue item = idm_sequence_item(datum, i, err);
-                if (err && err->present) { idm_syn_free(out); return NULL; }
-                IdmSyntax *child = syntax_from_datum_impl(ctx, item, err);
-                if (!child || !idm_syn_append(out, child)) { idm_syn_free(child); idm_syn_free(out); return NULL; }
-            }
-            break;
-        }
-        case IDM_VAL_VECTOR: {
-            out = idm_syn_vector(span);
-            if (!out) break;
-            for (size_t i = 0; i < idm_sequence_count(datum); i++) {
-                IdmValue item = idm_sequence_item(datum, i, err);
-                if (err && err->present) { idm_syn_free(out); return NULL; }
-                IdmSyntax *child = syntax_from_datum_impl(ctx, item, err);
-                if (!child || !idm_syn_append(out, child)) { idm_syn_free(child); idm_syn_free(out); return NULL; }
-            }
-            break;
-        }
-        case IDM_VAL_DICT: {
-            out = idm_syn_dict(span);
-            if (!out) break;
-            for (size_t i = 0; i < idm_dict_count(datum); i++) {
-                IdmValue key = idm_nil();
-                IdmValue val = idm_nil();
-                if (!idm_dict_entry(datum, i, &key, &val)) {
-                    idm_syn_free(out);
-                    idm_error_set(err, span, "dict entry conversion failed");
-                    return NULL;
-                }
-                IdmSyntax *key_syn = syntax_from_datum_impl(ctx, key, err);
-                if (!key_syn || !idm_syn_append(out, key_syn)) { idm_syn_free(key_syn); idm_syn_free(out); return NULL; }
-                IdmSyntax *val_syn = syntax_from_datum_impl(ctx, val, err);
-                if (!val_syn || !idm_syn_append(out, val_syn)) { idm_syn_free(val_syn); idm_syn_free(out); return NULL; }
-            }
-            break;
-        }
-        case IDM_VAL_SYNTAX: {
-            IdmSyntax *inner = idm_syntax_value_get(datum);
-            return idm_syn_clone(inner);
-        }
-        default:
-            idm_error_set(err, span, "datum->syntax cannot wrap this datum kind");
-            return NULL;
-    }
-    if (!out) {
-        idm_error_oom(err, span);
-        return NULL;
-    }
-    if (!copy_scopes_from(out, ctx)) { idm_syn_free(out); idm_error_oom(err, span); return NULL; }
-    return out;
-}
-
-static bool prim_datum_to_syntax(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    IdmSyntax *syn = syntax_from_datum_impl(ctx, args[1], err);
-    if (!syn) return false;
-    if (!add_active_intro_scope(rt, syn)) { idm_syn_free(syn); return idm_error_oom(err, ctx->span); }
-    return wrap_owned_syntax(rt, syn, out, err);
 }
 
 static bool prim_syntax_property(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
@@ -1277,36 +1115,14 @@ static bool prim_syntax_string_text(IdmRuntime *rt, IdmValue *args, IdmValue *ou
     return !(err && err->present);
 }
 
-static bool prim_expander_register_operator(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    if (!rt->register_operator) return idm_error_set(err, idm_span_unknown(NULL), "expander-register-operator requires an active expansion");
+static bool prim_internal_register_macro(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    if (!rt->register_macro) return idm_error_set(err, idm_span_unknown(NULL), "internal macro registration requires an active expansion");
     const IdmSyntax *name = idm_syntax_get(args[0], err);
     if (!name) return false;
-    if (args[1].tag != IDM_VAL_INT) return idm_error_set(err, idm_span_unknown(NULL), "operator precedence must be an integer");
-    if (args[2].tag != IDM_VAL_ATOM && args[2].tag != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "operator assoc must be an atom");
-    if (args[3].tag != IDM_VAL_ATOM && args[3].tag != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "operator capture must be an atom or string");
-    const IdmSyntax *target = idm_syntax_get(args[4], err);
-    if (!target) return false;
-    const char *assoc = args[2].tag == IDM_VAL_ATOM ? idm_symbol_text(args[2].as.symbol) : idm_string_bytes(args[2]);
-    const char *capture = args[3].tag == IDM_VAL_ATOM ? idm_symbol_text(args[3].as.symbol) : idm_string_bytes(args[3]);
-    if (!rt->register_operator(rt->register_operator_user, rt, name, args[1].as.i, assoc, capture, target, err)) return false;
-    *out = idm_atom(rt, "ok");
-    return true;
-}
-
-static bool prim_expander_register_macro(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    if (!rt->register_macro) return idm_error_set(err, idm_span_unknown(NULL), "expander-register-macro requires an active expansion");
-    const IdmSyntax *name = idm_syntax_get(args[0], err);
-    if (!name) return false;
-    if (!idm_is_closure(args[1])) return idm_error_set(err, idm_span_unknown(NULL), "expander-register-macro transformer must be a function value");
+    if (!idm_is_closure(args[1])) return idm_error_set(err, idm_span_unknown(NULL), "internal macro registration transformer must be a function value");
     if (!rt->register_macro(rt->register_macro_user, rt, name, args[1], err)) return false;
     *out = idm_atom(rt, "ok");
     return true;
-}
-
-static bool prim_expander_surface(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    if (!rt->expander_surface) return idm_error_set(err, idm_span_unknown(NULL), "expander-surface requires an active expansion");
-    if (args[0].tag != IDM_VAL_ATOM) return idm_error_set(err, idm_span_unknown(NULL), "expander-surface expects an atom kind");
-    return rt->expander_surface(rt->expander_surface_user, rt, idm_symbol_text(args[0].as.symbol), out, err);
 }
 
 static bool prim_inspect(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
@@ -1327,7 +1143,7 @@ static bool prim_expand_check(IdmRuntime *rt, IdmValue *args, IdmValue *out, Idm
     IdmError inner;
     idm_error_init(&inner);
     IdmCore *core = NULL;
-    bool expanded = idm_expand_string(rt, "<expand-check>", source, &core, &inner);
+    bool expanded = idm_expand_source_string(rt, "<expand-check>", source, &core, &inner);
     bool compiled = false;
     if (expanded) {
         IdmBytecodeModule module;
@@ -1807,6 +1623,15 @@ static bool prim_syntax_int_value(IdmRuntime *rt, IdmValue *args, IdmValue *out,
     return true;
 }
 
+static bool prim_syntax_float_value(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt;
+    IdmSyntax *syn = require_syntax(args[0], err);
+    if (!syn) return false;
+    if (syn->kind != IDM_SYN_FLOAT) return idm_error_set(err, syn->span, "syntax-float-value expects float syntax");
+    *out = idm_float(syn->as.real);
+    return true;
+}
+
 static const char *require_string(IdmValue v, size_t *out_len, IdmError *err) {
     if (!idm_is_string(v)) {
         idm_error_set(err, idm_span_unknown(NULL), "expected string");
@@ -1821,217 +1646,6 @@ static IdmSyntax *make_word_syntax_from(IdmSyntax *ctx, const char *text, IdmErr
     if (!out) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
     if (!copy_scopes_from(out, ctx)) { idm_syn_free(out); idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
     return out;
-}
-
-static bool prim_make_syntax_word(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    const char *text = require_string(args[1], NULL, err);
-    if (!text) return false;
-    IdmSyntax *syn = make_word_syntax_from(ctx, text, err);
-    if (!syn) return false;
-    if (!add_active_intro_scope(rt, syn)) { idm_syn_free(syn); return idm_error_oom(err, ctx->span); }
-    return wrap_owned_syntax(rt, syn, out, err);
-}
-
-static bool prim_make_syntax_atom(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    const char *text = require_string(args[1], NULL, err);
-    if (!text) return false;
-    IdmSyntax *syn = idm_syn_atom(text, ctx->span);
-    if (!syn) return idm_error_oom(err, idm_span_unknown(NULL));
-    if (!copy_scopes_from(syn, ctx)) { idm_syn_free(syn); return idm_error_oom(err, idm_span_unknown(NULL)); }
-    if (!add_active_intro_scope(rt, syn)) { idm_syn_free(syn); return idm_error_oom(err, ctx->span); }
-    return wrap_owned_syntax(rt, syn, out, err);
-}
-
-static bool prim_make_syntax_int(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    if (args[1].tag != IDM_VAL_INT) return idm_error_set(err, ctx->span, "make-syntax-int expects int");
-    IdmSyntax *syn = idm_syn_int(args[1].as.i, ctx->span);
-    if (!syn) return idm_error_oom(err, idm_span_unknown(NULL));
-    if (!copy_scopes_from(syn, ctx)) { idm_syn_free(syn); return idm_error_oom(err, idm_span_unknown(NULL)); }
-    if (!add_active_intro_scope(rt, syn)) { idm_syn_free(syn); return idm_error_oom(err, ctx->span); }
-    return wrap_owned_syntax(rt, syn, out, err);
-}
-
-static bool prim_make_syntax_string(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    size_t len = 0;
-    const char *text = require_string(args[1], &len, err);
-    if (!text) return false;
-    IdmSyntax *syn = idm_syn_string_n(text, len, ctx->span);
-    if (!syn) return idm_error_oom(err, idm_span_unknown(NULL));
-    if (!copy_scopes_from(syn, ctx)) { idm_syn_free(syn); return idm_error_oom(err, idm_span_unknown(NULL)); }
-    if (!add_active_intro_scope(rt, syn)) { idm_syn_free(syn); return idm_error_oom(err, ctx->span); }
-    return wrap_owned_syntax(rt, syn, out, err);
-}
-
-static bool collect_list_of_syntax(IdmValue list, IdmSyntax ***out_items, size_t *out_count, IdmError *err) {
-    size_t count = 0;
-    IdmValue cur = list;
-    while (idm_is_pair(cur)) {
-        count++;
-        cur = idm_cdr(cur, err);
-        if (err && err->present) return false;
-    }
-    if (!idm_is_empty_list(cur)) return idm_error_set(err, idm_span_unknown(NULL), "expected proper list of syntax");
-    IdmSyntax **items = count == 0 ? NULL : calloc(count, sizeof(*items));
-    if (count != 0 && !items) return idm_error_oom(err, idm_span_unknown(NULL));
-    cur = list;
-    for (size_t i = 0; i < count; i++) {
-        IdmValue car = idm_car(cur, err);
-        if (err && err->present) { free(items); return false; }
-        IdmSyntax *inner = idm_syntax_value_get(car);
-        if (!inner) {
-            free(items);
-            return idm_error_set(err, idm_span_unknown(NULL), "list item must be a syntax value");
-        }
-        items[i] = idm_syn_clone(inner);
-        if (!items[i]) {
-            for (size_t j = 0; j < i; j++) idm_syn_free(items[j]);
-            free(items);
-            return idm_error_oom(err, idm_span_unknown(NULL));
-        }
-        cur = idm_cdr(cur, err);
-        if (err && err->present) {
-            for (size_t j = 0; j <= i; j++) idm_syn_free(items[j]);
-            free(items);
-            return false;
-        }
-    }
-    *out_items = items;
-    *out_count = count;
-    return true;
-}
-
-typedef enum {
-    SYNTAX_SEQ_LIST,
-    SYNTAX_SEQ_VECTOR,
-    SYNTAX_SEQ_TUPLE,
-    SYNTAX_SEQ_DICT
-} SyntaxSequenceKind;
-
-static void free_syntax_items(IdmSyntax **items, size_t count) {
-    for (size_t i = 0; i < count; i++) idm_syn_free(items[i]);
-    free(items);
-}
-
-static IdmSyntax *make_syntax_sequence_node(SyntaxSequenceKind kind, IdmSpan span) {
-    switch (kind) {
-        case SYNTAX_SEQ_LIST: return idm_syn_list(span);
-        case SYNTAX_SEQ_VECTOR: return idm_syn_vector(span);
-        case SYNTAX_SEQ_TUPLE: return idm_syn_tuple(span);
-        case SYNTAX_SEQ_DICT: return idm_syn_dict(span);
-    }
-    return NULL;
-}
-
-static bool prim_make_syntax_sequence(IdmRuntime *rt, IdmValue *args, IdmValue *out, SyntaxSequenceKind kind, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    IdmSyntax **items = NULL;
-    size_t count = 0;
-    if (!collect_list_of_syntax(args[1], &items, &count, err)) return false;
-    IdmSyntax *syn = make_syntax_sequence_node(kind, ctx->span);
-    if (!syn || !copy_scopes_from(syn, ctx)) {
-        idm_syn_free(syn);
-        free_syntax_items(items, count);
-        return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    if (!add_active_intro_scope(rt, syn)) {
-        idm_syn_free(syn);
-        free_syntax_items(items, count);
-        return idm_error_oom(err, ctx->span);
-    }
-    for (size_t i = 0; i < count; i++) {
-        if (!idm_syn_append(syn, items[i])) {
-            for (size_t j = i; j < count; j++) idm_syn_free(items[j]);
-            free(items);
-            idm_syn_free(syn);
-            return idm_error_oom(err, idm_span_unknown(NULL));
-        }
-    }
-    free(items);
-    return wrap_owned_syntax(rt, syn, out, err);
-}
-
-static bool prim_make_syntax_list(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    return prim_make_syntax_sequence(rt, args, out, SYNTAX_SEQ_LIST, err);
-}
-
-static bool prim_make_syntax_vector(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    return prim_make_syntax_sequence(rt, args, out, SYNTAX_SEQ_VECTOR, err);
-}
-
-static bool prim_make_syntax_tuple(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    return prim_make_syntax_sequence(rt, args, out, SYNTAX_SEQ_TUPLE, err);
-}
-
-static bool prim_make_syntax_dict(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    return prim_make_syntax_sequence(rt, args, out, SYNTAX_SEQ_DICT, err);
-}
-
-static IdmSyntax *syntax_form_sequence(IdmRuntime *rt, IdmSyntax *ctx, const char *head, IdmSyntax **items, size_t count, IdmError *err) {
-    (void)rt;
-    IdmSyntax *syn = idm_syn_list(ctx->span);
-    if (!syn) return NULL;
-    if (!copy_scopes_from(syn, ctx)) { idm_syn_free(syn); return NULL; }
-    IdmSyntax *head_syn = idm_syn_word(head, ctx->span);
-    if (!head_syn || !copy_scopes_from(head_syn, ctx) || !idm_syn_append(syn, head_syn)) {
-        idm_syn_free(head_syn);
-        idm_syn_free(syn);
-        return NULL;
-    }
-    for (size_t i = 0; i < count; i++) {
-        if (!idm_syn_append(syn, items[i])) {
-            for (size_t j = i; j < count; j++) idm_syn_free(items[j]);
-            idm_syn_free(syn);
-            return NULL;
-        }
-    }
-    if (!add_active_intro_scope(rt, syn)) { idm_syn_free(syn); idm_error_oom(err, ctx->span); return NULL; }
-    return syn;
-}
-
-static bool prim_make_syntax_expr(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    IdmSyntax **items = NULL;
-    size_t count = 0;
-    if (!collect_list_of_syntax(args[1], &items, &count, err)) return false;
-    IdmSyntax *syn = syntax_form_sequence(rt, ctx, "%-expr", items, count, err);
-    free(items);
-    if (!syn) return idm_error_oom(err, ctx->span);
-    return wrap_owned_syntax(rt, syn, out, err);
-}
-
-static bool prim_make_syntax_body(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    IdmSyntax **items = NULL;
-    size_t count = 0;
-    if (!collect_list_of_syntax(args[1], &items, &count, err)) return false;
-    IdmSyntax *syn = syntax_form_sequence(rt, ctx, "%-body", items, count, err);
-    free(items);
-    if (!syn) return idm_error_oom(err, ctx->span);
-    return wrap_owned_syntax(rt, syn, out, err);
-}
-
-static bool prim_make_syntax_group(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmSyntax *ctx = require_syntax(args[0], err);
-    if (!ctx) return false;
-    IdmSyntax *expr = require_syntax(args[1], err);
-    if (!expr) return false;
-    IdmSyntax *item = idm_syn_clone(expr);
-    if (!item) return idm_error_oom(err, ctx->span);
-    IdmSyntax *items[1] = { item };
-    IdmSyntax *syn = syntax_form_sequence(rt, ctx, "%-group", items, 1, err);
-    if (!syn) return idm_error_oom(err, ctx->span);
-    return wrap_owned_syntax(rt, syn, out, err);
 }
 
 static bool prim_syntax_error(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmError *err) {
@@ -2624,6 +2238,11 @@ static bool prim_job_signal(IdmRuntime *rt, IdmValue *args, IdmValue *out, IdmEr
 bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
     if (!require_arity(rt, prim, argc, err)) return false;
     switch (prim) {
+        case IDM_PRIM_COND:
+            *out = idm_value_ok(args[0]) ? args[1] : (argc == 3u ? args[2] : idm_nil());
+            (void)rt;
+            (void)err;
+            return true;
         case IDM_PRIM_CONS: return prim_cons(rt, args, out, err);
         case IDM_PRIM_FIRST: return prim_first(rt, args, out, err);
         case IDM_PRIM_REST: return prim_rest(rt, args, out, err);
@@ -2638,8 +2257,6 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_VECTOR_TO_LIST: return prim_vector_to_list(rt, args, out, err);
         case IDM_PRIM_TUPLE_TO_LIST: return prim_tuple_to_list(rt, args, out, err);
         case IDM_PRIM_SYNTAX_KIND: return prim_syntax_kind(rt, args, out, err);
-        case IDM_PRIM_SYNTAX_TO_DATUM: return prim_syntax_to_datum(rt, args, out, err);
-        case IDM_PRIM_DATUM_TO_SYNTAX: return prim_datum_to_syntax(rt, args, out, err);
         case IDM_PRIM_SYNTAX_PROPERTY: return prim_syntax_property(rt, args, out, err);
         case IDM_PRIM_SYNTAX_SET_PROPERTY: return prim_syntax_set_property(rt, args, out, err);
         case IDM_PRIM_SYNTAX_ORIGIN: return prim_syntax_origin(rt, args, out, err);
@@ -2655,9 +2272,7 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_SYNTAX_ADJACENT_PRED: return prim_syntax_adjacent_pred(rt, args, out, err);
         case IDM_PRIM_SYNTAX_STRING_TEXT: return prim_syntax_string_text(rt, args, out, err);
         case IDM_PRIM_STR_CONTAINS: return prim_str_contains(rt, args, out, err);
-        case IDM_PRIM_EXPANDER_REGISTER_OPERATOR: return prim_expander_register_operator(rt, args, out, err);
-        case IDM_PRIM_EXPANDER_REGISTER_MACRO: return prim_expander_register_macro(rt, args, out, err);
-        case IDM_PRIM_EXPANDER_SURFACE: return prim_expander_surface(rt, args, out, err);
+        case IDM_PRIM_INTERNAL_REGISTER_MACRO: return prim_internal_register_macro(rt, args, out, err);
         case IDM_PRIM_EXPAND_CHECK: return prim_expand_check(rt, args, out, err);
         case IDM_PRIM_INSPECT: return prim_inspect(rt, args, out, err);
         case IDM_PRIM_STR_LEN: return prim_str_len(rt, args, out, err);
@@ -2705,17 +2320,19 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_DICT_HAS: return prim_dict_has(rt, args, out, err);
         case IDM_PRIM_DICT_SIZE: return prim_dict_size(rt, args, out, err);
         case IDM_PRIM_SYNTAX_INT_VALUE: return prim_syntax_int_value(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_WORD: return prim_make_syntax_word(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_ATOM: return prim_make_syntax_atom(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_INT: return prim_make_syntax_int(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_STRING: return prim_make_syntax_string(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_LIST: return prim_make_syntax_list(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_VECTOR: return prim_make_syntax_vector(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_TUPLE: return prim_make_syntax_tuple(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_DICT: return prim_make_syntax_dict(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_EXPR: return prim_make_syntax_expr(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_BODY: return prim_make_syntax_body(rt, args, out, err);
-        case IDM_PRIM_MAKE_SYNTAX_GROUP: return prim_make_syntax_group(rt, args, out, err);
+        case IDM_PRIM_SYNTAX_FLOAT_VALUE: return prim_syntax_float_value(rt, args, out, err);
+        case IDM_PRIM_MAKE_SYNTAX_NIL: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_NIL, args[0], idm_nil(), out, err);
+        case IDM_PRIM_MAKE_SYNTAX_WORD: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_WORD, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_ATOM: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_ATOM, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_INT: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_INT, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_STRING: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_STRING, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_LIST: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_LIST, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_VECTOR: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_VECTOR, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_TUPLE: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_TUPLE, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_DICT: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_DICT, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_EXPR: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_EXPR, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_BODY: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_BODY, args[0], args[1], out, err);
+        case IDM_PRIM_MAKE_SYNTAX_GROUP: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_GROUP, args[0], args[1], out, err);
         case IDM_PRIM_SYNTAX_ERROR: return prim_syntax_error(rt, args, out, err);
         case IDM_PRIM_LOCAL_EXPAND: return prim_local_expand(rt, args, out, err);
         case IDM_PRIM_FREE_IDENTIFIER_EQ: return prim_free_identifier_eq(rt, args, out, err);
@@ -2756,7 +2373,6 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_PID_P:
         case IDM_PRIM_REF_P:
         case IDM_PRIM_PORT_P:
-        case IDM_PRIM_PRIMITIVE_P:
         case IDM_PRIM_REGEX_P:
         case IDM_PRIM_REGEX_RESULT_P:
             return prim_type_pred(rt, prim, args, out, err);
@@ -2859,16 +2475,4 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, IdmValue *args, uint32_t
         case IDM_PRIM_JOB_SIGNAL: return prim_job_signal(rt, args, out, err);
     }
     return idm_error_set(err, idm_span_unknown(NULL), "unimplemented primitive '%s'", idm_primitive_name(prim));
-}
-
-bool idm_prim_lookup_by_name(const char *name, IdmPrimitive *out) {
-    size_t count = idm_primitive_count();
-    for (size_t i = 0; i < count; i++) {
-        const IdmPrimitiveInfo *info = idm_primitive_info((IdmPrimitive)i);
-        if (info && strcmp(info->name, name) == 0) {
-            *out = (IdmPrimitive)i;
-            return true;
-        }
-    }
-    return false;
 }

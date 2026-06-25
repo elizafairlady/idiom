@@ -1,0 +1,44 @@
+use std/test
+activate Test
+
+suite do
+  test "non-kernel primitive homes are not ambient" do
+    assert-expand-error "abs (neg 3)" "unbound identifier 'abs'"
+    assert-expand-error "len \"abc\"" "unbound identifier 'len'"
+    assert-expand-error "raw-compile \"x\" \"\"" "unbound identifier 'raw-compile'"
+    assert-expand-error "env-get \"HOME\"" "unbound identifier 'env-get'"
+    assert-expand-error "args" "unbound identifier 'args'"
+    assert-expand-error "pwd" "unbound identifier 'pwd'"
+    assert-expand-error "tty-size" "unbound identifier 'tty-size'"
+    assert-expand-error "port-status :nil" "unbound identifier 'port-status'"
+    assert-expand-error "expand-check \"1\"" "unbound identifier 'expand-check'"
+  end
+
+  test "selected primitive homes import direct primitive clauses" do
+    math-result = do
+      use std/math with [abs]
+      abs (neg 7)
+    end
+    string-result = do
+      use std/string with [len]
+      len "abcd"
+    end
+    system-result = do
+      use std/system with [env-get]
+      env-get "IDIOM_PRELUDE_TEST_NO_SUCH_VAR"
+    end
+    assert-eq math-result 7
+    assert-eq string-result 4
+    assert-expand-error "use std/string with [len]\nslice \"abcd\" 1 3" "unbound identifier 'slice'"
+    assert-eq system-result :nil
+  end
+
+  test "declared package name does not grant primitive authority" do
+    assert-expand-error "package math\nexport defn spoof -> abs (neg 5)" "unbound identifier 'abs'"
+    spoof = do
+      use tests/pkg/math_spoof with [abs]
+      abs (neg 5)
+    end
+    assert-eq spoof {:spoof (neg 5)}
+  end
+end

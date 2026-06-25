@@ -1,4 +1,4 @@
 defn a x -> b x
 y = 1
 defn b x -> add x y
-a 41
+println (a 41)

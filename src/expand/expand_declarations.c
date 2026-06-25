@@ -26,38 +26,6 @@ static char *record_predicate_name(const char *record_name);
 static bool register_record_type_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *record_name, char *identity, bool exported, char **fields, size_t field_count, IdmSpan span, IdmCore **out_define, IdmCore **out_implement, IdmError *err);
 static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const IdmSyntax *name_syntax, const IdmSyntax *body, bool exported, IdmSyntax *const *items, size_t index, size_t count, IdmError *err);
 
-static bool resolve_artifact_parent_imports(ExpandContext *ctx, const IdmArtifact *art, IdmScopeId min_id, int64_t delta, UsePackageTransfer *out, IdmSpan span, IdmError *err) {
-    use_package_transfer_init(out);
-    size_t count = art ? art->import_count : 0u;
-    if (count == 0) return true;
-    for (size_t i = 0; i < count; i++) {
-        const IdmPkgGlobal *imp = &art->imports[i];
-        IdmScopeSet scopes;
-        idm_scope_set_init(&scopes);
-        if (!idm_scope_set_copy(&scopes, &imp->scopes)) {
-            use_package_transfer_destroy(out);
-            return idm_error_oom(err, span);
-        }
-        idm_scope_set_relocate(&scopes, min_id, delta);
-        const IdmBinding *binding = NULL;
-        IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, imp->name, ctx->phase, IDM_BIND_SPACE_DEFAULT, &scopes, &binding);
-        idm_scope_set_destroy(&scopes);
-        if (status == IDM_RESOLVE_AMBIGUOUS) {
-            use_package_transfer_destroy(out);
-            return idm_error_set(err, span, "ambiguous package local '%s' required by protocol", imp->name);
-        }
-        if (status != IDM_RESOLVE_OK || !binding || binding->kind != IDM_BIND_GLOBAL) {
-            use_package_transfer_destroy(out);
-            return idm_error_set(err, span, "protocol requires package local '%s'", imp->name);
-        }
-        if (!use_package_transfer_add(out, binding->payload, imp->slot, imp->name, span, err)) {
-            use_package_transfer_destroy(out);
-            return false;
-        }
-    }
-    return true;
-}
-
 static bool method_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_param_start, bool *out_has_body, IdmError *err) {
     if (!syn_is_form(form, "%-expr")) return false;
     if (form->as.seq.count < 3 || !syn_is_word(form->as.seq.items[1], "method") || form->as.seq.items[2]->kind != IDM_SYN_WORD) return false;
@@ -340,7 +308,7 @@ static IdmCore *protocol_decl_core(ExpandContext *ctx, const IdmSyntax *form, co
     IdmArtifact art;
     memset(&art, 0, sizeof(art));
     IdmScopeId scope_base = ctx->scope_store.next_scope;
-    if (!compile_package_module(ctx, body, identity, hash, ctx->package_globals, ctx->package_global_count, &art, err)) { free(identity); return NULL; }
+    if (!compile_package_module(ctx, body, identity, hash, ctx->package_slots, ctx->package_slot_count, &art, err)) { free(identity); return NULL; }
     art.scope_base = scope_base;
     art.scope_end = ctx->scope_store.next_scope;
     memcpy(art.src_hash, hash, 32u);
@@ -379,15 +347,7 @@ static IdmCore *protocol_decl_core(ExpandContext *ctx, const IdmSyntax *form, co
     IdmBytecodeModule *module = p->art.module ? relocated_module_copy(ctx, p->art.module, p->art.scope_base, 0, &fn_off, err) : NULL;
     if (p->art.module && !module) return NULL;
     uint32_t init_fn = p->art.init_fn;
-    UsePackageTransfer parent_imports;
-    if (!resolve_artifact_parent_imports(ctx, &p->art, 0, 0, &parent_imports, form->span, err)) {
-        if (module) { idm_bc_destroy(module); free(module); }
-        return NULL;
-    }
-    UsePackageTransfer runtime_exports;
-    use_package_transfer_init(&runtime_exports);
-    if (!append_artifact_runtime_exports(ctx, &p->art, 0, 0, false, &runtime_exports, form->span, err)) {
-        use_package_transfer_destroy(&parent_imports);
+    if (!install_artifact_runtime_slots(ctx, &p->art, NULL, 0, 0, false, form->span, err)) {
         if (module) { idm_bc_destroy(module); free(module); }
         return NULL;
     }
@@ -397,13 +357,20 @@ static IdmCore *protocol_decl_core(ExpandContext *ctx, const IdmSyntax *form, co
         if (!activated) {
             idm_error_oom(err, form->span);
         } else {
+            SurfaceCheckpoint activation_checkpoint;
+            surface_checkpoint(ctx, &activation_checkpoint);
             IdmArtifact art_view = ctx->protocols[payload].art;
-            activated = activate_artifact(ctx, runtime_name, &art_view, art_view.scope_base, &act_scopes, form->span, err) && record_activation(ctx, name, form->span, err);
+            char runtime_key[17];
+            artifact_provider_key(art_view.src_hash, runtime_key);
+            activated = activate_artifact(ctx, runtime_name, &art_view, art_view.scope_base, &act_scopes, form->span, err) &&
+                        record_activation(ctx, name, runtime_name, runtime_key, form->span, err);
+            if (!activated) {
+                surface_rollback(ctx, &activation_checkpoint);
+                ctx->scope_store.next_scope = activation_checkpoint.next_scope;
+            }
             idm_scope_set_destroy(&act_scopes);
         }
         if (!activated) {
-            use_package_transfer_destroy(&runtime_exports);
-            use_package_transfer_destroy(&parent_imports);
             if (module) { idm_bc_destroy(module); free(module); }
             if (err && err->present && err->span.line == 0) err->span = form->span;
             if (err && err->present && form->span.line != 0) idm_error_note(err, "while activating '%s' (%s:%u:%u)", name, form->span.file ? form->span.file : "<unknown>", form->span.line, form->span.column);
@@ -412,15 +379,13 @@ static IdmCore *protocol_decl_core(ExpandContext *ctx, const IdmSyntax *form, co
     }
     IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, false, err);
     if (!cont) {
-        use_package_transfer_destroy(&runtime_exports);
-        use_package_transfer_destroy(&parent_imports);
         if (module) { idm_bc_destroy(module); free(module); }
         return NULL;
     }
-    IdmCore *runtime = idm_core_use_package(idm_atom(ctx->rt, runtime_name), module, init_fn + fn_off, parent_imports.src, parent_imports.dst, parent_imports.names, parent_imports.count, runtime_exports.src, runtime_exports.dst, runtime_exports.names, runtime_exports.count, cont, form->span);
+    char runtime_key[17];
+    artifact_provider_key(p->art.src_hash, runtime_key);
+    IdmCore *runtime = idm_core_use_package(idm_atom(ctx->rt, runtime_key), module, init_fn + fn_off, cont, form->span);
     if (!runtime) {
-        use_package_transfer_destroy(&runtime_exports);
-        use_package_transfer_destroy(&parent_imports);
         if (module) { idm_bc_destroy(module); free(module); }
         idm_core_free(cont);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
@@ -623,41 +588,26 @@ static IdmCore *expand_external_protocol_runtime(ExpandContext *ctx, ProtocolDef
     const IdmArtifact *art = &p->art;
     IdmScopeId min_id = art->scope_base;
     int64_t delta = (int64_t)base - (int64_t)art->scope_base;
-    UsePackageTransfer runtime_exports;
-    use_package_transfer_init(&runtime_exports);
-    if (!append_artifact_runtime_exports(ctx, art, min_id, delta, true, &runtime_exports, span, err)) {
+    if (!install_artifact_runtime_slots(ctx, art, NULL, min_id, delta, true, span, err)) {
         return NULL;
     }
     bool init_pending = artifact_init_pending(ctx, art);
-    UsePackageTransfer parent_imports;
-    use_package_transfer_init(&parent_imports);
-    if (init_pending && art->module &&
-        !resolve_artifact_parent_imports(ctx, art, p->provider_scope_base, p->provider_scope_delta, &parent_imports, span, err)) {
-        use_package_transfer_destroy(&runtime_exports);
-        return NULL;
-    }
     IdmCore *cont = expand_body_items(ctx, items, index + 1u, count, false, err);
-    if (!cont) {
-        use_package_transfer_destroy(&runtime_exports);
-        use_package_transfer_destroy(&parent_imports);
-        return NULL;
-    }
-    if ((!init_pending || !art->module) && runtime_exports.count == 0) return cont;
+    if (!cont) return NULL;
+    if (!init_pending || !art->module) return cont;
     uint32_t fn_off = 0;
     IdmBytecodeModule *module = NULL;
     if (init_pending && art->module) {
         module = relocated_module_copy(ctx, art->module, min_id, delta, &fn_off, err);
         if (!module) {
-            use_package_transfer_destroy(&runtime_exports);
-            use_package_transfer_destroy(&parent_imports);
             idm_core_free(cont);
             return NULL;
         }
     }
-    IdmCore *runtime = idm_core_use_package(idm_atom(ctx->rt, p->name), module, art->init_fn + fn_off, parent_imports.src, parent_imports.dst, parent_imports.names, parent_imports.count, runtime_exports.src, runtime_exports.dst, runtime_exports.names, runtime_exports.count, cont, span);
+    char runtime_key[17];
+    artifact_provider_key(art->src_hash, runtime_key);
+    IdmCore *runtime = idm_core_use_package(idm_atom(ctx->rt, runtime_key), module, art->init_fn + fn_off, cont, span);
     if (!runtime) {
-        use_package_transfer_destroy(&runtime_exports);
-        use_package_transfer_destroy(&parent_imports);
         idm_bc_destroy(module);
         free(module);
         idm_core_free(cont);
@@ -675,10 +625,18 @@ IdmCore *expand_activate(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmSy
     IdmScopeSet act_scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &act_scopes)) return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     IdmScopeId base = 0;
+    SurfaceCheckpoint activation_checkpoint;
+    surface_checkpoint(ctx, &activation_checkpoint);
     bool activated = p->external ? artifact_base(ctx, &p->art, &base, err) : (base = p->art.scope_base, true);
+    char runtime_key[17];
+    artifact_provider_key(p->art.src_hash, runtime_key);
     activated = activated &&
                 activate_artifact(ctx, p->name, &p->art, base, &act_scopes, span, err) &&
-                record_activation(ctx, name, span, err);
+                record_activation(ctx, name, p->name, runtime_key, span, err);
+    if (!activated) {
+        surface_rollback(ctx, &activation_checkpoint);
+        ctx->scope_store.next_scope = activation_checkpoint.next_scope;
+    }
     idm_scope_set_destroy(&act_scopes);
     if (!activated) {
         if (err && err->present && err->span.line == 0) err->span = span;
@@ -839,7 +797,7 @@ static bool parse_record_fields(const IdmSyntax *body, char ***out_fields, size_
 }
 
 IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const char *field, IdmSpan span, IdmError *err) {
-    IdmCore *call = expand_primitive_call(IDM_PRIM_RECORD_FIELD, span, err);
+    IdmCore *call = expand_primitive_clause_call(IDM_PRIM_RECORD_FIELD, span, err);
     if (!call) { idm_core_free(receiver); return NULL; }
     if (!core_call_add_arg_or_free(call, receiver, err, span) ||
         !core_call_add_arg_or_free(call, idm_core_literal(idm_atom(ctx->rt, field), span), err, span)) {
@@ -849,7 +807,7 @@ IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const c
 }
 
 static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, const char *identity, char **fields, size_t field_count, IdmSpan span, IdmError *err) {
-    IdmCore *dict = expand_primitive_call(IDM_PRIM_DICT, span, err);
+    IdmCore *dict = expand_primitive_clause_call(IDM_PRIM_DICT, span, err);
     if (!dict) return NULL;
     for (size_t i = 0; i < field_count; i++) {
         if (!core_call_add_arg_or_free(dict, idm_core_literal(idm_atom(ctx->rt, fields[i]), span), err, span) ||
@@ -857,7 +815,7 @@ static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_nam
             return NULL;
         }
     }
-    IdmCore *make = expand_primitive_call(IDM_PRIM_MAKE_RECORD, span, err);
+    IdmCore *make = expand_primitive_clause_call(IDM_PRIM_MAKE_RECORD, span, err);
     if (!make) { idm_core_free(dict); return NULL; }
     if (!core_call_add_arg_or_free(make, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span)) { idm_core_free(dict); return NULL; }
     if (!core_call_add_arg_or_free(make, dict, err, span)) return NULL;
@@ -870,7 +828,7 @@ static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_nam
 }
 
 static IdmCore *record_predicate_fn(ExpandContext *ctx, const char *identity, const char *predicate_name, IdmSpan span, IdmError *err) {
-    IdmCore *call = expand_primitive_call(IDM_PRIM_IS_A_P, span, err);
+    IdmCore *call = expand_primitive_clause_call(IDM_PRIM_IS_A_P, span, err);
     if (!call) return NULL;
     if (!core_call_add_arg_or_free(call, idm_core_arg_ref("value", 0u, span), err, span) ||
         !core_call_add_arg_or_free(call, idm_core_literal(idm_atom(ctx->rt, identity), span), err, span)) {
@@ -994,7 +952,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     }
     IdmArity constructor_arity = idm_arity_exact((uint32_t)field_count);
     IdmArity predicate_arity = idm_arity_exact(1u);
-    bool ok = top_level ? global_push_def_binder_with_arity(ctx, record_name, name_syntax, constructor_arity, &constructor_slot) : local_push_def_binder_with_arity(ctx, record_name, name_syntax, constructor_arity, &constructor_slot);
+    bool ok = top_level ? env_push_def_binder_with_arity(ctx, record_name, name_syntax, constructor_arity, &constructor_slot) : local_push_def_binder_with_arity(ctx, record_name, name_syntax, constructor_arity, &constructor_slot);
     IdmSyntax *predicate_syntax = NULL;
     if (ok) {
         predicate_syntax = idm_syn_word(predicate_name, name_syntax->span);
@@ -1004,7 +962,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         const IdmScopeSet *scopes = idm_syn_scope_set(name_syntax, 0);
         if (scopes) for (size_t i = 0; i < scopes->count && ok; i++) ok = idm_syn_scope_add(predicate_syntax, 0, scopes->items[i]);
     }
-    if (ok) ok = top_level ? global_push_def_binder_with_arity(ctx, predicate_name, predicate_syntax, predicate_arity, &predicate_slot) : local_push_def_binder_with_arity(ctx, predicate_name, predicate_syntax, predicate_arity, &predicate_slot);
+    if (ok) ok = top_level ? env_push_def_binder_with_arity(ctx, predicate_name, predicate_syntax, predicate_arity, &predicate_slot) : local_push_def_binder_with_arity(ctx, predicate_name, predicate_syntax, predicate_arity, &predicate_slot);
     if (!ok) {
         if (!top_level) local_pop_to(ctx, saved_count, saved_next);
         idm_syn_free(predicate_syntax);
@@ -1018,8 +976,8 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         IdmScopeSet record_scopes;
         idm_scope_set_init(&record_scopes);
         if (!syntax_scopes_copy(&record_scopes, name_syntax)) ok = false;
-        if (ok && !record_package_global(ctx, record_name, constructor_slot, &record_scopes, constructor_arity)) ok = false;
-        if (ok && !record_package_global(ctx, predicate_name, predicate_slot, &record_scopes, predicate_arity)) ok = false;
+        if (ok && !record_package_slot(ctx, record_name, constructor_slot, &record_scopes, constructor_arity)) ok = false;
+        if (ok && !record_package_slot(ctx, predicate_name, predicate_slot, &record_scopes, predicate_arity)) ok = false;
         if (ok && exported && !record_export(ctx, record_name, constructor_slot, constructor_arity)) ok = false;
         if (ok && exported && !record_export(ctx, predicate_name, predicate_slot, predicate_arity)) ok = false;
         idm_scope_set_destroy(&record_scopes);
@@ -1069,7 +1027,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         record_field_names_destroy(fields, field_count);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
     }
-    if (top_level) idm_core_letrec_set_global(letrec);
+    if (top_level) idm_core_letrec_set_env(letrec);
     bool letrec_ok = idm_core_letrec_add(letrec, record_name, constructor_slot, constructor);
     if (letrec_ok) constructor = NULL;
     if (letrec_ok) {

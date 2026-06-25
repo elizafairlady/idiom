@@ -67,6 +67,19 @@ suite do
     end
     assert-inspect {(pick 4) (pick 4 9) (4.pick) (4.pick 9)} "{4 36 4 36}"
   end
+  test "method implementation clauses use selector patterns and guards" do
+    trait MethodClausePick do
+      method classify x
+    end
+    implement MethodClausePick on tuple do
+      method classify do
+        {:tag n} when n > 3 -> {:big n}
+        {:tag n} -> {:small n}
+        _ -> :other
+      end
+    end
+    assert-inspect {(classify {:tag 5}) (classify {:tag 2}) (classify {:other 1})} "{{:big 5} {:small 2} :other}"
+  end
   test "implement method arity set must match trait contract" do
     assert-expand-error "trait NarrowImpl do\n  method pick do\n    x -> x\n    x y -> y\n  end\nend\nimplement NarrowImpl on int do\n  method pick x -> x\nend" "arity mismatch"
   end
@@ -92,7 +105,7 @@ suite do
     assert-expand-error "do\n  trait S do\n    method sz x\n  end\n  :ok\nend\nsz 1" "unbound identifier 'sz'"
     assert-expand-error "do\n  protocol Shellp do\n    operator <!!> precedence: 50 assoc: left capture: :infix do\n      a b -> a\n    end\n  end\n  :ok\nend\n1 <!!> 2" "unbound identifier"
   end
-  test "dispatch-cache-does-not-misserve-across-types" do
+  test "trait-dispatch-selects-by-receiver-type" do
     trait Tag do method tag x end
     implement Tag on int do method tag x -> :int end
     implement Tag on string do method tag x -> :str end

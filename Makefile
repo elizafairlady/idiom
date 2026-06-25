@@ -109,10 +109,10 @@ perf-compare: release
 	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --base-ref $(PERF_BASE_REF) --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) $(PERF_ARGS)
 
 perf-profile: release
-	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --with-sealed --dump-dir build/perf-dumps --callgrind-dir build/perf-callgrind --json-out build/perf-profile.json $(PERF_ARGS)
+	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --idiom-lanes source-hit,source-fill,source-nocache,build-hit,build-fill,build-nocache,sealed-hit,sealed-nocache --dump-dir build/perf-dumps --callgrind-dir build/perf-callgrind --json-out build/perf-profile.json $(PERF_ARGS)
 
 perf-editor: release
-	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --cases editor_keys,editor_line,editor_buffer,editor_markers,editor_syntax,editor_render --runtimes idiom-current,elisp $(PERF_ARGS)
+	@$(PERF_ENV) python3 tools/perf_suite.py --idiom-current ./build/release/idiomc --runs $(PERF_RUNS) --warmups $(PERF_WARMUPS) --cases editor_keys,editor_line,editor_buffer,editor_markers,editor_syntax,editor_render --runtimes idiom-current-source-hit,elisp $(PERF_ARGS)
 
 build/tsan/idiomc: $(LIB_SRCS) src/cli/main.c
 	mkdir -p build/tsan

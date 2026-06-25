@@ -3,12 +3,12 @@
 static void test_source_operator_surface(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
-    check_operator_eval(&rt, "84 / 2\n", "((prim div) 84 2)", 42);
-    check_operator_eval(&rt, "142 % 100\n", "((prim mod) 142 100)", 42);
-    check_operator_eval(&rt, "2 ** 5 + 10\n", "((prim add) ((prim pow) 2 5) 10)", 42);
-    check_operator_eval(&rt, "2 ** 3 ** 2\n", "((prim pow) 2 ((prim pow) 3 2))", 512);
-    check_operator_eval(&rt, "50 + -8\n", "((prim add) 50 -8)", 42);
-    check_operator_eval(&rt, "50 + - 8\n", "((prim add) 50 ((prim neg) 8))", 42);
+    check_operator_eval(&rt, "84 / 2\n", NULL, 42);
+    check_operator_eval(&rt, "142 % 100\n", NULL, 42);
+    check_operator_eval(&rt, "2 ** 5 + 10\n", NULL, 42);
+    check_operator_eval(&rt, "2 ** 3 ** 2\n", NULL, 512);
+    check_operator_eval(&rt, "50 + -8\n", NULL, 42);
+    check_operator_eval(&rt, "50 + - 8\n", NULL, 42);
     check_operator_eval(&rt, "x = -5\nx + 47\n", NULL, 42);
     check_operator_eval(&rt, "if (3 != 4) do 42 else do 0 end\n", NULL, 42);
     check_operator_eval(&rt, "if (3 != 3) do 0 else do 42 end\n", NULL, 42);
@@ -76,16 +76,19 @@ static void test_source_operator(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<operator-expand-test>", "1 + 2 * 3\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<operator-expand-test>", "1 + 2 * 3\n", &core, &err));
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "((prim add) 1 ((prim mul) 2 3))");
+    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
+    CHECK(strstr(dump.data, "((fn-multi mul (/2..2 primitive mul)") != NULL);
+    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 7);
@@ -93,9 +96,10 @@ static void test_source_operator(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<operator-expand-test>", "if (2 <= 2) do 42 else do 0 end\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<operator-expand-test>", "if (2 <= 2) do 42 else do 0 end\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -103,9 +107,10 @@ static void test_source_operator(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<operator-expand-test>", "if (2 >= 2) do 42 else do 0 end\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<operator-expand-test>", "if (2 >= 2) do 42 else do 0 end\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -113,9 +118,10 @@ static void test_source_operator(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<operator-expand-test>", "add (div 80 2) (mod 5 3)\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<operator-expand-test>", "add (div 80 2) (mod 5 3)\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -123,9 +129,10 @@ static void test_source_operator(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<operator-expand-test>", "add (pow 6 2) 6\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<operator-expand-test>", "add (pow 6 2) 6\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -133,14 +140,15 @@ static void test_source_operator(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(!idm_expand_string(&rt, "<operator-expand-test>", "add 1 nope\n", &core, &err));
+    CHECK(!idm_expand_source_string(&rt, "<operator-expand-test>", "add 1 nope\n", &core, &err));
     CHECK(err.present);
     idm_error_clear(&err);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<operator-expand-test>", "x = 2\nx * 20 + 2\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<operator-expand-test>", "x = 2\nx * 20 + 2\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -156,16 +164,20 @@ static void test_source_fn(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<fn-expand-test>", "inc = fn x -> add x 1\ninc 41\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<fn-expand-test>", "inc = fn x -> add x 1\ninc 41\n", &core, &err));
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(bind-local inc#0 (fn <lambda>/1 ((prim add) ((arg x#0)) 1)) ((local inc#0) 41))");
+    CHECK(strstr(dump.data, "(bind-local inc#0") != NULL);
+    CHECK(strstr(dump.data, "(fn <lambda>/1") != NULL);
+    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
+    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -174,9 +186,10 @@ static void test_source_fn(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<fn-expand-test>", "inc = fn x do add x 1 end\ninc 41\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<fn-expand-test>", "inc = fn x do add x 1 end\ninc 41\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -184,9 +197,10 @@ static void test_source_fn(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<fn-expand-test>", "x = 1\nf = fn y -> add x y\nf 2\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<fn-expand-test>", "x = 1\nf = fn y -> add x y\nf 2\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 3);
     CHECK(!err.present);
@@ -194,9 +208,10 @@ static void test_source_fn(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<fn-expand-test>", "f = fn x x -> x\nf 3 3\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<fn-expand-test>", "f = fn x x -> x\nf 3 3\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 3);
     CHECK(!err.present);
@@ -204,9 +219,10 @@ static void test_source_fn(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<fn-expand-test>", "f = fn x x -> x\nf 3 4\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<fn-expand-test>", "f = fn x x -> x\nf 3 4\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(!idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(err.present);
     idm_bc_destroy(&module);
@@ -221,22 +237,26 @@ static void test_source_defn_letrec(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(!idm_expand_string(&rt, "<definition-expand-test>", "def inc x -> add x 1\ninc 41\n", &core, &err));
+    CHECK(!idm_expand_source_string(&rt, "<definition-expand-test>", "def inc x -> add x 1\ninc 41\n", &core, &err));
     CHECK(err.present);
     CHECK(core == NULL);
     idm_error_clear(&err);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<definition-expand-test>", "defn inc x -> x + 1\ninc 41\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<definition-expand-test>", "defn inc x -> x + 1\ninc 41\n", &core, &err));
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(letrec ((inc#0 (fn inc/1 ((prim add) ((arg x#0)) 1)))) ((global inc#0) 41))");
+    CHECK(strstr(dump.data, "(letrec") != NULL);
+    CHECK(strstr(dump.data, "(fn inc/1") != NULL);
+    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
+    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -245,9 +265,10 @@ static void test_source_defn_letrec(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<definition-expand-test>", "defn f x -> g x\ndefn g x -> x + 1\nf 41\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<definition-expand-test>", "defn f x -> g x\ndefn g x -> x + 1\nf 41\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -255,9 +276,10 @@ static void test_source_defn_letrec(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<definition-expand-test>", "defn f 0 -> 40\ndefn f n -> n\nadd (f 0) 2\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<definition-expand-test>", "defn f 0 -> 40\ndefn f n -> n\nadd (f 0) 2\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -265,9 +287,10 @@ static void test_source_defn_letrec(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<definition-expand-test>", "defn f 0 -> 0\ndefn f n -> n\nf 7\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<definition-expand-test>", "defn f 0 -> 0\ndefn f n -> n\nf 7\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 7);
     CHECK(!err.present);
@@ -275,9 +298,10 @@ static void test_source_defn_letrec(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<definition-expand-test>", "defn sumdown n -> cond (n < 1) 0 (n + sumdown (n - 1))\nsumdown 5\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<definition-expand-test>", "defn sumdown n -> cond (n < 1) 0 (n + sumdown (n - 1))\nsumdown 5\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 15);
     CHECK(!err.present);
@@ -292,11 +316,12 @@ static void test_source_match(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match 0 do\n  0 -> 42\n  n -> n\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match 0 do\n  0 -> 42\n  n -> n\nend\n", &core, &err));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -305,9 +330,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match 7 do\n  0 -> 0\n  n -> n\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match 7 do\n  0 -> 0\n  n -> n\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 7);
     CHECK(!err.present);
@@ -315,9 +341,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "x = 40\nmatch 2 do\n  n -> x + n\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "x = 40\nmatch 2 do\n  n -> x + n\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -325,9 +352,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match [1 2] do\n  [1 2] -> 42\n  _ -> 0\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match [1 2] do\n  [1 2] -> 42\n  _ -> 0\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -335,9 +363,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match [1 2] do\n  [1 2] -> 42\n  _ -> 0\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match [1 2] do\n  [1 2] -> 42\n  _ -> 0\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -345,9 +374,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match [1 2 3] do\n  [h . t] -> t\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match [1 2 3] do\n  [h . t] -> t\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     IdmBuffer vec_buf;
     idm_buf_init(&vec_buf);
@@ -359,9 +389,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match {:ok 42} do\n  {:ok 42} -> 42\n  _ -> 0\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match {:ok 42} do\n  {:ok 42} -> 42\n  _ -> 0\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -369,9 +400,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match {1 2 3} do\n  {h . t} -> t\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match {1 2 3} do\n  {h . t} -> t\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     IdmBuffer tuple_buf;
     idm_buf_init(&tuple_buf);
@@ -383,9 +415,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match [1 2] do\n  [h t] -> h\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match [1 2] do\n  [h t] -> h\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 1);
     CHECK(!err.present);
@@ -393,9 +426,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match [1 2 3] do\n  [h . t] -> h\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match [1 2 3] do\n  [h . t] -> h\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 1);
     CHECK(!err.present);
@@ -403,9 +437,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match [1 2 3] do\n  [h x . t] -> x\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match [1 2 3] do\n  [h x . t] -> x\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 2);
     CHECK(!err.present);
@@ -413,9 +448,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "defn head [h . t] -> h\nhead [42 0]\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "defn head [h . t] -> h\nhead [42 0]\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -423,9 +459,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match %{:a 42 :b 0} do\n  %{:a 42} -> 42\n  _ -> 0\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match %{:a 42 :b 0} do\n  %{:a 42} -> 42\n  _ -> 0\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -433,9 +470,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match %{:a 42} do\n  %{:a x} -> x\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match %{:a 42} do\n  %{:a x} -> x\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -443,9 +481,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match {:ok \"no\"} do\n  {:ok x} when x < 0 -> 1\n  {:ok x} -> 42\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match {:ok \"no\"} do\n  {:ok x} when x < 0 -> 1\n  {:ok x} -> 42\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -453,9 +492,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "defn f n when n < 0 -> 0\ndefn f n -> n\nf 42\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "defn f n when n < 0 -> 0\ndefn f n -> n\nf 42\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -463,9 +503,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "defn f n when n == 42 -> 42\ndefn f n -> 0\nf 42\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "defn f n when n == 42 -> 42\ndefn f n -> 0\nf 42\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -473,9 +514,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "f = fn x when x == 42 -> x\nf 42\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "f = fn x when x == 42 -> x\nf 42\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
@@ -483,9 +525,10 @@ static void test_source_match(void) {
     idm_core_free(core);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<match-expand-test>", "match 1 do\n  0 -> 0\nend\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<match-expand-test>", "match 1 do\n  0 -> 0\nend\n", &core, &err));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(!idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(err.present);
     idm_error_clear(&err);

@@ -1,4 +1,5 @@
 use std/test
+use std/system with [cd pwd]
 import std/file as File
 activate Test
 use std/enum

@@ -1,4 +1,4 @@
 tests/diag/shell-amp.id:3:8: error: '&' is only allowed at the end of a command
-  in check-amp (app/ish:1739)
-  in grammar (app/ish:1917)
-  in grammar expansion of 'echo' (tests/diag/shell-amp.id:3:1)
+  in check-amp (app/ish:1732)
+  in _ (app/ish:1910)
+  in core syntax expansion of 'echo' (tests/diag/shell-amp.id:3:1)

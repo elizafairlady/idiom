@@ -2,6 +2,7 @@ package ish
 
 export protocol Shell do
   use std/string
+  use std/system with [chdir pwd]
   import std/file as File
 
   defn shell-ok? r -> eq? (tuple-get r 0) :ok
@@ -97,7 +98,7 @@ export protocol Shell do
       p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
       p when (string-syntax? p) -> syntax-string-text p
       p when (and (syntax? p) (syntax-int? p)) -> "#{syntax-int-value p}"
-      p when (float-syntax? p) -> "#{syntax->datum p}"
+      p when (float-syntax? p) -> "#{syntax-float-value p}"
       _ -> :nil
     end
   
@@ -143,7 +144,7 @@ export protocol Shell do
 
   defn shell-jobs-print do
     '() -> :nil
-    (list {n mark status text _port} . t) -> do
+    '({n mark status text _port} . t) -> do
       job-line n mark status text |> println
       shell-jobs-print t
     end
@@ -206,7 +207,7 @@ export protocol Shell do
     %`(bg %,n) -> %`(bg-cmd %,n)
   end
   
-  grammar do
+  core-syntax _ do
     form -> do
     defn head-is? do
       node name when (and (syntax? node) (syntax-list? node)) ->
@@ -232,17 +233,6 @@ export protocol Shell do
   
     defn part-word-is? node text -> eq? (word-text node) text
   
-    defn active-operator? do
-      _ _ '() -> :false
-      text capture (list entry . rest) ->
-        cond (and (eq? (str (tuple-get entry 0)) text) (eq? (str (tuple-get entry 3)) capture)) :true (active-operator? text capture rest)
-    end
-  
-    defn operator-word? do
-      node capture when (word-syntax? node) -> active-operator? (syntax-word-text node) capture (expander-surface :operators)
-      _ _ -> :false
-    end
-  
     defn redir-op-name? do
       ">" -> :true
       ">>" -> :true
@@ -254,26 +244,26 @@ export protocol Shell do
   
     defn redir-op? node -> match (word-text node) do
       :nil -> :false
-      text -> and (redir-op-name? text) (operator-word? node "infix")
+      text -> redir-op-name? text
     end
   
-    defn dup-op? node -> and (word-is? node ">&") (operator-word? node "infix")
-    defn pipe-op? node -> and (word-is? node "|") (operator-word? node "infix")
-    defn and-op? node -> and (word-is? node "&&") (operator-word? node "infix")
-    defn or-op? node -> and (word-is? node "||") (operator-word? node "infix")
-    defn background-op? node -> and (word-is? node "&") (operator-word? node "postfix")
-    defn heredoc-op? node -> and (word-is? node "<<") (operator-word? node "infix sentinel")
+    defn dup-op? node -> word-is? node ">&"
+    defn pipe-op? node -> word-is? node "|"
+    defn and-op? node -> word-is? node "&&"
+    defn or-op? node -> word-is? node "||"
+    defn background-op? node -> word-is? node "&"
+    defn heredoc-op? node -> word-is? node "<<"
   
     defn command-continuation-op? node ->
       or (pipe-op? node) (or (and-op? node) (or-op? node))
   
     defn incomplete-command-tail? do
       '() -> :false
-      (list h) -> or (command-continuation-op? h) (or (background-op? h) (or (heredoc-op? h) (or (redir-op? h) (dup-op? h))))
-      (list a b) when (and (int-syntax? a) (redir-op? b) (syntax-adjacent? b)) -> :true
-      (list a b) when (and (int-syntax? a) (dup-op? b) (syntax-adjacent? b)) -> :true
-      (list a b) when (and (dup-op? a) (int-syntax? b) (syntax-adjacent? b)) -> :false
-      (list _ . t) -> incomplete-command-tail? t
+      '(h) -> or (command-continuation-op? h) (or (background-op? h) (or (heredoc-op? h) (or (redir-op? h) (dup-op? h))))
+      '(a b) when (and (int-syntax? a) (redir-op? b) (syntax-adjacent? b)) -> :true
+      '(a b) when (and (int-syntax? a) (dup-op? b) (syntax-adjacent? b)) -> :true
+      '(a b) when (and (dup-op? a) (int-syntax? b) (syntax-adjacent? b)) -> :false
+      '(_ . t) -> incomplete-command-tail? t
     end
   
     defn glob-text? t -> or (contains? t "*") (contains? t "?")
@@ -384,7 +374,7 @@ export protocol Shell do
   
     defn drop-n do
       parts 0 -> parts
-      (list _ . t) k -> drop-n t (sub k 1)
+      '(_ . t) k -> drop-n t (sub k 1)
     end
   
     defn sentinel-name node -> match (word-text node) do
@@ -397,14 +387,14 @@ export protocol Shell do
       p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
       p when (and (syntax? p) (eq? (syntax-kind p) :string)) -> syntax-string-text p
       p when (int-syntax? p) -> "#{syntax-int-value p}"
-      p when (float-syntax? p) -> "#{syntax->datum p}"
+      p when (float-syntax? p) -> "#{syntax-float-value p}"
       _ -> ""
     end
   
     defn heredoc-join do
       '() acc -> acc
-      (list h . t) "" -> heredoc-join t (heredoc-token-text h)
-      (list h . t) acc -> heredoc-join t "${acc}\n${heredoc-token-text h}"
+      '(h . t) "" -> heredoc-join t (heredoc-token-text h)
+      '(h . t) acc -> heredoc-join t "${acc}\n${heredoc-token-text h}"
     end
   
     defn heredoc-text do
@@ -417,20 +407,20 @@ export protocol Shell do
   
     defn split-heredoc-body do
       sentinel '() _ -> syntax-error form "'<<' sentinel '${sentinel}' was not closed"
-      sentinel (list h . t) acc when (eq? (word-text h) sentinel) -> {acc t}
-      sentinel (list h . t) acc -> split-heredoc-body sentinel t (append acc (cons h '()))
+      sentinel '(h . t) acc when (eq? (word-text h) sentinel) -> {acc t}
+      sentinel '(h . t) acc -> split-heredoc-body sentinel t (append acc (cons h '()))
     end
   
     defn mk-heredoc-redir fdn body ->
       %`{:redir %,(make-syntax-atom form "<") %,(make-syntax-int form fdn) {:temp (write-heredoc-temp %,(make-syntax-string form (heredoc-text body)))}}
   
     defn fd-heredoc? do
-      (list a b _ . _) -> and (int-syntax? a) (heredoc-op? b) (syntax-adjacent? b)
+      '(a b _ . _) -> and (int-syntax? a) (heredoc-op? b) (syntax-adjacent? b)
       _ -> :false
     end
   
     defn plain-heredoc? do
-      (list a _ . _) -> heredoc-op? a
+      '(a _ . _) -> heredoc-op? a
       _ -> :false
     end
   
@@ -450,22 +440,22 @@ export protocol Shell do
     end
   
     defn fd-redir? do
-      (list a b _ . _) -> and (int-syntax? a) (redir-op? b) (syntax-adjacent? b)
+      '(a b _ . _) -> and (int-syntax? a) (redir-op? b) (syntax-adjacent? b)
       _ -> :false
     end
   
     defn fd-dup3? do
-      (list a b c . _) -> and (int-syntax? a) (dup-op? b) (syntax-adjacent? b) (int-syntax? c) (syntax-adjacent? c)
+      '(a b c . _) -> and (int-syntax? a) (dup-op? b) (syntax-adjacent? b) (int-syntax? c) (syntax-adjacent? c)
       _ -> :false
     end
   
     defn dup2? do
-      (list a b . _) -> and (dup-op? a) (int-syntax? b) (syntax-adjacent? b)
+      '(a b . _) -> and (dup-op? a) (int-syntax? b) (syntax-adjacent? b)
       _ -> :false
     end
   
     defn plain-redir? do
-      (list a _ . _) -> redir-op? a
+      '(a _ . _) -> redir-op? a
       _ -> :false
     end
   
@@ -498,23 +488,23 @@ export protocol Shell do
     end
   
     defn run-len do
-      (list _ n . t) when (and (part-adjacent? n) (seg? n)) -> add 1 (run-len (cons n t))
+      '(_ n . t) when (and (part-adjacent? n) (seg? n)) -> add 1 (run-len (cons n t))
       _ -> 1
     end
   
     defn run-text do
       _ 0 -> ""
-      (list h . t) k -> "#{seg-text h}#{run-text t (sub k 1)}"
+      '(h . t) k -> "#{seg-text h}#{run-text t (sub k 1)}"
     end
   
     defn run-glob? do
       _ 0 -> :false
-      (list h . t) k -> or (seg-glob? h) (run-glob? t (sub k 1))
+      '(h . t) k -> or (seg-glob? h) (run-glob? t (sub k 1))
     end
   
     defn run-dynamic? do
       _ 0 -> :false
-      (list h . t) k -> or (var-seg? h) (interp-seg? h) (command-sub? h) (run-dynamic? t (sub k 1))
+      '(h . t) k -> or (var-seg? h) (interp-seg? h) (command-sub? h) (run-dynamic? t (sub k 1))
     end
   
     defn seg-cat-part do
@@ -534,7 +524,7 @@ export protocol Shell do
   
     defn cat-parts do
       _ _ 0 -> '()
-      (list h . t) segf k -> cons (segf h) (cat-parts t segf (sub k 1))
+      '(h . t) segf k -> cons (segf h) (cat-parts t segf (sub k 1))
     end
   
     defn mk-run do
@@ -600,15 +590,15 @@ export protocol Shell do
         n = run-len parts
         add-arg (mk-run parts n) (scan-body (drop-n parts n))
       end
-      (list h . t) -> add-arg (part->arg h) (scan-body t)
+      '(h . t) -> add-arg (part->arg h) (scan-body t)
     end
   
-    defn eq-empty-word? p -> and (head-is? p "%-word") (eq? (syntax-string-text (syntax-nth p 1)) "=")
+    defn eq-empty-word? p -> or (word-is? p "=") (and (head-is? p "%-word") (eq? (syntax-string-text (syntax-nth p 1)) "="))
   
     defn env-entry do
-      (list a b . _) when (and (word-syntax? a) (syntax-adjacent? b) (eq-empty-word? b)) ->
+      '(a b c . _) when (and (word-syntax? a) (syntax-adjacent? b) (eq-empty-word? b) (eq? (part-adjacent? c) :false)) ->
         {(syntax-word-text a) %`{:lit ""} 2}
-      (list a b c . t) when (and (word-syntax? a) (word-is? b "=") (syntax-adjacent? b) (part-adjacent? c)) ->
+      '(a b c . t) when (and (word-syntax? a) (word-is? b "=") (syntax-adjacent? b) (part-adjacent? c)) ->
         env-entry-value (syntax-word-text a) (cons c t)
       _ -> :nil
     end
@@ -655,8 +645,8 @@ export protocol Shell do
   
     defn split-stages do
       '() cur -> cons (stage-of cur) '()
-      (list h . t) cur when (pipe-op? h) -> cons (stage-of cur) (split-stages t '())
-      (list h . t) cur -> split-stages t (append cur (cons h '()))
+      '(h . t) cur when (pipe-op? h) -> cons (stage-of cur) (split-stages t '())
+      '(h . t) cur -> split-stages t (append cur (cons h '()))
     end
   
     defn collect-adjacent-parts do
@@ -673,8 +663,8 @@ export protocol Shell do
 
     defn split-background do
       '() -> {'() :false}
-      (list h) when (background-op? h) -> {'() :true}
-      (list h . t) -> do
+      '(h) when (background-op? h) -> {'() :true}
+      '(h . t) -> do
         {rest bg} = split-background t
         {(cons h rest) bg}
       end
@@ -682,8 +672,8 @@ export protocol Shell do
   
     defn check-amp do
       '() -> :true
-      (list h . _) when (background-op? h) -> syntax-error h "'&' is only allowed at the end of a command"
-      (list _ . t) -> check-amp t
+      '(h . _) when (background-op? h) -> syntax-error h "'&' is only allowed at the end of a command"
+      '(_ . t) -> check-amp t
     end
   
     defn graph-stdio do
@@ -692,19 +682,19 @@ export protocol Shell do
     end
   
     defn build-graph do
-      (list s) cap -> %`{:exec %,s %,(graph-stdio cap)}
+      '(s) cap -> %`{:exec %,s %,(graph-stdio cap)}
       stages cap -> %`{:pipeline (list %,@stages) %,(graph-stdio cap) :true}
     end
   
     defn normalize-parts do
       '() -> '()
-      (list a b . t) when (and (part-word-is? a "$") (group-syntax? b) (syntax-adjacent? b)) ->
+      '(a b . t) when (and (part-word-is? a "$") (group-syntax? b) (syntax-adjacent? b)) ->
         cons {:command-sub (group-expr b) (part-adjacent? a)} (normalize-parts t)
-      (list a b . t) when (and (word-is? a "<") (group-syntax? b) (syntax-adjacent? b)) ->
+      '(a b . t) when (and (word-is? a "<") (group-syntax? b) (syntax-adjacent? b)) ->
         cons {:procsub-read (group-expr b) (part-adjacent? a)} (normalize-parts t)
-      (list a b . t) when (and (word-is? a ">") (group-syntax? b) (syntax-adjacent? b)) ->
+      '(a b . t) when (and (word-is? a ">") (group-syntax? b) (syntax-adjacent? b)) ->
         cons {:procsub-write (group-expr b) (part-adjacent? a)} (normalize-parts t)
-      (list h . t) -> cons h (normalize-parts t)
+      '(h . t) -> cons h (normalize-parts t)
     end
   
     defn form->graph f cap -> build-graph (split-stages (normalize-parts (collect-parts f 1 (syntax-length f))) '()) cap
@@ -713,23 +703,23 @@ export protocol Shell do
   
     defn split-chain do
       '() cur op -> cons {op cur} '()
-      (list h . t) cur op when (and-op? h) -> cons {op cur} (split-chain t '() :and)
-      (list h . t) cur op when (or-op? h) -> cons {op cur} (split-chain t '() :or)
-      (list h . t) cur op -> split-chain t (append cur (cons h '())) op
+      '(h . t) cur op when (and-op? h) -> cons {op cur} (split-chain t '() :and)
+      '(h . t) cur op when (or-op? h) -> cons {op cur} (split-chain t '() :or)
+      '(h . t) cur op -> split-chain t (append cur (cons h '())) op
     end
   
     defn after-last-pipe do
       '() acc -> acc
-      (list h . t) _ when (pipe-op? h) -> after-last-pipe t '()
-      (list h . t) acc -> after-last-pipe t (append acc (cons h '()))
+      '(h . t) _ when (pipe-op? h) -> after-last-pipe t '()
+      '(h . t) acc -> after-last-pipe t (append acc (cons h '()))
     end
   
     defn head-name do
       '() -> "command"
-      (list h . _) when (var-seg? h) -> word-text h
-      (list h . _) when (word-syntax? h) -> syntax-word-text h
-      (list h . _) when (head-is? h "%-word") -> syntax-string-text (syntax-nth h 1)
-      (list h . _) when (string-syntax? h) -> syntax-string-text h
+      '(h . _) when (var-seg? h) -> word-text h
+      '(h . _) when (word-syntax? h) -> syntax-word-text h
+      '(h . _) when (head-is? h "%-word") -> syntax-string-text (syntax-nth h 1)
+      '(h . _) when (string-syntax? h) -> syntax-string-text h
       _ -> "command"
     end
   
@@ -739,14 +729,14 @@ export protocol Shell do
     end
   
     defn exit-elem? do
-      (list h) -> word-is? h "exit"
-      (list h _) -> word-is? h "exit"
+      '(h) -> word-is? h "exit"
+      '(h _) -> word-is? h "exit"
       _ -> :false
     end
   
     defn exit-exec do
-      (list _) -> %`(exit 0)
-      (list _ n) -> %`(exit %,n)
+      '(_) -> %`(exit 0)
+      '(_ n) -> %`(exit %,n)
     end
   
     defn elem-exec do
@@ -780,21 +770,21 @@ export protocol Shell do
   
     defn chain-fold do
       acc '() _ _ -> acc
-      acc (list {op e} . t) cap checked -> do
+      acc '({op e} . t) cap checked -> do
         last = and checked (eq? t '())
         chain-fold (chain-step acc op (elem-exec e cap last) last) t cap checked
       end
     end
   
     defn emit-chain do
-      (list {_ e}) cap checked -> elem-exec e cap checked
-      (list {_ e} . t) cap checked -> chain-fold (elem-exec e cap :false) t cap checked
+      '({_ e}) cap checked -> elem-exec e cap checked
+      '({_ e} . t) cap checked -> chain-fold (elem-exec e cap :false) t cap checked
     end
   
     defn find-pw do
       '() -> :nil
-      (list h . _) when (procsub-write? h) -> h
-      (list _ . t) -> find-pw t
+      '(h . _) when (procsub-write? h) -> h
+      '(_ . t) -> find-pw t
     end
   
     defn write-sub-graph sub do
@@ -805,7 +795,7 @@ export protocol Shell do
     end
   
     defn bg-elem do
-      (list {_ e}) -> e
+      '({_ e}) -> e
       _ -> syntax-error form "'&' cannot background a '&&' or '||' list"
     end
   
@@ -818,18 +808,18 @@ export protocol Shell do
       p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
       p when (string-syntax? p) -> syntax-string-text p
       p when (int-syntax? p) -> "#{syntax-int-value p}"
-      p when (float-syntax? p) -> "#{syntax->datum p}"
+      p when (float-syntax? p) -> "#{syntax-float-value p}"
       _ -> "..."
     end
   
     defn render-parts do
       '() -> ""
-      (list h) -> render-part h
-      (list h . t) -> "#{render-part h} #{render-parts t}"
+      '(h) -> render-part h
+      '(h . t) -> "#{render-part h} #{render-parts t}"
     end
   
     defn pw-elem do
-      (list {_ e}) -> e
+      '({_ e}) -> e
       _ -> syntax-error form "process substitution cannot be combined with '&&' or '||'"
     end
   

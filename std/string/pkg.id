@@ -64,24 +64,24 @@ end
 
 defn rev do
   '() acc -> acc
-  (list h . t) acc -> rev t (cons h acc)
+  '(h . t) acc -> rev t (cons h acc)
 end
 
 defn take-runes do
   _ n when (lte? n 0) -> '()
   '() _ -> '()
-  (list h . t) n -> cons h (take-runes t (sub n 1))
+  '(h . t) n -> cons h (take-runes t (sub n 1))
 end
 
 defn drop-runes do
   xs n when (lte? n 0) -> xs
   '() _ -> '()
-  (list _ . t) n -> drop-runes t (sub n 1)
+  '(_ . t) n -> drop-runes t (sub n 1)
 end
 
 defn last-rune-from do
   x '() -> x
-  _ (list h . t) -> last-rune-from h t
+  _ '(h . t) -> last-rune-from h t
 end
 
 export defn split do
@@ -96,12 +96,12 @@ export defn join xs sep -> xs.to-list |> join-list sep
 
 defn join-list do
   '() _sep -> ""
-  (list h . t) sep -> join-from t sep h
+  '(h . t) sep -> join-from t sep h
 end
 
 defn join-from do
   '() _sep acc -> acc
-  (list h . t) sep acc -> join-from t sep "${acc}${sep}${h}"
+  '(h . t) sep acc -> join-from t sep "${acc}${sep}${h}"
 end
 
 export defn replace s old new ->
@@ -142,7 +142,7 @@ export defn capitalize do
   "" -> ""
   s -> match (s |> str-to-list) do
     '() -> ""
-    (list h . t) -> "#{h |> upbyte |> ord->str}#{t |> from-runes |> downcase}"
+    '(h . t) -> "#{h |> upbyte |> ord->str}#{t |> from-runes |> downcase}"
   end
 end
 
@@ -165,14 +165,14 @@ export defn last do
   "" -> :nil
   s -> match (s |> str-to-list) do
     '() -> :nil
-    (list h . t) -> last-rune-from h t
+    '(h . t) -> last-rune-from h t
   end
 end
 
 export defn last! do
   "" -> error {:empty-string}
   s -> match (s |> str-to-list) do
-    (list h . t) -> last-rune-from h t
+    '(h . t) -> last-rune-from h t
   end
 end
 

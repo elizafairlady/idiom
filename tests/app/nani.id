@@ -7,7 +7,7 @@ activate Test
 
 defn feed do
   editor '() -> editor
-  editor (list key . rest) -> match (step editor key) do
+  editor '(key . rest) -> match (step editor key) do
     {_tag next} -> feed next rest
   end
 end

@@ -31,7 +31,8 @@ CASES = [
     },
     {
         "name": "arith_tail",
-        "summary": "integer arithmetic in a hot tail loop",
+        "summary": "low-level integer arithmetic in a hot tail loop",
+        "default": False,
         "files": {
             "idiom": "arith_tail.id",
             "python": "arith_tail.py",
@@ -57,7 +58,8 @@ CASES = [
     },
     {
         "name": "list_sum",
-        "summary": "allocate a list/array and reduce it",
+        "summary": "low-level list allocation and reduction",
+        "default": False,
         "files": {
             "idiom": "list_sum.id",
             "python": "list_sum.py",
@@ -79,6 +81,15 @@ CASES = [
             "bash": "list_sum_idiomatic.sh",
             "elixir": "list_sum_idiomatic.exs",
             "elisp": "list_sum_idiomatic.el",
+        },
+    },
+    {
+        "name": "range_size",
+        "summary": "constant-time Range size/last/count over large integer spans",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current std/range O(1) sizing contract",
+        "files": {
+            "idiom": "range_size.id",
         },
     },
     {
@@ -196,27 +207,44 @@ EXTERNAL_RUNTIME_COMMANDS = {
     "elisp": ("emacs", "--quick", "--batch", "--script"),
 }
 
+IDIOM_LANES = {
+    "source-hit",
+    "source-fill",
+    "source-nocache",
+    "build-hit",
+    "build-fill",
+    "build-nocache",
+    "sealed-hit",
+    "sealed-nocache",
+}
+
 
 def fail(message):
     print(f"perf: {message}", file=sys.stderr)
     raise SystemExit(1)
 
 
-def child_env():
+def child_env(extra=None):
     env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
     if not env.get("IDIOMROOT"):
         env["IDIOMROOT"] = str(ROOT / "std")
     path = str(ROOT)
     env["IDIOMPATH"] = path if not env.get("IDIOMPATH") else f"{path}:{env['IDIOMPATH']}"
+    if extra:
+        for key, value in extra.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
     return env
 
 
-def run_checked(cmd, cwd=None, timeout=None, capture=True):
+def run_checked(cmd, cwd=None, timeout=None, capture=True, extra_env=None):
     kwargs = {
         "cwd": cwd,
         "timeout": timeout,
         "text": True,
-        "env": child_env(),
+        "env": child_env(extra_env),
     }
     if capture:
         kwargs.update({"stdout": subprocess.PIPE, "stderr": subprocess.PIPE})
@@ -262,49 +290,51 @@ def runtime_file(kind, filename):
     return PERF / kind / filename
 
 
+def parse_idiom_lanes(value, with_sealed):
+    lanes = [part.strip() for part in (value or "source-hit").split(",") if part.strip()]
+    if with_sealed:
+        for lane in ("sealed-hit", "sealed-nocache"):
+            if lane not in lanes:
+                lanes.append(lane)
+    unknown = set(lanes).difference(IDIOM_LANES)
+    if unknown:
+        fail(f"unknown Idiom lane(s): {', '.join(sorted(unknown))}")
+    return lanes
+
+
+def add_idiom_runtimes(runtimes, prefix, binary, cwd, lanes, artifact_root):
+    for lane in lanes:
+        lane_kind, cache_mode = lane.split("-", 1)
+        info = {
+            "kind": "idiom",
+            "cmd": [str(binary)],
+            "cwd": cwd,
+            "available": True,
+            "lane": lane_kind,
+            "cache_mode": cache_mode,
+        }
+        if cache_mode == "nocache":
+            info["env"] = {"IDIOMCACHE": "0"}
+        if lane_kind in ("build", "sealed"):
+            info["artifact_dir"] = artifact_root / prefix / lane
+        if lane_kind == "sealed":
+            info["sealed_cache"] = {}
+        runtimes[f"{prefix}-{lane}"] = info
+
+
 def discover_runtimes(args):
     runtimes = {}
     if args.idiom_current:
         current = Path(args.idiom_current)
         if not current.exists():
             fail(f"current idiom binary does not exist: {current}")
-        runtimes["idiom-current"] = {
-            "kind": "idiom",
-            "cmd": [str(current)],
-            "cwd": ROOT,
-            "available": True,
-        }
-        if args.with_sealed:
-            runtimes["idiom-current-sealed"] = {
-                "kind": "idiom",
-                "cmd": [str(current)],
-                "cwd": ROOT,
-                "available": True,
-                "sealed": True,
-                "artifact_dir": args.sealed_dir / "idiom-current",
-                "sealed_cache": {},
-            }
+        add_idiom_runtimes(runtimes, "idiom-current", current, ROOT, args.idiom_lanes, args.artifact_dir)
     if args.idiom_base:
         base = Path(args.idiom_base)
         if not base.exists():
             fail(f"base idiom binary does not exist: {base}")
         base_cwd = Path(args.idiom_base_cwd) if args.idiom_base_cwd else ROOT
-        runtimes["idiom-base"] = {
-            "kind": "idiom",
-            "cmd": [str(base)],
-            "cwd": base_cwd,
-            "available": True,
-        }
-        if args.with_sealed:
-            runtimes["idiom-base-sealed"] = {
-                "kind": "idiom",
-                "cmd": [str(base)],
-                "cwd": base_cwd,
-                "available": True,
-                "sealed": True,
-                "artifact_dir": args.sealed_dir / "idiom-base",
-                "sealed_cache": {},
-            }
+        add_idiom_runtimes(runtimes, "idiom-base", base, base_cwd, args.idiom_lanes, args.artifact_dir)
     if not args.no_external:
         for name, command in EXTERNAL_RUNTIME_COMMANDS.items():
             exe = shutil.which(command[0])
@@ -323,7 +353,7 @@ def discover_runtimes(args):
 
 def selected_cases(args):
     if not args.cases:
-        selected = CASES
+        selected = [case for case in CASES if case.get("default", True)]
         if args.base_ref:
             skipped = [case for case in selected if not case.get("base_ref_default", True)]
             selected = [case for case in selected if case.get("base_ref_default", True)]
@@ -348,7 +378,11 @@ def command_for(runtime, case):
     path = runtime_file(kind, filename)
     if not path.exists():
         fail(f"benchmark file does not exist: {path}")
-    if runtime.get("sealed"):
+    if runtime.get("lane") == "build":
+        artifact_dir = runtime["artifact_dir"]
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        return [*runtime["cmd"], "build", str(path), "-o", str(artifact_dir / case["name"])]
+    if runtime.get("lane") == "sealed":
         cache = runtime["sealed_cache"]
         if case["name"] not in cache:
             artifact_dir = runtime["artifact_dir"]
@@ -360,22 +394,36 @@ def command_for(runtime, case):
     return [*runtime["cmd"], str(path)]
 
 
-def timed_run(cmd, timeout, cwd=None):
+def purge_ic(root):
+    for path in Path(root).rglob("*.ic"):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def timed_run(cmd, timeout, cwd=None, extra_env=None, before=None):
+    if before:
+        before()
     start = time.perf_counter()
-    proc = run_checked(cmd, cwd=cwd, timeout=timeout)
+    proc = run_checked(cmd, cwd=cwd, timeout=timeout, extra_env=extra_env)
     elapsed = time.perf_counter() - start
     return elapsed, proc.stdout.strip()
 
 
-def measure(cmd, cwd, runs, warmups, timeout, expected):
+def measure(cmd, cwd, runs, warmups, timeout, expected, runtime):
+    before = None
+    if runtime.get("cache_mode") == "fill":
+        before = lambda: purge_ic(runtime.get("cwd") or ROOT)
+    extra_env = runtime.get("env")
     for _ in range(warmups):
-        _, output = timed_run(cmd, timeout, cwd)
-        if output != expected:
+        _, output = timed_run(cmd, timeout, cwd, extra_env, before)
+        if expected is not None and output != expected:
             fail(f"unexpected warmup output for {' '.join(cmd)}: got {output!r}, expected {expected!r}")
     samples = []
     for _ in range(runs):
-        elapsed, output = timed_run(cmd, timeout, cwd)
-        if output != expected:
+        elapsed, output = timed_run(cmd, timeout, cwd, extra_env, before)
+        if expected is not None and output != expected:
             fail(f"unexpected output for {' '.join(cmd)}: got {output!r}, expected {expected!r}")
         samples.append(elapsed)
     return {
@@ -388,15 +436,35 @@ def measure(cmd, cwd, runs, warmups, timeout, expected):
 
 
 def expected_for_case(case, runtimes, timeout):
-    for preferred in ("idiom-current", "idiom-base", "python", "ruby", "bash", "elixir"):
+    for preferred in (
+        "idiom-current-source-hit",
+        "idiom-current-source-fill",
+        "idiom-current-source-nocache",
+        "idiom-current-sealed-hit",
+        "idiom-current-sealed-nocache",
+        "idiom-base-source-hit",
+        "idiom-base-source-fill",
+        "idiom-base-source-nocache",
+        "idiom-base-sealed-hit",
+        "idiom-base-sealed-nocache",
+        "python",
+        "ruby",
+        "bash",
+        "elixir",
+    ):
         runtime = runtimes.get(preferred)
         if not runtime or not runtime.get("available"):
+            continue
+        if runtime.get("lane") == "build":
             continue
         cmd = command_for(runtime, case)
         if not cmd:
             continue
-        _, output = timed_run(cmd, timeout, runtime.get("cwd"))
+        _, output = timed_run(cmd, timeout, runtime.get("cwd"), runtime.get("env"))
         return output
+    for runtime in runtimes.values():
+        if runtime.get("available") and runtime.get("lane") == "build":
+            return ""
     fail(f"no available runtime can establish expected output for {case['name']}")
 
 
@@ -405,7 +473,7 @@ def emit_idiom_dumps(cases, runtimes, dump_dir, timeout):
         return
     dump_dir.mkdir(parents=True, exist_ok=True)
     for label, runtime in runtimes.items():
-        if runtime["kind"] != "idiom" or not runtime.get("available") or runtime.get("sealed"):
+        if runtime["kind"] != "idiom" or not runtime.get("available") or runtime.get("lane") != "source":
             continue
         label_dir = dump_dir / label
         label_dir.mkdir(parents=True, exist_ok=True)
@@ -421,7 +489,7 @@ def emit_idiom_dumps(cases, runtimes, dump_dir, timeout):
 
 
 def run_callgrind(case, label, runtime, expected, out_dir, timeout):
-    if not out_dir or runtime["kind"] != "idiom" or runtime.get("sealed") or not runtime.get("available"):
+    if not out_dir or runtime["kind"] != "idiom" or runtime.get("lane") != "source" or runtime.get("cache_mode") != "hit" or not runtime.get("available"):
         return None
     valgrind = shutil.which("valgrind")
     if not valgrind:
@@ -454,8 +522,8 @@ def print_table(results, runtimes):
     print("-" * (72 + runtime_width))
     for case_result in results:
         by_runtime = case_result["runtimes"]
-        current = by_runtime.get("idiom-current", {}).get("median_ms")
-        base = by_runtime.get("idiom-base", {}).get("median_ms")
+        current = by_runtime.get("idiom-current-source-hit", {}).get("median_ms")
+        base = by_runtime.get("idiom-base-source-hit", {}).get("median_ms")
         first = True
         for label in labels:
             stats = by_runtime.get(label)
@@ -490,6 +558,7 @@ def main(argv):
     parser.add_argument("--cases", help="Comma-separated benchmark case names.")
     parser.add_argument("--runtimes", help="Comma-separated runtime labels.")
     parser.add_argument("--no-external", action="store_true")
+    parser.add_argument("--idiom-lanes", help="Comma-separated Idiom lanes: source-hit,source-fill,source-nocache,build-hit,build-fill,build-nocache,sealed-hit,sealed-nocache.")
     parser.add_argument("--with-sealed", action="store_true", help="Also benchmark Idiom sealed bytecode artifacts.")
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--dump-dir", type=Path, help="Write 'idiomc dump core' and 'idiomc dump bytecode' outputs for Idiom cases.")
@@ -504,6 +573,7 @@ def main(argv):
         fail("--runs must be >= 1")
     if args.warmups < 0:
         fail("--warmups must be >= 0")
+    args.idiom_lanes = parse_idiom_lanes(args.idiom_lanes, args.with_sealed)
 
     cases = selected_cases(args)
     if args.list:
@@ -512,16 +582,13 @@ def main(argv):
         return 0
 
     base_tmp = None
-    sealed_tmp = None
+    artifact_tmp = None
     if args.base_ref:
         base_tmp, base_bin, base_cwd = build_base_ref(args.base_ref)
         args.idiom_base = str(base_bin)
         args.idiom_base_cwd = str(base_cwd)
-    if args.with_sealed:
-        sealed_tmp = tempfile.TemporaryDirectory(prefix="idiom-perf-sealed-")
-        args.sealed_dir = Path(sealed_tmp.name)
-    else:
-        args.sealed_dir = Path(tempfile.gettempdir())
+    artifact_tmp = tempfile.TemporaryDirectory(prefix="idiom-perf-artifacts-")
+    args.artifact_dir = Path(artifact_tmp.name)
 
     runtimes = discover_runtimes(args)
     if not any(info.get("available") for info in runtimes.values()):
@@ -547,7 +614,8 @@ def main(argv):
                 cmd = command_for(runtime, case)
                 if not cmd:
                     continue
-                stats = measure(cmd, runtime.get("cwd"), args.runs, args.warmups, args.timeout, expected)
+                runtime_expected = None if runtime.get("lane") == "build" else expected
+                stats = measure(cmd, runtime.get("cwd"), args.runs, args.warmups, args.timeout, runtime_expected, runtime)
                 profile = run_callgrind(case, label, runtime, expected, args.callgrind_dir, args.timeout)
                 if profile:
                     stats["callgrind"] = profile
@@ -556,13 +624,14 @@ def main(argv):
     finally:
         if base_tmp is not None:
             base_tmp.cleanup()
-        if sealed_tmp is not None:
-            sealed_tmp.cleanup()
+        if artifact_tmp is not None:
+            artifact_tmp.cleanup()
 
     payload = {
         "runs": args.runs,
         "warmups": args.warmups,
         "base_ref": args.base_ref,
+        "idiom_lanes": args.idiom_lanes,
         "dump_dir": str(args.dump_dir) if args.dump_dir else None,
         "callgrind_dir": str(args.callgrind_dir) if args.callgrind_dir else None,
         "results": results,

@@ -4,4 +4,4 @@ r = nonexistent-cmd-h12 2> /dev/null
 println r
 f = sh -c "exit 4"
 println f
-:done
+println :done

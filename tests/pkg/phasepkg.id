@@ -1,0 +1,3 @@
+package phasepkg
+
+export defn phase-value _ -> 42

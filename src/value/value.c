@@ -1,5 +1,6 @@
 #include "idiom/value.h"
 
+#include "idiom/bytecode.h"
 #include "idiom/pattern.h"
 #include "idiom/regex.h"
 #include "idiom/syntax.h"
@@ -55,8 +56,9 @@ typedef struct {
     size_t entry_count;
     IdmValue *captures;
     size_t capture_count;
-    IdmNamespace *ns;
+    IdmEnv *env;
     IdmPatternSelector *selector;
+    uint64_t selector_generation;
 } IdmClosureObj;
 
 typedef struct {
@@ -98,10 +100,10 @@ struct IdmSymbol {
 };
 
 static pthread_mutex_t g_intern_mu = PTHREAD_MUTEX_INITIALIZER;
-static pthread_mutex_t g_ns_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_env_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text);
-static IdmNamespace *namespace_get_or_create_unlocked(IdmRuntime *rt, const char *name);
+static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, const char *package_key);
 
 static IdmObject *heap_alloc_unlocked(IdmHeap *heap, IdmObjectKind kind) {
     IdmObject *obj = calloc(1u, sizeof(*obj));
@@ -167,9 +169,9 @@ static void object_free(IdmObject *obj) {
     if (obj->kind == IDM_OBJ_DICT) free(obj->as.dict.entries);
     if (obj->kind == IDM_OBJ_SYNTAX) idm_syn_free(obj->as.syntax);
     if (obj->kind == IDM_OBJ_CLOSURE) {
+        idm_pattern_selector_free(obj->as.closure.selector);
         free(obj->as.closure.entries);
         free(obj->as.closure.captures);
-        idm_pattern_selector_free(obj->as.closure.selector);
     }
     if (obj->kind == IDM_OBJ_RECORD) free(obj->as.record.type);
     if (obj->kind == IDM_OBJ_REGEX) idm_regex_free(obj->as.regex);
@@ -189,19 +191,15 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->local_expand = NULL;
     rt->free_identifier_eq_user = NULL;
     rt->free_identifier_eq = NULL;
-    rt->register_operator_user = NULL;
-    rt->register_operator = NULL;
     rt->register_macro_user = NULL;
     rt->register_macro = NULL;
-    rt->expander_surface_user = NULL;
-    rt->expander_surface = NULL;
     rt->cli_args = NULL;
     rt->cli_arg_count = 0;
 
-    rt->namespaces = NULL;
-    rt->ns_count = 0;
-    rt->ns_cap = 0;
-    rt->main_ns = idm_namespace_get_or_create(rt, "main");
+    rt->envs = NULL;
+    rt->env_count = 0;
+    rt->env_cap = 0;
+    rt->main_env = idm_env_fresh(rt);
     memset(rt->trait_worlds, 0, sizeof(rt->trait_worlds));
     rt->trait_phase = 0;
     rt->expand_cache = NULL;
@@ -273,16 +271,16 @@ void idm_runtime_destroy(IdmRuntime *rt) {
         free(world->conformances);
     }
     memset(rt->trait_worlds, 0, sizeof(rt->trait_worlds));
-    for (size_t i = 0; i < rt->ns_count; i++) {
-        free(rt->namespaces[i]->name);
-        free(rt->namespaces[i]->slots);
-        free(rt->namespaces[i]);
+    for (size_t i = 0; i < rt->env_count; i++) {
+        free(rt->envs[i]->package_key);
+        free(rt->envs[i]->slots);
+        free(rt->envs[i]);
     }
-    free(rt->namespaces);
-    rt->namespaces = NULL;
-    rt->ns_count = 0;
-    rt->ns_cap = 0;
-    rt->main_ns = NULL;
+    free(rt->envs);
+    rt->envs = NULL;
+    rt->env_count = 0;
+    rt->env_cap = 0;
+    rt->main_env = NULL;
     if (rt->expand_cache && rt->expand_cache_free) rt->expand_cache_free(rt->expand_cache);
     rt->expand_cache = NULL;
     rt->expand_cache_free = NULL;
@@ -299,66 +297,78 @@ void idm_runtime_destroy(IdmRuntime *rt) {
     idm_intern_destroy(&rt->intern);
 }
 
-IdmNamespace *idm_namespace_get_or_create(IdmRuntime *rt, const char *name) {
-    pthread_mutex_lock(&g_ns_mu);
-    IdmNamespace *found = namespace_get_or_create_unlocked(rt, name);
-    pthread_mutex_unlock(&g_ns_mu);
+IdmEnv *idm_package_env_get_or_create(IdmRuntime *rt, const char *key) {
+    if (!key) return NULL;
+    pthread_mutex_lock(&g_env_mu);
+    IdmEnv *found = env_get_or_create_unlocked(rt, key);
+    pthread_mutex_unlock(&g_env_mu);
     return found;
 }
 
-static IdmNamespace *namespace_get_or_create_unlocked(IdmRuntime *rt, const char *name) {
-    for (size_t i = 0; i < rt->ns_count; i++) {
-        if (strcmp(rt->namespaces[i]->name, name) == 0) return rt->namespaces[i];
-    }
-    IdmNamespace *ns = calloc(1u, sizeof(*ns));
-    if (!ns) return NULL;
-    ns->name = idm_strdup(name);
-    if (!ns->name) { free(ns); return NULL; }
-    if (rt->ns_count == rt->ns_cap) {
-        size_t cap = rt->ns_cap ? rt->ns_cap * 2u : 8u;
-        IdmNamespace **grown = realloc(rt->namespaces, cap * sizeof(*grown));
-        if (!grown) { free(ns->name); free(ns); return NULL; }
-        rt->namespaces = grown;
-        rt->ns_cap = cap;
-    }
-    rt->namespaces[rt->ns_count++] = ns;
-    return ns;
+IdmEnv *idm_env_fresh(IdmRuntime *rt) {
+    pthread_mutex_lock(&g_env_mu);
+    IdmEnv *env = env_get_or_create_unlocked(rt, NULL);
+    pthread_mutex_unlock(&g_env_mu);
+    return env;
 }
 
-bool idm_ns_slot_ensure(IdmNamespace *ns, uint32_t id, IdmError *err) {
-    pthread_mutex_lock(&g_ns_mu);
+static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, const char *package_key) {
+    if (package_key) {
+        for (size_t i = 0; i < rt->env_count; i++) {
+            if (rt->envs[i]->package_key && strcmp(rt->envs[i]->package_key, package_key) == 0) return rt->envs[i];
+        }
+    }
+    IdmEnv *env = calloc(1u, sizeof(*env));
+    if (!env) return NULL;
+    if (package_key) {
+        env->package_key = idm_strdup(package_key);
+        if (!env->package_key) { free(env); return NULL; }
+    }
+    if (rt->env_count == rt->env_cap) {
+        size_t cap = rt->env_cap ? rt->env_cap * 2u : 8u;
+        IdmEnv **grown = realloc(rt->envs, cap * sizeof(*grown));
+        if (!grown) { free(env->package_key); free(env); return NULL; }
+        rt->envs = grown;
+        rt->env_cap = cap;
+    }
+    rt->envs[rt->env_count++] = env;
+    return env;
+}
+
+bool idm_env_slot_ensure(IdmEnv *env, uint32_t id, IdmError *err) {
+    pthread_mutex_lock(&g_env_mu);
     size_t needed = (size_t)id + 1u;
-    if (needed <= ns->slot_count) {
-        pthread_mutex_unlock(&g_ns_mu);
+    if (needed <= env->slot_count) {
+        pthread_mutex_unlock(&g_env_mu);
         return true;
     }
-    if (needed > ns->slot_cap) {
-        size_t cap = ns->slot_cap ? ns->slot_cap * 2u : 16u;
+    if (needed > env->slot_cap) {
+        size_t cap = env->slot_cap ? env->slot_cap * 2u : 16u;
         while (cap < needed) cap *= 2u;
-        IdmValue *grown = realloc(ns->slots, cap * sizeof(*grown));
+        IdmValue *grown = realloc(env->slots, cap * sizeof(*grown));
         if (!grown) {
-            pthread_mutex_unlock(&g_ns_mu);
+            pthread_mutex_unlock(&g_env_mu);
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
-        ns->slots = grown;
-        ns->slot_cap = cap;
+        env->slots = grown;
+        env->slot_cap = cap;
     }
-    for (size_t i = ns->slot_count; i < needed; i++) ns->slots[i] = idm_nil();
-    ns->slot_count = needed;
-    pthread_mutex_unlock(&g_ns_mu);
+    for (size_t i = env->slot_count; i < needed; i++) env->slots[i] = idm_nil();
+    env->slot_count = needed;
+    pthread_mutex_unlock(&g_env_mu);
     return true;
 }
 
-void idm_ns_slot_set(IdmNamespace *ns, uint32_t id, IdmValue value) {
-    pthread_mutex_lock(&g_ns_mu);
-    if ((size_t)id < ns->slot_count) ns->slots[id] = value;
-    pthread_mutex_unlock(&g_ns_mu);
+void idm_env_slot_set(IdmEnv *env, uint32_t id, IdmValue value) {
+    pthread_mutex_lock(&g_env_mu);
+    if ((size_t)id < env->slot_count) env->slots[id] = value;
+    pthread_mutex_unlock(&g_env_mu);
 }
 
-IdmValue idm_ns_slot_get(const IdmNamespace *ns, uint32_t id) {
-    pthread_mutex_lock(&g_ns_mu);
-    IdmValue out = (size_t)id < ns->slot_count ? ns->slots[id] : idm_nil();
-    pthread_mutex_unlock(&g_ns_mu);
+IdmValue idm_env_slot_get(const IdmEnv *env, uint32_t id) {
+    pthread_mutex_lock(&g_env_mu);
+    IdmValue out = (size_t)id < env->slot_count ? env->slots[id] : idm_nil();
+    pthread_mutex_unlock(&g_env_mu);
     return out;
 }
 
@@ -654,6 +664,28 @@ IdmValue idm_string(IdmRuntime *rt, const char *text, IdmError *err) {
     return idm_string_n(rt, text, strlen(text), err);
 }
 
+static bool value_append_display(IdmBuffer *buf, IdmValue v) {
+    if (v.tag == IDM_VAL_STRING) return idm_buf_append_n(buf, idm_string_bytes(v), idm_string_length(v));
+    if (v.tag == IDM_VAL_ATOM || v.tag == IDM_VAL_WORD) return idm_buf_append(buf, idm_symbol_text(v.as.symbol));
+    if (v.tag == IDM_VAL_NIL) return true;
+    return idm_value_write(buf, v);
+}
+
+bool idm_string_concat_display(IdmRuntime *rt, const IdmValue *items, size_t count, IdmValue *out, IdmError *err) {
+    if (count == 1u && items[0].tag == IDM_VAL_STRING) { *out = items[0]; return true; }
+    IdmBuffer buf;
+    idm_buf_init(&buf);
+    for (size_t i = 0; i < count; i++) {
+        if (!value_append_display(&buf, items[i])) {
+            idm_buf_destroy(&buf);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+    }
+    *out = idm_string_n(rt, buf.data ? buf.data : "", buf.len, err);
+    idm_buf_destroy(&buf);
+    return !(err && err->present);
+}
+
 IdmValue idm_cons(IdmRuntime *rt, IdmValue car, IdmValue cdr, IdmError *err) {
     IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_PAIR);
     if (!obj) {
@@ -666,6 +698,36 @@ IdmValue idm_cons(IdmRuntime *rt, IdmValue car, IdmValue cdr, IdmError *err) {
     v.tag = IDM_VAL_PAIR;
     v.as.obj = obj;
     return v;
+}
+
+bool idm_list_append(IdmRuntime *rt, IdmValue head, IdmValue tail, IdmValue *out, IdmError *err) {
+    if (idm_is_empty_list(head)) { *out = tail; return true; }
+    if (!idm_is_pair(head)) return idm_error_set(err, idm_span_unknown(NULL), "append expects a list as first argument");
+    size_t count = 0;
+    IdmValue cur = head;
+    while (idm_is_pair(cur)) {
+        count++;
+        cur = idm_cdr(cur, err);
+        if (err && err->present) return false;
+    }
+    if (!idm_is_empty_list(cur)) return idm_error_set(err, idm_span_unknown(NULL), "append expects a proper list as first argument");
+    IdmValue *items = count == 0 ? NULL : calloc(count, sizeof(*items));
+    if (count != 0 && !items) return idm_error_oom(err, idm_span_unknown(NULL));
+    cur = head;
+    for (size_t i = 0; i < count; i++) {
+        items[i] = idm_car(cur, err);
+        if (err && err->present) { free(items); return false; }
+        cur = idm_cdr(cur, err);
+        if (err && err->present) { free(items); return false; }
+    }
+    IdmValue result = tail;
+    for (size_t i = count; i > 0; i--) {
+        result = idm_cons(rt, items[i - 1u], result, err);
+        if (err && err->present) { free(items); return false; }
+    }
+    free(items);
+    *out = result;
+    return true;
 }
 
 static IdmValue sequence_value(IdmRuntime *rt, const IdmValue *items, size_t count, IdmObjectKind obj_kind, IdmValueTag tag, IdmError *err) {
@@ -746,7 +808,6 @@ static bool dict_key_equal(IdmValue a, IdmValue b) {
         case IDM_VAL_PID:
         case IDM_VAL_REF:
         case IDM_VAL_PORT:
-        case IDM_VAL_PRIMITIVE:
             return a.as.id == b.as.id;
         default:
             return idm_value_equal(a, b);
@@ -793,6 +854,218 @@ IdmValue idm_syntax_value(IdmRuntime *rt, const IdmSyntax *syntax, IdmError *err
     return v;
 }
 
+static bool syntax_copy_scopes_from(IdmSyntax *dst, const IdmSyntax *src) {
+    if (!src) return true;
+    for (size_t i = 0; i < src->scopes.count; i++) {
+        const IdmSyntaxPhaseScope *p = &src->scopes.items[i];
+        for (size_t j = 0; j < p->scopes.count; j++) {
+            if (!idm_syn_scope_add(dst, p->phase, p->scopes.items[j])) return false;
+        }
+    }
+    return true;
+}
+
+static bool syntax_add_active_intro_scope(IdmRuntime *rt, IdmSyntax *syn) {
+    if (!rt->macro_intro_active) return true;
+    const IdmScopeSet *set = idm_syn_scope_set(syn, 0);
+    if (!set || !idm_scope_set_contains(set, rt->macro_intro_scope)) return true;
+    return idm_syn_scope_flip(syn, 0, rt->macro_intro_scope);
+}
+
+static bool syntax_collect_list(IdmValue list, IdmSyntax ***out_items, size_t *out_count, IdmError *err) {
+    size_t count = 0;
+    IdmValue cur = list;
+    while (idm_is_pair(cur)) {
+        count++;
+        cur = idm_cdr(cur, err);
+        if (err && err->present) return false;
+    }
+    if (!idm_is_empty_list(cur)) return idm_error_set(err, idm_span_unknown(NULL), "expected proper list of syntax");
+    IdmSyntax **items = count == 0 ? NULL : calloc(count, sizeof(*items));
+    if (count != 0 && !items) return idm_error_oom(err, idm_span_unknown(NULL));
+    cur = list;
+    for (size_t i = 0; i < count; i++) {
+        IdmValue car = idm_car(cur, err);
+        if (err && err->present) { free(items); return false; }
+        IdmSyntax *inner = idm_syntax_value_get(car);
+        if (!inner) {
+            free(items);
+            return idm_error_set(err, idm_span_unknown(NULL), "list item must be a syntax value");
+        }
+        items[i] = idm_syn_clone(inner);
+        if (!items[i]) {
+            for (size_t j = 0; j < i; j++) idm_syn_free(items[j]);
+            free(items);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        cur = idm_cdr(cur, err);
+        if (err && err->present) {
+            for (size_t j = 0; j <= i; j++) idm_syn_free(items[j]);
+            free(items);
+            return false;
+        }
+    }
+    *out_items = items;
+    *out_count = count;
+    return true;
+}
+
+static void syntax_items_free(IdmSyntax **items, size_t count) {
+    for (size_t i = 0; i < count; i++) idm_syn_free(items[i]);
+    free(items);
+}
+
+static void syntax_items_free_nodes(IdmSyntax **items, size_t count) {
+    for (size_t i = 0; i < count; i++) idm_syn_free(items[i]);
+}
+
+static IdmSyntax *syntax_sequence_node(IdmSyntaxBuildKind kind, IdmSpan span) {
+    switch (kind) {
+        case IDM_SYNTAX_BUILD_LIST: return idm_syn_list(span);
+        case IDM_SYNTAX_BUILD_VECTOR: return idm_syn_vector(span);
+        case IDM_SYNTAX_BUILD_TUPLE: return idm_syn_tuple(span);
+        case IDM_SYNTAX_BUILD_DICT: return idm_syn_dict(span);
+        default: return NULL;
+    }
+}
+
+static const char *syntax_form_head(IdmSyntaxBuildKind kind) {
+    switch (kind) {
+        case IDM_SYNTAX_BUILD_EXPR: return "%-expr";
+        case IDM_SYNTAX_BUILD_BODY: return "%-body";
+        case IDM_SYNTAX_BUILD_GROUP: return "%-group";
+        default: return NULL;
+    }
+}
+
+static IdmSyntax *syntax_form_sequence(IdmRuntime *rt, IdmSyntax *ctx, IdmSyntaxBuildKind kind, IdmSyntax **items, size_t count, IdmError *err) {
+    const char *head = syntax_form_head(kind);
+    if (!head) return NULL;
+    IdmSyntax *syn = idm_syn_list(ctx->span);
+    if (!syn || !syntax_copy_scopes_from(syn, ctx)) {
+        idm_syn_free(syn);
+        syntax_items_free_nodes(items, count);
+        return NULL;
+    }
+    IdmSyntax *head_syn = idm_syn_word(head, ctx->span);
+    if (!head_syn || !syntax_copy_scopes_from(head_syn, ctx) || !idm_syn_append(syn, head_syn)) {
+        idm_syn_free(head_syn);
+        idm_syn_free(syn);
+        syntax_items_free_nodes(items, count);
+        return NULL;
+    }
+    for (size_t i = 0; i < count; i++) {
+        if (!idm_syn_append(syn, items[i])) {
+            for (size_t j = i; j < count; j++) idm_syn_free(items[j]);
+            idm_syn_free(syn);
+            return NULL;
+        }
+    }
+    if (!syntax_add_active_intro_scope(rt, syn)) {
+        idm_syn_free(syn);
+        idm_error_oom(err, ctx->span);
+        return NULL;
+    }
+    return syn;
+}
+
+static bool syntax_wrap_owned(IdmRuntime *rt, IdmSyntax *syn, IdmValue *out, IdmError *err) {
+    if (!syn) return false;
+    *out = idm_syntax_value(rt, syn, err);
+    idm_syn_free(syn);
+    return !(err && err->present);
+}
+
+bool idm_syntax_build(IdmRuntime *rt, IdmSyntaxBuildKind kind, IdmValue ctx_value, IdmValue payload, IdmValue *out, IdmError *err) {
+    IdmSyntax *ctx = idm_syntax_value_get(ctx_value);
+    if (!ctx) return idm_error_set(err, idm_span_unknown(NULL), "expected a syntax value");
+    IdmSyntax *syn = NULL;
+    switch (kind) {
+        case IDM_SYNTAX_BUILD_NIL:
+            syn = idm_syn_nil(ctx->span);
+            break;
+        case IDM_SYNTAX_BUILD_WORD:
+            if (payload.tag != IDM_VAL_STRING) return idm_error_set(err, ctx->span, "make-syntax-word expects string");
+            syn = idm_syn_word(idm_string_bytes(payload), ctx->span);
+            break;
+        case IDM_SYNTAX_BUILD_ATOM:
+            if (payload.tag != IDM_VAL_STRING) return idm_error_set(err, ctx->span, "make-syntax-atom expects string");
+            syn = idm_syn_atom(idm_string_bytes(payload), ctx->span);
+            break;
+        case IDM_SYNTAX_BUILD_INT:
+            if (payload.tag != IDM_VAL_INT) return idm_error_set(err, ctx->span, "make-syntax-int expects int");
+            syn = idm_syn_int(payload.as.i, ctx->span);
+            break;
+        case IDM_SYNTAX_BUILD_FLOAT:
+            if (payload.tag != IDM_VAL_FLOAT && payload.tag != IDM_VAL_INT) return idm_error_set(err, ctx->span, "make-syntax-float expects number");
+            syn = idm_syn_float(payload.tag == IDM_VAL_FLOAT ? payload.as.f : (double)payload.as.i, ctx->span);
+            break;
+        case IDM_SYNTAX_BUILD_STRING:
+            if (payload.tag != IDM_VAL_STRING) return idm_error_set(err, ctx->span, "make-syntax-string expects string");
+            syn = idm_syn_string_n(idm_string_bytes(payload), idm_string_length(payload), ctx->span);
+            break;
+        case IDM_SYNTAX_BUILD_LIST:
+        case IDM_SYNTAX_BUILD_VECTOR:
+        case IDM_SYNTAX_BUILD_TUPLE:
+        case IDM_SYNTAX_BUILD_DICT: {
+            IdmSyntax **items = NULL;
+            size_t count = 0;
+            if (!syntax_collect_list(payload, &items, &count, err)) return false;
+            syn = syntax_sequence_node(kind, ctx->span);
+            if (!syn || !syntax_copy_scopes_from(syn, ctx)) {
+                idm_syn_free(syn);
+                syntax_items_free(items, count);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            if (!syntax_add_active_intro_scope(rt, syn)) {
+                idm_syn_free(syn);
+                syntax_items_free(items, count);
+                return idm_error_oom(err, ctx->span);
+            }
+            for (size_t i = 0; i < count; i++) {
+                if (!idm_syn_append(syn, items[i])) {
+                    for (size_t j = i; j < count; j++) idm_syn_free(items[j]);
+                    free(items);
+                    idm_syn_free(syn);
+                    return idm_error_oom(err, idm_span_unknown(NULL));
+                }
+            }
+            free(items);
+            return syntax_wrap_owned(rt, syn, out, err);
+        }
+        case IDM_SYNTAX_BUILD_EXPR:
+        case IDM_SYNTAX_BUILD_BODY: {
+            IdmSyntax **items = NULL;
+            size_t count = 0;
+            if (!syntax_collect_list(payload, &items, &count, err)) return false;
+            syn = syntax_form_sequence(rt, ctx, kind, items, count, err);
+            free(items);
+            if (!syn) return idm_error_oom(err, ctx->span);
+            return syntax_wrap_owned(rt, syn, out, err);
+        }
+        case IDM_SYNTAX_BUILD_GROUP: {
+            IdmSyntax *inner = idm_syntax_value_get(payload);
+            if (!inner) return idm_error_set(err, ctx->span, "make-syntax-group expects syntax");
+            IdmSyntax *item = idm_syn_clone(inner);
+            if (!item) return idm_error_oom(err, ctx->span);
+            IdmSyntax *items[1] = { item };
+            syn = syntax_form_sequence(rt, ctx, kind, items, 1u, err);
+            if (!syn) return idm_error_oom(err, ctx->span);
+            return syntax_wrap_owned(rt, syn, out, err);
+        }
+    }
+    if (!syn) return idm_error_oom(err, ctx->span);
+    if (!syntax_copy_scopes_from(syn, ctx)) {
+        idm_syn_free(syn);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    if (!syntax_add_active_intro_scope(rt, syn)) {
+        idm_syn_free(syn);
+        return idm_error_oom(err, ctx->span);
+    }
+    return syntax_wrap_owned(rt, syn, out, err);
+}
+
 IdmValue idm_cell(IdmRuntime *rt, IdmValue initial, IdmError *err) {
     IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_CELL);
     if (!obj) {
@@ -806,9 +1079,21 @@ IdmValue idm_cell(IdmRuntime *rt, IdmValue initial, IdmError *err) {
     return v;
 }
 
-IdmValue idm_closure_multi_selectable_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *function_indexes, size_t function_count, IdmPatternSelector *selector, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
+IdmValue idm_closure_multi_selectable_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *function_indexes, size_t function_count, IdmPatternSelector *selector, const IdmValue *captures, size_t capture_count, IdmEnv *env, IdmError *err) {
     if (function_count == 0) {
         idm_error_set(err, idm_span_unknown(NULL), "closure must have at least one function entry");
+        return idm_nil();
+    }
+    if (!selector) {
+        idm_error_set(err, idm_span_unknown(NULL), "closure requires a prepared selector");
+        return idm_nil();
+    }
+    if (!idm_bc_is_finalized(module)) {
+        idm_error_set(err, idm_span_unknown(NULL), "closure module is not finalized");
+        return idm_nil();
+    }
+    if (!env) {
+        idm_error_set(err, idm_span_unknown(NULL), "closure requires an explicit runtime environment");
         return idm_nil();
     }
     IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_CLOSURE);
@@ -817,9 +1102,7 @@ IdmValue idm_closure_multi_selectable_in_module(IdmRuntime *rt, const IdmBytecod
         return idm_nil();
     }
     obj->as.closure.module = module;
-    obj->as.closure.ns = ns;
-    obj->as.closure.selector = selector;
-    idm_pattern_selector_retain(selector);
+    obj->as.closure.env = env;
     obj->as.closure.function_index = function_indexes[0];
     obj->as.closure.entry_count = function_count;
     obj->as.closure.entries = NULL;
@@ -843,26 +1126,30 @@ IdmValue idm_closure_multi_selectable_in_module(IdmRuntime *rt, const IdmBytecod
         memcpy(obj->as.closure.captures, captures, capture_count * sizeof(*captures));
         heap_account(idm_active_heap(rt), obj, capture_count * sizeof(*captures));
     }
+    obj->as.closure.selector = selector;
+    idm_pattern_selector_retain(selector);
+    obj->as.closure.selector_generation = module->selector_generation;
     IdmValue v;
     v.tag = IDM_VAL_CLOSURE;
     v.as.obj = obj;
     return v;
 }
 
-IdmValue idm_closure_multi_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *function_indexes, size_t function_count, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
-    return idm_closure_multi_selectable_in_module(rt, module, function_indexes, function_count, NULL, captures, capture_count, ns, err);
-}
-
-IdmValue idm_closure_multi(IdmRuntime *rt, const uint32_t *function_indexes, size_t function_count, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
-    return idm_closure_multi_in_module(rt, NULL, function_indexes, function_count, captures, capture_count, ns, err);
-}
-
-IdmValue idm_closure(IdmRuntime *rt, uint32_t function_index, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
-    return idm_closure_multi(rt, &function_index, 1, captures, capture_count, ns, err);
-}
-
-IdmValue idm_closure_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, uint32_t function_index, const IdmValue *captures, size_t capture_count, IdmNamespace *ns, IdmError *err) {
-    return idm_closure_multi_in_module(rt, module, &function_index, 1, captures, capture_count, ns, err);
+IdmValue idm_closure_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, uint32_t function_index, const IdmValue *captures, size_t capture_count, IdmEnv *env, IdmError *err) {
+    if (!idm_bc_is_finalized(module)) {
+        idm_error_set(err, idm_span_unknown(NULL), "closure module is not finalized");
+        return idm_nil();
+    }
+    if (function_index >= module->function_count) {
+        idm_error_set(err, idm_span_unknown(NULL), "closure references invalid function %u", function_index);
+        return idm_nil();
+    }
+    IdmPatternSelector *selector = module->functions[function_index].selector;
+    if (!selector) {
+        idm_error_set(err, idm_span_unknown(NULL), "closure function selector is missing");
+        return idm_nil();
+    }
+    return idm_closure_multi_selectable_in_module(rt, module, &function_index, 1, selector, captures, capture_count, env, err);
 }
 
 IdmValue idm_record(IdmRuntime *rt, const char *type, IdmValue fields, IdmError *err) {
@@ -951,17 +1238,6 @@ IdmValue idm_port(uint64_t id) {
     return v;
 }
 
-IdmValue idm_primitive_value(uint32_t primitive) {
-    IdmValue v;
-    v.tag = IDM_VAL_PRIMITIVE;
-    v.as.id = primitive;
-    return v;
-}
-
-bool idm_is_primitive(IdmValue value) {
-    return value.tag == IDM_VAL_PRIMITIVE;
-}
-
 const char *idm_value_type_name(IdmValueTag tag) {
     switch (tag) {
         case IDM_VAL_NIL: return "nil";
@@ -981,7 +1257,6 @@ const char *idm_value_type_name(IdmValueTag tag) {
         case IDM_VAL_PID: return "pid";
         case IDM_VAL_REF: return "ref";
         case IDM_VAL_PORT: return "port";
-        case IDM_VAL_PRIMITIVE: return "primitive";
         case IDM_VAL_RECORD: return "record";
         case IDM_VAL_REGEX: return "regex";
         case IDM_VAL_REGEX_RESULT: return "regex-result";
@@ -1013,10 +1288,6 @@ static bool trait_method_key_eq(const char *a_trait, const char *a_method, const
 
 static IdmTraitWorld *trait_world(IdmRuntime *rt) {
     return &rt->trait_worlds[rt->trait_phase ? 1 : 0];
-}
-
-uint64_t idm_trait_world_version(IdmRuntime *rt) {
-    return trait_world(rt)->version;
 }
 
 static IdmRuntimeTraitContract *runtime_trait_find_contract(IdmRuntime *rt, const char *trait) {
@@ -1488,12 +1759,16 @@ size_t idm_closure_capture_count(IdmValue value) {
     return value.tag == IDM_VAL_CLOSURE ? value.as.obj->as.closure.capture_count : 0;
 }
 
-IdmNamespace *idm_closure_namespace(IdmValue value) {
-    return value.tag == IDM_VAL_CLOSURE ? value.as.obj->as.closure.ns : NULL;
+IdmEnv *idm_closure_env(IdmValue value) {
+    return value.tag == IDM_VAL_CLOSURE ? value.as.obj->as.closure.env : NULL;
 }
 
 IdmPatternSelector *idm_closure_selector(IdmValue value) {
     return value.tag == IDM_VAL_CLOSURE ? value.as.obj->as.closure.selector : NULL;
+}
+
+uint64_t idm_closure_selector_generation(IdmValue value) {
+    return value.tag == IDM_VAL_CLOSURE ? value.as.obj->as.closure.selector_generation : 0;
 }
 
 IdmValue idm_closure_capture(IdmValue value, size_t index, IdmError *err) {
@@ -1733,7 +2008,6 @@ bool idm_value_equal(IdmValue a, IdmValue b) {
         case IDM_VAL_PID:
         case IDM_VAL_REF:
         case IDM_VAL_PORT:
-        case IDM_VAL_PRIMITIVE:
             return a.as.id == b.as.id;
     }
     return false;
@@ -1774,7 +2048,6 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
         case IDM_VAL_PID: return idm_buf_appendf(buf, "#<pid:%llu>", (unsigned long long)value.as.id);
         case IDM_VAL_REF: return idm_buf_appendf(buf, "#<ref:%llu>", (unsigned long long)value.as.id);
         case IDM_VAL_PORT: return idm_buf_appendf(buf, "#<port:%llu>", (unsigned long long)value.as.id);
-        case IDM_VAL_PRIMITIVE: return idm_buf_appendf(buf, "#<primitive:%llu>", (unsigned long long)value.as.id);
         case IDM_VAL_RECORD: return idm_buf_appendf(buf, "#<record:%s>", value.as.obj->as.record.type);
         case IDM_VAL_REGEX: {
             size_t len = 0;
@@ -1963,9 +2236,10 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
         case IDM_OBJ_CLOSURE: {
             dst->as.closure.module = src->as.closure.module;
             dst->as.closure.function_index = src->as.closure.function_index;
-            dst->as.closure.ns = src->as.closure.ns;
+            dst->as.closure.env = src->as.closure.env;
             dst->as.closure.selector = src->as.closure.selector;
             idm_pattern_selector_retain(dst->as.closure.selector);
+            dst->as.closure.selector_generation = src->as.closure.selector_generation;
             dst->as.closure.entry_count = src->as.closure.entry_count;
             dst->as.closure.entries = NULL;
             if (src->as.closure.entry_count > 1) {

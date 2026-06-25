@@ -1,74 +1,153 @@
 package range
 
-use std/enum
-use std/math
+import std/enum as Enum
+import std/math as Math
 
-export record Range do
+record Range do
   field start
   field stop
   field step
   field closed
 end
 
-defn valid-step step -> cond (step |> eq? 0) (error {:range-step-zero}) step
+defn valid-int do
+  value label when (int? value) -> value
+  value label -> error {:range-integer-required label value}
+end
+
+defn valid-step do
+  0 -> error {:range-step-zero}
+  step -> valid-int step :step
+end
+
+defn make start stop step closed ->
+  Range (valid-int start :start) (valid-int stop :stop) (valid-step step) closed
 
 export defn new do
-  first stop -> Range first stop 1 :false
-  first stop step -> Range first stop (valid-step step) :false
+  first stop -> make first stop 1 :false
+  first stop step -> make first stop step :false
 end
 
 export defn inclusive do
-  first stop -> Range first stop 1 :true
-  first stop step -> Range first stop (valid-step step) :true
+  first stop -> make first stop 1 :true
+  first stop step -> make first stop step :true
 end
 
 export defn exclusive do
-  first stop -> Range first stop 1 :false
-  first stop step -> Range first stop (valid-step step) :false
+  first stop -> make first stop 1 :false
+  first stop step -> make first stop step :false
 end
 
-defn positive-step? r -> r.step |> gt? 0
+defn positive-step? r -> r.step > 0
 
-defn done-exclusive? cur r -> cond (r |> positive-step?) (cur |> gte? r.stop) (cur |> lte? r.stop)
+defn done-exclusive? cur r ->
+  if positive-step? r do
+    cur >= r.stop
+  else do
+    cur <= r.stop
+  end
 
-defn done-inclusive? cur r -> cond (r |> positive-step?) (cur |> gt? r.stop) (cur |> lt? r.stop)
+defn done-inclusive? cur r ->
+  if positive-step? r do
+    cur > r.stop
+  else do
+    cur < r.stop
+  end
 
-defn done? cur r -> cond (r.closed |> eq? :true) (cur |> done-inclusive? r) (cur |> done-exclusive? r)
+defn done? cur r ->
+  if r.closed == :true do
+    done-inclusive? cur r
+  else do
+    done-exclusive? cur r
+  end
 
-export defn empty? r -> r.start |> done? r
+export defn empty? r -> done? r.start r
 
 defn fold-range cur r acc f ->
-  cond (cur |> done? r) acc (fold-range (cur + r.step) r (f cur acc) f)
+  if done? cur r do
+    acc
+  else do
+    fold-range (cur + r.step) r (f cur acc) f
+  end
 
-export defn reduce r acc f -> r.start |> fold-range r acc f
+defn reduce-range r acc f -> fold-range r.start r acc f
 
-export defn to-list r -> (r |> reduce '() &cons).reverse
+export defn reduce r acc f -> reduce-range r acc f
 
-defn size-from cur r acc ->
-  cond (cur |> done? r) acc (size-from (cur + r.step) r (acc + 1))
+defn list-range r -> (reduce-range r '() &cons).reverse
 
-export defn size r -> r.start |> size-from r 0
+export defn to-list r -> list-range r
 
-export defn first r -> if (empty? r) do :nil else do r.start end
+defn distance r ->
+  if positive-step? r do
+    r.stop - r.start
+  else do
+    r.start - r.stop
+  end
 
-defn last-from cur r prev ->
-  cond (cur |> done? r) prev (last-from (cur + r.step) r cur)
+defn span r ->
+  if r.closed == :true do
+    (distance r) + 1
+  else do
+    distance r
+  end
 
-export defn last r -> r.start |> last-from r :nil
+defn ceil-div n d -> (n + d - 1) / d
+
+defn size-range r ->
+  if empty? r do
+    0
+  else do
+    ceil-div (span r) (Math.abs r.step)
+  end
+
+export defn size r -> size-range r
+
+export defn first r ->
+  if empty? r do
+    :nil
+  else do
+    r.start
+  end
+
+export defn last r ->
+  if empty? r do
+    :nil
+  else do
+    r.start + (r.step * ((size-range r) - 1))
+  end
 
 defn within-positive? r x ->
-  cond (r.closed |> eq? :true) (and (x |> gte? r.start) (x |> lte? r.stop)) (and (x |> gte? r.start) (x |> lt? r.stop))
+  if r.closed == :true do
+    and (x >= r.start) (x <= r.stop)
+  else do
+    and (x >= r.start) (x < r.stop)
+  end
 
 defn within-negative? r x ->
-  cond (r.closed |> eq? :true) (and (x |> lte? r.start) (x |> gte? r.stop)) (and (x |> lte? r.start) (x |> gt? r.stop))
+  if r.closed == :true do
+    and (x <= r.start) (x >= r.stop)
+  else do
+    and (x <= r.start) (x > r.stop)
+  end
 
-defn within? r x -> cond (r |> positive-step?) (r |> within-positive? x) (r |> within-negative? x)
+defn within? r x ->
+  if positive-step? r do
+    within-positive? r x
+  else do
+    within-negative? r x
+  end
 
 export defn contains? r x ->
-  and (r |> within? x) (x |> sub r.start |> floor-mod (r.step |> abs) |> eq? 0)
+  and (int? x) (and (within? r x) (((x - r.start) %% (Math.abs r.step)) == 0))
 
-implement Iter on Range do
-  method foldl r acc f -> r |> reduce acc f
+implement Enum.Iter on Range do
+  method foldl r acc f -> reduce-range r acc f
 end
 
-implement Enum on Range
+implement Enum.Enum on Range do
+  method reduce r acc f -> reduce-range r acc f
+  method to-list r -> list-range r
+  method length r -> size-range r
+  method count r -> size-range r
+end

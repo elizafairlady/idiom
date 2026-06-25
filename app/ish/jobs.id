@@ -1,3 +1,5 @@
+use std/port with [port-status]
+
 defn status-name do
   :running -> "Running"
   :stopped -> "Stopped"
@@ -10,8 +12,8 @@ defn jobs-init -> {'() 1}
 
 defn find-port do
   '() _p -> :nil
-  (list {n port text} . _) p when (eq? port p) -> {n port text}
-  (list _ . t) p -> find-port t p
+  '({n port text} . _) p when (eq? port p) -> {n port text}
+  '(_ . t) p -> find-port t p
 end
 
 defn jobs-register {entries next} port text -> match (find-port entries port) do
@@ -27,7 +29,7 @@ end
 
 defn snap-lines do
   '() _i acc live -> {acc live}
-  (list {n port text} . t) i acc live -> do
+  '({n port text} . t) i acc live -> do
     s = port-status port
     snap-lines t (add i 1) (cons {n (mark-for i) s text port} acc) (cond (eq? s :done) live (add live 1))
   end
@@ -35,8 +37,8 @@ end
 
 defn keep-undone do
   '() -> '()
-  (list {_n port _text} . t) when (eq? (port-status port) :done) -> keep-undone t
-  (list {n port text} . t) -> cons {n port text} (keep-undone t)
+  '({_n port _text} . t) when (eq? (port-status port) :done) -> keep-undone t
+  '({n port text} . t) -> cons {n port text} (keep-undone t)
 end
 
 defn jobs-snapshot {entries next} do
@@ -47,8 +49,8 @@ end
 
 defn drop-port do
   '() _p -> '()
-  (list {_n port _t} . t) p when (eq? port p) -> t
-  (list h . t) p -> cons h (drop-port t p)
+  '({_n port _t} . t) p when (eq? port p) -> t
+  '(h . t) p -> cons h (drop-port t p)
 end
 
 defn jobs-remove {entries next} port do
@@ -58,9 +60,9 @@ end
 
 defn entry-for do
   '() _n -> :nil
-  (list {n port text} . _) :nil -> {n port text}
-  (list {n port text} . _) m when (eq? n m) -> {n port text}
-  (list _ . t) m -> entry-for t m
+  '({n port text} . _) :nil -> {n port text}
+  '({n port text} . _) m when (eq? n m) -> {n port text}
+  '(_ . t) m -> entry-for t m
 end
 
 defn jobs-lookup {entries _next} n -> match (entry-for entries n) do
@@ -70,19 +72,19 @@ end
 
 defn done-lines do
   '() -> '()
-  (list {n mark :done text port} . t) -> cons {n mark :done text port} (done-lines t)
-  (list _ . t) -> done-lines t
+  '({n mark :done text port} . t) -> cons {n mark :done text port} (done-lines t)
+  '(_ . t) -> done-lines t
 end
 
 defn stopped-lines do
   '() -> '()
-  (list {n mark :stopped text port} . t) -> cons {n mark :stopped text port} (stopped-lines t)
-  (list _ . t) -> stopped-lines t
+  '({n mark :stopped text port} . t) -> cons {n mark :stopped text port} (stopped-lines t)
+  '(_ . t) -> stopped-lines t
 end
 
 defn hup-stopped do
   '() -> :ok
-  (list {_n _m _s _t port} . t) -> do
+  '({_n _m _s _t port} . t) -> do
     job-signal port :hup
     job-signal port :cont
     hup-stopped t

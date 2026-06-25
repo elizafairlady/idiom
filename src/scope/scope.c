@@ -238,7 +238,7 @@ bool idm_arity_describe(IdmBuffer *buf, const IdmArity *arity) {
     return first ? idm_buf_append(buf, "<empty>") : true;
 }
 
-bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id) {
+bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, uint32_t primitive, IdmBindingId *out_id) {
     if (table->count == table->cap) {
         size_t cap = table->cap ? table->cap * 2u : 16u;
         IdmBinding *items = realloc(table->items, cap * sizeof(*items));
@@ -260,8 +260,16 @@ bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, 
     binding->payload = payload;
     binding->frame_id = frame_id;
     binding->arity = arity;
+    binding->primitive_backed = true;
+    binding->primitive = primitive;
     table->count++;
     if (out_id) *out_id = binding->id;
+    return true;
+}
+
+bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id) {
+    if (!idm_binding_table_add_primitive_with_arity(table, name, phase, space, kind, scopes, payload, frame_id, arity, 0u, out_id)) return false;
+    table->items[table->count - 1u].primitive_backed = false;
     return true;
 }
 
@@ -282,12 +290,33 @@ static bool binding_candidate(const IdmBinding *candidate, const char *name, int
     return idm_scope_set_subset(&candidate->scopes, reference_scopes);
 }
 
+static int binding_tie_priority(const IdmBinding *binding) {
+    switch (binding->kind) {
+        case IDM_BIND_VALUE:
+        case IDM_BIND_LOCAL:
+        case IDM_BIND_ARG:
+        case IDM_BIND_ENV:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static bool binding_prefer_candidate(const IdmBinding *candidate, const IdmBinding *best) {
+    if (!best) return true;
+    if (!idm_scope_set_subset(&best->scopes, &candidate->scopes)) return false;
+    if (!idm_scope_set_equal(&best->scopes, &candidate->scopes)) return true;
+    int candidate_priority = binding_tie_priority(candidate);
+    int best_priority = binding_tie_priority(best);
+    return candidate_priority >= best_priority;
+}
+
 IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding) {
     const IdmBinding *best = NULL;
     for (size_t i = 0; i < table->count; i++) {
         const IdmBinding *candidate = &table->items[i];
         if (!binding_candidate(candidate, name, phase, space, reference_scopes)) continue;
-        if (!best || idm_scope_set_subset(&best->scopes, &candidate->scopes)) best = candidate;
+        if (binding_prefer_candidate(candidate, best)) best = candidate;
     }
     if (!best) {
         if (out_binding) *out_binding = NULL;
@@ -308,13 +337,13 @@ IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *n
 const char *idm_binding_space_name(IdmBindingSpace space) {
     switch (space) {
         case IDM_BIND_SPACE_DEFAULT: return "default";
-        case IDM_BIND_SPACE_PACKAGE: return "package";
         case IDM_BIND_SPACE_OPERATOR: return "operator";
         case IDM_BIND_SPACE_SHELL: return "shell";
         case IDM_BIND_SPACE_LABEL: return "label";
         case IDM_BIND_SPACE_PROTOCOL: return "protocol";
         case IDM_BIND_SPACE_TRAIT: return "trait";
         case IDM_BIND_SPACE_TYPE: return "type";
+        case IDM_BIND_SPACE_CORE_SYNTAX: return "core-syntax";
         case IDM_BIND_SPACE_GRAMMAR: return "grammar";
         case IDM_BIND_SPACE_METHOD: return "method";
     }
@@ -326,15 +355,16 @@ const char *idm_binding_kind_name(IdmBindingKind kind) {
         case IDM_BIND_VALUE: return "value";
         case IDM_BIND_CORE_FORM: return "core-form";
         case IDM_BIND_TRANSFORMER: return "transformer";
-        case IDM_BIND_PACKAGE: return "package";
         case IDM_BIND_OPERATOR: return "operator";
         case IDM_BIND_SHELL_FORM: return "shell-form";
         case IDM_BIND_LOCAL: return "local";
         case IDM_BIND_ARG: return "arg";
-        case IDM_BIND_GLOBAL: return "global";
+        case IDM_BIND_ENV: return "env";
+        case IDM_BIND_PACKAGE_SLOT: return "package-slot";
         case IDM_BIND_PROTOCOL: return "protocol";
         case IDM_BIND_TRAIT: return "trait";
         case IDM_BIND_TYPE: return "type";
+        case IDM_BIND_GRAMMAR: return "grammar";
         case IDM_BIND_METHOD: return "method";
     }
     return "<bad-kind>";

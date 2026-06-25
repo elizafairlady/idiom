@@ -16,7 +16,10 @@ struct IdmMacroRunner {
 
 bool idm_expand_syntax(IdmRuntime *rt, const IdmSyntax *syntax, IdmCore **out, IdmError *err);
 bool idm_expand_syntax_with_runner(IdmRuntime *rt, const IdmSyntax *syntax, IdmMacroRunner *runner, IdmCore **out, IdmError *err);
-bool idm_expand_string(IdmRuntime *rt, const char *file, const char *source, IdmCore **out, IdmError *err);
+bool idm_expand_reader_artifact_string(IdmRuntime *rt, const IdmReaderArtifact *artifact, const char *file, const char *source, IdmCore **out, IdmError *err);
+bool idm_expand_source_reader(IdmRuntime *rt, const IdmReaderArtifact **out, IdmError *err);
+bool idm_expand_read_source_string(IdmRuntime *rt, const char *file, const char *source, IdmSyntax **out, IdmError *err);
+bool idm_expand_source_string(IdmRuntime *rt, const char *file, const char *source, IdmCore **out, IdmError *err);
 typedef enum {
     IDM_REPL_OK,
     IDM_REPL_INCOMPLETE,
@@ -35,7 +38,8 @@ bool idm_repl_loop_thunk(IdmRepl *repl, const char *source, IdmValue *out_thunk,
 bool idm_repl_seed_source(IdmRepl *repl, const char *source, IdmError *err);
 bool idm_expand_package_artifact_serialize(IdmRuntime *rt, const char *path, IdmBuffer *out, IdmError *err);
 bool idm_expand_preload_package_artifact(IdmRuntime *rt, const char *path, const unsigned char *data, size_t len, IdmError *err);
+bool idm_expand_surface_dump(IdmRuntime *rt, const char *prelude, IdmBuffer *out, IdmError *err);
 
-bool idm_expand_string_with_runner(IdmRuntime *rt, const char *file, const char *source, IdmMacroRunner *runner, IdmCore **out, IdmError *err);
+bool idm_expand_source_string_with_runner(IdmRuntime *rt, const char *file, const char *source, IdmMacroRunner *runner, IdmCore **out, IdmError *err);
 
 #endif

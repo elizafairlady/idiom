@@ -14,4 +14,4 @@ end
 activate OpCarrier
 activate UsesOp
 println (squarish 7)
-inspect r
+println (inspect r)

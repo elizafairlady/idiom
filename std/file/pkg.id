@@ -2,6 +2,7 @@ package file
 
 use std/path
 use std/string
+use std/port with [port-close-input port-read port-write]
 
 export defn ls path -> list path
 export defn read-port port max -> port-read port :stdout max

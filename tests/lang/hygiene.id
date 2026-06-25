@@ -6,13 +6,9 @@ defmacro twice %`(twice %,e) -> %`(kadd %,e %,e)
 defn myadd a b -> add a b
 operator <+> precedence: 50 assoc: left capture: :infix -> myadd
 
-defmacro defmm do
-  %`(defmm %,n) -> do
-    expander-register-macro n (fn do %`(_ %,a) -> %`(add %,a 1) end)
-    %`:nil
-  end
+defmacro inc do
+  %`(inc %,a) -> %`(add %,a 1)
 end
-defmm inc
 
 defmacro defproto %`(defproto %,n %,b) -> %`do
   protocol %,n %,b
@@ -35,7 +31,7 @@ defrec Pt do
 end
 
 suite do
-  test "macro registered from inside a transformer" do
+  test "macro declared beside transformer" do
     assert-eq (inc 41) 42
   end
   test "protocol registered from a macro splice" do

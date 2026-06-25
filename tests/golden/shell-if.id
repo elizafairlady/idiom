@@ -10,4 +10,4 @@ if (true) do
 else do
   println "ok-false"
 end
-:done
+println :done

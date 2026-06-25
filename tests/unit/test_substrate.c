@@ -1,8 +1,121 @@
 #include "test_util.h"
 
-static bool emit_prim_call(IdmBytecodeModule *module, IdmPrimitive prim, uint32_t argc) {
-    return idm_bc_emit_u32(module, IDM_OP_PRIM_CALL, (uint32_t)prim, NULL) &&
-           idm_bc_emit(module, argc, NULL);
+#include "../../src/expand/internal.h"
+
+#include "idiom/artifact.h"
+
+static bool add_primitive_clause_fn(IdmBytecodeModule *module, IdmPrimitive primitive, uint32_t *out_index) {
+    return idm_bc_add_primitive_function(module, idm_primitive_name(primitive), idm_primitive_arity(primitive), (uint32_t)primitive, out_index);
+}
+
+static bool emit_call(IdmBytecodeModule *module, uint32_t argc, bool tail) {
+    return idm_bc_emit_u32(module, IDM_OP_CALL, argc, NULL) &&
+           idm_bc_emit(module, tail ? 1u : 0u, NULL);
+}
+
+static IdmCore *primitive_clause_call(IdmPrimitive primitive, IdmSpan span) {
+    IdmCore *callee = idm_core_primitive_backed_fn(idm_primitive_name(primitive), primitive, idm_primitive_arity(primitive), span);
+    CHECK(callee != NULL);
+    IdmCore *call = idm_core_call(callee, span);
+    CHECK(call != NULL);
+    return call;
+}
+
+static char *dump_transparent_reader(const char *src) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmSyntax *program = NULL;
+    if (!idm_reader_read_terms_string("<transparent-test>", src, &program, &err)) {
+        idm_error_fprint(stderr, &err);
+        idm_error_clear(&err);
+        return NULL;
+    }
+    IdmBuffer buf;
+    idm_buf_init(&buf);
+    CHECK(idm_syn_dump(&buf, program));
+    idm_syn_free(program);
+    return idm_buf_take(&buf);
+}
+
+static IdmSyntax *test_read_one_term(const char *src) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmSyntax *program = NULL;
+    if (!idm_reader_read_terms_string("<artifact-term>", src, &program, &err)) {
+        idm_error_fprint(stderr, &err);
+        idm_error_clear(&err);
+        return NULL;
+    }
+    CHECK(program != NULL && program->kind == IDM_SYN_LIST && program->as.seq.count == 1u);
+    IdmSyntax *out = program && program->kind == IDM_SYN_LIST && program->as.seq.count == 1u ? idm_syn_clone(program->as.seq.items[0]) : NULL;
+    CHECK(out != NULL);
+    idm_syn_free(program);
+    idm_error_clear(&err);
+    return out;
+}
+
+static bool test_reader_artifact_token_rule(IdmGrammarRule *rule, const char *name, uint8_t terminal_kind, const char *terminal_text, const char *pattern_src, const char *constructor_src) {
+    memset(rule, 0, sizeof(*rule));
+    rule->name = idm_strdup(name);
+    rule->kind = (uint8_t)IDM_GRAMMAR_RULE_TOKEN;
+    IdmError err;
+    idm_error_init(&err);
+    IdmSyntax *pattern = test_read_one_term(pattern_src);
+    IdmSyntax *constructor = test_read_one_term(constructor_src);
+    bool ok = rule->name && pattern && constructor &&
+              idm_grammar_terminal_from_ir(pattern, &rule->terminal, &err) &&
+              idm_reader_ctor_compile_ir(constructor, &rule->constructor, &err) &&
+              rule->terminal.kind == terminal_kind &&
+              rule->terminal.text && strcmp(rule->terminal.text, terminal_text) == 0;
+    if (!ok) {
+        if (err.present) idm_error_fprint(stderr, &err);
+        idm_grammar_rule_destroy(rule);
+    }
+    idm_syn_free(pattern);
+    idm_syn_free(constructor);
+    idm_error_clear(&err);
+    return ok;
+}
+
+static bool test_reader_artifact_form_rule(IdmGrammarRule *rule, const char *name, const char *pattern_src, const char *constructor_src) {
+    memset(rule, 0, sizeof(*rule));
+    rule->name = idm_strdup(name);
+    rule->kind = (uint8_t)IDM_GRAMMAR_RULE_FORM;
+    IdmError err;
+    idm_error_init(&err);
+    IdmSyntax *pattern = test_read_one_term(pattern_src);
+    IdmSyntax *constructor = test_read_one_term(constructor_src);
+    bool ok = rule->name && pattern && constructor &&
+              idm_reader_pattern_compile_ir(pattern, &rule->pattern, &err) &&
+              idm_reader_ctor_compile_ir(constructor, &rule->constructor, &err);
+    if (!ok) {
+        if (err.present) idm_error_fprint(stderr, &err);
+        idm_grammar_rule_destroy(rule);
+    }
+    idm_syn_free(pattern);
+    idm_syn_free(constructor);
+    idm_error_clear(&err);
+    return ok;
+}
+
+static bool test_reader_artifact_skip_rule(IdmGrammarRule *rule, const char *name, uint8_t terminal_kind, const char *terminal_text, const char *pattern_src) {
+    memset(rule, 0, sizeof(*rule));
+    rule->name = idm_strdup(name);
+    rule->kind = (uint8_t)IDM_GRAMMAR_RULE_SKIP;
+    IdmError err;
+    idm_error_init(&err);
+    IdmSyntax *pattern = test_read_one_term(pattern_src);
+    bool ok = rule->name && pattern &&
+              idm_grammar_terminal_from_ir(pattern, &rule->terminal, &err) &&
+              rule->terminal.kind == terminal_kind &&
+              rule->terminal.text && strcmp(rule->terminal.text, terminal_text) == 0;
+    if (!ok) {
+        if (err.present) idm_error_fprint(stderr, &err);
+        idm_grammar_rule_destroy(rule);
+    }
+    idm_syn_free(pattern);
+    idm_error_clear(&err);
+    return ok;
 }
 
 static void test_values(void) {
@@ -80,6 +193,960 @@ static void test_reader_basic(void) {
     free(s);
 }
 
+static void test_transparent_reader_basic(void) {
+    char *s = dump_transparent_reader("foo (bar baz) [1 :ok \"x\"]\n");
+    CHECK(s != NULL);
+    CHECK_STR(s, "(foo (bar baz) [1 :ok \"x\"])");
+    free(s);
+
+    s = dump_transparent_reader("r\"abc\" regex\n");
+    CHECK(s != NULL);
+    CHECK_STR(s, "(r \"abc\" regex)");
+    free(s);
+}
+
+static IdmSyntax *copy_core_grammar_form(const IdmSyntax *terms, const char *name) {
+    if (!terms || terms->kind != IDM_SYN_LIST) return NULL;
+    for (size_t i = 0; i < terms->as.seq.count; i++) {
+        const IdmSyntax *form = terms->as.seq.items[i];
+        const IdmSyntax *grammar_name = i + 1u < terms->as.seq.count ? terms->as.seq.items[i + 1u] : NULL;
+        if (form && form->kind == IDM_SYN_WORD && strcmp(form->as.text, "core-grammar") == 0 &&
+            grammar_name && grammar_name->kind == IDM_SYN_WORD && strcmp(grammar_name->as.text, name) == 0 &&
+            i + 3u < terms->as.seq.count) {
+            IdmSyntax *copy = idm_syn_list(form->span);
+            if (!copy) return NULL;
+            for (size_t j = 0; j < 4u; j++) {
+                IdmSyntax *item = idm_syn_clone(terms->as.seq.items[i + j]);
+                if (!item || !idm_syn_append(copy, item)) {
+                    idm_syn_free(item);
+                    idm_syn_free(copy);
+                    return NULL;
+                }
+            }
+            return copy;
+        }
+    }
+    return NULL;
+}
+
+static void test_kernel_bootstrap_iridium_quine(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmSyntax *terms = NULL;
+    CHECK(idm_reader_read_terms_file("std/kernel/bootstrap.id", &terms, &err));
+    CHECK(terms != NULL && terms->kind == IDM_SYN_LIST);
+    IdmSyntax *iridium_form = copy_core_grammar_form(terms, "Iridium");
+    CHECK(iridium_form != NULL);
+    IdmPkgGrammar grammar;
+    CHECK(idm_pkg_grammar_from_ir(iridium_form, &grammar, &err));
+    CHECK(grammar.name != NULL && strcmp(grammar.name, "Iridium") == 0);
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(idm_reader_artifact_from_grammars(grammar.name, &grammar, 1u, &artifact, &err));
+    IdmBuffer wire;
+    idm_buf_init(&wire);
+    CHECK(idm_reader_artifact_serialize(artifact, &wire, &err));
+    IdmReaderArtifact *loaded = NULL;
+    CHECK(idm_reader_artifact_deserialize((const unsigned char *)wire.data, wire.len, &loaded, &err));
+    char *source = NULL;
+    size_t source_len = 0;
+    CHECK(idm_read_file("std/kernel/bootstrap.id", &source, &source_len, &err));
+    IdmSyntax *readback = NULL;
+    CHECK(idm_reader_read_artifact_string(loaded, "std/kernel/bootstrap.id", source, &readback, &err));
+    IdmSyntax *expected = idm_syn_list(terms->span);
+    CHECK(expected != NULL);
+    CHECK(idm_syn_append(expected, idm_syn_word("%-package-begin", terms->span)));
+    for (size_t i = 0; i < terms->as.seq.count; i++) {
+        IdmSyntax *item = idm_syn_clone(terms->as.seq.items[i]);
+        CHECK(item != NULL);
+        CHECK(idm_syn_append(expected, item));
+    }
+    IdmBuffer got;
+    IdmBuffer want;
+    idm_buf_init(&got);
+    idm_buf_init(&want);
+    CHECK(idm_syn_dump(&got, readback));
+    CHECK(idm_syn_dump(&want, expected));
+    CHECK_STR(got.data, want.data);
+    idm_buf_destroy(&got);
+    idm_buf_destroy(&want);
+    idm_syn_free(expected);
+    idm_syn_free(readback);
+    free(source);
+    idm_buf_destroy(&wire);
+    idm_reader_artifact_destroy(loaded);
+    idm_reader_artifact_destroy(artifact);
+    idm_pkg_grammar_destroy(&grammar);
+    idm_syn_free(iridium_form);
+    idm_syn_free(terms);
+    idm_error_clear(&err);
+}
+
+static void test_bootstrap_source_reader_selection_is_data_driven(void) {
+    const char *old = getenv("IDIOMROOT");
+    char *saved = old ? idm_strdup(old) : NULL;
+    CHECK(mkdir("build/source_select_std", 0755) == 0 || errno == EEXIST);
+    CHECK(mkdir("build/source_select_std/kernel", 0755) == 0 || errno == EEXIST);
+    CHECK(write_text_file("build/source_select_std/kernel/bootstrap.id",
+        "core-grammar Idiom :exclusive [\n"
+        "  {:skip space {:regex \" +\"}}\n"
+        "  {:token nope {:literal \"nope\"} {:emit-word nope}}\n"
+        "  {:form program {:capture item {:token nope}} {:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:capture item}]}]}}\n"
+        "]\n"
+        "\n"
+        "core-reader :source Idiom\n"
+        "\n"
+        "core-grammar Pydiom :exclusive [\n"
+        "  {:skip space {:regex \"[ \\t\\r\\n]+\"}}\n"
+        "  {:token py {:literal \"py\"} {:emit-word py}}\n"
+        "  {:token integer {:regex \"[0-9]+\"} {:capture integer}}\n"
+        "  {:form program {:seq {:token py} {:capture value {:token integer}}} {:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:capture value}]}]}}\n"
+        "]\n"
+        "\n"
+        "core-reader :source Pydiom\n"));
+    setenv("IDIOMROOT", "build/source_select_std", 1);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    const IdmReaderArtifact *reader = NULL;
+    bool got = idm_expand_source_reader(&rt, &reader, &err);
+    if (!got) idm_error_fprint(stderr, &err);
+    CHECK(got);
+    if (got) {
+        IdmReaderArtifactInfo info;
+        memset(&info, 0, sizeof(info));
+        CHECK(idm_reader_artifact_info(reader, &info));
+        CHECK_STR(info.surface, "Pydiom");
+        IdmSyntax *program = NULL;
+        bool read = idm_reader_read_artifact_string(reader, "<pydiom-selection>", "py 42", &program, &err);
+        if (!read) idm_error_fprint(stderr, &err);
+        CHECK(read);
+        if (read) {
+            IdmBuffer dump;
+            idm_buf_init(&dump);
+            CHECK(idm_syn_dump(&dump, program));
+            CHECK_STR(dump.data, "(%-package-begin (%-expr 42))");
+            idm_buf_destroy(&dump);
+            idm_syn_free(program);
+        }
+    }
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+    if (saved) {
+        setenv("IDIOMROOT", saved, 1);
+        free(saved);
+    } else {
+        unsetenv("IDIOMROOT");
+    }
+}
+
+static void test_surface_grammar_source_reader_artifact(void) {
+    remove("build/surface_reader_pkg.ic");
+    CHECK(write_text_file("build/surface_reader_pkg.id",
+        "package surface_reader_pkg\n"
+        "\n"
+        "grammar SurfaceKernelReader exclusive do\n"
+        "  skip space {:regex \"[ \\t\\r\\n]+\"}\n"
+        "  token grammar_kw {:literal \"grammar\"} -> {:emit-word grammar}\n"
+        "  token do_kw {:literal \"do\"} -> {:emit-word do}\n"
+        "  token end_kw {:literal \"end\"} -> {:emit-word end}\n"
+        "  token extend_kw {:literal \"extend\"} -> {:emit-word extend}\n"
+        "  token ident {:regex \"[A-Za-z_][A-Za-z0-9_]*\"} -> {:capture ident}\n"
+        "  form grammar_decl {:seq {:token grammar_kw} {:capture name {:token ident}} {:capture mode {:token extend_kw}} {:token do_kw} {:token end_kw}} -> {:emit-form \"%-expr\" [{:emit-word grammar} {:capture name} {:capture mode} {:emit-form \"%-body\" []}]}\n"
+        "  form program {:capture decl {:ref grammar_decl}} -> {:emit-form \"%-package-begin\" [{:capture decl}]}\n"
+        "end\n"
+        "\n"
+        "core-reader :source SurfaceKernelReader\n"));
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    bool serialized = idm_expand_package_artifact_serialize(&rt, "build/surface_reader_pkg", &blob, &err);
+    if (!serialized) idm_error_fprint(stderr, &err);
+    CHECK(serialized);
+    IdmArtifact art;
+    memset(&art, 0, sizeof(art));
+    bool loaded = serialized && idm_artifact_deserialize(&rt, (const unsigned char *)blob.data, blob.len, &art, &err);
+    if (!loaded) idm_error_fprint(stderr, &err);
+    CHECK(loaded);
+    if (loaded) {
+        CHECK(art.source_reader != NULL);
+        if (art.source_reader) CHECK_STR(art.source_reader, "SurfaceKernelReader");
+    }
+    IdmReaderArtifact *reader = NULL;
+    bool built = loaded && idm_reader_artifact_from_grammars(art.source_reader, art.grammars, art.grammar_count, &reader, &err);
+    if (!built) idm_error_fprint(stderr, &err);
+    CHECK(built);
+    IdmSyntax *program = NULL;
+    bool read = reader && idm_reader_read_artifact_string(reader, "<surface-kernel-reader>", "grammar NextReader extend do end", &program, &err);
+    if (!read) idm_error_fprint(stderr, &err);
+    CHECK(read);
+    if (read) {
+        IdmBuffer dump;
+        idm_buf_init(&dump);
+        CHECK(idm_syn_dump(&dump, program));
+        CHECK_STR(dump.data, "(%-package-begin (%-expr grammar NextReader extend (%-body)))");
+        idm_buf_destroy(&dump);
+    }
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(reader);
+    if (loaded) idm_artifact_destroy(&art);
+    idm_buf_destroy(&blob);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_reader_artifact(void) {
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("GateReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 7u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_skip_rule(&grammar.rules[0], "space", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, " +", "{:regex \" +\"}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[1], "ident", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "[A-Za-z_][A-Za-z0-9_]*", "{:regex \"[A-Za-z_][A-Za-z0-9_]*\"}", "{:capture ident}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[2], "integer", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "[0-9]+", "{:regex \"[0-9]+\"}", "{:capture integer}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[3], "equals", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "=", "{:regex \"=\"}", "{:emit-atom equals}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[4], "arrow", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "=>", "{:literal \"=>\"}", "{:emit-atom arrow}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[5], "pair", "{:seq {:capture left {:ref ident}} {:token arrow} {:capture right {:ref integer}}}", "{:emit-form \"%-expr\" [{:emit-word pair} {:capture left} {:capture right}]}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[6], "program", "{:capture item {:ref pair}}", "{:emit-form \"%-package-begin\" [{:capture item}]}"));
+
+    IdmError err;
+    idm_error_init(&err);
+    IdmReaderArtifact *artifact = NULL;
+    bool built = idm_reader_artifact_from_grammars("GateReader", &grammar, 1u, &artifact, &err);
+    if (!built) idm_error_fprint(stderr, &err);
+    CHECK(built);
+    CHECK(artifact != NULL);
+    IdmReaderArtifactInfo info;
+    memset(&info, 0, sizeof(info));
+    CHECK(idm_reader_artifact_info(artifact, &info));
+    CHECK_STR(info.surface, "GateReader");
+    CHECK(info.phase == 0);
+    CHECK(info.format_version == 1u);
+    CHECK(info.compiler_version == 1u);
+    CHECK(info.mode == (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE);
+    CHECK(info.contributor_count == 1u);
+    CHECK(info.token_count == 4u);
+    CHECK(info.form_count == 2u);
+    CHECK(info.skip_count == 1u);
+    IdmReaderArtifactContributorInfo contributor;
+    memset(&contributor, 0, sizeof(contributor));
+    CHECK(idm_reader_artifact_contributor_info(artifact, 0, &contributor));
+    CHECK(contributor.provider != NULL && contributor.provider[0] == '\0');
+    CHECK(contributor.provider_key != NULL && contributor.provider_key[0] == '\0');
+    CHECK(contributor.mode == (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE);
+    CHECK(contributor.first_rule_order == 0u);
+    CHECK(contributor.rule_count == grammar.rule_count);
+
+    IdmSyntax *program = NULL;
+    bool read = artifact && idm_reader_read_artifact_string(artifact, "<reader-artifact-input>", "alpha => 42", &program, &err);
+    if (!read) idm_error_fprint(stderr, &err);
+    CHECK(read);
+    CHECK(program != NULL);
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin (%-expr pair alpha 42))");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(artifact);
+    idm_error_clear(&err);
+    idm_pkg_grammar_destroy(&grammar);
+}
+
+static void test_reader_artifact_terminal_captures(void) {
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("CaptureReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 5u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_skip_rule(&grammar.rules[0], "space", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, " +", "{:regex \" +\"}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[1], "atom", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, ":(?<atom_name>[A-Za-z_][A-Za-z0-9_]*)", "{:regex \":(?<atom_name>[A-Za-z_][A-Za-z0-9_]*)\"}", "{:capture-atom atom_name}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[2], "word", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "@(?<word_name>[A-Za-z_][A-Za-z0-9_]*)", "{:regex \"@(?<word_name>[A-Za-z_][A-Za-z0-9_]*)\"}", "{:capture-word word_name}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[3], "string", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "#(?<string_text>[A-Za-z_][A-Za-z0-9_]*)", "{:regex \"#(?<string_text>[A-Za-z_][A-Za-z0-9_]*)\"}", "{:capture-string string_text}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[4], "program", "{:seq {:capture a {:token atom}} {:capture w {:token word}} {:capture s {:token string}}}", "{:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:capture a} {:capture w} {:capture s}]}]}"));
+
+    IdmError err;
+    idm_error_init(&err);
+    IdmReaderArtifact *artifact = NULL;
+    bool built = idm_reader_artifact_from_grammars("CaptureReader", &grammar, 1u, &artifact, &err);
+    if (!built) idm_error_fprint(stderr, &err);
+    CHECK(built);
+
+    IdmSyntax *program = NULL;
+    bool read = artifact && idm_reader_read_artifact_string(artifact, "<capture-reader>", ":ok @name #text", &program, &err);
+    if (!read) idm_error_fprint(stderr, &err);
+    CHECK(read);
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin (%-expr :ok name \"text\"))");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(artifact);
+    idm_error_clear(&err);
+    idm_pkg_grammar_destroy(&grammar);
+}
+
+static void test_reader_artifact_metadata_reductions(void) {
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("MetadataReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 9u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_skip_rule(&grammar.rules[0], "space", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "[ ]+", "{:regex \"[ ]+\"}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[1], "newline", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "\n", "{:literal \"\\n\"}", "{:emit-atom newline}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[2], "at", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "@", "{:literal \"@\"}", "{:emit-atom at}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[3], "bang", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "!", "{:literal \"!\"}", "{:emit-atom bang}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[4], "word", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "[A-Za-z]+", "{:regex \"[A-Za-z]+\"}", "{:capture word}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[5], "continued", "{:seq {:capture first {:ref word}} {:token newline} {:indent-gt first {:capture second {:ref word}}}}", "{:emit-form \"%-expr\" [{:capture first} {:capture second}]}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[6], "adjacent", "{:seq {:capture left {:token at}} {:adjacent {:capture right {:token bang}}}}", "{:emit-form \"%-expr\" [{:capture left} {:capture right}]}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[7], "separated", "{:seq {:capture left {:token at}} {:not-adjacent {:capture right {:token bang}}}}", "{:emit-form \"%-expr\" [{:capture left} {:capture right}]}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[8], "program", "{:alt {:capture item {:ref continued}} {:capture item {:ref adjacent}} {:capture item {:ref separated}}}", "{:emit-form \"%-package-begin\" [{:capture item}]}"));
+
+    IdmError err;
+    idm_error_init(&err);
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(idm_reader_artifact_from_grammars(grammar.name, &grammar, 1u, &artifact, &err));
+    IdmSyntax *program = NULL;
+    CHECK(idm_reader_read_artifact_string(artifact, "<metadata-reader>", "foo\n  bar", &program, &err));
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin (%-expr foo bar))");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    program = NULL;
+    CHECK(!idm_reader_read_artifact_string(artifact, "<metadata-reader>", "foo\nbar", &program, &err));
+    idm_error_clear(&err);
+    CHECK(idm_reader_read_artifact_string(artifact, "<metadata-reader>", "@!", &program, &err));
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin (%-expr (%-adjacent :at :bang)))");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    program = NULL;
+    CHECK(idm_reader_read_artifact_string(artifact, "<metadata-reader>", "@ !", &program, &err));
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin (%-expr :at :bang))");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(artifact);
+    idm_pkg_grammar_destroy(&grammar);
+    idm_error_clear(&err);
+}
+
+static void test_reader_artifact_literal_roundtrip(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmArtifact art;
+    memset(&art, 0, sizeof(art));
+    idm_sha256("reader-literal-roundtrip", 24u, art.src_hash);
+    art.grammar_count = 1u;
+    art.grammars = calloc(art.grammar_count, sizeof(*art.grammars));
+    CHECK(art.grammars != NULL);
+    IdmPkgGrammar *grammar = &art.grammars[0];
+    grammar->name = idm_strdup("LiteralReader");
+    art.source_reader = idm_strdup("LiteralReader");
+    grammar->mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar->rule_count = 2u;
+    grammar->rules = calloc(grammar->rule_count, sizeof(*grammar->rules));
+    CHECK(grammar->name != NULL);
+    CHECK(art.source_reader != NULL);
+    CHECK(grammar->rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar->rules[0], "x", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "x", "{:literal \"x\"}", "{:literal {:tag [1 \"two\"]}}"));
+    CHECK(test_reader_artifact_form_rule(&grammar->rules[1], "program", "{:literal {:tag [1 \"two\"]}}", "{:emit-form \"%-package-begin\" [{:literal {:out [1 \"two\"]}}]}"));
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(idm_artifact_serialize(&art, &blob, &err));
+    CHECK(!err.present);
+    idm_artifact_destroy(&art);
+    IdmArtifact back;
+    CHECK(idm_artifact_deserialize(&rt, (const unsigned char *)blob.data, blob.len, &back, &err));
+    CHECK(!err.present);
+    CHECK(back.grammar_count == 1u);
+    CHECK_STR(back.source_reader, "LiteralReader");
+    IdmReaderArtifact *reader = NULL;
+    CHECK(idm_reader_artifact_from_grammars(back.source_reader, back.grammars, back.grammar_count, &reader, &err));
+    IdmSyntax *program = NULL;
+    CHECK(idm_reader_read_artifact_string(reader, "<literal-reader>", "x", &program, &err));
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin {:out [1 \"two\"]})");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(reader);
+    idm_artifact_destroy(&back);
+    idm_buf_destroy(&blob);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_reader_artifact_binary_roundtrip(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("BinaryReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 2u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[0], "x", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "x", "{:literal \"x\"}", "{:emit-atom ok}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[1], "program", "{:token x}", "{:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:emit-atom ok}]}]}"));
+    IdmScopeSet scopes;
+    idm_scope_set_init(&scopes);
+    CHECK(idm_scope_set_add(&scopes, 33u));
+    IdmReaderGrammarSource source = {
+        .grammar = &grammar,
+        .provider = "binary-provider",
+        .provider_key = "binary-key",
+        .binding_scopes = &scopes,
+        .phase = 0,
+    };
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(idm_reader_artifact_from_sources("BinaryReader", &source, 1u, &artifact, &err));
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(idm_reader_artifact_serialize(artifact, &blob, &err));
+    idm_reader_artifact_destroy(artifact);
+    artifact = NULL;
+    CHECK(idm_reader_artifact_deserialize((const unsigned char *)blob.data, blob.len, &artifact, &err));
+    IdmReaderArtifactInfo info;
+    CHECK(idm_reader_artifact_info(artifact, &info));
+    CHECK_STR(info.surface, "BinaryReader");
+    CHECK(info.contributor_count == 1u);
+    IdmReaderArtifactContributorInfo contributor;
+    CHECK(idm_reader_artifact_contributor_info(artifact, 0u, &contributor));
+    CHECK_STR(contributor.provider, "binary-provider");
+    CHECK_STR(contributor.provider_key, "binary-key");
+    CHECK(contributor.binding_scopes && idm_scope_set_contains(contributor.binding_scopes, 33u));
+    IdmSyntax *program = NULL;
+    CHECK(idm_reader_read_artifact_string(artifact, "<binary-reader>", "x", &program, &err));
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin (%-expr :ok))");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(artifact);
+    idm_buf_destroy(&blob);
+    idm_scope_set_destroy(&scopes);
+    idm_pkg_grammar_destroy(&grammar);
+    idm_error_clear(&err);
+}
+
+static void test_reader_artifact_binary_preserves_terminal_descriptors(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("MachineReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 2u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[0], "q", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "@", "{:regex \"@\"}", "{:emit-atom hit}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[1], "program", "{:token q}", "{:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:emit-atom hit}]}]}"));
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(idm_reader_artifact_from_grammars("MachineReader", &grammar, 1u, &artifact, &err));
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    CHECK(idm_reader_artifact_serialize(artifact, &blob, &err));
+    idm_reader_artifact_destroy(artifact);
+    artifact = NULL;
+    const unsigned char *bytes = (const unsigned char *)blob.data;
+    bool framed_descriptor = false;
+    for (size_t i = 0; i + 5u <= blob.len; i++) {
+        if (bytes[i] == 0u && bytes[i + 1u] == 0u && bytes[i + 2u] == 0u && bytes[i + 3u] == 1u && bytes[i + 4u] == '@') {
+            framed_descriptor = true;
+            break;
+        }
+    }
+    CHECK(framed_descriptor);
+    CHECK(idm_reader_artifact_deserialize((const unsigned char *)blob.data, blob.len, &artifact, &err));
+    IdmSyntax *program = NULL;
+    CHECK(idm_reader_read_artifact_string(artifact, "<machine-reader>", "@", &program, &err));
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin (%-expr :hit))");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(artifact);
+    idm_buf_destroy(&blob);
+    idm_pkg_grammar_destroy(&grammar);
+    idm_error_clear(&err);
+}
+
+static void test_reader_artifact_literal_drops_declaration_metadata(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmSpan decl_span = idm_span_unknown("decl.id");
+    IdmSyntax *decl_literal = idm_syn_word("declared", decl_span);
+    CHECK(decl_literal != NULL);
+    CHECK(idm_syn_scope_add(decl_literal, 0, 99u));
+    CHECK(idm_syn_property_set(decl_literal, "leak", "no"));
+    CHECK(idm_syn_origin_push(decl_literal, "declaration-origin"));
+    idm_syn_set_token(decl_literal, "declared", true, false);
+    IdmSyntax *ctor_literal_ir = idm_syn_tuple(decl_span);
+    CHECK(ctor_literal_ir != NULL);
+    CHECK(idm_syn_append(ctor_literal_ir, idm_syn_atom("literal", decl_span)));
+    CHECK(idm_syn_append(ctor_literal_ir, decl_literal));
+    IdmSyntax *args = idm_syn_vector(decl_span);
+    CHECK(args != NULL);
+    CHECK(idm_syn_append(args, ctor_literal_ir));
+    IdmSyntax *ctor = idm_syn_tuple(decl_span);
+    CHECK(ctor != NULL);
+    CHECK(idm_syn_append(ctor, idm_syn_atom("emit-form", decl_span)));
+    CHECK(idm_syn_append(ctor, idm_syn_string("%-package-begin", decl_span)));
+    CHECK(idm_syn_append(ctor, args));
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("MetadataLiteralReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 2u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[0], "x", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "x", "{:literal \"x\"}", "{:capture x}"));
+    IdmGrammarRule *program_rule = &grammar.rules[1];
+    program_rule->name = idm_strdup("program");
+    program_rule->kind = (uint8_t)IDM_GRAMMAR_RULE_FORM;
+    IdmSyntax *pattern = test_read_one_term("{:token x}");
+    CHECK(program_rule->name != NULL);
+    CHECK(pattern != NULL);
+    CHECK(idm_reader_pattern_compile_ir(pattern, &program_rule->pattern, &err));
+    CHECK(idm_reader_ctor_compile_ir(ctor, &program_rule->constructor, &err));
+    idm_syn_free(pattern);
+    idm_syn_free(ctor);
+    IdmReaderArtifact *reader = NULL;
+    CHECK(idm_reader_artifact_from_grammars("MetadataLiteralReader", &grammar, 1u, &reader, &err));
+    IdmSyntax *program = NULL;
+    CHECK(idm_reader_read_artifact_string(reader, "<metadata-literal-reader>", "x", &program, &err));
+    CHECK(program != NULL && program->kind == IDM_SYN_LIST && program->as.seq.count == 2u);
+    IdmSyntax *emitted = program->as.seq.items[1];
+    CHECK(emitted->kind == IDM_SYN_WORD && strcmp(emitted->as.text, "declared") == 0);
+    CHECK(!idm_syn_scope_contains(emitted, 0, 99u));
+    CHECK(idm_syn_property_get(emitted, "leak") == NULL);
+    CHECK(emitted->origins.count == 0);
+    CHECK(emitted->token_raw == NULL);
+    CHECK(emitted->span.file != NULL && strcmp(emitted->span.file, "<metadata-literal-reader>") == 0);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(reader);
+    idm_pkg_grammar_destroy(&grammar);
+    idm_error_clear(&err);
+}
+
+static void test_reader_artifact_rejects_nullable_terminals(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmGrammarTerminal terminal;
+    memset(&terminal, 0, sizeof(terminal));
+    IdmSyntax *pattern = test_read_one_term("{:regex \"a*\"}");
+    CHECK(pattern != NULL);
+    CHECK(!idm_grammar_terminal_from_ir(pattern, &terminal, &err));
+    CHECK(err.present && err.message && strstr(err.message, "empty input") != NULL);
+    idm_grammar_terminal_destroy(&terminal);
+    idm_syn_free(pattern);
+    idm_error_clear(&err);
+
+    pattern = test_read_one_term("{:literal \"\"}");
+    CHECK(pattern != NULL);
+    CHECK(!idm_grammar_terminal_from_ir(pattern, &terminal, &err));
+    CHECK(err.present && err.message && strstr(err.message, "empty") != NULL);
+    idm_grammar_terminal_destroy(&terminal);
+    idm_syn_free(pattern);
+    idm_error_clear(&err);
+}
+
+static void test_reader_artifact_literal_depth_guard(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmSpan span = idm_span_unknown("<reader-literal-depth>");
+    IdmSyntax *root = idm_syn_list(span);
+    CHECK(root != NULL);
+    IdmSyntax *cursor = root;
+    for (unsigned i = 0; i <= IDM_IC_MAX_DEPTH + 1u; i++) {
+        IdmSyntax *child = idm_syn_list(span);
+        CHECK(child != NULL);
+        CHECK(idm_syn_append(cursor, child));
+        cursor = child;
+    }
+    IdmReaderLiteral literal;
+    memset(&literal, 0, sizeof(literal));
+    CHECK(!idm_reader_literal_from_syntax(&literal, root, &err));
+    CHECK(err.present && err.message != NULL && strstr(err.message, "nested too deeply") != NULL);
+    idm_reader_literal_destroy(&literal);
+    idm_syn_free(root);
+    idm_error_clear(&err);
+}
+
+static void test_active_grammar_reader_artifact_freeze(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    const char *source = "use tests/pkg/coregrammar_skip\nactivate GrammarSkip\n:ok\n";
+    IdmSyntax *program = NULL;
+    bool read_setup = idm_expand_read_source_string(&rt, "<active-reader-artifact-setup>", source, &program, &err);
+    if (!read_setup) idm_error_fprint(stderr, &err);
+    CHECK(read_setup);
+    ExpandContext ctx;
+    ctx_init(&ctx, &rt);
+    IdmCore *core = NULL;
+    IdmReaderArtifact *artifact = NULL;
+    IdmSyntax *read = NULL;
+    bool hooks = false;
+    SavedHooks saved;
+    memset(&saved, 0, sizeof(saved));
+    if (program) {
+        IdmBuffer ser;
+        idm_buf_init(&ser);
+        bool serialized = idm_syn_serialize(&ser, program, &err);
+        CHECK(serialized);
+        unsigned char unit_hash[32];
+        idm_sha256(ser.data ? ser.data : "", ser.len, unit_hash);
+        idm_buf_destroy(&ser);
+        ctx_set_unit(&ctx, "<active-reader-artifact-setup>", unit_hash);
+        IdmEnv *phase_runtime_env = idm_fresh_phase_runtime_env(&rt, &err);
+        CHECK(phase_runtime_env != NULL);
+        ctx.phase_env = phase_runtime_env ? idm_phase_env_create(&rt, phase_runtime_env) : NULL;
+        CHECK(ctx.phase_env != NULL);
+        ctx.runner = &ctx.local_runner;
+        hooks_install(&rt, &ctx, &saved);
+        hooks = true;
+        bool seeded = ctx.phase_env && ctx_seed(&ctx, &err) && ctx_activate_kernel(&ctx, &err);
+        if (!seeded) idm_error_fprint(stderr, &err);
+        CHECK(seeded);
+        if (seeded) {
+            core = expand_body_items(&ctx, program->as.seq.items, 1u, program->as.seq.count, false, &err);
+            if (!core) idm_error_fprint(stderr, &err);
+            CHECK(core != NULL);
+        }
+        bool frozen = core && ctx_reader_artifact_from_active_grammars(&ctx, "ReaderSkip", &artifact, &err);
+        if (!frozen) idm_error_fprint(stderr, &err);
+        CHECK(frozen);
+        bool reader_artifact_read = artifact && idm_reader_read_artifact_string(artifact, "<active-reader-artifact>", "alpha", &read, &err);
+        if (!reader_artifact_read) idm_error_fprint(stderr, &err);
+        CHECK(reader_artifact_read);
+        if (read) {
+            IdmBuffer dump;
+            idm_buf_init(&dump);
+            CHECK(idm_syn_dump(&dump, read));
+            CHECK_STR(dump.data, "(%-package-begin (%-expr alpha))");
+            idm_buf_destroy(&dump);
+        }
+    }
+    if (hooks) hooks_restore(&rt, &saved);
+    idm_syn_free(read);
+    idm_reader_artifact_destroy(artifact);
+    idm_core_free(core);
+    ctx_destroy(&ctx);
+    idm_syn_free(program);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_reader_artifact_rejects_bad_reductions(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmReaderArtifact *artifact = NULL;
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("BadReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 2u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[0], "ident", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "[A-Za-z_][A-Za-z0-9_]*", "{:regex \"[A-Za-z_][A-Za-z0-9_]*\"}", "{:capture ident}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[1], "program", "{:ref missing}", "{:emit-form \"%-package-begin\" [{:emit-word bad}]}"));
+    CHECK(!idm_reader_artifact_from_grammars("BadReader", &grammar, 1u, &artifact, &err));
+    CHECK(err.present && err.message && strstr(err.message, "unknown rule 'missing'") != NULL);
+    idm_error_clear(&err);
+    idm_reader_artifact_destroy(artifact);
+    idm_pkg_grammar_destroy(&grammar);
+
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("LoopReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 3u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[0], "ident", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "[A-Za-z_][A-Za-z0-9_]*", "{:regex \"[A-Za-z_][A-Za-z0-9_]*\"}", "{:capture ident}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[1], "loop", "{:ref loop}", "{:emit-form \"%-expr\" [{:emit-word loop}]}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[2], "program", "{:ref loop}", "{:emit-form \"%-package-begin\" [{:emit-word bad}]}"));
+    artifact = NULL;
+    CHECK(!idm_reader_artifact_from_grammars("LoopReader", &grammar, 1u, &artifact, &err));
+    CHECK(err.present && err.message && strstr(err.message, "left-recursive") != NULL);
+    idm_error_clear(&err);
+    idm_reader_artifact_destroy(artifact);
+    idm_pkg_grammar_destroy(&grammar);
+
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("NullableRepeatReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 2u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[0], "ident", (uint8_t)IDM_GRAMMAR_TERMINAL_REGEX, "[A-Za-z_][A-Za-z0-9_]*", "{:regex \"[A-Za-z_][A-Za-z0-9_]*\"}", "{:capture ident}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[1], "program", "{:seq {:repeat {:optional {:token ident}}}}", "{:emit-form \"%-package-begin\" [{:emit-atom ok}]}"));
+    artifact = NULL;
+    CHECK(!idm_reader_artifact_from_grammars("NullableRepeatReader", &grammar, 1u, &artifact, &err));
+    CHECK(err.present && err.message && strstr(err.message, "can match empty input") != NULL);
+    idm_error_clear(&err);
+    idm_reader_artifact_destroy(artifact);
+    idm_pkg_grammar_destroy(&grammar);
+}
+
+static void test_reader_artifact_rejects_mixed_scopes(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmPkgGrammar grammars[2];
+    memset(grammars, 0, sizeof(grammars));
+    IdmScopeSet scopes_a;
+    IdmScopeSet scopes_b;
+    idm_scope_set_init(&scopes_a);
+    idm_scope_set_init(&scopes_b);
+    CHECK(idm_scope_set_add(&scopes_a, 11));
+    CHECK(idm_scope_set_add(&scopes_b, 22));
+    for (size_t i = 0; i < 2u; i++) {
+        grammars[i].name = idm_strdup("ScopedReader");
+        grammars[i].mode = (uint8_t)IDM_GRAMMAR_MODE_EXTEND;
+        grammars[i].rule_count = 1u;
+        grammars[i].rules = calloc(1u, sizeof(*grammars[i].rules));
+        CHECK(grammars[i].name != NULL);
+        CHECK(grammars[i].rules != NULL);
+    }
+    CHECK(test_reader_artifact_token_rule(&grammars[0].rules[0], "a", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "a", "{:literal \"a\"}", "{:capture a}"));
+    CHECK(test_reader_artifact_token_rule(&grammars[1].rules[0], "b", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "b", "{:literal \"b\"}", "{:capture b}"));
+    IdmReaderGrammarSource sources[2];
+    memset(sources, 0, sizeof(sources));
+    sources[0].grammar = &grammars[0];
+    sources[0].binding_scopes = &scopes_a;
+    sources[1].grammar = &grammars[1];
+    sources[1].binding_scopes = &scopes_b;
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(!idm_reader_artifact_from_sources("ScopedReader", sources, 2u, &artifact, &err));
+    CHECK(err.present && err.message && strstr(err.message, "multiple binding scopes") != NULL);
+    idm_reader_artifact_destroy(artifact);
+    idm_error_clear(&err);
+    for (size_t i = 0; i < 2u; i++) idm_pkg_grammar_destroy(&grammars[i]);
+    idm_scope_set_destroy(&scopes_a);
+    idm_scope_set_destroy(&scopes_b);
+}
+
+static void test_reader_artifact_rejects_mixed_phases(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmPkgGrammar grammars[2];
+    memset(grammars, 0, sizeof(grammars));
+    IdmScopeSet scopes;
+    idm_scope_set_init(&scopes);
+    CHECK(idm_scope_set_add(&scopes, 33));
+    for (size_t i = 0; i < 2u; i++) {
+        grammars[i].name = idm_strdup("PhaseReader");
+        grammars[i].mode = (uint8_t)IDM_GRAMMAR_MODE_EXTEND;
+        grammars[i].rule_count = 1u;
+        grammars[i].rules = calloc(1u, sizeof(*grammars[i].rules));
+        CHECK(grammars[i].name != NULL);
+        CHECK(grammars[i].rules != NULL);
+    }
+    CHECK(test_reader_artifact_token_rule(&grammars[0].rules[0], "a", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "a", "{:literal \"a\"}", "{:capture a}"));
+    CHECK(test_reader_artifact_token_rule(&grammars[1].rules[0], "b", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "b", "{:literal \"b\"}", "{:capture b}"));
+    IdmReaderGrammarSource sources[2];
+    memset(sources, 0, sizeof(sources));
+    sources[0].grammar = &grammars[0];
+    sources[0].binding_scopes = &scopes;
+    sources[0].phase = 0;
+    sources[1].grammar = &grammars[1];
+    sources[1].binding_scopes = &scopes;
+    sources[1].phase = 1;
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(!idm_reader_artifact_from_sources("PhaseReader", sources, 2u, &artifact, &err));
+    CHECK(err.present && err.message && strstr(err.message, "multiple phases") != NULL);
+    idm_reader_artifact_destroy(artifact);
+    idm_error_clear(&err);
+    for (size_t i = 0; i < 2u; i++) idm_pkg_grammar_destroy(&grammars[i]);
+    idm_scope_set_destroy(&scopes);
+}
+
+static void test_reader_artifact_terminal_priority(void) {
+    IdmError err;
+    idm_error_init(&err);
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("PriorityReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 3u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[0], "a", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "a", "{:literal \"a\"}", "{:emit-atom ok}"));
+    CHECK(test_reader_artifact_skip_rule(&grammar.rules[1], "skip_a", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "a", "{:literal \"a\"}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[2], "program", "{:token a}", "{:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:emit-atom ok}]}]}"));
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(idm_reader_artifact_from_grammars("PriorityReader", &grammar, 1u, &artifact, &err));
+    IdmSyntax *program = NULL;
+    bool read = artifact && idm_reader_read_artifact_string(artifact, "<priority-reader>", "a", &program, &err);
+    if (!read) idm_error_fprint(stderr, &err);
+    CHECK(read);
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_syn_dump(&dump, program));
+    CHECK_STR(dump.data, "(%-package-begin (%-expr :ok))");
+    idm_buf_destroy(&dump);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(artifact);
+    idm_pkg_grammar_destroy(&grammar);
+    idm_error_clear(&err);
+
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("PriorityReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 3u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_skip_rule(&grammar.rules[0], "skip_a", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "a", "{:literal \"a\"}"));
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[1], "a", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "a", "{:literal \"a\"}", "{:emit-atom ok}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[2], "program", "{:token a}", "{:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:emit-atom ok}]}]}"));
+    artifact = NULL;
+    CHECK(idm_reader_artifact_from_grammars("PriorityReader", &grammar, 1u, &artifact, &err));
+    program = NULL;
+    CHECK(!idm_reader_read_artifact_string(artifact, "<priority-reader>", "a", &program, &err));
+    CHECK(err.present && err.message && strstr(err.message, "did not match program") != NULL);
+    idm_syn_free(program);
+    idm_reader_artifact_destroy(artifact);
+    idm_pkg_grammar_destroy(&grammar);
+    idm_error_clear(&err);
+}
+
+static void test_expand_reader_artifact_string_entrypoint(void) {
+    IdmPkgGrammar grammar;
+    memset(&grammar, 0, sizeof(grammar));
+    grammar.name = idm_strdup("EvalReader");
+    grammar.mode = (uint8_t)IDM_GRAMMAR_MODE_EXCLUSIVE;
+    grammar.rule_count = 2u;
+    grammar.rules = calloc(grammar.rule_count, sizeof(*grammar.rules));
+    CHECK(grammar.name != NULL);
+    CHECK(grammar.rules != NULL);
+    CHECK(test_reader_artifact_token_rule(&grammar.rules[0], "ok", (uint8_t)IDM_GRAMMAR_TERMINAL_LITERAL, "ok", "{:literal \"ok\"}", "{:emit-atom ok}"));
+    CHECK(test_reader_artifact_form_rule(&grammar.rules[1], "program", "{:token ok}", "{:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:emit-atom ok}]}]}"));
+    IdmError err;
+    idm_error_init(&err);
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(idm_reader_artifact_from_grammars("EvalReader", &grammar, 1u, &artifact, &err));
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmCore *core = NULL;
+    bool expanded = artifact && idm_expand_reader_artifact_string(&rt, artifact, "<reader-artifact-expand>", "ok", &core, &err);
+    if (!expanded) idm_error_fprint(stderr, &err);
+    CHECK(expanded);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    uint32_t main_fn = 0;
+    CHECK(core && idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    IdmBuffer dump;
+    idm_buf_init(&dump);
+    CHECK(idm_value_write(&dump, out));
+    CHECK_STR(dump.data, ":ok");
+    idm_buf_destroy(&dump);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_runtime_destroy(&rt);
+    idm_reader_artifact_destroy(artifact);
+    idm_error_clear(&err);
+    idm_pkg_grammar_destroy(&grammar);
+}
+
+static void test_pythonish_reader_artifact_over_language(void) {
+    IdmError err;
+    idm_error_init(&err);
+    const char *old_cache = getenv("IDIOMCACHE");
+    char *saved_cache = old_cache ? idm_strdup(old_cache) : NULL;
+    setenv("IDIOMCACHE", "0", 1);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmBuffer blob;
+    idm_buf_init(&blob);
+    bool serialized = idm_expand_package_artifact_serialize(&rt, "tests/pkg/pydiom_reader", &blob, &err);
+    if (!serialized) idm_error_fprint(stderr, &err);
+    CHECK(serialized);
+    IdmArtifact art;
+    memset(&art, 0, sizeof(art));
+    bool loaded = serialized && idm_artifact_deserialize(&rt, (const unsigned char *)blob.data, blob.len, &art, &err);
+    if (!loaded) idm_error_fprint(stderr, &err);
+    CHECK(loaded);
+    CHECK(art.source_reader != NULL);
+    if (art.source_reader) CHECK_STR(art.source_reader, "PythonishReader");
+    IdmReaderArtifact *artifact = NULL;
+    CHECK(loaded && idm_reader_artifact_from_grammars(art.source_reader, art.grammars, art.grammar_count, &artifact, &err));
+    const char *source = "block:\n  answer = 40\n  answer + 2\n";
+    IdmSyntax *program = NULL;
+    bool read = artifact && idm_reader_read_artifact_string(artifact, "<pythonish-reader>", source, &program, &err);
+    if (!read) idm_error_fprint(stderr, &err);
+    CHECK(read);
+    IdmBuffer syntax_dump;
+    idm_buf_init(&syntax_dump);
+    CHECK(idm_syn_dump(&syntax_dump, program));
+    CHECK_STR(syntax_dump.data, "(%-package-begin (%-expr (%-body (%-expr answer = 40) (%-expr answer + 2))))");
+    idm_buf_destroy(&syntax_dump);
+    idm_syn_free(program);
+    IdmCore *core = NULL;
+    bool expanded = artifact && idm_expand_reader_artifact_string(&rt, artifact, "<pythonish-reader>", source, &core, &err);
+    if (!expanded) idm_error_fprint(stderr, &err);
+    CHECK(expanded);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    uint32_t main_fn = 0;
+    CHECK(core && idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
+    IdmBuffer value_dump;
+    idm_buf_init(&value_dump);
+    CHECK(idm_value_write(&value_dump, out));
+    CHECK_STR(value_dump.data, "42");
+    idm_buf_destroy(&value_dump);
+    idm_bc_destroy(&module);
+    idm_core_free(core);
+    idm_reader_artifact_destroy(artifact);
+    idm_artifact_destroy(&art);
+    idm_buf_destroy(&blob);
+    idm_runtime_destroy(&rt);
+    idm_error_clear(&err);
+    if (saved_cache) {
+        setenv("IDIOMCACHE", saved_cache, 1);
+        free(saved_cache);
+    } else {
+        unsetenv("IDIOMCACHE");
+    }
+}
+
 static void test_reader_shell_protocols(void) {
     char *s = dump_reader("grep -c *.c > out.txt\n");
     CHECK(s != NULL);
@@ -138,14 +1205,19 @@ static void test_vm_call_and_locals(void) {
     idm_error_init(&err);
     IdmBytecodeModule module;
     idm_bc_init(&module);
+    uint32_t add_prim = 0;
+    uint32_t sub_prim = 0;
     uint32_t add2 = 0;
     uint32_t main_fn = 0;
+    CHECK(add_primitive_clause_fn(&module, IDM_PRIM_ADD, &add_prim));
+    CHECK(add_primitive_clause_fn(&module, IDM_PRIM_SUB, &sub_prim));
     CHECK(idm_bc_add_function(&module, "add2", 2, 0, 0, &add2));
     CHECK(idm_bc_add_function(&module, "main", 0, 1, 0, &main_fn));
     CHECK(idm_bc_set_function_entry(&module, add2, module.code_count));
+    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, add_prim, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 1, NULL));
-    CHECK(emit_prim_call(&module, IDM_PRIM_ADD, 2));
+    CHECK(emit_call(&module, 2, false));
     CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
     CHECK(idm_bc_set_function_entry(&module, main_fn, module.code_count));
     uint32_t c20 = 0;
@@ -157,12 +1229,14 @@ static void test_vm_call_and_locals(void) {
     CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, add2, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c20, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c22, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_CALL, 2, NULL));
+    CHECK(emit_call(&module, 2, false));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_STORE_LOCAL, 0, NULL));
+    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, sub_prim, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_LOCAL, 0, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c1, NULL));
-    CHECK(emit_prim_call(&module, IDM_PRIM_SUB, 2));
+    CHECK(emit_call(&module, 2, false));
     CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 41);
@@ -191,7 +1265,8 @@ static void test_vm_tail_call_reuses_frame(void) {
     CHECK(idm_bc_add_const(&module, idm_int(99), &c99));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, id_fn, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c99, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_TAIL_CALL, 1, NULL));
+    CHECK(emit_call(&module, 1, true));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmVmLimits limits = idm_vm_default_limits();
     limits.max_frames = 1;
     IdmValue out = idm_nil();
@@ -210,10 +1285,12 @@ static void test_vm_guard_error_is_clause_failure(void) {
     idm_error_init(&err);
     IdmBytecodeModule module;
     idm_bc_init(&module);
+    uint32_t lt_prim = 0;
     uint32_t guarded = 0;
     uint32_t fallback = 0;
     uint32_t guard = 0;
     uint32_t main_fn = 0;
+    CHECK(add_primitive_clause_fn(&module, IDM_PRIM_LT, &lt_prim));
     CHECK(idm_bc_add_function(&module, "guarded", 1, 0, 0, &guarded));
     CHECK(idm_bc_add_function(&module, "fallback", 1, 0, 0, &fallback));
     CHECK(idm_bc_add_function(&module, "guard", 1, 0, 0, &guard));
@@ -230,9 +1307,10 @@ static void test_vm_guard_error_is_clause_failure(void) {
     CHECK(!err.present);
 
     CHECK(idm_bc_set_function_entry(&module, guard, module.code_count));
+    CHECK(idm_bc_emit_u32(&module, IDM_OP_MAKE_CLOSURE, lt_prim, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_ARG, 0, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c0, NULL));
-    CHECK(emit_prim_call(&module, IDM_PRIM_LT, 2));
+    CHECK(emit_call(&module, 2, false));
     CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
     CHECK(idm_bc_set_function_entry(&module, guarded, module.code_count));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c1, NULL));
@@ -246,13 +1324,71 @@ static void test_vm_guard_error_is_clause_failure(void) {
     CHECK(idm_bc_emit(&module, guarded, NULL));
     CHECK(idm_bc_emit(&module, fallback, NULL));
     CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c_bad, NULL));
-    CHECK(idm_bc_emit_u32(&module, IDM_OP_CALL, 1, NULL));
+    CHECK(emit_call(&module, 1, false));
     CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
 
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
     CHECK(!err.present);
+    idm_bc_destroy(&module);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_bytecode_link_finalizes_after_intern(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmBytecodeModule src;
+    idm_bc_init(&src);
+    uint32_t c7 = 0;
+    uint32_t main_fn = 0;
+    CHECK(idm_bc_add_const(&src, idm_int(7), &c7));
+    CHECK(idm_bc_add_function(&src, "main", 0, 0, 0, &main_fn));
+    CHECK(idm_bc_emit_u32(&src, IDM_OP_LOAD_CONST, c7, NULL));
+    CHECK(idm_bc_emit_op(&src, IDM_OP_RETURN, NULL));
+    IdmBytecodeModule linked;
+    idm_bc_init(&linked);
+    uint32_t fn_off = 0;
+    CHECK(idm_bc_link(&linked, &src, NULL, &fn_off, NULL, &err));
+    CHECK(!linked.selectors_prepared);
+    CHECK(idm_bc_intern_literals(&rt, &linked, &err));
+    CHECK(idm_bc_is_finalized(&linked));
+    IdmValue out = idm_nil();
+    CHECK(idm_vm_run(&rt, &linked, fn_off + main_fn, &out, &err));
+    CHECK(out.tag == IDM_VAL_INT && out.as.i == 7);
+    CHECK(!err.present);
+    idm_bc_destroy(&linked);
+    idm_bc_destroy(&src);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+}
+
+static void test_stale_closure_selector_fails(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmBytecodeModule module;
+    idm_bc_init(&module);
+    uint32_t c7 = 0;
+    uint32_t main_fn = 0;
+    CHECK(idm_bc_add_const(&module, idm_int(7), &c7));
+    CHECK(idm_bc_add_function(&module, "main", 0, 0, 0, &main_fn));
+    CHECK(idm_bc_emit_u32(&module, IDM_OP_LOAD_CONST, c7, NULL));
+    CHECK(idm_bc_emit_op(&module, IDM_OP_RETURN, NULL));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
+    IdmValue closure = idm_closure_in_module(&rt, &module, main_fn, NULL, 0, rt.main_env, &err);
+    CHECK(!err.present);
+    CHECK(idm_bc_add_const(&module, idm_int(8), NULL));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
+    IdmValue out = idm_nil();
+    CHECK(!idm_vm_call_closure(&rt, closure, NULL, 0, &out, &err));
+    CHECK(err.present);
+    CHECK(err.message != NULL && strstr(err.message, "stale") != NULL);
     idm_bc_destroy(&module);
     idm_error_clear(&err);
     idm_runtime_destroy(&rt);
@@ -264,13 +1400,14 @@ static void test_core_compile_and_vm(void) {
     IdmError err;
     idm_error_init(&err);
     IdmSpan span = idm_span_unknown("<core-test>");
-    IdmCore *add = idm_core_call(idm_core_primitive(IDM_PRIM_ADD, span), span);
+    IdmCore *add = primitive_clause_call(IDM_PRIM_ADD, span);
     CHECK(idm_core_call_add_arg(add, idm_core_literal(idm_int(20), span)));
     CHECK(idm_core_call_add_arg(add, idm_core_literal(idm_int(22), span)));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(add, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -284,6 +1421,7 @@ static void test_core_compile_and_vm(void) {
         span);
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(cond_expr, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 2);
     CHECK(!err.present);
@@ -351,7 +1489,7 @@ static void test_binding_resolution(void) {
     CHECK(idm_binding_resolve(&table, "x", 0, IDM_BIND_SPACE_DEFAULT, &one, &binding) == IDM_RESOLVE_OK);
     CHECK(binding && binding->id == inner && binding->payload == 20);
     CHECK(idm_binding_resolve(&table, "x", 1, IDM_BIND_SPACE_DEFAULT, &one, &binding) == IDM_RESOLVE_UNBOUND);
-    CHECK(idm_binding_resolve(&table, "x", 0, IDM_BIND_SPACE_PACKAGE, &one, &binding) == IDM_RESOLVE_UNBOUND);
+    CHECK(idm_binding_resolve(&table, "x", 0, IDM_BIND_SPACE_OPERATOR, &one, &binding) == IDM_RESOLVE_UNBOUND);
 
     CHECK(idm_binding_table_add(&table, "amb", 0, IDM_BIND_SPACE_DEFAULT, IDM_BIND_VALUE, &one, 1, 0u, NULL));
     CHECK(idm_binding_table_add(&table, "amb", 0, IDM_BIND_SPACE_DEFAULT, IDM_BIND_VALUE, &two, 2, 0u, NULL));
@@ -415,44 +1553,84 @@ static void test_syntax_scope_tree(void) {
     idm_syn_free(root);
 }
 
-static void test_pattern_matcher(void) {
+static void test_pattern_selector(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     IdmError err;
     idm_error_init(&err);
     IdmSpan span = idm_span_unknown("<pattern-test>");
+    uint32_t fn = UINT32_MAX;
+    bool has = false;
+    bool matched = false;
     IdmValue pair = idm_cons(&rt, idm_int(1), idm_int(2), &err);
     IdmPattern *pat = idm_pat_pair(idm_pat_bind("h", span), idm_pat_bind("t", span), span);
+    IdmPattern *patterns[1] = { pat };
+    IdmPatternSelectorClause clause = {
+        .function_index = 7,
+        .arity = idm_arity_exact(1u),
+        .patterns = patterns,
+        .pattern_count = 1,
+    };
+    IdmPatternSelector *selector = NULL;
+    CHECK(idm_pattern_selector_build(&clause, 1u, &selector, &err));
     IdmPatternBindings bindings;
     idm_pattern_bindings_init(&bindings);
-    CHECK(idm_pattern_match(&rt, pat, pair, &bindings, &err));
+    CHECK(idm_pattern_selector_select(&rt, selector, &pair, 1u, NULL, NULL, &fn, &bindings, &has, &matched, &err));
+    CHECK(matched && has && fn == 7u);
     const IdmValue *h = idm_pattern_bindings_get(&bindings, "h");
     const IdmValue *t = idm_pattern_bindings_get(&bindings, "t");
     CHECK(h && h->tag == IDM_VAL_INT && h->as.i == 1);
     CHECK(t && t->tag == IDM_VAL_INT && t->as.i == 2);
     CHECK(!err.present);
     idm_pattern_bindings_destroy(&bindings);
+    idm_pattern_selector_free(selector);
     idm_pat_free(pat);
 
     IdmValue same = idm_cons(&rt, idm_int(7), idm_cons(&rt, idm_int(7), idm_nil(), &err), &err);
     IdmValue different = idm_cons(&rt, idm_int(7), idm_cons(&rt, idm_int(8), idm_nil(), &err), &err);
     pat = idm_pat_pair(idm_pat_bind("x", span), idm_pat_pair(idm_pat_bind("x", span), idm_pat_literal(idm_nil(), span), span), span);
+    patterns[0] = pat;
+    selector = NULL;
+    CHECK(idm_pattern_selector_build(&clause, 1u, &selector, &err));
+    fn = UINT32_MAX;
+    has = false;
+    matched = false;
     idm_pattern_bindings_init(&bindings);
-    CHECK(idm_pattern_match(&rt, pat, same, &bindings, &err));
+    CHECK(idm_pattern_selector_select(&rt, selector, &same, 1u, NULL, NULL, &fn, &bindings, &has, &matched, &err));
+    CHECK(matched && has && fn == 7u);
     CHECK(bindings.count == 1u);
     idm_pattern_bindings_destroy(&bindings);
+    fn = UINT32_MAX;
+    has = false;
+    matched = false;
     idm_pattern_bindings_init(&bindings);
-    CHECK(!idm_pattern_match(&rt, pat, different, &bindings, &err));
+    CHECK(idm_pattern_selector_select(&rt, selector, &different, 1u, NULL, NULL, &fn, &bindings, &has, &matched, &err));
+    CHECK(!matched);
     CHECK(bindings.count == 0u);
     CHECK(!err.present);
     idm_pattern_bindings_destroy(&bindings);
+    idm_pattern_selector_free(selector);
     idm_pat_free(pat);
 
     idm_pattern_bindings_init(&bindings);
     CHECK(idm_pattern_bindings_add(&bindings, "p", idm_int(5)));
     pat = idm_pat_pin("p", span);
-    CHECK(idm_pattern_match(&rt, pat, idm_int(5), &bindings, &err));
-    CHECK(!idm_pattern_match(&rt, pat, idm_int(6), &bindings, &err));
+    patterns[0] = pat;
+    selector = NULL;
+    CHECK(idm_pattern_selector_build(&clause, 1u, &selector, &err));
+    IdmValue pinned = idm_int(5);
+    fn = UINT32_MAX;
+    has = false;
+    matched = false;
+    CHECK(idm_pattern_selector_select(&rt, selector, &pinned, 1u, NULL, NULL, &fn, &bindings, &has, &matched, &err));
+    CHECK(matched && fn == 7u);
+    pinned = idm_int(6);
+    fn = UINT32_MAX;
+    has = false;
+    matched = false;
+    CHECK(idm_pattern_selector_select(&rt, selector, &pinned, 1u, NULL, NULL, &fn, &bindings, &has, &matched, &err));
+    CHECK(!matched);
+    idm_pattern_selector_free(selector);
     idm_pat_free(pat);
     idm_pattern_bindings_destroy(&bindings);
     idm_error_clear(&err);
@@ -466,7 +1644,7 @@ static void test_core_do_and_local_bind(void) {
     idm_error_init(&err);
     IdmSpan span = idm_span_unknown("<local-core-test>");
 
-    IdmCore *add = idm_core_call(idm_core_primitive(IDM_PRIM_ADD, span), span);
+    IdmCore *add = primitive_clause_call(IDM_PRIM_ADD, span);
     CHECK(idm_core_call_add_arg(add, idm_core_local_ref("x", 0, span)));
     CHECK(idm_core_call_add_arg(add, idm_core_literal(idm_int(1), span)));
     IdmCore *bind = idm_core_bind_local("x", 0, idm_core_literal(idm_int(41), span), add, span);
@@ -474,6 +1652,7 @@ static void test_core_do_and_local_bind(void) {
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(bind, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(module.functions[main_fn].local_count == 1u);
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -487,6 +1666,7 @@ static void test_core_do_and_local_bind(void) {
     CHECK(idm_core_do_add(do_expr, idm_core_literal(idm_int(2), span)));
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(do_expr, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 2);
     idm_bc_destroy(&module);
@@ -503,7 +1683,7 @@ static void test_core_fn_literal_and_call(void) {
     idm_error_init(&err);
     IdmSpan span = idm_span_unknown("<fn-core-test>");
 
-    IdmCore *body_add = idm_core_call(idm_core_primitive(IDM_PRIM_ADD, span), span);
+    IdmCore *body_add = primitive_clause_call(IDM_PRIM_ADD, span);
     CHECK(idm_core_call_add_arg(body_add, idm_core_arg_ref("n", 0, span)));
     CHECK(idm_core_call_add_arg(body_add, idm_core_literal(idm_int(1), span)));
     IdmCore *fn = idm_core_fn("inc", 1, body_add, span);
@@ -513,10 +1693,13 @@ static void test_core_fn_literal_and_call(void) {
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(call, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmBuffer dis;
     idm_buf_init(&dis);
     CHECK(idm_bc_disassemble(&dis, &module));
-    CHECK(strstr(dis.data, "TAIL_CALL        direct argc=1") != NULL);
+    CHECK(strstr(dis.data, "MAKE_CLOSURE") != NULL);
+    CHECK(strstr(dis.data, "CALL             1 tail=1") != NULL);
+    CHECK(strstr(dis.data, "direct") == NULL);
     idm_buf_destroy(&dis);
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
@@ -528,32 +1711,53 @@ static void test_core_fn_literal_and_call(void) {
     idm_runtime_destroy(&rt);
 }
 
-static void test_regex_primitives_compile_to_opcodes(void) {
+static IdmCore *literal_arg_prim(IdmPrimitive prim, uint32_t argc, IdmSpan span) {
+    IdmCore *call = primitive_clause_call(prim, span);
+    for (uint32_t i = 0; i < argc; i++) {
+        CHECK(idm_core_call_add_arg(call, idm_core_literal(idm_nil(), span)));
+    }
+    return call;
+}
+
+static size_t count_substr(const char *haystack, const char *needle) {
+    size_t count = 0;
+    size_t n = strlen(needle);
+    const char *cursor = haystack;
+    while (cursor && *cursor) {
+        cursor = strstr(cursor, needle);
+        if (!cursor) break;
+        count++;
+        cursor += n;
+    }
+    return count;
+}
+
+static void test_regex_primitives_compile_to_clause_calls(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     IdmError err;
     idm_error_init(&err);
-    IdmCore *core = NULL;
+    IdmSpan span = idm_span_unknown("<regex-opcode-test>");
+    IdmCore *core = idm_core_do(span);
+    CHECK(core != NULL);
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_REGEX_TEST, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_REGEX_SCAN_FROM, 3u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_REGEX_SCAN_AT, 3u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_REGEX_SCAN_FULL, 2u, span)));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
-    const char *source =
-        "use std/regex\n"
-        "rx = compile! \"a+\"\n"
-        "raw-test? rx \"baaa\"\n"
-        "raw-scan-from rx \"baaa\" 0\n"
-        "raw-scan-at rx \"baaa\" 1\n"
-        "raw-scan-full rx \"aaa\"\n";
-    CHECK(idm_expand_string(&rt, "<regex-opcode-test>", source, &core, &err));
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     (void)main_fn;
     IdmBuffer dis;
     idm_buf_init(&dis);
     CHECK(idm_bc_disassemble(&dis, &module));
-    CHECK(strstr(dis.data, "REGEX_TEST") != NULL);
-    CHECK(strstr(dis.data, "REGEX_SCAN") != NULL);
-    CHECK(strstr(dis.data, "REGEX_EXEC       0") != NULL);
-    CHECK(strstr(dis.data, "REGEX_EXEC       1") != NULL);
+    CHECK(count_substr(dis.data, "primitive=") == 4u);
+    CHECK(strstr(dis.data, "PRIM_CALL") == NULL);
+    CHECK(strstr(dis.data, "REGEX_TEST") == NULL);
+    CHECK(strstr(dis.data, "REGEX_SCAN") == NULL);
+    CHECK(strstr(dis.data, "REGEX_EXEC") == NULL);
     idm_buf_destroy(&dis);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -561,61 +1765,49 @@ static void test_regex_primitives_compile_to_opcodes(void) {
     idm_runtime_destroy(&rt);
 }
 
-static void test_arithmetic_primitives_compile_to_opcodes(void) {
+static void test_arithmetic_primitives_compile_to_clause_calls(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     IdmError err;
     idm_error_init(&err);
-    IdmCore *core = NULL;
+    IdmSpan span = idm_span_unknown("<arithmetic-opcode-test>");
+    IdmCore *core = idm_core_do(span);
+    CHECK(core != NULL);
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_ADD, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_SUB, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_MUL, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_DIV, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_MOD, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_POW, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_NEG, 1u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_LT, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_GT, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_LTE, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_GTE, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_EQ, 2u, span)));
+    CHECK(idm_core_do_add(core, literal_arg_prim(IDM_PRIM_NEQ, 2u, span)));
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
-    const char *source =
-        "1 + 2\n"
-        "3 - 1\n"
-        "2 * 4\n"
-        "8 / 2\n"
-        "8 % 3\n"
-        "2 ** 8\n"
-        "neg 5\n"
-        "1 < 2\n"
-        "2 > 1\n"
-        "1 <= 1\n"
-        "2 >= 1\n"
-        "1 == 1\n"
-        "1 != 2\n";
-    CHECK(idm_expand_string(&rt, "<arithmetic-opcode-test>", source, &core, &err));
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     (void)main_fn;
     IdmBuffer dis;
     idm_buf_init(&dis);
     CHECK(idm_bc_disassemble(&dis, &module));
-    CHECK(strstr(dis.data, "NUM_ADD") != NULL);
-    CHECK(strstr(dis.data, "NUM_SUB") != NULL);
-    CHECK(strstr(dis.data, "NUM_MUL") != NULL);
-    CHECK(strstr(dis.data, "NUM_DIV") != NULL);
-    CHECK(strstr(dis.data, "NUM_MOD") != NULL);
-    CHECK(strstr(dis.data, "NUM_POW") != NULL);
-    CHECK(strstr(dis.data, "NUM_NEG") != NULL);
-    CHECK(strstr(dis.data, "NUM_LT") != NULL);
-    CHECK(strstr(dis.data, "NUM_GT") != NULL);
-    CHECK(strstr(dis.data, "NUM_LTE") != NULL);
-    CHECK(strstr(dis.data, "NUM_GTE") != NULL);
-    CHECK(strstr(dis.data, "EQ") != NULL);
-    CHECK(strstr(dis.data, "NEQ") != NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        0 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        1 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        2 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        3 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        4 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        5 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        6 1") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        7 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        8 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        9 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        10 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        11 2") == NULL);
-    CHECK(strstr(dis.data, "PRIM_CALL        12 2") == NULL);
+    CHECK(count_substr(dis.data, "primitive=") == 13u);
+    CHECK(strstr(dis.data, "PRIM_CALL") == NULL);
+    CHECK(strstr(dis.data, "NUM_ADD") == NULL);
+    CHECK(strstr(dis.data, "NUM_SUB") == NULL);
+    CHECK(strstr(dis.data, "NUM_MUL") == NULL);
+    CHECK(strstr(dis.data, "NUM_DIV") == NULL);
+    CHECK(strstr(dis.data, "NUM_MOD") == NULL);
+    CHECK(strstr(dis.data, "NUM_POW") == NULL);
+    CHECK(strstr(dis.data, "NUM_NEG") == NULL);
+    CHECK(strstr(dis.data, "NUM_LT") == NULL);
+    CHECK(strstr(dis.data, "NUM_GT") == NULL);
+    CHECK(strstr(dis.data, "NUM_LTE") == NULL);
+    CHECK(strstr(dis.data, "NUM_GTE") == NULL);
     idm_buf_destroy(&dis);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -624,8 +1816,7 @@ static void test_arithmetic_primitives_compile_to_opcodes(void) {
 }
 
 static IdmCore *binary_prim(IdmPrimitive prim, IdmCore *a, IdmCore *b, IdmSpan span) {
-    IdmCore *call = idm_core_call(idm_core_primitive(prim, span), span);
-    CHECK(call != NULL);
+    IdmCore *call = primitive_clause_call(prim, span);
     CHECK(idm_core_call_add_arg(call, a));
     CHECK(idm_core_call_add_arg(call, b));
     return call;
@@ -656,6 +1847,7 @@ static void test_core_letrec_recursion(void) {
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(letrec, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 15);
@@ -672,16 +1864,19 @@ static void test_source_expansion_capabilities(void) {
     IdmError err;
     idm_error_init(&err);
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<expand-test>", "x = 40\nadd x 2\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<expand-test>", "x = 40\nadd x 2\n", &core, &err));
     IdmBuffer dump;
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
-    CHECK_STR(dump.data, "(bind-local x#0 40 ((prim add) ((local x#0)) 2))");
+    CHECK(strstr(dump.data, "(bind-local x#0 40") != NULL);
+    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
+    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
     CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
@@ -690,12 +1885,12 @@ static void test_source_expansion_capabilities(void) {
     CHECK(!err.present);
 
     core = NULL;
-    CHECK(!idm_expand_string(&rt, "<expand-test>", "echo hello\n", &core, &err));
+    CHECK(!idm_expand_source_string(&rt, "<expand-test>", "echo hello\n", &core, &err));
     CHECK(err.present);
     idm_error_clear(&err);
 
     core = NULL;
-    CHECK(idm_expand_string(&rt, "<expand-test>", "use app/ish\nactivate Shell\necho hello\n", &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<expand-test>", "use app/ish\nactivate Shell\necho hello\n", &core, &err));
     CHECK(!err.present);
     CHECK(core != NULL);
     {
@@ -703,6 +1898,7 @@ static void test_source_expansion_capabilities(void) {
         idm_bc_init(&cmd_module);
         uint32_t cmd_fn = 0;
         CHECK(idm_core_compile_main(core, &cmd_module, &cmd_fn, &err));
+        CHECK(idm_bc_intern_literals(&rt, &cmd_module, &err));
         CHECK(!err.present);
         idm_bc_destroy(&cmd_module);
     }
@@ -751,12 +1947,13 @@ static void test_bytecode_serialize_roundtrip(void) {
     idm_error_init(&err);
     const char *src = "defn pick x do match x do [a b] -> add a b end end\npick [40 2]\n";
     IdmCore *core = NULL;
-    CHECK(idm_expand_string(&rt, "<ishc-test>", src, &core, &err));
+    CHECK(idm_expand_source_string(&rt, "<ishc-test>", src, &core, &err));
     CHECK(!err.present);
     IdmBytecodeModule m1;
     idm_bc_init(&m1);
     uint32_t main_fn = 0;
     CHECK(idm_core_compile_main(core, &m1, &main_fn, &err));
+    CHECK(idm_bc_intern_literals(&rt, &m1, &err));
     CHECK(!err.present);
     IdmValue out1 = idm_nil();
     CHECK(idm_vm_run(&rt, &m1, main_fn, &out1, &err));
@@ -991,10 +2188,13 @@ static void test_reader_depth_guard(void) {
     IdmError err;
     idm_error_init(&err);
     IdmSyntax *program = NULL;
-    CHECK(!idm_reader_read_string("<deep>", src.data, &program, &err));
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    CHECK(!idm_expand_read_source_string(&rt, "<deep>", src.data, &program, &err));
     CHECK(err.present && err.message != NULL && strstr(err.message, "nested too deeply") != NULL);
     CHECK(err.span.file != NULL && strcmp(err.span.file, "<deep>") == 0);
     idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
     idm_buf_destroy(&src);
 }
 
@@ -1078,6 +2278,26 @@ void run_substrate_suite(void) {
     test_values();
     test_value_copy();
     test_gc_deep_pair_chain();
+    test_transparent_reader_basic();
+    test_kernel_bootstrap_iridium_quine();
+    test_bootstrap_source_reader_selection_is_data_driven();
+    test_surface_grammar_source_reader_artifact();
+    test_reader_artifact();
+    test_reader_artifact_terminal_captures();
+    test_reader_artifact_metadata_reductions();
+    test_reader_artifact_literal_roundtrip();
+    test_reader_artifact_binary_roundtrip();
+    test_reader_artifact_binary_preserves_terminal_descriptors();
+    test_reader_artifact_literal_drops_declaration_metadata();
+    test_reader_artifact_literal_depth_guard();
+    test_reader_artifact_rejects_nullable_terminals();
+    test_active_grammar_reader_artifact_freeze();
+    test_reader_artifact_rejects_bad_reductions();
+    test_reader_artifact_rejects_mixed_scopes();
+    test_reader_artifact_rejects_mixed_phases();
+    test_reader_artifact_terminal_priority();
+    test_expand_reader_artifact_string_entrypoint();
+    test_pythonish_reader_artifact_over_language();
     test_reader_basic();
     test_reader_shell_protocols();
     test_reader_quote();
@@ -1086,15 +2306,17 @@ void run_substrate_suite(void) {
     test_vm_call_and_locals();
     test_vm_tail_call_reuses_frame();
     test_vm_guard_error_is_clause_failure();
+    test_bytecode_link_finalizes_after_intern();
+    test_stale_closure_selector_fails();
     test_core_compile_and_vm();
     test_scope_sets();
     test_binding_resolution();
     test_syntax_scope_tree();
-    test_pattern_matcher();
+    test_pattern_selector();
     test_core_do_and_local_bind();
     test_core_fn_literal_and_call();
-    test_regex_primitives_compile_to_opcodes();
-    test_arithmetic_primitives_compile_to_opcodes();
+    test_regex_primitives_compile_to_clause_calls();
+    test_arithmetic_primitives_compile_to_clause_calls();
     test_core_letrec_recursion();
     test_source_expansion_capabilities();
     test_sha256_vectors();

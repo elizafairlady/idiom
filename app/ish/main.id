@@ -85,8 +85,8 @@ end
 
 defn drop-loop-frames do
   '() -> '()
-  (list h . t) when (contains? h "(app/ish:") -> drop-loop-frames t
-  (list h . t) -> cons h (drop-loop-frames t)
+  '(h . t) when (contains? h "(app/ish:") -> drop-loop-frames t
+  '(h . t) -> cons h (drop-loop-frames t)
 end
 
 defn print-diag fallback -> match (repl-diagnostic) do
@@ -210,7 +210,7 @@ defn run-rc -> match rc-file do
 end
 
 defn first-hist ed -> match (sget ed :history) do
-  (list h . _) -> h
+  '(h . _) -> h
   _ -> :nil
 end
 
@@ -227,7 +227,7 @@ end
 
 defn print-done do
   '() -> :ok
-  (list {n mark status text _port} . t) -> do
+  '({n mark status text _port} . t) -> do
     job-line n mark status text |> eprintln
     print-done t
   end
@@ -328,8 +328,8 @@ end
 
 defn recent-restarts do
   '() _now -> '()
-  (list t . rest) now when (lt? (sub now t) 30000) -> cons t (recent-restarts rest now)
-  (list _ . rest) now -> recent-restarts rest now
+  '(t . rest) now when (lt? (sub now t) 30000) -> cons t (recent-restarts rest now)
+  '(_ . rest) now -> recent-restarts rest now
 end
 
 defn state-loop shell pid restarts jst hist cwd -> receive do
@@ -435,17 +435,17 @@ end
 
 defn cli-main do
   '() -> cond (eq? (tty?) :true) (session-main :shell) (shell-file-status "/dev/stdin")
-  (list "--version") -> do
+  '("--version") -> do
     println "ish 0.34.0-dev (idiom)"
     0
   end
-  (list "--help") -> do
+  '("--help") -> do
     usage
     0
   end
-  (list "-c" source) -> shell-source-status source
-  (list flag . _rest) when (starts-with? flag "-") -> usage-error
-  (list path . _rest) -> shell-file-status path
+  '("-c" source) -> shell-source-status source
+  '(flag . _rest) when (starts-with? flag "-") -> usage-error
+  '(path . _rest) -> shell-file-status path
 end
 
 export defn main do

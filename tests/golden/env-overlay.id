@@ -1,6 +1,7 @@
+use std/system with [env-get env-set]
 use app/ish
 activate Shell
 env-set "ISH_GOLD_VAR" "from-overlay"
 printf "penv:"
 printenv ISH_GOLD_VAR
-env-get "ISH_GOLD_VAR"
+println (inspect (env-get "ISH_GOLD_VAR"))

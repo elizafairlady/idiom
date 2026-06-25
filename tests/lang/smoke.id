@@ -9,7 +9,7 @@ suite do
   test "clauses and patterns" do
     f = fn do
       0 -> :zero
-      (list h . _) -> {:head h}
+      '(h . _) -> {:head h}
       _ -> :other
     end
     assert-eq (f 0) :zero

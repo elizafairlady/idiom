@@ -2,6 +2,7 @@ package test
 
 use std/enum
 use std/string
+use std/compile with [expand-check]
 
 defn run-one do
   {:test name thunk} failures -> do
@@ -29,7 +30,7 @@ end
 
 defn run-all do
   '() failures total -> {failures total}
-  (list t . rest) failures total -> run-all rest (run-one t failures) (add total 1)
+  '(t . rest) failures total -> run-all rest (run-one t failures) (add total 1)
 end
 
 export defn run-suite tests do

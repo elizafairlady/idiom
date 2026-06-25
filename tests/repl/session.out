@@ -1,14 +1,7 @@
 42
-84
 42
-202
 {:ok 0 "from-repl-shell" ""}
 11
 5
-{:add 5}
-{:add 2}
-7
 :normal
 ":nil"
-"hi-7"
-"yo-7"

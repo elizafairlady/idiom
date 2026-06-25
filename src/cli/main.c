@@ -67,7 +67,7 @@ static int dump_reader(const char *path) {
         return 1;
     }
     IdmSyntax *program = NULL;
-    if (!idm_reader_read_string(file, source, &program, &err)) {
+    if (!idm_expand_read_source_string(&rt, file, source, &program, &err)) {
         idm_error_fprint(stderr, &err);
         idm_error_clear(&err);
         free(source);
@@ -96,7 +96,7 @@ static bool expand_input(const char *path, IdmRuntime *rt, IdmCore **out, IdmErr
     char *source = NULL;
     const char *file = NULL;
     if (!read_source_arg(path, rt, &source, &file, err)) return false;
-    bool ok = idm_expand_string(rt, file, source, out, err);
+    bool ok = idm_expand_source_string(rt, file, source, out, err);
     free(source);
     return ok;
 }
@@ -199,9 +199,10 @@ static int run_source(const char *file, const char *source, bool print_result) {
     IdmBytecodeModule module;
     idm_bc_init(&module);
     IdmScheduler *sched = NULL;
-    if (!idm_expand_string(&rt, file, source, &core, &err)) goto done;
+    if (!idm_expand_source_string(&rt, file, source, &core, &err)) goto done;
     uint32_t main_fn = 0;
     if (!idm_core_compile_main(core, &module, &main_fn, &err)) goto done;
+    if (!idm_bc_intern_literals(&rt, &module, &err)) goto done;
     sched = idm_sched_create(&rt, &module, &err);
     if (!sched) goto done;
     IdmValue out = idm_nil();
@@ -389,6 +390,7 @@ static int run_sealed(const char *file, const unsigned char *data, size_t len) {
     IdmBytecodeModule module;
     idm_bc_init(&module);
     IdmRepl *repl = NULL;
+    IdmScheduler *direct_sched = NULL;
     char *package_path = NULL;
     IdmByteReader r = { data, len, 0u, true };
     r.pos = 4u;
@@ -419,6 +421,17 @@ static int run_sealed(const char *file, const unsigned char *data, size_t len) {
         idm_error_set(&err, idm_span_unknown(file), "sealed program main function is out of bounds");
         goto done;
     }
+    if (version == 1u) {
+        direct_sched = idm_sched_create(&rt, &module, &err);
+        if (!direct_sched) goto done;
+        IdmValue thunk = idm_closure_in_module(&rt, &module, main_fn, NULL, 0, rt.main_env, &err);
+        if (err.present) goto done;
+        IdmValue out = idm_nil();
+        IdmValue reason = idm_nil();
+        if (!idm_sched_run_session(direct_sched, thunk, rt.interactive, &out, &reason, &err)) goto done;
+        status = idm_sched_session_status(direct_sched, out, reason);
+        goto done;
+    }
     repl = idm_repl_create(&rt, &err);
     if (!repl) goto done;
     if (version == 2u && package_len != 0u) {
@@ -443,7 +456,7 @@ static int run_sealed(const char *file, const unsigned char *data, size_t len) {
         if (!seeded) goto done;
     }
     IdmScheduler *sched = idm_repl_scheduler(repl);
-    IdmValue thunk = idm_closure_in_module(&rt, &module, main_fn, NULL, 0, rt.main_ns, &err);
+    IdmValue thunk = idm_closure_in_module(&rt, &module, main_fn, NULL, 0, rt.main_env, &err);
     if (err.present) goto done;
     IdmValue out = idm_nil();
     IdmValue reason = idm_nil();
@@ -452,6 +465,7 @@ static int run_sealed(const char *file, const unsigned char *data, size_t len) {
 done:
     if (err.present) idm_error_fprint(stderr, &err);
     idm_error_clear(&err);
+    idm_sched_destroy(direct_sched);
     idm_repl_destroy(repl);
     idm_bc_destroy(&module);
     free(package_path);
@@ -471,7 +485,7 @@ static bool build_package_entry_source(const char *package_path, char **out_sour
     idm_buf_init(&src);
     bool ok = idm_buf_append(&src, "use ")
         && idm_buf_append(&src, package_path)
-        && idm_buf_append(&src, "\nmain args\n");
+        && idm_buf_append(&src, "\nuse std/system with [args]\nmain args\n");
     if (!ok) {
         idm_buf_destroy(&src);
         return idm_error_oom(err, idm_span_unknown(package_path));
@@ -506,10 +520,10 @@ static int build_sealed(const char *src_path, const char *out_path) {
         file = src_path;
         if (!build_package_entry_source(src_path, &source, &err)) goto done;
     } else if (!read_source_arg(src_path, &rt, &source, &file, &err)) goto done;
-    if (!idm_reader_read_string(file, source, &program, &err)) goto done;
+    if (!idm_expand_read_source_string(&rt, file, source, &program, &err)) goto done;
     size_t src_len = strlen(src_path);
     if (src_len >= 4 && strcmp(src_path + src_len - 4, ".ish") == 0) {
-        if (!idm_reader_read_string("<ish-prelude>", "use app/ish\nactivate Shell\n", &prelude, &err)) goto done;
+        if (!idm_expand_read_source_string(&rt, "<ish-prelude>", "use app/ish\nactivate Shell\n", &prelude, &err)) goto done;
         wrapped = idm_syn_program_prepend_program(program, prelude, file);
         if (!wrapped) { idm_error_oom(&err, idm_span_unknown(file)); goto done; }
     }
@@ -570,19 +584,23 @@ done:
 }
 
 static int dump_surface(const char *prelude) {
-    char source[4096];
-    snprintf(source, sizeof(source),
-             "%s\n"
-             "for-syntax do\n"
-             "  println (tuple :operators (expander-surface :operators))\n"
-             "  println (tuple :macros (expander-surface :macros))\n"
-             "  println (tuple :protocols (expander-surface :protocols))\n"
-             "  println (tuple :grammars (expander-surface :grammars))\n"
-             "  println (tuple :methods (expander-surface :methods))\n"
-             "  println (tuple :active (expander-surface :active))\n"
-             "end\n"
-             ":ok\n", prelude);
-    return run_source("<dump-surface>", source, false);
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmError err;
+    idm_error_init(&err);
+    IdmBuffer out;
+    idm_buf_init(&out);
+    int status = 1;
+    if (idm_expand_surface_dump(&rt, prelude, &out, &err)) {
+        fputs(out.data ? out.data : "", stdout);
+        status = 0;
+    } else if (err.present) {
+        idm_error_fprint(stderr, &err);
+    }
+    idm_buf_destroy(&out);
+    idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
+    return status;
 }
 
 #ifndef IDM_VERSION
