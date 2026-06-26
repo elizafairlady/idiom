@@ -134,6 +134,11 @@ void idm_binding_table_init(IdmBindingTable *table) {
     table->count = 0;
     table->cap = 0;
     table->next_id = 1u;
+    table->data_free = NULL;
+}
+
+void idm_binding_table_set_data_free(IdmBindingTable *table, void (*data_free)(void *)) {
+    table->data_free = data_free;
 }
 
 void idm_binding_table_destroy(IdmBindingTable *table) {
@@ -141,6 +146,7 @@ void idm_binding_table_destroy(IdmBindingTable *table) {
     for (size_t i = 0; i < table->count; i++) {
         free(table->items[i].name);
         idm_scope_set_destroy(&table->items[i].scopes);
+        if (table->data_free && table->items[i].data) table->data_free(table->items[i].data);
     }
     free(table->items);
     table->items = NULL;
@@ -258,6 +264,7 @@ bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const ch
     }
     binding->id = table->next_id++;
     binding->payload = payload;
+    binding->data = NULL;
     binding->frame_id = frame_id;
     binding->arity = arity;
     binding->primitive_backed = true;
@@ -282,7 +289,14 @@ void idm_binding_table_truncate(IdmBindingTable *table, size_t count) {
         table->count--;
         free(table->items[table->count].name);
         idm_scope_set_destroy(&table->items[table->count].scopes);
+        if (table->data_free && table->items[table->count].data) table->data_free(table->items[table->count].data);
     }
+}
+
+bool idm_binding_table_add_data(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, void *data, uint32_t frame_id, IdmBindingId *out_id) {
+    if (!idm_binding_table_add_primitive_with_arity(table, name, phase, space, kind, scopes, 0u, frame_id, idm_arity_unknown(), 0u, out_id)) return false;
+    table->items[table->count - 1u].data = data;
+    return true;
 }
 
 static bool binding_candidate(const IdmBinding *candidate, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes) {

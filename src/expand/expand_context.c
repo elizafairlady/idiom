@@ -10,11 +10,13 @@ static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, cons
 static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, const IdmBinding *b);
 static const IdmOperatorDef *op_lookup_capture(const ExpandContext *ctx, const IdmSyntax *syn, const char *capture);
 static const IdmBinding *resolve_surface_binding(const ExpandContext *ctx, const IdmSyntax *word, IdmBindingSpace space, IdmBindingKind kind, IdmResolveStatus *out_status);
+static void core_form_fn_free(void *data);
 
 void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     memset(ctx, 0, sizeof(*ctx));
     ctx->rt = rt;
     idm_binding_table_init(&ctx->bindings);
+    idm_binding_table_set_data_free(&ctx->bindings, core_form_fn_free);
     idm_scope_set_init(&ctx->empty_scopes);
     ctx->frame = 1u;
     ctx->frame_seq = 1u;
@@ -77,6 +79,12 @@ void phase_syntax_fn_destroy(PhaseSyntaxFn *fn) {
     idm_module_ref_release(fn->module);
     idm_phase_env_release(fn->phase_env);
     memset(fn, 0, sizeof(*fn));
+}
+
+static void core_form_fn_free(void *data) {
+    if (!data) return;
+    phase_syntax_fn_destroy((PhaseSyntaxFn *)data);
+    free(data);
 }
 
 static void core_syntax_def_destroy(CoreSyntaxDef *core_syntax) {
@@ -235,11 +243,20 @@ int surface_bind_payload(ExpandContext *ctx, const char *provider, const char *p
     return 1;
 }
 
+int surface_bind_data(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, void *data, IdmSpan span, IdmError *err) {
+    int guard = surface_install_guard(ctx, provider, provider_key, key, display, space, scopes, err);
+    if (guard <= 0) return guard;
+    if (!idm_binding_table_add_data(&ctx->bindings, key, IDM_PHASE_ANY, space, kind, scopes, data, ctx->frame, NULL)) {
+        idm_error_oom(err, span);
+        return -1;
+    }
+    return 1;
+}
+
 void surface_checkpoint(ExpandContext *ctx, SurfaceCheckpoint *checkpoint) {
     checkpoint->next_scope = ctx->scope_store.next_scope;
     checkpoint->binding_count = ctx->bindings.count;
     checkpoint->macro_count = ctx->macro_count;
-    checkpoint->core_syntax_count = ctx->core_syntax_count;
     checkpoint->grammar_count = ctx->grammar_count;
     checkpoint->decl_grammar_count = ctx->decl_grammar_count;
     checkpoint->operator_count = ctx->operator_count;
@@ -283,7 +300,6 @@ void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint) {
     if (ctx->runtime_init_mark_count > checkpoint->runtime_init_mark_count) ctx->runtime_init_mark_count = checkpoint->runtime_init_mark_count;
     ctx->phase_runtime_init_mark_count = checkpoint->phase_runtime_init_mark_count;
     while (ctx->package_slot_ref_count > checkpoint->package_slot_ref_count) free(ctx->package_slot_refs[--ctx->package_slot_ref_count].env_key);
-    while (ctx->core_syntax_count > checkpoint->core_syntax_count) core_syntax_def_destroy(&ctx->core_syntax[--ctx->core_syntax_count]);
     while (ctx->grammar_count > checkpoint->grammar_count) grammar_def_destroy(&ctx->grammars[--ctx->grammar_count]);
     while (ctx->macro_count > checkpoint->macro_count) macro_def_destroy(&ctx->macros[--ctx->macro_count]);
     while (ctx->operator_count > checkpoint->operator_count) idm_operator_def_destroy(&ctx->operators[--ctx->operator_count]);
@@ -331,8 +347,6 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->package_slots);
     for (size_t i = 0; i < ctx->macro_count; i++) macro_def_destroy(&ctx->macros[i]);
     free(ctx->macros);
-    for (size_t i = 0; i < ctx->core_syntax_count; i++) core_syntax_def_destroy(&ctx->core_syntax[i]);
-    free(ctx->core_syntax);
     for (size_t i = 0; i < ctx->grammar_count; i++) grammar_def_destroy(&ctx->grammars[i]);
     free(ctx->grammars);
     for (size_t i = 0; i < ctx->operator_count; i++) idm_operator_def_destroy(&ctx->operators[i]);
@@ -518,6 +532,24 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *t
     return true;
 }
 
+IdmResolveStatus resolve_scoped(const ExpandContext *ctx, const char *name, IdmBindingSpace space, const IdmScopeSet *base, const IdmScopeSet *fallback, const IdmBinding **out_binding) {
+    IdmScopeSet empty;
+    idm_scope_set_init(&empty);
+    const IdmScopeSet *lookup = base ? base : &empty;
+    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, name, ctx->phase, space, lookup, out_binding);
+    if (status == IDM_RESOLVE_UNBOUND && fallback && fallback->count != 0) {
+        IdmScopeSet merged;
+        if (idm_scope_set_copy(&merged, lookup)) {
+            bool ok = true;
+            for (size_t i = 0; ok && i < fallback->count; i++) ok = idm_scope_set_add(&merged, fallback->items[i]);
+            if (ok) status = idm_binding_resolve(&ctx->bindings, name, ctx->phase, space, &merged, out_binding);
+            idm_scope_set_destroy(&merged);
+        }
+    }
+    idm_scope_set_destroy(&empty);
+    return status;
+}
+
 ProtocolDef *resolve_protocol_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status) {
     const IdmBinding *binding = resolve_surface_binding(ctx, name_syntax, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, out_status);
     if (!binding || binding->payload >= ctx->protocol_count) return NULL;
@@ -541,12 +573,8 @@ static const IdmBinding *resolve_surface_binding(const ExpandContext *ctx, const
         if (out_status) *out_status = IDM_RESOLVE_UNBOUND;
         return NULL;
     }
-    const IdmScopeSet *scopes = idm_syn_scope_set(word, 0);
-    IdmScopeSet empty;
-    idm_scope_set_init(&empty);
     const IdmBinding *binding = NULL;
-    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, word->as.text, ctx->phase, space, scopes ? scopes : &empty, &binding);
-    idm_scope_set_destroy(&empty);
+    IdmResolveStatus status = resolve_scoped(ctx, word->as.text, space, idm_syn_scope_set(word, 0), NULL, &binding);
     if (out_status) *out_status = status;
     return status == IDM_RESOLVE_OK && binding && binding->kind == kind ? binding : NULL;
 }
@@ -599,13 +627,8 @@ bool scopes_subset_for_ref(const IdmScopeSet *binding_scopes, const IdmSyntax *r
 }
 
 const IdmBinding *resolve_default(const ExpandContext *ctx, const IdmSyntax *word, IdmResolveStatus *out_status) {
-    const IdmScopeSet *scopes = idm_syn_scope_set(word, 0);
-    IdmScopeSet empty;
-    idm_scope_set_init(&empty);
-    const IdmScopeSet *lookup = scopes ? scopes : &empty;
     const IdmBinding *binding = NULL;
-    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, word->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, lookup, &binding);
-    idm_scope_set_destroy(&empty);
+    IdmResolveStatus status = resolve_scoped(ctx, word->as.text, IDM_BIND_SPACE_DEFAULT, idm_syn_scope_set(word, 0), NULL, &binding);
     if (out_status) *out_status = status;
     return status == IDM_RESOLVE_OK ? binding : NULL;
 }
@@ -879,22 +902,8 @@ static const IdmOperatorDef *op_lookup_capture(const ExpandContext *ctx, const I
     if (!syn || syn->kind != IDM_SYN_WORD) return NULL;
     char *key = operator_binding_key(syn->as.text, capture);
     if (!key) return NULL;
-    const IdmScopeSet *scopes = idm_syn_scope_set(syn, 0);
-    IdmScopeSet empty;
-    idm_scope_set_init(&empty);
-    const IdmScopeSet *lookup = scopes ? scopes : &empty;
     const IdmBinding *binding = NULL;
-    IdmResolveStatus status = idm_binding_resolve(&ctx->bindings, key, ctx->phase, IDM_BIND_SPACE_OPERATOR, lookup, &binding);
-    if (status == IDM_RESOLVE_UNBOUND && ctx->op_fallback) {
-        IdmScopeSet merged;
-        if (idm_scope_set_copy(&merged, lookup)) {
-            bool ok = true;
-            for (size_t i = 0; ok && i < ctx->op_fallback->count; i++) ok = idm_scope_set_add(&merged, ctx->op_fallback->items[i]);
-            if (ok) status = idm_binding_resolve(&ctx->bindings, key, ctx->phase, IDM_BIND_SPACE_OPERATOR, &merged, &binding);
-            idm_scope_set_destroy(&merged);
-        }
-    }
-    idm_scope_set_destroy(&empty);
+    IdmResolveStatus status = resolve_scoped(ctx, key, IDM_BIND_SPACE_OPERATOR, idm_syn_scope_set(syn, 0), ctx->op_fallback, &binding);
     free(key);
     if (status != IDM_RESOLVE_OK || !binding || binding->kind != IDM_BIND_OPERATOR) return NULL;
     if (binding->payload >= ctx->operator_count) return NULL;
@@ -1136,8 +1145,10 @@ bool expand_surface_value(ExpandContext *ctx, IdmRuntime *rt, const char *kind, 
             if (err && err->present) return false;
         }
     } else if (strcmp(kind, "core-syntax") == 0) {
-        for (size_t i = ctx->core_syntax_count; i > 0; i--) {
-            acc = idm_cons(rt, idm_atom(rt, ctx->core_syntax[i - 1u].name ? ctx->core_syntax[i - 1u].name : "_"), acc, err);
+        for (size_t i = ctx->bindings.count; i > 0; i--) {
+            const IdmBinding *b = &ctx->bindings.items[i - 1u];
+            if (b->space != IDM_BIND_SPACE_CORE_SYNTAX) continue;
+            acc = idm_cons(rt, idm_atom(rt, b->name ? b->name : "_"), acc, err);
             if (err && err->present) return false;
         }
     } else if (strcmp(kind, "grammar-artifacts") == 0) {

@@ -69,6 +69,7 @@ typedef struct {
     IdmScopeSet scopes;
     IdmBindingId id;
     uint32_t payload;
+    void *data;
     uint32_t frame_id;
     IdmArity arity;
     bool primitive_backed;
@@ -80,6 +81,7 @@ typedef struct {
     size_t count;
     size_t cap;
     IdmBindingId next_id;
+    void (*data_free)(void *);
 } IdmBindingTable;
 
 typedef enum {
@@ -105,6 +107,8 @@ void idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta);
 
 void idm_binding_table_init(IdmBindingTable *table);
 void idm_binding_table_destroy(IdmBindingTable *table);
+void idm_binding_table_set_data_free(IdmBindingTable *table, void (*data_free)(void *));
+bool idm_binding_table_add_data(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, void *data, uint32_t frame_id, IdmBindingId *out_id);
 bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id);
 bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id);
 bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, uint32_t primitive, IdmBindingId *out_id);

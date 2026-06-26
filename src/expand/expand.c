@@ -696,20 +696,48 @@ static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word) {
     return ok;
 }
 
-static IdmCore *method_dispatch_ref(ExpandContext *ctx, const MethodSurfaceDef *method, IdmSpan span, IdmError *err) {
+typedef enum { METHOD_DISPATCH_PACKAGE, METHOD_DISPATCH_ENV, METHOD_DISPATCH_CAPTURE, METHOD_DISPATCH_LOCAL } MethodDispatchKind;
+
+typedef struct {
+    MethodDispatchKind kind;
+    uint32_t index;
+    const char *env_key;
+} MethodDispatchLoc;
+
+static bool method_dispatch_loc(ExpandContext *ctx, const MethodSurfaceDef *method, MethodDispatchLoc *out, IdmSpan span, IdmError *err) {
     if (method->dispatch_env) {
-        if (method->dispatch_env_key && method->dispatch_env_key[0]) return idm_core_package_ref(method->name, idm_atom(ctx->rt, method->dispatch_env_key), method->dispatch_slot, span);
-        return idm_core_env_ref(method->name, method->dispatch_slot, span);
+        out->kind = (method->dispatch_env_key && method->dispatch_env_key[0]) ? METHOD_DISPATCH_PACKAGE : METHOD_DISPATCH_ENV;
+        out->index = method->dispatch_slot;
+        out->env_key = method->dispatch_env_key;
+        return true;
     }
     if (method->dispatch_frame != ctx->frame) {
         uint32_t capture = 0;
         if (!materialize_slot_capture(ctx, method->name, &method->scopes, method->dispatch_frame, method->dispatch_slot, method->arity, &capture)) {
             idm_error_set(err, span, "method dispatcher '%s.%s' is not visible in this function", method->trait, method->name);
-            return NULL;
+            return false;
         }
-        return idm_core_capture_ref(method->name, capture, span);
+        out->kind = METHOD_DISPATCH_CAPTURE;
+        out->index = capture;
+        out->env_key = NULL;
+        return true;
     }
-    return idm_core_local_ref(method->name, method->dispatch_slot, span);
+    out->kind = METHOD_DISPATCH_LOCAL;
+    out->index = method->dispatch_slot;
+    out->env_key = NULL;
+    return true;
+}
+
+static IdmCore *method_dispatch_ref(ExpandContext *ctx, const MethodSurfaceDef *method, IdmSpan span, IdmError *err) {
+    MethodDispatchLoc loc;
+    if (!method_dispatch_loc(ctx, method, &loc, span, err)) return NULL;
+    switch (loc.kind) {
+        case METHOD_DISPATCH_PACKAGE: return idm_core_package_ref(method->name, idm_atom(ctx->rt, loc.env_key), loc.index, span);
+        case METHOD_DISPATCH_ENV: return idm_core_env_ref(method->name, loc.index, span);
+        case METHOD_DISPATCH_CAPTURE: return idm_core_capture_ref(method->name, loc.index, span);
+        case METHOD_DISPATCH_LOCAL: return idm_core_local_ref(method->name, loc.index, span);
+    }
+    return NULL;
 }
 
 static bool method_impl_matches_surface(const MethodImplDef *impl, const MethodSurfaceDef *method, uint32_t argc) {
@@ -756,18 +784,14 @@ static bool candidate_type_push(CandidateMethodType **items, size_t *count, size
 
 static bool method_dispatch_ref_for_multi(ExpandContext *ctx, IdmCore *multi, const MethodSurfaceDef *method, IdmCore **out, IdmSpan span, IdmError *err) {
     *out = NULL;
-    if (method->dispatch_env) {
+    MethodDispatchLoc loc;
+    if (!method_dispatch_loc(ctx, method, &loc, span, err)) return false;
+    if (loc.kind == METHOD_DISPATCH_PACKAGE || loc.kind == METHOD_DISPATCH_ENV) {
         *out = method_dispatch_ref(ctx, method, span, err);
         return *out != NULL;
     }
-    IdmCaptureKind kind = IDM_CAP_LOCAL;
-    uint32_t index = method->dispatch_slot;
-    if (method->dispatch_frame != ctx->frame) {
-        kind = IDM_CAP_UPVALUE;
-        if (!materialize_slot_capture(ctx, method->name, &method->scopes, method->dispatch_frame, method->dispatch_slot, method->arity, &index)) {
-            return idm_error_set(err, span, "method dispatcher '%s.%s' is not visible in this function", method->trait, method->name);
-        }
-    }
+    IdmCaptureKind kind = loc.kind == METHOD_DISPATCH_CAPTURE ? IDM_CAP_UPVALUE : IDM_CAP_LOCAL;
+    uint32_t index = loc.index;
     if (!idm_core_fn_multi_add_capture(multi, kind, method->name, index)) return idm_error_oom(err, span);
     for (size_t i = 0; i < multi->as.fn_multi.capture_count; i++) {
         const IdmCapture *capture = &multi->as.fn_multi.captures[i];
@@ -1410,8 +1434,8 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
     }
     if (items[start]->kind == IDM_SYN_WORD && !head_is_bound(ctx, items[start]) &&
         !op_lookup(ctx, items[start], true) && !op_lookup(ctx, items[start], false)) {
-        uint32_t core_syntax_index = 0;
-        if (resolve_head_core_syntax(ctx, items[start], &core_syntax_index, err)) return expand_core_syntax_use_from_parts(ctx, items, start, end, core_syntax_index, err);
+        const PhaseSyntaxFn *core_syntax_fn = NULL;
+        if (resolve_head_core_syntax(ctx, items[start], &core_syntax_fn, err)) return expand_core_syntax_use_from_parts(ctx, items, start, end, core_syntax_fn, err);
         if (err && err->present) return NULL;
         if (reserved_prefix_string(items, start, end, err)) return NULL;
         expand_error(err, items[start]->span, "unbound identifier '%s'", items[start]->as.text);

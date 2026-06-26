@@ -160,7 +160,6 @@ typedef struct {
     IdmScopeId next_scope;
     size_t binding_count;
     size_t macro_count;
-    size_t core_syntax_count;
     size_t grammar_count;
     size_t decl_grammar_count;
     size_t operator_count;
@@ -207,9 +206,6 @@ typedef struct {
     MacroDef *macros;
     size_t macro_count;
     size_t macro_cap;
-    CoreSyntaxDef *core_syntax;
-    size_t core_syntax_count;
-    size_t core_syntax_cap;
     GrammarDef *grammars;
     size_t grammar_count;
     size_t grammar_cap;
@@ -376,7 +372,7 @@ IdmCore *expand_implement_trait_decl(ExpandContext *ctx, const IdmSyntax *form, 
 IdmCore *build_method_dispatch_refresh_core(ExpandContext *ctx, IdmSpan span, IdmError *err);
 IdmCore *expand_macro_use(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmError *err);
 IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t payload, IdmError *err);
-IdmCore *expand_core_syntax_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t core_syntax_index, IdmError *err);
+IdmCore *expand_core_syntax_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, const PhaseSyntaxFn *fn, IdmError *err);
 IdmCore *expand_method_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err);
 IdmCore *expand_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 IdmCore *expand_primitive_clause_call(IdmPrimitive primitive, IdmSpan span, IdmError *err);
@@ -441,7 +437,8 @@ bool register_core_syntax(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmC
 bool register_grammar(ExpandContext *ctx, const IdmSyntax *name_syntax, uint8_t mode, IdmGrammarRule *rules, size_t rule_count, bool exported, IdmError *err);
 IdmBytecodeModule *relocated_module_copy(ExpandContext *ctx, const IdmBytecodeModule *src, IdmScopeId min_id, int64_t delta, uint32_t *out_fn_off, IdmError *err);
 const IdmBinding *resolve_default(const ExpandContext *ctx, const IdmSyntax *word, IdmResolveStatus *out_status);
-bool resolve_head_core_syntax(ExpandContext *ctx, const IdmSyntax *head, uint32_t *out_core_syntax_index, IdmError *err);
+IdmResolveStatus resolve_scoped(const ExpandContext *ctx, const char *name, IdmBindingSpace space, const IdmScopeSet *base, const IdmScopeSet *fallback, const IdmBinding **out_binding);
+bool resolve_head_core_syntax(ExpandContext *ctx, const IdmSyntax *head, const PhaseSyntaxFn **out_fn, IdmError *err);
 ProtocolDef *resolve_protocol_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status);
 TraitDef *resolve_trait_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status);
 TypeDef *resolve_type_def(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmResolveStatus *out_status);
@@ -467,6 +464,7 @@ void ctx_set_unit(ExpandContext *ctx, const char *name, const unsigned char hash
 bool record_activation(ExpandContext *ctx, const char *name, const char *provider, const char *provider_key, IdmSpan span, IdmError *err);
 int surface_install_guard(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, const IdmScopeSet *scopes, IdmError *err);
 int surface_bind_payload(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, IdmSpan span, IdmError *err);
+int surface_bind_data(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, void *data, IdmSpan span, IdmError *err);
 void artifact_provider_key(const unsigned char hash[32], char out[17]);
 char *operator_binding_key(const char *name, const char *capture);
 bool scopes_subset_for_ref(const IdmScopeSet *binding_scopes, const IdmSyntax *ref);
