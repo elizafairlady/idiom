@@ -130,6 +130,46 @@ const IdmValue *idm_pattern_bindings_get_slot(const IdmPatternBindings *bindings
 bool idm_pattern_bindings_add(IdmPatternBindings *bindings, const char *name, IdmValue value);
 bool idm_pattern_bindings_add_slot(IdmPatternBindings *bindings, const char *name, uint32_t slot, IdmValue value);
 
+#define SEL_NO_NODE ((uint32_t)0xFFFFFFFFu)
+
+typedef enum {
+    IDM_BYTE_GUARD_LINE_START,
+    IDM_BYTE_GUARD_LINE_END,
+    IDM_BYTE_GUARD_LOOKAHEAD_POS,
+    IDM_BYTE_GUARD_LOOKAHEAD_NEG,
+    IDM_BYTE_GUARD_LOOKBEHIND_POS,
+    IDM_BYTE_GUARD_LOOKBEHIND_NEG
+} IdmByteGuardKind;
+
+typedef struct {
+    bool set;
+    size_t start;
+    size_t end;
+} IdmByteCapture;
+
+typedef struct SelByteProg SelByteProg;
+
+SelByteProg *idm_byteprog_new(IdmError *err);
+void idm_byteprog_free(SelByteProg *p);
+uint32_t idm_byteprog_fork(SelByteProg *p, IdmError *err);
+uint32_t idm_byteprog_byte(SelByteProg *p, const unsigned char bits[32], bool negated, IdmError *err);
+uint32_t idm_byteprog_save(SelByteProg *p, uint32_t slot, IdmError *err);
+uint32_t idm_byteprog_guard(SelByteProg *p, IdmByteGuardKind kind, uint32_t flags, SelByteProg *sub, IdmError *err);
+uint32_t idm_byteprog_accept(SelByteProg *p, uint32_t accept_id, IdmError *err);
+void idm_byteprog_set_byte_next(SelByteProg *p, uint32_t node, uint32_t target);
+void idm_byteprog_set_save_next(SelByteProg *p, uint32_t node, uint32_t target);
+void idm_byteprog_set_guard_next(SelByteProg *p, uint32_t node, uint32_t target);
+void idm_byteprog_set_fork(SelByteProg *p, uint32_t node, uint32_t first, uint32_t second);
+void idm_byteprog_set_start(SelByteProg *p, uint32_t start);
+void idm_byteprog_set_capture_count(SelByteProg *p, size_t n);
+void idm_byteprog_set_flags(SelByteProg *p, uint32_t flags);
+size_t idm_byteprog_node_count(const SelByteProg *p);
+size_t idm_byteprog_footprint(const SelByteProg *p);
+void idm_byteprog_finalize_linear(SelByteProg *p);
+bool idm_byteprog_build_test_closures(SelByteProg *p, IdmError *err);
+bool idm_byteprog_test(const SelByteProg *p, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, bool *out_matched, IdmError *err);
+bool idm_byteprog_exec(const SelByteProg *p, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, bool capture, bool *out_matched, size_t *out_end, size_t *out_accept, IdmByteCapture *out_caps, size_t out_cap_count, IdmError *err);
+
 bool idm_pattern_selector_build(const IdmPatternSelectorClause *clauses, size_t clause_count, IdmPatternSelector **out, IdmError *err);
 void idm_pattern_selector_retain(IdmPatternSelector *selector);
 void idm_pattern_selector_free(IdmPatternSelector *selector);
