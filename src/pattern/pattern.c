@@ -1,6 +1,7 @@
 #include "idiom/pattern.h"
 #include "idiom/regex.h"
 
+#include <ctype.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,7 +125,12 @@ typedef enum {
     SEL_GUARD_LOOKAHEAD_POS,
     SEL_GUARD_LOOKAHEAD_NEG,
     SEL_GUARD_LOOKBEHIND_POS,
-    SEL_GUARD_LOOKBEHIND_NEG
+    SEL_GUARD_LOOKBEHIND_NEG,
+    SEL_GUARD_WORD_BOUNDARY,
+    SEL_GUARD_NOT_WORD_BOUNDARY,
+    SEL_GUARD_BUFFER_START,
+    SEL_GUARD_BUFFER_END,
+    SEL_GUARD_BUFFER_END_NL
 } SelGuardKind;
 
 typedef enum {
@@ -2209,6 +2215,12 @@ static bool sel_class_has(const SelCharClass *cls, unsigned char c) {
 }
 static bool sel_at_line_start(const char *s, size_t pos) { return pos == 0 || s[pos - 1u] == '\n'; }
 static bool sel_at_line_end(const char *s, size_t len, size_t pos) { return pos == len || s[pos] == '\n'; }
+static bool sel_is_word_byte(unsigned char c) { return isalnum(c) || c == '_'; }
+static bool sel_at_word_boundary(const char *s, size_t len, size_t pos) {
+    bool before = pos > 0 && sel_is_word_byte((unsigned char)s[pos - 1u]);
+    bool after = pos < len && sel_is_word_byte((unsigned char)s[pos]);
+    return before != after;
+}
 
 static void sel_byte_state_vec_destroy(SelByteStateVec *vec) {
     free(vec->items);
@@ -2326,6 +2338,21 @@ static bool sel_closure(const SelByteProg *prog, SelByteStateVec *vec, uint32_t 
                     break;
                 case SEL_GUARD_LINE_END:
                     pass = pos == len || ((node->as.guard.flags & IDM_REGEX_MULTILINE) != 0 && sel_at_line_end(s, len, pos));
+                    break;
+                case SEL_GUARD_WORD_BOUNDARY:
+                    pass = sel_at_word_boundary(s, len, pos);
+                    break;
+                case SEL_GUARD_NOT_WORD_BOUNDARY:
+                    pass = !sel_at_word_boundary(s, len, pos);
+                    break;
+                case SEL_GUARD_BUFFER_START:
+                    pass = pos == 0;
+                    break;
+                case SEL_GUARD_BUFFER_END:
+                    pass = pos == len;
+                    break;
+                case SEL_GUARD_BUFFER_END_NL:
+                    pass = pos == len || (pos + 1u == len && s[pos] == '\n');
                     break;
                 case SEL_GUARD_LOOKAHEAD_POS:
                 case SEL_GUARD_LOOKAHEAD_NEG: {
@@ -2540,6 +2567,11 @@ static bool sel_add_test_closure(const SelByteProg *p, SelTestVec *vec, uint32_t
             switch (n->as.guard.kind) {
                 case SEL_GUARD_LINE_START: pass = pos == 0 || ((n->as.guard.flags & IDM_REGEX_MULTILINE) != 0 && sel_at_line_start(s, pos)); break;
                 case SEL_GUARD_LINE_END: pass = pos == len || ((n->as.guard.flags & IDM_REGEX_MULTILINE) != 0 && sel_at_line_end(s, len, pos)); break;
+                case SEL_GUARD_WORD_BOUNDARY: pass = sel_at_word_boundary(s, len, pos); break;
+                case SEL_GUARD_NOT_WORD_BOUNDARY: pass = !sel_at_word_boundary(s, len, pos); break;
+                case SEL_GUARD_BUFFER_START: pass = pos == 0; break;
+                case SEL_GUARD_BUFFER_END: pass = pos == len; break;
+                case SEL_GUARD_BUFFER_END_NL: pass = pos == len || (pos + 1u == len && s[pos] == '\n'); break;
                 case SEL_GUARD_LOOKAHEAD_POS:
                 case SEL_GUARD_LOOKAHEAD_NEG: {
                     bool m = sel_look_matches(n->as.guard.sub, s, len, pos, err);

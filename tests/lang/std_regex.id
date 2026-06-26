@@ -97,6 +97,20 @@ suite do
     assert-eq (text-of (scan r"(?<!foo)bar" "xxbar")) "bar"
   end
 
+  test "regex-boundary-escapes" do
+    assert-eq (text-of (scan r"\bcat\b" "the cat sat")) "cat"
+    assert-eq (scan r"\bcat\b" "category") :nil
+    assert-eq (text-of (scan r"\Bcat" "scatter")) "cat"
+    assert-eq (scan r"\Bcat\B" "category") :nil
+    assert-eq (text-of (scan r"\w+\b" "hello world")) "hello"
+    assert-eq (text-of (scan r"\Acat" "cat food")) "cat"
+    assert-eq (scan r"\Acat" "a cat") :nil
+    assert-eq (text-of (scan r"cat\z" "wildcat")) "cat"
+    assert-eq (scan r"cat\z" "cat food") :nil
+    assert-eq (text-of (scan r"cat\Z" "wildcat\n")) "cat"
+    assert-eq (text-of (scan r"cat\Z" "cat")) "cat"
+  end
+
   test "regex-named-captures" do
     rx = r"(?<word>[a-z]+)-(?<num>[0-9]+)"
     m = scan rx "abc-123"

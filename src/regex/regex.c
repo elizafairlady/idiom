@@ -15,6 +15,11 @@ typedef enum {
     RX_CLASS,
     RX_ANCHOR_START,
     RX_ANCHOR_END,
+    RX_WORD_BOUNDARY,
+    RX_NOT_WORD_BOUNDARY,
+    RX_BUFFER_START,
+    RX_BUFFER_END,
+    RX_BUFFER_END_NL,
     RX_CONCAT,
     RX_ALT,
     RX_REPEAT,
@@ -273,6 +278,11 @@ static void node_free(RxNode *node) {
         case RX_CLASS:
         case RX_ANCHOR_START:
         case RX_ANCHOR_END:
+        case RX_WORD_BOUNDARY:
+        case RX_NOT_WORD_BOUNDARY:
+        case RX_BUFFER_START:
+        case RX_BUFFER_END:
+        case RX_BUFFER_END_NL:
             break;
     }
     free(node);
@@ -419,8 +429,11 @@ static bool parse_escape_atom(RxParser *p, RxNode **out) {
         case 'S': *out = class_node_named("space", true, regex_is_caseless(p)); return *out != NULL;
         case 'w': *out = class_node_named("word", false, regex_is_caseless(p)); return *out != NULL;
         case 'W': *out = class_node_named("word", true, regex_is_caseless(p)); return *out != NULL;
-        case 'A': *out = node_new(RX_ANCHOR_START); return *out != NULL;
-        case 'z': *out = node_new(RX_ANCHOR_END); return *out != NULL;
+        case 'b': *out = node_new(RX_WORD_BOUNDARY); return *out != NULL;
+        case 'B': *out = node_new(RX_NOT_WORD_BOUNDARY); return *out != NULL;
+        case 'A': *out = node_new(RX_BUFFER_START); return *out != NULL;
+        case 'z': *out = node_new(RX_BUFFER_END); return *out != NULL;
+        case 'Z': *out = node_new(RX_BUFFER_END_NL); return *out != NULL;
         default: *out = literal_node((unsigned char)c); return *out != NULL;
     }
 }
@@ -822,6 +835,10 @@ static RxStartInfo start_info_node(const RxNode *node, uint32_t flags) {
     switch (node->kind) {
         case RX_EMPTY:
         case RX_ANCHOR_END:
+        case RX_WORD_BOUNDARY:
+        case RX_NOT_WORD_BOUNDARY:
+        case RX_BUFFER_END:
+        case RX_BUFFER_END_NL:
         case RX_LOOK_POS:
         case RX_LOOK_NEG:
         case RX_LOOKBEHIND_POS:
@@ -829,6 +846,7 @@ static RxStartInfo start_info_node(const RxNode *node, uint32_t flags) {
             info.nullable = true;
             return info;
         case RX_ANCHOR_START:
+        case RX_BUFFER_START:
             info.nullable = true;
             info.anchored_start = true;
             return info;
@@ -994,6 +1012,16 @@ static bool bcompile_node(SelByteProg *bp, const RxNode *node, uint32_t flags, I
             return idm_byteprog_guard(bp, IDM_BYTE_GUARD_LINE_START, flags, NULL, err) != SEL_NO_NODE;
         case RX_ANCHOR_END:
             return idm_byteprog_guard(bp, IDM_BYTE_GUARD_LINE_END, flags, NULL, err) != SEL_NO_NODE;
+        case RX_WORD_BOUNDARY:
+            return idm_byteprog_guard(bp, IDM_BYTE_GUARD_WORD_BOUNDARY, flags, NULL, err) != SEL_NO_NODE;
+        case RX_NOT_WORD_BOUNDARY:
+            return idm_byteprog_guard(bp, IDM_BYTE_GUARD_NOT_WORD_BOUNDARY, flags, NULL, err) != SEL_NO_NODE;
+        case RX_BUFFER_START:
+            return idm_byteprog_guard(bp, IDM_BYTE_GUARD_BUFFER_START, flags, NULL, err) != SEL_NO_NODE;
+        case RX_BUFFER_END:
+            return idm_byteprog_guard(bp, IDM_BYTE_GUARD_BUFFER_END, flags, NULL, err) != SEL_NO_NODE;
+        case RX_BUFFER_END_NL:
+            return idm_byteprog_guard(bp, IDM_BYTE_GUARD_BUFFER_END_NL, flags, NULL, err) != SEL_NO_NODE;
         case RX_CONCAT:
             for (size_t i = 0; i < node->as.seq.count; i++) {
                 if (!bcompile_node(bp, node->as.seq.items[i], flags, err)) return false;
