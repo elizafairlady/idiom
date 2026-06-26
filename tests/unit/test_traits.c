@@ -113,20 +113,14 @@ static void test_trait_methods_runtime_dispatch(void) {
         "end\n"
         "show 1\n",
         ":second");
-    expect_runtime_error_contains(&rt, "<cross-provider-implement-conflict>",
+    check_value_written(&rt,
         "use tests/pkg/labelext\n"
         "use tests/pkg/labelproto\n"
         "implement Label on int do\n"
         "  method point-label n -> :mine\n"
-        "end\n",
-        "already implements trait 'Label#");
-    expect_runtime_error_contains(&rt, "<cross-provider-implement-names-units>",
-        "use tests/pkg/labelext\n"
-        "use tests/pkg/labelproto\n"
-        "implement Label on int do\n"
-        "  method point-label n -> :mine\n"
-        "end\n",
-        "via 'tests/pkg/labelext'");
+        "end\n"
+        "point-label 1\n",
+        ":mine");
     idm_runtime_destroy(&rt);
 }
 
@@ -191,7 +185,7 @@ static void test_trait_requirements(void) {
         "implement ChildReq on int\n"
         "5.child\n",
         "\"base:child\"");
-    expect_runtime_error_contains(&rt, "<trait-requirement-before-implement>",
+    expect_expand_error_rt(&rt, "<trait-requirement-before-implement>",
         "trait LowReq do\n"
         "  method low x -> :low\n"
         "end\n"
@@ -250,10 +244,11 @@ static void test_trait_method_candidate_dispatch(void) {
         "import tests/pkg/sizea as A\n"
         "import tests/pkg/sizeb as B\n"
         "size :atom\n",
-        "not implemented on type 'atom'");
+        "not implemented on receiver");
     expect_runtime_error_contains(&rt, "<candidate-method-ambiguous-type>",
         "import tests/pkg/sizea as A\n"
         "import tests/pkg/sizeb as B\n"
+        "implement A.Size on int\n"
         "implement B.Size on int\n"
         "size 1\n",
         "ambiguous method 'size' on type 'int'");
@@ -291,9 +286,9 @@ static void test_trait_bytecode_roundtrip(void) {
     IdmBuffer dis;
     idm_buf_init(&dis);
     CHECK(idm_bc_disassemble(&dis, &m1));
-    CHECK(strstr(dis.data, "DEFINE_TRAIT") != NULL);
-    CHECK(strstr(dis.data, "IMPLEMENT_TRAIT") != NULL);
-    CHECK(strstr(dis.data, "CALL_METHOD") != NULL);
+    CHECK(strstr(dis.data, "DEFINE_TRAIT") == NULL);
+    CHECK(strstr(dis.data, "IMPLEMENT_TRAIT") == NULL);
+    CHECK(strstr(dis.data, "CALL_METHOD") == NULL);
     idm_buf_destroy(&dis);
     IdmValue out1 = idm_nil();
     CHECK(idm_vm_run(&rt1, &m1, main_fn, &out1, &err));
@@ -375,6 +370,59 @@ static void test_records_on_trait_dispatch(void) {
         "implement NeedsRecordTrait on int\n"
         "label (NeedsRecord 1)\n",
         "does not implement trait 'NeedsRecordTrait#");
+    check_value_written(&rt,
+        "record LeftField do\n"
+        "  field x\n"
+        "end\n"
+        "record RightField do\n"
+        "  field x\n"
+        "end\n"
+        "l = LeftField 10\n"
+        "r = RightField 20\n"
+        "{l.x r.x (x l) (x r)}\n",
+        "{10 20 10 20}");
+    expect_runtime_error_contains(&rt, "<record-field-contract-type>",
+        "record FieldA do\n"
+        "  field x\n"
+        "end\n"
+        "record FieldB do\n"
+        "  field y\n"
+        "end\n"
+        "x (FieldB 1)\n",
+        "expects record type");
+    check_value_written(&rt,
+        "record TypedPoint do\n"
+        "  field x : int\n"
+        "  field label : string\n"
+        "  field meta : _\n"
+        "end\n"
+        "p = TypedPoint 1 \"ok\" :anything\n"
+        "{p.x p.label p.meta}\n",
+        "{1 \"ok\" :anything}");
+    expect_runtime_error_contains(&rt, "<record-field-int-contract>",
+        "record TypedIntField do\n"
+        "  field x : int\n"
+        "end\n"
+        "TypedIntField \"bad\"\n",
+        "record field 'x' expects int");
+    expect_runtime_error_contains(&rt, "<record-field-record-contract>",
+        "record ContractA do\n"
+        "  field x\n"
+        "end\n"
+        "record ContractB do\n"
+        "  field a : ContractA\n"
+        "end\n"
+        "ContractB 1\n",
+        "record field 'a' expects ContractA#");
+    check_value_written(&rt,
+        "use tests/pkg/typedrecord\n"
+        "t = TypedExport 5 \"ok\"\n"
+        "{t.x t.label}\n",
+        "{5 \"ok\"}");
+    expect_runtime_error_contains(&rt, "<imported-record-field-contract>",
+        "use tests/pkg/typedrecord\n"
+        "TypedExport \"bad\" \"ok\"\n",
+        "record field 'x' expects int");
     idm_runtime_destroy(&rt);
 }
 
@@ -388,6 +436,16 @@ static void test_record_expansion_boundaries(void) {
     expect_expand_result("<record-body-invalid>",
         "record BadBody do\n"
         "  method nope x -> x\n"
+        "end\n",
+        false);
+    expect_expand_result("<record-keyword-dict-is-not-field-contract>",
+        "record BadKeywordField do\n"
+        "  field x: int\n"
+        "end\n",
+        false);
+    expect_expand_result("<record-unbound-field-contract>",
+        "record BadContract do\n"
+        "  field x : MissingType\n"
         "end\n",
         false);
     expect_expand_result("<record-scope-leak>",
@@ -406,12 +464,35 @@ static void test_record_ishc_roundtrip(void) {
     idm_runtime_init(&rt);
     IdmError err;
     idm_error_init(&err);
-    IdmDictEntry entries[1];
-    entries[0].key = idm_atom(&rt, "x");
-    entries[0].value = idm_int(42);
-    IdmValue fields = idm_dict(&rt, entries, 1u, &err);
+    IdmCore *field_core = NULL;
+    CHECK(idm_expand_source_string(&rt, "<record-field-bytecode>",
+        "record PointFieldBc do\n"
+        "  field x\n"
+        "  field y\n"
+        "end\n"
+        "p = PointFieldBc 1 2\n"
+        "p.y\n",
+        &field_core, &err));
     CHECK(!err.present);
-    IdmValue record = idm_record(&rt, "ConstRecord", fields, &err);
+    IdmBytecodeModule field_module;
+    idm_bc_init(&field_module);
+    uint32_t field_main = 0;
+    CHECK(idm_core_compile_main(field_core, &field_module, &field_main, &err));
+    CHECK(idm_bc_intern_literals(&rt, &field_module, &err));
+    CHECK(!err.present);
+    IdmBuffer field_dis;
+    idm_buf_init(&field_dis);
+    CHECK(idm_bc_disassemble(&field_dis, &field_module));
+    CHECK(strstr(field_dis.data, "RECORD_FIELD") != NULL);
+    CHECK(strstr(field_dis.data, "type=") != NULL);
+    CHECK(strstr(field_dis.data, "index=1") != NULL);
+    idm_buf_destroy(&field_dis);
+    idm_bc_destroy(&field_module);
+    idm_core_free(field_core);
+
+    const char *field_names[1] = {"x"};
+    IdmValue field_values[1] = {idm_int(42)};
+    IdmValue record = idm_record(&rt, "ConstRecord", field_names, field_values, 1u, &err);
     CHECK(!err.present);
 
     IdmBytecodeModule m1;
@@ -446,7 +527,7 @@ static void test_record_ishc_roundtrip(void) {
     CHECK(out2.tag == IDM_VAL_RECORD);
     CHECK_STR(idm_record_type(out2, &err), "ConstRecord");
     IdmValue field = idm_nil();
-    CHECK(idm_record_field(out2, idm_atom(&rt2, "x"), &field, &err));
+    CHECK(idm_record_field_named(out2, "x", &field, &err));
     CHECK(field.tag == IDM_VAL_INT && field.as.i == 42);
     CHECK(!err.present);
 
@@ -481,7 +562,7 @@ static void test_trait_identity_semantics(void) {
         "  add (size \"hello\") (size 5)\n"
         "end\n"
         "add (mk-a) (mk-b)\n",
-        "type 'int' does not implement trait 'P#");
+        "method 'size' does not implement trait 'P#");
     check_value_written(&rt,
         "trait Q do\n"
         "  method qa x\n"
@@ -497,7 +578,7 @@ static void test_trait_identity_semantics(void) {
         "end\n"
         "implement Q on string\n"
         "qa 1 2\n",
-        "type 'int' does not implement trait 'Q#");
+        "method 'qa' does not implement trait 'Q#");
     check_value_written(&rt,
         "use tests/pkg/protomethod\n"
         "use tests/pkg/protomethod\n"
@@ -506,19 +587,6 @@ static void test_trait_identity_semantics(void) {
         "end\n"
         "describe 7\n",
         "\"pkg:7\"");
-    IdmError err;
-    idm_error_init(&err);
-    IdmTraitMethodSpec contract_v1 = {"m", idm_arity_exact(1u), false, idm_nil()};
-    IdmTraitMethodSpec contract_v2 = {"m", idm_arity_exact(2u), false, idm_nil()};
-    CHECK(idm_trait_define(&rt, "redef/X#1", NULL, 0, &contract_v1, 1u, &err));
-    CHECK(!err.present);
-    CHECK(!idm_trait_define(&rt, "redef/X#1", NULL, 0, &contract_v2, 1u, &err));
-    IdmBuffer reason;
-    idm_buf_init(&reason);
-    CHECK(idm_value_write(&reason, idm_error_reason_value(&rt, &err)));
-    CHECK_STR(reason.data, "{:error {:trait-redefinition :redef/X#1}}");
-    idm_buf_destroy(&reason);
-    idm_error_clear(&err);
     check_value_written(&rt,
         "trait G do\n"
         "  method gee x -> 1\n"
@@ -534,11 +602,9 @@ static void test_trait_identity_semantics(void) {
         "record Plain do\n"
         "  field v\n"
         "end\n"
-        "raw = make-record \"Plain\" (dict :v 9)\n"
         "declared = Plain 9\n"
-        "same = make-record (record-type declared) (dict :v 9)\n"
-        "{(Plain? declared) (Plain? raw) (Plain? same) same.v}\n",
-        "{:true :false :true 9}");
+        "{(Plain? declared) declared.v}\n",
+        "{:true 9}");
     idm_runtime_destroy(&rt);
 }
 

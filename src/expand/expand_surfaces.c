@@ -14,12 +14,9 @@ bool run_phase_core(ExpandContext *ctx, IdmCore *core, IdmError *err) {
         !idm_bc_intern_literals(ctx->rt, module, err)) {
         idm_bc_destroy(module); free(module); return false;
     }
-    int old_trait_phase = ctx->rt->trait_phase;
-    ctx->rt->trait_phase = 1;
     IdmValue ignored = idm_nil();
     IdmEnv *phase_runtime_env = ctx->phase_env ? ctx->phase_env->env : ctx->rt->main_env;
     bool ok = idm_vm_run_in_env(ctx->rt, module, main_fn, phase_runtime_env, &ignored, err);
-    ctx->rt->trait_phase = old_trait_phase;
     if (ok) {
         if (!idm_phase_env_add_module(ctx->phase_env, module, main_fn, err)) {
             idm_bc_destroy(module); free(module); return idm_error_oom(err, idm_span_unknown(NULL));
@@ -118,18 +115,12 @@ static bool phase_syntax_call(IdmRuntime *rt, const IdmSyntax *use_syntax, const
     IdmValue arg = idm_syntax_value(rt, use_syntax, err);
     if (err && err->present) return false;
     IdmValue result = idm_nil();
-    int old_trait_phase = rt->trait_phase;
     IdmEnv *call_env = fn->phase_env ? fn->phase_env->env : rt->main_env;
-    rt->trait_phase = 1;
     IdmValue callee = fn->closure_backed
         ? fn->closure
         : idm_closure_in_module(rt, &fn->module->module, fn->function_index, NULL, 0, call_env, err);
-    if (err && err->present) {
-        rt->trait_phase = old_trait_phase;
-        return false;
-    }
+    if (err && err->present) return false;
     bool ok = idm_vm_call_closure(rt, callee, &arg, 1, &result, err);
-    rt->trait_phase = old_trait_phase;
     if (!ok) return false;
     const IdmSyntax *result_syntax = idm_syntax_get(result, err);
     if (!result_syntax) return false;

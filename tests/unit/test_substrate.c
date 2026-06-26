@@ -1887,8 +1887,6 @@ static void test_source_expansion_capabilities(void) {
     idm_buf_init(&dump);
     CHECK(idm_core_dump(&dump, core));
     CHECK(strstr(dump.data, "(bind-local x#0 40") != NULL);
-    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
-    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);

@@ -50,7 +50,7 @@ export defmacro if stx do
 end
 
 export defmacro match do
-  %`(match %,scrutinee %,body) -> %`((fn %,body) %,scrutinee)
+  %`(match %,scrutinee %,body) -> make-syntax-list scrutinee (cons (make-syntax-word scrutinee "%-match") (cons scrutinee (cons body '())))
 end
 
 export defmacro error do

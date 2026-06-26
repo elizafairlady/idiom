@@ -40,7 +40,7 @@ suite do
     assert-eq [1 2].to-list '(1 2)
     assert-eq '(1 2).to-list '(1 2)
     match (assert-raises (fn do (:nil).to-list end)) do
-      {:error {:runtime msg}} -> assert (Str.contains? msg "does not implement trait 'Enum#")
+      {:error msg} -> assert (Str.contains? msg "does not implement trait 'Enum#")
     end
   end
   test "renderings-round-trip" do

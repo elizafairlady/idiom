@@ -16,7 +16,8 @@ typedef enum {
     SEL_PAT_VECTOR_REST,
     SEL_PAT_TUPLE_REST,
     SEL_PAT_DICT,
-    SEL_PAT_SYNTAX
+    SEL_PAT_SYNTAX,
+    SEL_PAT_TYPE
 } SelPatKind;
 
 typedef struct SelPat SelPat;
@@ -93,12 +94,14 @@ typedef enum {
     SEL_CTOR_VECTOR_REST,
     SEL_CTOR_TUPLE_EXACT,
     SEL_CTOR_TUPLE_REST,
-    SEL_CTOR_DICT
+    SEL_CTOR_DICT,
+    SEL_CTOR_TYPE
 } SelCtorKind;
 
 typedef struct {
     SelCtorKind kind;
     IdmValue literal;
+    const char *type;
     uint32_t count;
 } SelCtor;
 
@@ -342,11 +345,20 @@ IdmPattern *idm_pat_syntax_take(IdmSyntaxPattern *syntax, IdmSpan span) {
     return pat;
 }
 
+IdmPattern *idm_pat_type(const char *type, IdmSpan span) {
+    IdmPattern *pat = pat_alloc(IDM_PAT_TYPE, span);
+    if (!pat) return NULL;
+    pat->as.name = idm_strdup(type);
+    if (!pat->as.name) { free(pat); return NULL; }
+    return pat;
+}
+
 void idm_pat_free(IdmPattern *pat) {
     if (!pat) return;
     switch (pat->kind) {
         case IDM_PAT_BIND:
         case IDM_PAT_PIN:
+        case IDM_PAT_TYPE:
             free(pat->as.name);
             break;
         case IDM_PAT_PAIR:
@@ -388,6 +400,8 @@ IdmPattern *idm_pat_clone(const IdmPattern *pat) {
             return idm_pat_bind(pat->as.name, pat->span);
         case IDM_PAT_PIN:
             return idm_pat_pin(pat->as.name, pat->span);
+        case IDM_PAT_TYPE:
+            return idm_pat_type(pat->as.name, pat->span);
         case IDM_PAT_LITERAL:
             return idm_pat_literal(pat->as.literal, pat->span);
         case IDM_PAT_PAIR: {
@@ -885,6 +899,7 @@ static void sel_pat_free(SelPat *pat) {
     switch (pat->kind) {
         case SEL_PAT_BIND:
         case SEL_PAT_PIN:
+        case SEL_PAT_TYPE:
             free(pat->as.name.name);
             break;
         case SEL_PAT_PAIR:
@@ -973,6 +988,13 @@ static SelPat *sel_pat_from_idm(const IdmPattern *pat, const IdmPatternLocal *lo
             if (!out) { idm_error_oom(err, pat->span); return NULL; }
             out->as.name.name = idm_strdup(pat->as.name);
             out->as.name.slot = selector_local_slot(locals, local_count, pat->as.name);
+            if (!out->as.name.name) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }
+            return out;
+        case IDM_PAT_TYPE:
+            out = sel_pat_alloc(SEL_PAT_TYPE, pat->span);
+            if (!out) { idm_error_oom(err, pat->span); return NULL; }
+            out->as.name.name = idm_strdup(pat->as.name);
+            out->as.name.slot = UINT32_MAX;
             if (!out->as.name.name) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }
             return out;
         case IDM_PAT_LITERAL:
@@ -1244,6 +1266,11 @@ static bool sel_pat_ctor(const SelPat *pat, SelCtor *out) {
             out->kind = SEL_CTOR_DICT;
             out->count = 0;
             return true;
+        case SEL_PAT_TYPE:
+            out->kind = SEL_CTOR_TYPE;
+            out->type = pat->as.name.name;
+            out->count = 0;
+            return true;
         case SEL_PAT_WILDCARD:
         case SEL_PAT_BIND:
         case SEL_PAT_PIN:
@@ -1255,6 +1282,7 @@ static bool sel_pat_ctor(const SelPat *pat, SelCtor *out) {
 
 static bool sel_ctor_equal(SelCtor a, SelCtor b) {
     if (a.kind != b.kind || a.count != b.count) return false;
+    if (a.kind == SEL_CTOR_TYPE) return strcmp(a.type ? a.type : "", b.type ? b.type : "") == 0;
     return a.kind != SEL_CTOR_LITERAL || idm_value_equal(a.literal, b.literal);
 }
 
@@ -1274,6 +1302,8 @@ static bool sel_ctor_matches_value(SelCtor ctor, IdmValue value) {
             return idm_is_tuple(value) && idm_sequence_count(value) >= ctor.count;
         case SEL_CTOR_DICT:
             return idm_is_dict(value);
+        case SEL_CTOR_TYPE:
+            return idm_value_matches_type_name(value, ctor.type);
     }
     return false;
 }
@@ -1398,6 +1428,8 @@ static bool row_add_ctor_subcells(IdmPatternSelector *selector, SelRow *row, uin
             return row_add_sequence_subcells(selector, row, access, pat, err);
         case SEL_PAT_DICT:
             return row_add_dict_subcells(selector, row, access, pat, err);
+        case SEL_PAT_TYPE:
+            return true;
         case SEL_PAT_WILDCARD:
         case SEL_PAT_BIND:
         case SEL_PAT_PIN:
@@ -1802,6 +1834,8 @@ static bool selector_match_value(IdmRuntime *rt, IdmValue value, const SelPat *p
         case SEL_PAT_SYNTAX:
             if (value.tag != IDM_VAL_SYNTAX) return false;
             return syntax_pattern_match(rt, pat->as.syntax, idm_syntax_value_get(value), bindings, err);
+        case SEL_PAT_TYPE:
+            return idm_value_matches_type_name(value, pat->as.name.name);
     }
     return false;
 }

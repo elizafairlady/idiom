@@ -2189,22 +2189,32 @@ static bool reader_artifact_custom_best_in_rules(const ReaderArtifactRule *rules
 }
 
 static bool reader_artifact_lex(const IdmReaderArtifact *artifact, const char *file, const char *source, size_t len, unsigned start_line, ReaderArtifactTokenVec *out, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "reader.artifact.lex");
     size_t pos = 0;
     size_t previous_end = 0;
     unsigned line = start_line;
     unsigned column = 1;
     bool leading_space = false;
+    uint64_t regex_calls = 0;
+    uint64_t custom_scans = 0;
+    uint64_t skipped = 0;
     while (pos < len) {
         IdmRegexSetResult match;
         memset(&match, 0, sizeof(match));
         bool have_regex = false;
-        if (!idm_regex_set_exec_at(artifact->terminal_program, source, len, pos, &match, err)) return false;
+        regex_calls++;
+        if (!idm_regex_set_exec_at(artifact->terminal_program, source, len, pos, &match, err)) {
+            idm_profile_scope_end(&prof);
+            return false;
+        }
         if (match.matched && match.end > pos && match.index < artifact->lex_count) have_regex = true;
         const ReaderArtifactRule *best = have_regex ? artifact->lex_rules[match.index] : NULL;
         size_t best_end = have_regex ? match.end : pos;
         bool best_regex = have_regex;
         const ReaderArtifactRule *custom = NULL;
         size_t custom_end = pos;
+        custom_scans += (uint64_t)artifact->token_count + (uint64_t)artifact->skip_count;
         reader_artifact_custom_best_in_rules(artifact->tokens, artifact->token_count, source, len, pos, &custom, &custom_end);
         reader_artifact_custom_best_in_rules(artifact->skips, artifact->skip_count, source, len, pos, &custom, &custom_end);
         if (custom && (!best || custom_end > best_end || (custom_end == best_end && custom->order < best->order))) {
@@ -2214,11 +2224,13 @@ static bool reader_artifact_lex(const IdmReaderArtifact *artifact, const char *f
         }
         if (!best) {
             idm_regex_set_result_destroy(&match);
+            idm_profile_scope_end(&prof);
             return idm_error_set(err, (IdmSpan){file, pos, pos + 1u, line, column}, "reader artifact has no terminal for '%c'", source[pos]);
         }
         IdmSpan span = {file, pos, best_end, line, column};
         if (best->kind == (uint8_t)IDM_GRAMMAR_RULE_SKIP) {
             leading_space = true;
+            skipped++;
             reader_artifact_advance_position(source, pos, best_end, &line, &column);
             pos = best_end;
             idm_regex_set_result_destroy(&match);
@@ -2228,12 +2240,14 @@ static bool reader_artifact_lex(const IdmReaderArtifact *artifact, const char *f
         IdmSyntax *syntax = reader_artifact_construct_token(artifact, best, best_regex ? match.index : SIZE_MAX, best_regex ? &match : NULL, source, pos, best_end - pos, span, leading_space, adjacent_previous, err);
         if (!syntax) {
             idm_regex_set_result_destroy(&match);
+            idm_profile_scope_end(&prof);
             return false;
         }
         char *lexeme = idm_strndup(source + pos, best_end - pos);
         if (!lexeme) {
             idm_regex_set_result_destroy(&match);
             idm_syn_free(syntax);
+            idm_profile_scope_end(&prof);
             return idm_error_oom(err, span);
         }
         ReaderArtifactToken token = {best, lexeme, syntax, span, leading_space, adjacent_previous};
@@ -2241,6 +2255,7 @@ static bool reader_artifact_lex(const IdmReaderArtifact *artifact, const char *f
             idm_regex_set_result_destroy(&match);
             free(lexeme);
             idm_syn_free(syntax);
+            idm_profile_scope_end(&prof);
             return false;
         }
         reader_artifact_advance_position(source, pos, best_end, &line, &column);
@@ -2249,6 +2264,12 @@ static bool reader_artifact_lex(const IdmReaderArtifact *artifact, const char *f
         leading_space = false;
         idm_regex_set_result_destroy(&match);
     }
+    idm_profile_count("reader.artifact.lex.bytes", (uint64_t)len);
+    idm_profile_count("reader.artifact.lex.regex_calls", regex_calls);
+    idm_profile_count("reader.artifact.lex.custom_scans", custom_scans);
+    idm_profile_count("reader.artifact.lex.skips", skipped);
+    idm_profile_count("reader.artifact.lex.tokens", (uint64_t)out->count);
+    idm_profile_scope_end(&prof);
     return true;
 }
 
@@ -2370,14 +2391,152 @@ static void reader_reduction_return(ReaderReductionStack *stack, bool ok, IdmSyn
     *result_pos = pos;
 }
 
+static bool reader_artifact_rule_nullable(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, unsigned depth);
+static bool reader_artifact_node_nullable(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, size_t pc, unsigned depth);
+static bool reader_artifact_rule_can_start(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, const ReaderArtifactTokenVec *tokens, size_t pos, unsigned depth);
+static bool reader_artifact_node_can_start(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, size_t pc, const ReaderArtifactTokenVec *tokens, size_t pos, unsigned depth);
+
+static bool reader_artifact_token_matches_inst(const IdmReaderArtifact *artifact, const ReaderReductionInst *inst, const ReaderArtifactTokenVec *tokens, size_t pos) {
+    if (pos >= tokens->count) return false;
+    switch ((IdmReaderPatternOp)inst->op) {
+        case IDM_READER_PATTERN_REF:
+            return inst->target_kind == IDM_READER_PATTERN_TARGET_TOKEN &&
+                   inst->target_index < artifact->token_count &&
+                   tokens->items[pos].rule == &artifact->tokens[inst->target_index];
+        case IDM_READER_PATTERN_TOKEN:
+            return inst->target_index < artifact->token_count &&
+                   tokens->items[pos].rule == &artifact->tokens[inst->target_index];
+        case IDM_READER_PATTERN_LITERAL:
+            return inst->literal_index < artifact->literal_count &&
+                   idm_reader_literal_equal_syntax(&artifact->literals[inst->literal_index], tokens->items[pos].syntax);
+        default:
+            return false;
+    }
+}
+
+static bool reader_artifact_rule_nullable(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, unsigned depth) {
+    if (!rule || rule->reduction_count == 0) return false;
+    if (depth > artifact->form_count + 8u) return true;
+    return reader_artifact_node_nullable(artifact, rule, 0, depth + 1u);
+}
+
+static bool reader_artifact_node_nullable(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, size_t pc, unsigned depth) {
+    if (!rule || pc >= rule->reduction_count) return false;
+    if (depth > artifact->form_count + 64u) return true;
+    const ReaderReductionInst *inst = &rule->reductions[pc];
+    switch ((IdmReaderPatternOp)inst->op) {
+        case IDM_READER_PATTERN_EMPTY:
+        case IDM_READER_PATTERN_OPTIONAL:
+        case IDM_READER_PATTERN_REPEAT:
+            return true;
+        case IDM_READER_PATTERN_REF:
+            if (inst->target_kind == IDM_READER_PATTERN_TARGET_FORM && inst->target_index < artifact->form_count)
+                return reader_artifact_rule_nullable(artifact, &artifact->forms[inst->target_index], depth + 1u);
+            return false;
+        case IDM_READER_PATTERN_SEQ: {
+            size_t child = inst->first_child;
+            for (size_t i = 0; i < inst->child_count; i++) {
+                if (!reader_artifact_node_nullable(artifact, rule, child, depth + 1u)) return false;
+                child = rule->reductions[child].next;
+            }
+            return true;
+        }
+        case IDM_READER_PATTERN_ALT: {
+            size_t child = inst->first_child;
+            for (size_t i = 0; i < inst->child_count; i++) {
+                if (reader_artifact_node_nullable(artifact, rule, child, depth + 1u)) return true;
+                child = rule->reductions[child].next;
+            }
+            return false;
+        }
+        case IDM_READER_PATTERN_CAPTURE:
+        case IDM_READER_PATTERN_INDENT_GT:
+        case IDM_READER_PATTERN_INDENT_EQ:
+        case IDM_READER_PATTERN_ADJACENT:
+        case IDM_READER_PATTERN_NOT_ADJACENT:
+        case IDM_READER_PATTERN_PEEK:
+            return reader_artifact_node_nullable(artifact, rule, inst->first_child, depth + 1u);
+        case IDM_READER_PATTERN_TOKEN:
+        case IDM_READER_PATTERN_LITERAL:
+            return false;
+    }
+    return true;
+}
+
+static bool reader_artifact_rule_can_start(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, const ReaderArtifactTokenVec *tokens, size_t pos, unsigned depth) {
+    if (!rule || rule->reduction_count == 0) return false;
+    if (pos >= tokens->count) return reader_artifact_rule_nullable(artifact, rule, depth + 1u);
+    if (depth > artifact->form_count + 8u) return true;
+    return reader_artifact_node_can_start(artifact, rule, 0, tokens, pos, depth + 1u);
+}
+
+static bool reader_artifact_node_can_start(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, size_t pc, const ReaderArtifactTokenVec *tokens, size_t pos, unsigned depth) {
+    if (!rule || pc >= rule->reduction_count) return false;
+    if (depth > artifact->form_count + 64u) return true;
+    const ReaderReductionInst *inst = &rule->reductions[pc];
+    switch ((IdmReaderPatternOp)inst->op) {
+        case IDM_READER_PATTERN_EMPTY:
+        case IDM_READER_PATTERN_OPTIONAL:
+        case IDM_READER_PATTERN_REPEAT:
+            return true;
+        case IDM_READER_PATTERN_REF:
+            if (inst->target_kind == IDM_READER_PATTERN_TARGET_FORM && inst->target_index < artifact->form_count)
+                return reader_artifact_rule_can_start(artifact, &artifact->forms[inst->target_index], tokens, pos, depth + 1u);
+            return reader_artifact_token_matches_inst(artifact, inst, tokens, pos);
+        case IDM_READER_PATTERN_TOKEN:
+        case IDM_READER_PATTERN_LITERAL:
+            return reader_artifact_token_matches_inst(artifact, inst, tokens, pos);
+        case IDM_READER_PATTERN_SEQ: {
+            size_t child = inst->first_child;
+            for (size_t i = 0; i < inst->child_count; i++) {
+                if (reader_artifact_node_can_start(artifact, rule, child, tokens, pos, depth + 1u)) return true;
+                if (!reader_artifact_node_nullable(artifact, rule, child, depth + 1u)) return false;
+                child = rule->reductions[child].next;
+            }
+            return true;
+        }
+        case IDM_READER_PATTERN_ALT: {
+            size_t child = inst->first_child;
+            for (size_t i = 0; i < inst->child_count; i++) {
+                if (reader_artifact_node_can_start(artifact, rule, child, tokens, pos, depth + 1u)) return true;
+                child = rule->reductions[child].next;
+            }
+            return false;
+        }
+        case IDM_READER_PATTERN_CAPTURE:
+        case IDM_READER_PATTERN_INDENT_GT:
+        case IDM_READER_PATTERN_INDENT_EQ:
+        case IDM_READER_PATTERN_ADJACENT:
+        case IDM_READER_PATTERN_NOT_ADJACENT:
+        case IDM_READER_PATTERN_PEEK:
+            return reader_artifact_node_can_start(artifact, rule, inst->first_child, tokens, pos, depth + 1u);
+    }
+    return true;
+}
+
+static void reader_artifact_alt_skip_impossible(const IdmReaderArtifact *artifact, ReaderReductionFrame *frame, const ReaderArtifactTokenVec *tokens) {
+    while (frame->remaining != 0 &&
+           !reader_artifact_node_can_start(artifact, frame->rule, frame->child, tokens, frame->pos, 0)) {
+        frame->child = frame->rule->reductions[frame->child].next;
+        frame->remaining--;
+    }
+}
+
 static IdmSyntax *reader_artifact_match_rule(const IdmReaderArtifact *artifact, const ReaderArtifactRule *rule, const ReaderArtifactTokenVec *tokens, size_t pos, ReaderArtifactCaptures *captures, size_t *out_pos, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "reader.artifact.match_rule");
     ReaderReductionStack stack = {0};
     bool have_result = false;
     bool result_ok = false;
     IdmSyntax *result = NULL;
     size_t result_pos = pos;
-    if (!reader_reduction_push_rule(&stack, rule, pos, err, reader_artifact_token_span_at(tokens, pos))) return NULL;
+    uint64_t frames = 0;
+    if (!reader_reduction_push_rule(&stack, rule, pos, err, reader_artifact_token_span_at(tokens, pos))) {
+        idm_profile_scope_end(&prof);
+        return NULL;
+    }
     while (stack.count != 0) {
+        frames++;
         if (stack.count > IDM_IC_MAX_DEPTH * 8u) {
             idm_error_set(err, reader_artifact_token_span_at(tokens, result_pos), "reader artifact nested too deeply");
             break;
@@ -2649,6 +2808,7 @@ static IdmSyntax *reader_artifact_match_rule(const IdmReaderArtifact *artifact, 
                 }
                 break;
             case READER_REDUCTION_FRAME_ALT:
+                reader_artifact_alt_skip_impossible(artifact, frame, tokens);
                 if (frame->remaining == 0) {
                     reader_reduction_return(&stack, false, NULL, frame->pos, &have_result, &result_ok, &result, &result_pos);
                 } else {
@@ -2684,53 +2844,74 @@ static IdmSyntax *reader_artifact_match_rule(const IdmReaderArtifact *artifact, 
         if (err && err->present) break;
     }
     if (err && err->present) {
+        idm_profile_count("reader.artifact.match_rule.frames", frames);
         idm_syn_free(result);
         reader_reduction_stack_destroy(&stack, captures);
+        idm_profile_scope_end(&prof);
         return NULL;
     }
     reader_reduction_stack_destroy(&stack, captures);
     if (!have_result || !result_ok) {
+        idm_profile_count("reader.artifact.match_rule.frames", frames);
         idm_syn_free(result);
+        idm_profile_scope_end(&prof);
         return NULL;
     }
     *out_pos = result_pos;
+    idm_profile_count("reader.artifact.match_rule.frames", frames);
+    idm_profile_scope_end(&prof);
     return result;
 }
 
 static bool reader_artifact_read_program(const IdmReaderArtifact *artifact, const char *file, const ReaderArtifactTokenVec *tokens, IdmSyntax **out, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "reader.artifact.read_program");
     const ReaderArtifactRule *start_rule = reader_artifact_find_form_rule(artifact, IDM_READER_START_RULE);
-    if (!start_rule) return idm_error_set(err, idm_span_unknown(file), "reader artifact surface '%s' has no '%s' start rule", artifact->surface, IDM_READER_START_RULE);
+    if (!start_rule) {
+        idm_profile_scope_end(&prof);
+        return idm_error_set(err, idm_span_unknown(file), "reader artifact surface '%s' has no '%s' start rule", artifact->surface, IDM_READER_START_RULE);
+    }
     ReaderArtifactCaptures captures;
-    if (!reader_artifact_captures_init(&captures, artifact->capture_name_count, err, tokens->count ? tokens->items[0].span : idm_span_unknown(file))) return false;
+    if (!reader_artifact_captures_init(&captures, artifact->capture_name_count, err, tokens->count ? tokens->items[0].span : idm_span_unknown(file))) {
+        idm_profile_scope_end(&prof);
+        return false;
+    }
     IdmError trial;
     idm_error_init(&trial);
     size_t end = 0;
     IdmSyntax *program = reader_artifact_match_rule(artifact, start_rule, tokens, 0, &captures, &end, &trial);
     reader_artifact_captures_destroy(&captures);
+    idm_profile_count("reader.artifact.read_program.tokens", (uint64_t)tokens->count);
+    idm_profile_count("reader.artifact.read_program.capture_slots", (uint64_t)artifact->capture_name_count);
     if (trial.present) {
         IdmSpan span = trial.span;
         const char *message = trial.message ? trial.message : "reader artifact program rule failed";
         bool reported = idm_error_set(err, span, "%s", message);
         idm_syn_free(program);
         idm_error_clear(&trial);
+        idm_profile_scope_end(&prof);
         return reported;
     }
     if (!program) {
         IdmSpan span = tokens->count ? tokens->items[0].span : idm_span_unknown(file);
         idm_error_clear(&trial);
+        idm_profile_scope_end(&prof);
         return idm_error_set(err, span, "reader artifact surface '%s' did not match program", artifact->surface);
     }
     idm_error_clear(&trial);
     if (end != tokens->count) {
         IdmSpan span = end < tokens->count ? tokens->items[end].span : idm_span_unknown(file);
         idm_syn_free(program);
+        idm_profile_scope_end(&prof);
         return idm_error_set(err, span, "reader artifact surface '%s' left unmatched input at '%s'", artifact->surface, end < tokens->count ? tokens->items[end].lexeme : "<eof>");
     }
     if (!reader_artifact_is_package_begin(program)) {
         idm_syn_free(program);
+        idm_profile_scope_end(&prof);
         return idm_error_set(err, idm_span_unknown(file), "reader artifact program rule must emit %-package-begin");
     }
     *out = program;
+    idm_profile_scope_end(&prof);
     return true;
 }
 
@@ -3275,17 +3456,25 @@ bool idm_reader_artifact_from_grammars(const char *surface, const IdmPkgGrammar 
 }
 
 bool idm_reader_read_artifact_string(const IdmReaderArtifact *artifact, const char *file, const char *source, IdmSyntax **out, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "reader.artifact.read_string");
     *out = NULL;
-    if (!artifact) return idm_error_set(err, idm_span_unknown(file), "reader artifact is required");
+    if (!artifact) {
+        idm_profile_scope_end(&prof);
+        return idm_error_set(err, idm_span_unknown(file), "reader artifact is required");
+    }
     ReaderArtifactTokenVec tokens = {0};
     unsigned start_line = 1;
     source = skip_shebang(source, &start_line);
     if (!reader_artifact_lex(artifact, file, source, strlen(source), start_line, &tokens, err)) {
         reader_artifact_tokens_destroy(&tokens);
+        idm_profile_scope_end(&prof);
         return false;
     }
+    idm_profile_count("reader.artifact.tokens", (uint64_t)tokens.count);
     bool ok = reader_artifact_read_program(artifact, file, &tokens, out, err);
     reader_artifact_tokens_destroy(&tokens);
+    idm_profile_scope_end(&prof);
     return ok;
 }
 
@@ -3300,27 +3489,41 @@ static const char *skip_shebang(const char *source, unsigned *start_line) {
 }
 
 bool idm_reader_read_terms_string(const char *file, const char *source, IdmSyntax **out, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "reader.terms.read_string");
     TokenVec tokens = {0};
     unsigned start_line = 1;
     source = skip_shebang(source, &start_line);
     if (!lex_transparent_from(file, source, strlen(source), start_line, &tokens, err)) {
         tokens_destroy(&tokens);
+        idm_profile_scope_end(&prof);
         return false;
     }
+    idm_profile_count("reader.terms.tokens", (uint64_t)tokens.count);
     Parser p = {tokens.items, tokens.count, 0, file, err};
     IdmSyntax *program = parse_transparent_program(&p);
     tokens_destroy(&tokens);
-    if (!program) return false;
+    if (!program) {
+        idm_profile_scope_end(&prof);
+        return false;
+    }
     *out = program;
+    idm_profile_scope_end(&prof);
     return true;
 }
 
 bool idm_reader_read_terms_file(const char *path, IdmSyntax **out, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "reader.terms.read_file");
     char *source = NULL;
     size_t len = 0;
-    if (!idm_read_file(path, &source, &len, err)) return false;
+    if (!idm_read_file(path, &source, &len, err)) {
+        idm_profile_scope_end(&prof);
+        return false;
+    }
     (void)len;
     bool ok = idm_reader_read_terms_string(path, source, out, err);
     free(source);
+    idm_profile_scope_end(&prof);
     return ok;
 }

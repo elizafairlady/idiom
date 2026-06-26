@@ -16,6 +16,7 @@ typedef enum {
     IDM_CORE_SYNTAX_BUILD,
     IDM_CORE_STRING_CONCAT,
     IDM_CORE_COND,
+    IDM_CORE_MATCH,
     IDM_CORE_DO,
     IDM_CORE_BIND_LOCAL,
     IDM_CORE_FN,
@@ -26,9 +27,9 @@ typedef enum {
     IDM_CORE_ENV_REF,
     IDM_CORE_PACKAGE_REF,
     IDM_CORE_USE_PACKAGE,
-    IDM_CORE_DEFINE_TRAIT,
-    IDM_CORE_IMPLEMENT_TRAIT,
-    IDM_CORE_METHOD_CALL
+    IDM_CORE_RECORD_CONSTRUCT,
+    IDM_CORE_RECORD_FIELD,
+    IDM_CORE_RECORD_IS
 } IdmCoreKind;
 
 typedef enum {
@@ -112,10 +113,6 @@ typedef enum {
     IDM_PRIM_PWD,
     IDM_PRIM_WRITE_PROCSUB_TEMP,
     IDM_PRIM_MAKE_PROCSUB_TEMP,
-    IDM_PRIM_MAKE_RECORD,
-    IDM_PRIM_RECORD_PRED,
-    IDM_PRIM_RECORD_TYPE,
-    IDM_PRIM_RECORD_FIELD,
     IDM_PRIM_ENV_GET,
     IDM_PRIM_ENV_SET,
     IDM_PRIM_SYNTAX_ADJACENT_PRED,
@@ -270,23 +267,6 @@ typedef struct {
 
 typedef struct IdmCore IdmCore;
 
-typedef struct {
-    IdmValue name;
-} IdmCoreTraitRequirement;
-
-typedef struct {
-    IdmValue name;
-    IdmArity arity;
-    bool has_default;
-    IdmCore *default_fn;
-} IdmCoreTraitMethod;
-
-typedef struct {
-    IdmValue name;
-    IdmArity arity;
-    IdmCore *impl_fn;
-} IdmCoreTraitImpl;
-
 typedef enum {
     IDM_CAP_LOCAL,
     IDM_CAP_ARG,
@@ -326,8 +306,11 @@ typedef struct {
 
 typedef struct {
     char *name;
+    IdmValue env_key;
+    bool has_env_key;
     uint32_t slot;
     IdmCore *value;
+    bool fill_existing;
 } IdmLetRecBinding;
 
 struct IdmCore {
@@ -369,6 +352,17 @@ struct IdmCore {
             IdmCore *then_branch;
             IdmCore *else_branch;
         } cond_expr;
+        struct {
+            IdmCore **scrutinees;
+            size_t scrutinee_count;
+            size_t scrutinee_cap;
+            IdmCapture *captures;
+            size_t capture_count;
+            size_t capture_cap;
+            IdmFnClause *clauses;
+            size_t count;
+            size_t cap;
+        } match_expr;
         struct {
             IdmCore **items;
             size_t count;
@@ -425,34 +419,28 @@ struct IdmCore {
         struct {
             IdmValue env_key;
             IdmBytecodeModule *module;
+            bool module_owned;
             uint32_t init_fn;
             IdmCore *cont;
         } use_package;
         struct {
-            IdmValue name;
-            IdmCoreTraitRequirement *requirements;
-            size_t requirement_count;
-            size_t requirement_cap;
-            IdmCoreTraitMethod *methods;
-            size_t count;
-            size_t cap;
-        } define_trait;
-        struct {
-            IdmValue trait;
             IdmValue type;
-            IdmValue provider;
-            IdmValue provider_key;
-            IdmCoreTraitImpl *impls;
+            IdmValue *field_names;
+            IdmValue *field_contracts;
+            IdmCore **field_values;
             size_t count;
             size_t cap;
-        } implement_trait;
+        } record_construct;
         struct {
-            IdmValue trait;
-            IdmValue method;
-            IdmCore **args;
-            size_t arg_count;
-            size_t arg_cap;
-        } method_call;
+            IdmCore *receiver;
+            IdmValue type;
+            IdmValue field;
+            uint32_t field_index;
+        } record_field;
+        struct {
+            IdmCore *value;
+            IdmValue type;
+        } record_is;
     } as;
 };
 
@@ -471,6 +459,10 @@ IdmCore *idm_core_syntax_build(IdmSyntaxBuildKind kind, IdmCore *ctx, IdmCore *p
 IdmCore *idm_core_string_concat(IdmSpan span);
 bool idm_core_string_concat_add(IdmCore *core, IdmCore *item);
 IdmCore *idm_core_cond(IdmCore *cond, IdmCore *then_branch, IdmCore *else_branch, IdmSpan span);
+IdmCore *idm_core_match(IdmSpan span);
+bool idm_core_match_add_scrutinee(IdmCore *match, IdmCore *scrutinee);
+bool idm_core_match_add_capture(IdmCore *match, IdmCaptureKind kind, const char *name, uint32_t index);
+bool idm_core_match_add_clause_take(IdmCore *match, uint32_t arity, IdmPattern **patterns, uint32_t pattern_count, IdmPatternLocal *locals, uint32_t local_count, IdmCore *guard, IdmCore *body);
 IdmCore *idm_core_do(IdmSpan span);
 bool idm_core_do_add(IdmCore *do_expr, IdmCore *item);
 IdmCore *idm_core_bind_local(const char *name, uint32_t slot, IdmCore *value, IdmCore *body, IdmSpan span);
@@ -484,6 +476,8 @@ bool idm_core_fn_multi_add_capture(IdmCore *multi, IdmCaptureKind kind, const ch
 bool idm_core_fn_multi_add_clause_take(IdmCore *multi, uint32_t arity, IdmPattern **patterns, uint32_t pattern_count, IdmPatternLocal *locals, uint32_t local_count, IdmCore *guard, IdmCore *body);
 IdmCore *idm_core_letrec(IdmSpan span);
 bool idm_core_letrec_add(IdmCore *letrec, const char *name, uint32_t slot, IdmCore *value);
+bool idm_core_letrec_add_fill(IdmCore *letrec, const char *name, uint32_t slot, IdmCore *value, bool fill_existing);
+bool idm_core_letrec_add_env_fill(IdmCore *letrec, const char *name, IdmValue env_key, uint32_t slot, IdmCore *value, bool fill_existing);
 bool idm_core_letrec_set_body(IdmCore *letrec, IdmCore *body);
 void idm_core_letrec_set_env(IdmCore *letrec);
 void idm_core_letrec_set_fill_only(IdmCore *letrec);
@@ -491,14 +485,11 @@ IdmCore *idm_core_env_ref(const char *name, uint32_t id, IdmSpan span);
 IdmCore *idm_core_package_ref(const char *name, IdmValue env_key, uint32_t slot, IdmSpan span);
 IdmCore *idm_core_receive(IdmCore *receiver, IdmCore *timeout, IdmCore *timeout_body, IdmSpan span);
 IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, IdmCore *cleanup, uint32_t ensure_slot, IdmSpan span);
-IdmCore *idm_core_use_package(IdmValue env_key, IdmBytecodeModule *module, uint32_t init_fn, IdmCore *cont, IdmSpan span);
-IdmCore *idm_core_define_trait(IdmValue name, IdmSpan span);
-bool idm_core_define_trait_add_requirement(IdmCore *core, IdmValue requirement);
-bool idm_core_define_trait_add_method(IdmCore *core, IdmValue method, IdmArity arity, IdmCore *default_fn);
-IdmCore *idm_core_implement_trait(IdmValue trait, IdmValue type, IdmValue provider, IdmValue provider_key, IdmSpan span);
-bool idm_core_implement_trait_add_impl(IdmCore *core, IdmValue method, IdmArity arity, IdmCore *impl_fn);
-IdmCore *idm_core_method_call(IdmValue trait, IdmValue method, IdmSpan span);
-bool idm_core_method_call_add_arg(IdmCore *core, IdmCore *arg);
+IdmCore *idm_core_use_package(IdmValue env_key, IdmBytecodeModule *module, bool module_owned, uint32_t init_fn, IdmCore *cont, IdmSpan span);
+IdmCore *idm_core_record_construct(IdmValue type, IdmSpan span);
+bool idm_core_record_construct_add(IdmCore *core, IdmValue field, IdmValue contract, IdmCore *value);
+IdmCore *idm_core_record_field(IdmCore *receiver, IdmValue type, IdmValue field, uint32_t field_index, IdmSpan span);
+IdmCore *idm_core_record_is(IdmCore *value, IdmValue type, IdmSpan span);
 void idm_core_free(IdmCore *core);
 bool idm_core_normalize(IdmRuntime *rt, IdmCore **core, IdmError *err);
 bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmError *err);

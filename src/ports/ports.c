@@ -149,13 +149,6 @@ static bool parse_stdio_tuple(IdmValue v, StdioPolicy *in, StdioPolicy *out, Std
         && parse_stdio_policy(errv, err);
 }
 
-static void parse_legacy_capture(IdmValue cap, StdioPolicy *in, StdioPolicy *out, StdioPolicy *err) {
-    bool capture = value_is_atom(cap, "true");
-    *in = STDIO_INHERIT;
-    *out = capture ? STDIO_PIPE : STDIO_INHERIT;
-    *err = capture ? STDIO_PIPE : STDIO_INHERIT;
-}
-
 static bool list_to_array(IdmValue list, IdmValue **out_items, size_t *out_count) {
     size_t count = 0;
     IdmValue cur = list;
@@ -491,7 +484,10 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         IdmValue stage = idm_sequence_item(graph, 1, &ignore);
         IdmValue io = idm_sequence_item(graph, 2, &ignore);
         if (!parse_stdio_tuple(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy)) {
-            parse_legacy_capture(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy);
+            idm_error_clear(&ignore);
+            idm_error_set(err, idm_span_unknown(NULL), "invalid command stdio policy");
+            idm_port_free(port);
+            return NULL;
         }
         port->stage_count = 1;
         port->stages = calloc(1u, sizeof(*port->stages));
@@ -501,7 +497,10 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         IdmValue io = idm_sequence_item(graph, 2, &ignore);
         IdmValue pf = idm_sequence_item(graph, 3, &ignore);
         if (!parse_stdio_tuple(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy)) {
-            parse_legacy_capture(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy);
+            idm_error_clear(&ignore);
+            idm_error_set(err, idm_span_unknown(NULL), "invalid command stdio policy");
+            idm_port_free(port);
+            return NULL;
         }
         port->pipefail = value_is_atom(pf, "true");
         IdmValue *sv = NULL;

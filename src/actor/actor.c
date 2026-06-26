@@ -312,6 +312,7 @@ IdmScheduler *idm_sched_create(IdmRuntime *rt, const IdmBytecodeModule *module, 
     const char *procs = getenv("IDIOMMAXPROCS");
     long n = procs && procs[0] ? strtol(procs, NULL, 10) : 1;
     if (n > 1 && sched->wake_pipe[0] >= 0 && sched->wake_pipe[1] >= 0) sched->nworkers = (size_t)(n > 64 ? 64 : n);
+    rt->heap.locking = sched->nworkers > 1u;
     sched->gc_threshold = gc_threshold_from_env();
     return sched;
 }
@@ -497,6 +498,7 @@ static IdmActor *actor_create(IdmScheduler *sched, IdmError *err) {
     IdmActor *actor = calloc(1u, sizeof(*actor));
     if (!actor) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
     idm_heap_init(&actor->heap);
+    actor->heap.locking = sched->nworkers > 1u;
     actor->rt = sched->rt;
     actor->gc_threshold = gc_threshold_from_env();
     pthread_mutex_init(&actor->mbox_mu, NULL);

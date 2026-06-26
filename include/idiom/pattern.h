@@ -16,7 +16,8 @@ typedef enum {
     IDM_PAT_VECTOR_REST,
     IDM_PAT_TUPLE_REST,
     IDM_PAT_DICT,
-    IDM_PAT_SYNTAX
+    IDM_PAT_SYNTAX,
+    IDM_PAT_TYPE
 } IdmPatternKind;
 
 typedef struct IdmPattern IdmPattern;
@@ -117,6 +118,7 @@ IdmPattern *idm_pat_sequence(IdmPatternKind kind, IdmPattern **items, size_t cou
 IdmPattern *idm_pat_sequence_rest(IdmPatternKind kind, IdmPattern **items, size_t count, IdmPattern *rest, IdmSpan span);
 IdmPattern *idm_pat_dict(IdmDictPatternEntry *entries, size_t count, IdmPattern *rest, IdmSpan span);
 IdmPattern *idm_pat_syntax_take(IdmSyntaxPattern *syntax, IdmSpan span);
+IdmPattern *idm_pat_type(const char *type, IdmSpan span);
 IdmPattern *idm_pat_clone(const IdmPattern *pat);
 void idm_pat_free(IdmPattern *pat);
 

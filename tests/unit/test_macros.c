@@ -7,12 +7,6 @@ static void test_source_defmacro(void) {
     idm_error_init(&err);
     IdmCore *core = NULL;
     CHECK(idm_expand_source_string(&rt, "<macro-expand-test>", "defmacro answer stx -> %'(add 40 2)\nanswer\n", &core, &err));
-    IdmBuffer dump;
-    idm_buf_init(&dump);
-    CHECK(idm_core_dump(&dump, core));
-    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
-    CHECK(strstr(dump.data, "(prim ") == NULL);
-    idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
@@ -38,11 +32,6 @@ static void test_source_defmacro(void) {
 
     core = NULL;
     CHECK(idm_expand_source_string(&rt, "<macro-expand-test>", "defmacro plus2 %`(plus2 %,x) -> %`(add %,x 2)\nplus2 40\n", &core, &err));
-    idm_buf_init(&dump);
-    CHECK(idm_core_dump(&dump, core));
-    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
-    CHECK(strstr(dump.data, "(prim ") == NULL);
-    idm_buf_destroy(&dump);
     idm_bc_init(&module);
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
@@ -69,12 +58,6 @@ static void test_source_macro_clauses(void) {
 
     IdmCore *core = NULL;
     CHECK(idm_expand_source_string(&rt, "<macro-clause-test>", source, &core, &err));
-    IdmBuffer dump;
-    idm_buf_init(&dump);
-    CHECK(idm_core_dump(&dump, core));
-    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
-    CHECK(strstr(dump.data, "(prim ") == NULL);
-    idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;

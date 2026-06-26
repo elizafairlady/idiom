@@ -41,7 +41,7 @@ suite do
       rescue r -> r
     end
     match got do
-      {:error {:runtime msg}} -> assert (contains? msg "does not implement trait")
+      {:error msg} -> assert (contains? msg "does not implement trait")
     end
   end
   test "implement activates macros and operators" do

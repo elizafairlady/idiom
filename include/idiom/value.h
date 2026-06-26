@@ -88,67 +88,6 @@ typedef enum {
 typedef bool (*IdmRegisterMacroFn)(void *user, IdmRuntime *rt, const IdmSyntax *name, IdmValue transformer, IdmError *err);
 
 typedef struct {
-    const char *name;
-} IdmTraitRequirementSpec;
-
-typedef struct {
-    const char *name;
-    IdmArity arity;
-    bool has_default;
-    IdmValue default_impl;
-} IdmTraitMethodSpec;
-
-typedef struct {
-    const char *name;
-    IdmArity arity;
-    IdmValue impl;
-} IdmTraitImplSpec;
-
-typedef struct {
-    char *name;
-    char **requirements;
-    size_t requirement_count;
-} IdmRuntimeTraitContract;
-
-typedef struct {
-    char *trait;
-    char *method;
-    IdmArity arity;
-    bool has_default;
-    IdmValue default_impl;
-} IdmRuntimeTraitMethod;
-
-typedef struct {
-    char *trait;
-    char *method;
-    char *type;
-    IdmValue impl;
-} IdmRuntimeTraitImpl;
-
-typedef struct {
-    char *trait;
-    char *type;
-    char *provider;
-    char *provider_key;
-} IdmRuntimeTraitConformance;
-
-typedef struct {
-    uint64_t version;
-    IdmRuntimeTraitContract *contracts;
-    size_t contract_count;
-    size_t contract_cap;
-    IdmRuntimeTraitMethod *methods;
-    size_t method_count;
-    size_t method_cap;
-    IdmRuntimeTraitImpl *impls;
-    size_t impl_count;
-    size_t impl_cap;
-    IdmRuntimeTraitConformance *conformances;
-    size_t conformance_count;
-    size_t conformance_cap;
-} IdmTraitWorld;
-
-typedef struct {
     IdmSymbol **symbols;
     size_t count;
     size_t cap;
@@ -162,6 +101,7 @@ typedef struct {
     IdmObject *grey;
     size_t object_count;
     size_t bytes_allocated;
+    bool locking;
     pthread_mutex_t lock;
 } IdmHeap;
 
@@ -194,8 +134,6 @@ struct IdmRuntime {
     size_t env_count;
     size_t env_cap;
     IdmEnv *main_env;
-    IdmTraitWorld trait_worlds[2];
-    int trait_phase;
     void *expand_cache;
     void (*expand_cache_free)(void *cache);
     IdmPhaseReads *phase_reads;
@@ -256,7 +194,7 @@ bool idm_syntax_build(IdmRuntime *rt, IdmSyntaxBuildKind kind, IdmValue ctx_valu
 IdmValue idm_cell(IdmRuntime *rt, IdmValue initial, IdmError *err);
 IdmValue idm_closure_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, uint32_t function_index, const IdmValue *captures, size_t capture_count, IdmEnv *env, IdmError *err);
 IdmValue idm_closure_multi_selectable_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *function_indexes, size_t function_count, IdmPatternSelector *selector, const IdmValue *captures, size_t capture_count, IdmEnv *env, IdmError *err);
-IdmValue idm_record(IdmRuntime *rt, const char *type, IdmValue fields, IdmError *err);
+IdmValue idm_record(IdmRuntime *rt, const char *type, const char *const *field_names, const IdmValue *field_values, size_t field_count, IdmError *err);
 IdmValue idm_regex_value(IdmRuntime *rt, IdmRegex *regex, IdmError *err);
 IdmValue idm_regex_result_value(IdmRuntime *rt, IdmRegexResult *result, IdmError *err);
 IdmValue idm_pid(uint64_t id);
@@ -265,11 +203,7 @@ IdmValue idm_port(uint64_t id);
 const char *idm_value_type_name(IdmValueTag tag);
 const char *idm_value_dispatch_type_name(IdmValue value);
 bool idm_value_type_from_name(const char *name, IdmValueTag *out);
-bool idm_trait_define(IdmRuntime *rt, const char *trait, const IdmTraitRequirementSpec *requirements, size_t requirement_count, const IdmTraitMethodSpec *methods, size_t method_count, IdmError *err);
-bool idm_trait_implement(IdmRuntime *rt, const char *trait, const char *type, const char *provider, const char *provider_key, const IdmTraitImplSpec *impls, size_t impl_count, IdmError *err);
-bool idm_trait_implements(IdmRuntime *rt, const char *trait, const char *type);
-bool idm_trait_lookup(IdmRuntime *rt, const char *trait, const char *method, const char *type, uint32_t argc, IdmValue *out_impl, IdmError *err);
-
+bool idm_value_matches_type_name(IdmValue value, const char *type);
 bool idm_is_nil(IdmValue value);
 bool idm_is_empty_list(IdmValue value);
 bool idm_is_pair(IdmValue value);
@@ -295,8 +229,12 @@ IdmEnv *idm_closure_env(IdmValue value);
 IdmPatternSelector *idm_closure_selector(IdmValue value);
 uint64_t idm_closure_selector_generation(IdmValue value);
 const char *idm_record_type(IdmValue value, IdmError *err);
-IdmValue idm_record_fields(IdmValue value, IdmError *err);
-bool idm_record_field(IdmValue value, IdmValue field, IdmValue *out, IdmError *err);
+size_t idm_record_field_count(IdmValue value, IdmError *err);
+const char *idm_record_field_name(IdmValue value, size_t index, IdmError *err);
+IdmValue idm_record_field_value(IdmValue value, size_t index, IdmError *err);
+bool idm_record_field_named(IdmValue value, const char *field, IdmValue *out, IdmError *err);
+bool idm_record_field_project(IdmValue value, const char *type, const char *field, uint32_t field_index, IdmValue *out, IdmError *err);
+bool idm_record_is_a(IdmValue value, const char *type);
 IdmRegex *idm_regex_value_get(IdmValue value, IdmError *err);
 IdmRegexResult *idm_regex_result_value_get(IdmValue value, IdmError *err);
 IdmValue idm_car(IdmValue pair, IdmError *err);

@@ -18,7 +18,12 @@ static IdmValue build_capture_graph(IdmRuntime *rt, const char *arg0, const char
     IdmValue graph_items[3];
     graph_items[0] = idm_atom(rt, "exec");
     graph_items[1] = stage;
-    graph_items[2] = idm_atom(rt, "true");
+    IdmValue stdio_items[4];
+    stdio_items[0] = idm_atom(rt, "stdio");
+    stdio_items[1] = idm_atom(rt, "inherit");
+    stdio_items[2] = idm_atom(rt, "pipe");
+    stdio_items[3] = idm_atom(rt, "pipe");
+    graph_items[2] = idm_tuple(rt, stdio_items, 4u, err);
     return idm_tuple(rt, graph_items, 3u, err);
 }
 

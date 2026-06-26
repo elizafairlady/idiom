@@ -420,40 +420,6 @@ static bool prim_make_procsub_temp(IdmRuntime *rt, const IdmValue *args, IdmValu
     return !(err && err->present);
 }
 
-static const char *name_value_text(IdmValue value, IdmError *err, const char *what) {
-    if (value.tag == IDM_VAL_ATOM || value.tag == IDM_VAL_WORD) return idm_symbol_text(value.as.symbol);
-    if (value.tag == IDM_VAL_STRING) return idm_string_bytes(value);
-    idm_error_set(err, idm_span_unknown(NULL), "%s must be an atom, word, or string", what);
-    return NULL;
-}
-
-static bool prim_make_record(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    const char *type = name_value_text(args[0], err, "record type");
-    if (!type) return false;
-    if (!idm_is_dict(args[1])) return idm_error_set(err, idm_span_unknown(NULL), "make-record fields must be a dict");
-    *out = idm_record(rt, type, args[1], err);
-    return !(err && err->present);
-}
-
-static bool prim_record_pred(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)err;
-    *out = idm_bool(rt, idm_is_record(args[0]));
-    return true;
-}
-
-static bool prim_record_type(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    const char *type = idm_record_type(args[0], err);
-    if (!type) return false;
-    *out = idm_atom(rt, type);
-    return true;
-}
-
-static bool prim_record_field(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_record_field(args[0], args[1], out, err)) return true;
-    if (!idm_is_record(args[0])) return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "record-field"), args[0]);
-    return idm_error_reason(rt, err, "key-not-found", 1, args[1]);
-}
-
 static bool prim_write_procsub_temp(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (!idm_is_tuple(args[0]) || idm_sequence_count(args[0]) < 3) return idm_error_set(err, idm_span_unknown(NULL), "process substitution: expected a command result tuple");
     IdmError ig;
@@ -776,6 +742,25 @@ static int cmp_sequence_total(IdmValue a, IdmValue b) {
     return cmp_size(ac, bc);
 }
 
+static int cmp_record_total(IdmValue a, IdmValue b) {
+    const char *at = idm_record_type(a, NULL);
+    const char *bt = idm_record_type(b, NULL);
+    int r = strcmp(at ? at : "", bt ? bt : "");
+    if (r != 0) return r;
+    size_t ac = idm_record_field_count(a, NULL);
+    size_t bc = idm_record_field_count(b, NULL);
+    size_t n = ac < bc ? ac : bc;
+    for (size_t i = 0; i < n; i++) {
+        const char *an = idm_record_field_name(a, i, NULL);
+        const char *bn = idm_record_field_name(b, i, NULL);
+        r = strcmp(an ? an : "", bn ? bn : "");
+        if (r != 0) return r;
+        r = cmp_value_total(idm_record_field_value(a, i, NULL), idm_record_field_value(b, i, NULL));
+        if (r != 0) return r;
+    }
+    return cmp_size(ac, bc);
+}
+
 static int cmp_value_total(IdmValue a, IdmValue b) {
     if (a.tag != b.tag) return (int)a.tag < (int)b.tag ? -1 : 1;
     switch (a.tag) {
@@ -804,12 +789,8 @@ static int cmp_value_total(IdmValue a, IdmValue b) {
             return cmp_sequence_total(a, b);
         case IDM_VAL_DICT:
             return cmp_dict_total(a, b);
-        case IDM_VAL_RECORD: {
-            const char *at = idm_record_type(a, NULL);
-            const char *bt = idm_record_type(b, NULL);
-            int r = strcmp(at ? at : "", bt ? bt : "");
-            return r != 0 ? r : cmp_value_total(idm_record_fields(a, NULL), idm_record_fields(b, NULL));
-        }
+        case IDM_VAL_RECORD:
+            return cmp_record_total(a, b);
         case IDM_VAL_PID:
         case IDM_VAL_REF:
         case IDM_VAL_PORT:
@@ -863,7 +844,7 @@ static bool value_is_a_name(IdmValue value, const char *name) {
 static bool prim_is_a(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *name = type_name_text(args[1]);
     if (!name) return type_error(rt, err, "is-a?", args[1], "a type name atom, word, or string");
-    bool result = value_is_a_name(args[0], name) || idm_trait_implements(rt, name, idm_value_dispatch_type_name(args[0]));
+    bool result = value_is_a_name(args[0], name);
     *out = idm_bool(rt, result);
     return true;
 }
@@ -2408,10 +2389,6 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
         case IDM_PRIM_ENV_SET: return prim_env_set(rt, args, out, err);
         case IDM_PRIM_WRITE_PROCSUB_TEMP: return prim_write_procsub_temp(rt, args, out, err);
         case IDM_PRIM_MAKE_PROCSUB_TEMP: return prim_make_procsub_temp(rt, args, out, err);
-        case IDM_PRIM_MAKE_RECORD: return prim_make_record(rt, args, out, err);
-        case IDM_PRIM_RECORD_PRED: return prim_record_pred(rt, args, out, err);
-        case IDM_PRIM_RECORD_TYPE: return prim_record_type(rt, args, out, err);
-        case IDM_PRIM_RECORD_FIELD: return prim_record_field(rt, args, out, err);
         case IDM_PRIM_ABS: return prim_abs(rt, args, out, err);
         case IDM_PRIM_FLOOR: return prim_float_unary(rt, "floor", floor, args, out, err);
         case IDM_PRIM_ROUND: return prim_float_unary(rt, "round", round, args, out, err);

@@ -477,12 +477,24 @@ void idm_pkg_trait_destroy(IdmPkgTrait *trait) {
     memset(trait, 0, sizeof(*trait));
 }
 
+void idm_pkg_method_impl_destroy(IdmPkgMethodImpl *impl) {
+    if (!impl) return;
+    free(impl->trait);
+    free(impl->type);
+    free(impl->method);
+    free(impl->impl_env_key);
+    memset(impl, 0, sizeof(*impl));
+}
+
 void idm_pkg_type_destroy(IdmPkgType *type) {
     if (!type) return;
     free(type->name);
     free(type->identity);
     idm_scope_set_destroy(&type->scopes);
-    for (size_t i = 0; i < type->field_count; i++) free(type->fields[i]);
+    for (size_t i = 0; i < type->field_count; i++) {
+        free(type->fields[i].name);
+        free(type->fields[i].contract);
+    }
     free(type->fields);
     memset(type, 0, sizeof(*type));
 }
@@ -509,6 +521,10 @@ bool idm_trait_method_defs_copy(const IdmTraitMethodDef *src, size_t count, IdmT
         methods[i].has_default = src[i].has_default;
         methods[i].seen_decl = src[i].seen_decl;
         methods[i].exported = true;
+        methods[i].dispatch_slot = src[i].dispatch_slot;
+        methods[i].has_dispatch = src[i].has_dispatch;
+        methods[i].default_slot = src[i].default_slot;
+        methods[i].has_default_slot = src[i].has_default_slot;
         if (!methods[i].name || !idm_scope_set_copy(&methods[i].scopes, &src[i].scopes)) {
             for (size_t j = 0; j <= i; j++) idm_trait_method_def_destroy(&methods[j]);
             free(methods);
@@ -563,6 +579,10 @@ void idm_artifact_destroy(IdmArtifact *art) {
     if (art->traits) {
         for (size_t i = 0; i < art->trait_count; i++) idm_pkg_trait_destroy(&art->traits[i]);
         free(art->traits);
+    }
+    if (art->method_impls) {
+        for (size_t i = 0; i < art->method_impl_count; i++) idm_pkg_method_impl_destroy(&art->method_impls[i]);
+        free(art->method_impls);
     }
     if (art->protocols) {
         for (size_t i = 0; i < art->protocol_count; i++) idm_pkg_protocol_destroy(&art->protocols[i]);
@@ -706,7 +726,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 65u
+#define IDM_ARTIFACT_VERSION 70u
 
 const char *idm_grammar_mode_name(uint8_t mode) {
     switch ((IdmGrammarMode)mode) {
@@ -1366,7 +1386,12 @@ static bool put_method_defs(IdmBuffer *out, const IdmTraitMethodDef *methods, si
     for (size_t i = 0; i < count; i++) {
         const IdmTraitMethodDef *m = &methods[i];
         if (!idm_buf_put_str(out, m->name, strlen(m->name)) || !put_arity(out, m->arity)) return false;
-        if (!idm_buf_put_u8(out, m->has_default ? 1u : 0u) || !idm_buf_put_u8(out, m->seen_decl ? 1u : 0u)) return false;
+        if (!idm_buf_put_u8(out, m->has_default ? 1u : 0u) ||
+            !idm_buf_put_u8(out, m->seen_decl ? 1u : 0u) ||
+            !idm_buf_put_u8(out, m->has_dispatch ? 1u : 0u) ||
+            !idm_buf_put_u32(out, m->dispatch_slot) ||
+            !idm_buf_put_u8(out, m->has_default_slot ? 1u : 0u) ||
+            !idm_buf_put_u32(out, m->default_slot)) return false;
         if (!put_scope_set(out, &m->scopes)) return false;
     }
     return true;
@@ -1386,6 +1411,10 @@ static bool read_method_defs(IdmByteReader *r, IdmTraitMethodDef **out_methods, 
         m->arity = read_arity(r);
         m->has_default = r->ok && idm_rd_u8(r) != 0;
         m->seen_decl = r->ok && idm_rd_u8(r) != 0;
+        m->has_dispatch = r->ok && idm_rd_u8(r) != 0;
+        m->dispatch_slot = r->ok ? idm_rd_u32(r) : 0;
+        m->has_default_slot = r->ok && idm_rd_u8(r) != 0;
+        m->default_slot = r->ok ? idm_rd_u32(r) : 0;
         if (!r->ok) return false;
         m->exported = true;
         idm_scope_set_init(&m->scopes);
@@ -1671,7 +1700,11 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
         const IdmPkgType *t = &art->types[i];
         ok = idm_buf_put_str(out, t->name, strlen(t->name)) && idm_buf_put_str(out, t->identity, strlen(t->identity)) && put_scope_set(out, &t->scopes);
         ok = ok && idm_buf_put_u32(out, (uint32_t)t->field_count);
-        for (size_t f = 0; ok && f < t->field_count; f++) ok = idm_buf_put_str(out, t->fields[f], strlen(t->fields[f]));
+        for (size_t f = 0; ok && f < t->field_count; f++) {
+            const char *contract = t->fields[f].contract ? t->fields[f].contract : "";
+            ok = idm_buf_put_str(out, t->fields[f].name, strlen(t->fields[f].name)) &&
+                 idm_buf_put_str(out, contract, strlen(contract));
+        }
     }
     ok = ok && idm_buf_put_u32(out, (uint32_t)art->trait_count);
     for (size_t i = 0; ok && i < art->trait_count; i++) {
@@ -1679,6 +1712,17 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
         ok = idm_buf_put_str(out, t->name, strlen(t->name)) && idm_buf_put_str(out, t->identity, strlen(t->identity));
         ok = ok && put_requirement_defs(out, t->requirements, t->requirement_count);
         ok = ok && put_method_defs(out, t->methods, t->method_count);
+    }
+    ok = ok && idm_buf_put_u32(out, (uint32_t)art->method_impl_count);
+    for (size_t i = 0; ok && i < art->method_impl_count; i++) {
+        const IdmPkgMethodImpl *impl = &art->method_impls[i];
+        ok = idm_buf_put_str(out, impl->trait, strlen(impl->trait)) &&
+             idm_buf_put_str(out, impl->type, strlen(impl->type)) &&
+             idm_buf_put_str(out, impl->method, strlen(impl->method)) &&
+             put_arity(out, impl->arity) &&
+             idm_buf_put_u8(out, impl->impl_env ? 1u : 0u) &&
+             idm_buf_put_str(out, impl->impl_env_key ? impl->impl_env_key : "", strlen(impl->impl_env_key ? impl->impl_env_key : "")) &&
+             idm_buf_put_u32(out, impl->impl_slot);
     }
     ok = ok && idm_buf_put_u32(out, (uint32_t)art->protocol_count);
     for (size_t i = 0; ok && i < art->protocol_count; i++) {
@@ -1888,7 +1932,12 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
                 if (!t->fields) ok = false;
                 for (uint32_t f = 0; ok && f < field_count; f++) {
                     t->field_count = f + 1u;
-                    ok = artifact_read_str(&r, &t->fields[f], err);
+                    ok = artifact_read_str(&r, &t->fields[f].name, err) &&
+                         artifact_read_str(&r, &t->fields[f].contract, err);
+                    if (ok && t->fields[f].contract && t->fields[f].contract[0] == '\0') {
+                        free(t->fields[f].contract);
+                        t->fields[f].contract = NULL;
+                    }
                 }
             }
         }
@@ -1904,6 +1953,24 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             ok = artifact_read_str(&r, &t->name, err) && artifact_read_str(&r, &t->identity, err);
             if (ok) ok = read_requirement_defs(&r, &t->requirements, &t->requirement_count, err);
             if (ok) ok = read_method_defs(&r, &t->methods, &t->method_count, err);
+        }
+    }
+    uint32_t method_impl_count = ok ? idm_rd_u32(&r) : 0;
+    if (ok && !r.ok) ok = false;
+    if (ok && method_impl_count != 0) {
+        out->method_impls = calloc(method_impl_count, sizeof(*out->method_impls));
+        if (!out->method_impls) ok = false;
+        for (uint32_t i = 0; ok && i < method_impl_count; i++) {
+            IdmPkgMethodImpl *impl = &out->method_impls[i];
+            out->method_impl_count = i + 1u;
+            ok = artifact_read_str(&r, &impl->trait, err) &&
+                 artifact_read_str(&r, &impl->type, err) &&
+                 artifact_read_str(&r, &impl->method, err);
+            impl->arity = ok ? read_arity(&r) : idm_arity_unknown();
+            impl->impl_env = ok ? idm_rd_u8(&r) != 0 : false;
+            ok = ok && artifact_read_str(&r, &impl->impl_env_key, err);
+            impl->impl_slot = ok ? idm_rd_u32(&r) : 0u;
+            if (ok && !r.ok) ok = false;
         }
     }
     uint32_t protocol_count = ok ? idm_rd_u32(&r) : 0;
@@ -2049,17 +2116,14 @@ bool idm_artifact_run_phase_inits(IdmRuntime *rt, const IdmArtifact *art, IdmErr
     const IdmPhaseEnv *env = art->phase_env;
     bool ok = true;
     if (env && env->module_count != 0) {
-        int old_trait_phase = rt->trait_phase;
         void *old_mac_user = rt->register_macro_user;
         IdmRegisterMacroFn old_mac = rt->register_macro;
-        rt->trait_phase = 1;
         rt->register_macro_user = NULL;
         rt->register_macro = artifact_noop_register_macro;
         for (size_t i = 0; ok && i < env->module_count; i++) {
             IdmValue ignored = idm_nil();
             ok = idm_vm_run_in_env(rt, env->modules[i], env->module_main_fns[i], env->env, &ignored, err);
         }
-        rt->trait_phase = old_trait_phase;
         rt->register_macro_user = old_mac_user;
         rt->register_macro = old_mac;
     }
@@ -2076,11 +2140,14 @@ bool idm_artifact_cache_disabled(void) {
 
 void idm_artifact_cache_write(const char *path, const IdmArtifact *art) {
     if (idm_artifact_cache_disabled()) return;
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "artifact.cache.write");
     IdmError werr;
     idm_error_init(&werr);
     IdmBuffer blob;
     idm_buf_init(&blob);
     bool ok = idm_artifact_serialize(art, &blob, &werr);
+    if (ok) idm_profile_count("artifact.cache.write_bytes", (uint64_t)blob.len);
     if (ok) {
         IdmBuffer ishc_path;
         IdmBuffer tmp_path;
@@ -2102,6 +2169,7 @@ void idm_artifact_cache_write(const char *path, const IdmArtifact *art) {
     }
     idm_buf_destroy(&blob);
     idm_error_clear(&werr);
+    idm_profile_scope_end(&prof);
 }
 
 static pthread_mutex_t g_phase_reads_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -2125,7 +2193,7 @@ static void file_state_observe(const char *path, unsigned char hash[32], uint8_t
 
 void idm_phase_io_record(IdmRuntime *rt, const char *path) {
     IdmPhaseReads *reads = rt->phase_reads;
-    if (!reads || !rt->trait_phase) return;
+    if (!reads) return;
     char abs[PATH_MAX];
     if (path[0] != '/') {
         char cwd[PATH_MAX];
@@ -2191,11 +2259,18 @@ static bool artifact_dep_verified_with(IdmRuntime *rt, const IdmArtifactDep *dep
 }
 
 bool idm_artifact_cache_load(IdmRuntime *rt, const char *path, const unsigned char src_hash[32], IdmArtifact *out, IdmArtifactPackageDepVerifier package_dep_verified, void *package_dep_user) {
-    if (idm_artifact_cache_disabled()) return false;
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "artifact.cache.load");
+    if (idm_artifact_cache_disabled()) {
+        idm_profile_count("artifact.cache.disabled", 1u);
+        idm_profile_scope_end(&prof);
+        return false;
+    }
     IdmBuffer ishc_path;
     idm_buf_init(&ishc_path);
     if (!idm_buf_append(&ishc_path, path) || !idm_buf_append(&ishc_path, ".ic")) {
         idm_buf_destroy(&ishc_path);
+        idm_profile_scope_end(&prof);
         return false;
     }
     char *data = NULL;
@@ -2205,7 +2280,12 @@ bool idm_artifact_cache_load(IdmRuntime *rt, const char *path, const unsigned ch
     bool ok = idm_read_file(ishc_path.data, &data, &len, &rerr);
     idm_buf_destroy(&ishc_path);
     idm_error_clear(&rerr);
-    if (!ok) return false;
+    if (!ok) {
+        idm_profile_count("artifact.cache.miss", 1u);
+        idm_profile_scope_end(&prof);
+        return false;
+    }
+    idm_profile_count("artifact.cache.read_bytes", (uint64_t)len);
     IdmError derr;
     idm_error_init(&derr);
     ok = idm_artifact_deserialize(rt, (const unsigned char *)data, len, out, &derr);
@@ -2219,5 +2299,7 @@ bool idm_artifact_cache_load(IdmRuntime *rt, const char *path, const unsigned ch
         if (!ok) idm_artifact_destroy(out);
     }
     idm_error_clear(&derr);
+    idm_profile_count(ok ? "artifact.cache.hit" : "artifact.cache.stale", 1u);
+    idm_profile_scope_end(&prof);
     return ok;
 }

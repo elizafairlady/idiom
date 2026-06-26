@@ -63,7 +63,9 @@ typedef struct {
 
 typedef struct {
     char *type;
-    IdmValue fields;
+    char **field_names;
+    IdmValue *field_values;
+    size_t field_count;
 } IdmRecordObj;
 
 typedef struct {
@@ -105,25 +107,53 @@ static pthread_mutex_t g_env_mu = PTHREAD_MUTEX_INITIALIZER;
 static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text);
 static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, const char *package_key);
 
-static IdmObject *heap_alloc_unlocked(IdmHeap *heap, IdmObjectKind kind) {
-    IdmObject *obj = calloc(1u, sizeof(*obj));
+static void heap_lock(IdmHeap *heap) {
+    if (heap->locking) pthread_mutex_lock(&heap->lock);
+}
+
+static void heap_unlock(IdmHeap *heap) {
+    if (heap->locking) pthread_mutex_unlock(&heap->lock);
+}
+
+static IdmObject *heap_alloc_extra_unlocked(IdmHeap *heap, IdmObjectKind kind, size_t extra) {
+    if (extra > SIZE_MAX - sizeof(IdmObject)) return NULL;
+    IdmObject *obj = calloc(1u, sizeof(*obj) + extra);
     if (!obj) return NULL;
     obj->kind = kind;
     obj->color = IDM_GC_WHITE;
     obj->heap = heap;
-    obj->bytes = sizeof(*obj);
+    obj->bytes = sizeof(*obj) + extra;
     obj->next = heap->objects;
     heap->objects = obj;
     heap->object_count++;
-    heap->bytes_allocated += sizeof(*obj);
+    heap->bytes_allocated += obj->bytes;
     return obj;
 }
 
+static IdmObject *heap_alloc_unlocked(IdmHeap *heap, IdmObjectKind kind) {
+    return heap_alloc_extra_unlocked(heap, kind, 0u);
+}
+
 static IdmObject *heap_alloc(IdmHeap *heap, IdmObjectKind kind) {
-    pthread_mutex_lock(&heap->lock);
+    heap_lock(heap);
     IdmObject *obj = heap_alloc_unlocked(heap, kind);
-    pthread_mutex_unlock(&heap->lock);
+    heap_unlock(heap);
     return obj;
+}
+
+static IdmObject *heap_alloc_extra(IdmHeap *heap, IdmObjectKind kind, size_t extra) {
+    heap_lock(heap);
+    IdmObject *obj = heap_alloc_extra_unlocked(heap, kind, extra);
+    heap_unlock(heap);
+    return obj;
+}
+
+static bool object_payload_external(const IdmObject *obj, const void *ptr) {
+    if (!obj || !ptr) return false;
+    const char *p = ptr;
+    const char *start = (const char *)(obj + 1);
+    const char *end = (const char *)obj + obj->bytes;
+    return p < start || p >= end;
 }
 
 static void heap_account_unlocked(IdmHeap *heap, IdmObject *obj, size_t extra) {
@@ -132,9 +162,9 @@ static void heap_account_unlocked(IdmHeap *heap, IdmObject *obj, size_t extra) {
 }
 
 static void heap_account(IdmHeap *heap, IdmObject *obj, size_t extra) {
-    pthread_mutex_lock(&heap->lock);
+    heap_lock(heap);
     heap_account_unlocked(heap, obj, extra);
-    pthread_mutex_unlock(&heap->lock);
+    heap_unlock(heap);
 }
 
 static size_t syn_footprint(const IdmSyntax *syn) {
@@ -166,14 +196,19 @@ static void object_free(IdmObject *obj) {
     if (!obj) return;
     if (obj->kind == IDM_OBJ_STRING) free(obj->as.string.bytes);
     if (obj->kind == IDM_OBJ_TUPLE || obj->kind == IDM_OBJ_VECTOR) free(obj->as.sequence.items);
-    if (obj->kind == IDM_OBJ_DICT) free(obj->as.dict.entries);
+    if (obj->kind == IDM_OBJ_DICT && object_payload_external(obj, obj->as.dict.entries)) free(obj->as.dict.entries);
     if (obj->kind == IDM_OBJ_SYNTAX) idm_syn_free(obj->as.syntax);
     if (obj->kind == IDM_OBJ_CLOSURE) {
         idm_pattern_selector_free(obj->as.closure.selector);
         free(obj->as.closure.entries);
         free(obj->as.closure.captures);
     }
-    if (obj->kind == IDM_OBJ_RECORD) free(obj->as.record.type);
+    if (obj->kind == IDM_OBJ_RECORD) {
+        free(obj->as.record.type);
+        for (size_t i = 0; i < obj->as.record.field_count; i++) free(obj->as.record.field_names[i]);
+        free(obj->as.record.field_names);
+        free(obj->as.record.field_values);
+    }
     if (obj->kind == IDM_OBJ_REGEX) idm_regex_free(obj->as.regex);
     if (obj->kind == IDM_OBJ_REGEX_RESULT) idm_regex_result_free(obj->as.regex_result);
     free(obj);
@@ -200,8 +235,6 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->env_count = 0;
     rt->env_cap = 0;
     rt->main_env = idm_env_fresh(rt);
-    memset(rt->trait_worlds, 0, sizeof(rt->trait_worlds));
-    rt->trait_phase = 0;
     rt->expand_cache = NULL;
     rt->expand_cache_free = NULL;
     rt->phase_reads = NULL;
@@ -226,51 +259,7 @@ bool idm_runtime_own_temp(IdmRuntime *rt, const char *path) {
     return true;
 }
 
-static void runtime_trait_method_destroy(IdmRuntimeTraitMethod *method) {
-    if (!method) return;
-    free(method->trait);
-    free(method->method);
-    memset(method, 0, sizeof(*method));
-}
-
-static void runtime_trait_contract_destroy(IdmRuntimeTraitContract *contract) {
-    if (!contract) return;
-    free(contract->name);
-    for (size_t i = 0; i < contract->requirement_count; i++) free(contract->requirements[i]);
-    free(contract->requirements);
-    memset(contract, 0, sizeof(*contract));
-}
-
-static void runtime_trait_impl_destroy(IdmRuntimeTraitImpl *impl) {
-    if (!impl) return;
-    free(impl->trait);
-    free(impl->method);
-    free(impl->type);
-    memset(impl, 0, sizeof(*impl));
-}
-
-static void runtime_trait_conformance_destroy(IdmRuntimeTraitConformance *conf) {
-    if (!conf) return;
-    free(conf->trait);
-    free(conf->type);
-    free(conf->provider);
-    free(conf->provider_key);
-    memset(conf, 0, sizeof(*conf));
-}
-
 void idm_runtime_destroy(IdmRuntime *rt) {
-    for (size_t w = 0; w < 2u; w++) {
-        IdmTraitWorld *world = &rt->trait_worlds[w];
-        for (size_t i = 0; i < world->contract_count; i++) runtime_trait_contract_destroy(&world->contracts[i]);
-        free(world->contracts);
-        for (size_t i = 0; i < world->method_count; i++) runtime_trait_method_destroy(&world->methods[i]);
-        free(world->methods);
-        for (size_t i = 0; i < world->impl_count; i++) runtime_trait_impl_destroy(&world->impls[i]);
-        free(world->impls);
-        for (size_t i = 0; i < world->conformance_count; i++) runtime_trait_conformance_destroy(&world->conformances[i]);
-        free(world->conformances);
-    }
-    memset(rt->trait_worlds, 0, sizeof(rt->trait_worlds));
     for (size_t i = 0; i < rt->env_count; i++) {
         free(rt->envs[i]->package_key);
         free(rt->envs[i]->slots);
@@ -478,6 +467,7 @@ void idm_heap_init(IdmHeap *heap) {
     heap->grey = NULL;
     heap->object_count = 0;
     heap->bytes_allocated = 0;
+    heap->locking = false;
     pthread_mutex_init(&heap->lock, NULL);
 }
 
@@ -540,7 +530,7 @@ static void gc_trace_object(IdmHeap *heap, IdmObject *obj) {
     } else if (obj->kind == IDM_OBJ_CLOSURE) {
         for (size_t i = 0; i < obj->as.closure.capture_count; i++) gc_grey_value(heap, obj->as.closure.captures[i]);
     } else if (obj->kind == IDM_OBJ_RECORD) {
-        gc_grey_value(heap, obj->as.record.fields);
+        for (size_t i = 0; i < obj->as.record.field_count; i++) gc_grey_value(heap, obj->as.record.field_values[i]);
     } else if (obj->kind == IDM_OBJ_REGEX_RESULT) {
         gc_grey_value(heap, idm_regex_result_subject_value(obj->as.regex_result));
     }
@@ -579,9 +569,9 @@ void idm_heap_sweep(IdmHeap *heap) {
 
 size_t idm_heap_bytes(const IdmHeap *heap) {
     IdmHeap *h = (IdmHeap *)heap;
-    pthread_mutex_lock(&h->lock);
+    heap_lock(h);
     size_t n = h->bytes_allocated;
-    pthread_mutex_unlock(&h->lock);
+    heap_unlock(h);
     return n;
 }
 
@@ -762,21 +752,19 @@ IdmValue idm_vector(IdmRuntime *rt, const IdmValue *items, size_t count, IdmErro
 }
 
 static IdmValue dict_value_with_cap(IdmRuntime *rt, size_t cap, IdmError *err) {
-    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_DICT);
+    size_t extra = 0;
+    if (cap > SIZE_MAX / sizeof(IdmDictEntry)) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return idm_nil();
+    }
+    extra = cap * sizeof(IdmDictEntry);
+    IdmObject *obj = heap_alloc_extra(idm_active_heap(rt), IDM_OBJ_DICT, extra);
     if (!obj) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
     }
     obj->as.dict.count = 0;
-    obj->as.dict.entries = NULL;
-    if (cap != 0) {
-        obj->as.dict.entries = malloc(cap * sizeof(*obj->as.dict.entries));
-        if (!obj->as.dict.entries) {
-            idm_error_oom(err, idm_span_unknown(NULL));
-            return idm_nil();
-        }
-        heap_account(idm_active_heap(rt), obj, cap * sizeof(*obj->as.dict.entries));
-    }
+    obj->as.dict.entries = cap == 0 ? NULL : (IdmDictEntry *)(obj + 1);
     IdmValue v;
     v.tag = IDM_VAL_DICT;
     v.as.obj = obj;
@@ -1152,13 +1140,9 @@ IdmValue idm_closure_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, 
     return idm_closure_multi_selectable_in_module(rt, module, &function_index, 1, selector, captures, capture_count, env, err);
 }
 
-IdmValue idm_record(IdmRuntime *rt, const char *type, IdmValue fields, IdmError *err) {
+IdmValue idm_record(IdmRuntime *rt, const char *type, const char *const *field_names, const IdmValue *field_values, size_t field_count, IdmError *err) {
     if (!type || !*type) {
         idm_error_set(err, idm_span_unknown(NULL), "record type must be a non-empty name");
-        return idm_nil();
-    }
-    if (!idm_is_dict(fields)) {
-        idm_error_set(err, idm_span_unknown(NULL), "record fields must be a dict");
         return idm_nil();
     }
     IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_RECORD);
@@ -1171,7 +1155,29 @@ IdmValue idm_record(IdmRuntime *rt, const char *type, IdmValue fields, IdmError 
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
     }
-    obj->as.record.fields = fields;
+    obj->as.record.field_count = field_count;
+    if (field_count != 0) {
+        obj->as.record.field_names = calloc(field_count, sizeof(*obj->as.record.field_names));
+        obj->as.record.field_values = calloc(field_count, sizeof(*obj->as.record.field_values));
+        if (!obj->as.record.field_names || !obj->as.record.field_values) {
+            idm_error_oom(err, idm_span_unknown(NULL));
+            return idm_nil();
+        }
+        for (size_t i = 0; i < field_count; i++) {
+            if (!field_names[i] || !*field_names[i]) {
+                idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
+                return idm_nil();
+            }
+            obj->as.record.field_names[i] = idm_strdup(field_names[i]);
+            if (!obj->as.record.field_names[i]) {
+                idm_error_oom(err, idm_span_unknown(NULL));
+                return idm_nil();
+            }
+            obj->as.record.field_values[i] = field_values[i];
+        }
+        heap_account(idm_active_heap(rt), obj, field_count * (sizeof(*obj->as.record.field_names) + sizeof(*obj->as.record.field_values)));
+        for (size_t i = 0; i < field_count; i++) heap_account(idm_active_heap(rt), obj, strlen(obj->as.record.field_names[i]) + 1u);
+    }
     heap_account(idm_active_heap(rt), obj, strlen(obj->as.record.type) + 1u);
     IdmValue v;
     v.tag = IDM_VAL_RECORD;
@@ -1282,371 +1288,17 @@ bool idm_value_type_from_name(const char *name, IdmValueTag *out) {
     return false;
 }
 
-static bool trait_method_key_eq(const char *a_trait, const char *a_method, const char *b_trait, const char *b_method) {
-    return strcmp(a_trait, b_trait) == 0 && strcmp(a_method, b_method) == 0;
-}
-
-static IdmTraitWorld *trait_world(IdmRuntime *rt) {
-    return &rt->trait_worlds[rt->trait_phase ? 1 : 0];
-}
-
-static IdmRuntimeTraitContract *runtime_trait_find_contract(IdmRuntime *rt, const char *trait) {
-    IdmTraitWorld *w = trait_world(rt);
-    for (size_t i = 0; i < w->contract_count; i++) {
-        if (strcmp(w->contracts[i].name, trait) == 0) return &w->contracts[i];
+bool idm_value_matches_type_name(IdmValue value, const char *type) {
+    if (!type) return false;
+    if (strcmp(type, "record") == 0) return value.tag == IDM_VAL_RECORD;
+    if (value.tag == IDM_VAL_RECORD) return idm_record_is_a(value, type);
+    if (strcmp(type, "list") == 0) {
+        IdmValue cur = value;
+        while (idm_is_pair(cur)) cur = idm_cdr(cur, NULL);
+        return idm_is_empty_list(cur);
     }
-    return NULL;
-}
-
-static IdmRuntimeTraitMethod *runtime_trait_find_method(IdmRuntime *rt, const char *trait, const char *method) {
-    IdmTraitWorld *w = trait_world(rt);
-    for (size_t i = 0; i < w->method_count; i++) {
-        if (trait_method_key_eq(w->methods[i].trait, w->methods[i].method, trait, method)) return &w->methods[i];
-    }
-    return NULL;
-}
-
-static IdmRuntimeTraitImpl *runtime_trait_find_impl(IdmRuntime *rt, const char *trait, const char *method, const char *type) {
-    IdmTraitWorld *w = trait_world(rt);
-    for (size_t i = 0; i < w->impl_count; i++) {
-        if (strcmp(w->impls[i].type, type) == 0 && trait_method_key_eq(w->impls[i].trait, w->impls[i].method, trait, method)) return &w->impls[i];
-    }
-    return NULL;
-}
-
-static IdmRuntimeTraitConformance *runtime_trait_find_conformance(IdmRuntime *rt, const char *trait, const char *type) {
-    IdmTraitWorld *w = trait_world(rt);
-    for (size_t i = 0; i < w->conformance_count; i++) {
-        if (strcmp(w->conformances[i].type, type) == 0 && strcmp(w->conformances[i].trait, trait) == 0) return &w->conformances[i];
-    }
-    return NULL;
-}
-
-static bool trait_contracts_reserve(IdmTraitWorld *w, size_t needed, IdmError *err) {
-    if (needed <= w->contract_cap) return true;
-    size_t cap = w->contract_cap ? w->contract_cap * 2u : 8u;
-    while (cap < needed) cap *= 2u;
-    IdmRuntimeTraitContract *next = realloc(w->contracts, cap * sizeof(*next));
-    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-    w->contracts = next;
-    w->contract_cap = cap;
-    return true;
-}
-
-static bool trait_methods_reserve(IdmTraitWorld *w, size_t needed, IdmError *err) {
-    if (needed <= w->method_cap) return true;
-    size_t cap = w->method_cap ? w->method_cap * 2u : 8u;
-    while (cap < needed) cap *= 2u;
-    IdmRuntimeTraitMethod *next = realloc(w->methods, cap * sizeof(*next));
-    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-    w->methods = next;
-    w->method_cap = cap;
-    return true;
-}
-
-static bool trait_impls_reserve(IdmTraitWorld *w, size_t needed, IdmError *err) {
-    if (needed <= w->impl_cap) return true;
-    size_t cap = w->impl_cap ? w->impl_cap * 2u : 8u;
-    while (cap < needed) cap *= 2u;
-    IdmRuntimeTraitImpl *next = realloc(w->impls, cap * sizeof(*next));
-    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-    w->impls = next;
-    w->impl_cap = cap;
-    return true;
-}
-
-static bool trait_conformances_reserve(IdmTraitWorld *w, size_t needed, IdmError *err) {
-    if (needed <= w->conformance_cap) return true;
-    size_t cap = w->conformance_cap ? w->conformance_cap * 2u : 8u;
-    while (cap < needed) cap *= 2u;
-    IdmRuntimeTraitConformance *next = realloc(w->conformances, cap * sizeof(*next));
-    if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-    w->conformances = next;
-    w->conformance_cap = cap;
-    return true;
-}
-
-static size_t runtime_trait_method_count_for(IdmRuntime *rt, const char *trait) {
-    IdmTraitWorld *w = trait_world(rt);
-    size_t count = 0;
-    for (size_t i = 0; i < w->method_count; i++) if (strcmp(w->methods[i].trait, trait) == 0) count++;
-    return count;
-}
-
-static bool requirement_specs_match_contract(const IdmRuntimeTraitContract *contract, const IdmTraitRequirementSpec *requirements, size_t requirement_count) {
-    if (contract->requirement_count != requirement_count) return false;
-    for (size_t i = 0; i < requirement_count; i++) {
-        bool found = false;
-        for (size_t j = 0; j < contract->requirement_count; j++) {
-            if (strcmp(contract->requirements[j], requirements[i].name) == 0) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return false;
-    }
-    return true;
-}
-
-static bool runtime_trait_contract_compatible(IdmRuntime *rt, const char *trait, const IdmTraitRequirementSpec *requirements, size_t requirement_count, const IdmTraitMethodSpec *methods, size_t method_count) {
-    IdmRuntimeTraitContract *contract = runtime_trait_find_contract(rt, trait);
-    if (!contract || !requirement_specs_match_contract(contract, requirements, requirement_count)) return false;
-    if (runtime_trait_method_count_for(rt, trait) != method_count) return false;
-    for (size_t i = 0; i < method_count; i++) {
-        IdmRuntimeTraitMethod *existing = runtime_trait_find_method(rt, trait, methods[i].name);
-        if (!existing || !idm_arity_equal(&existing->arity, &methods[i].arity)) return false;
-    }
-    return true;
-}
-
-static bool trait_arity_mismatch(IdmError *err, const char *trait, const char *method, const IdmArity *expected, const IdmArity *got) {
-    IdmBuffer expected_buf;
-    IdmBuffer got_buf;
-    idm_buf_init(&expected_buf);
-    idm_buf_init(&got_buf);
-    bool described = idm_arity_describe(&expected_buf, expected) && idm_arity_describe(&got_buf, got);
-    bool ok = idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %s got %s", trait, method, described ? expected_buf.data : "?", described ? got_buf.data : "?");
-    idm_buf_destroy(&expected_buf);
-    idm_buf_destroy(&got_buf);
-    return ok;
-}
-
-static bool trait_call_arity_mismatch(IdmError *err, const char *trait, const char *method, const IdmArity *expected, uint32_t got) {
-    IdmBuffer expected_buf;
-    idm_buf_init(&expected_buf);
-    bool described = idm_arity_describe(&expected_buf, expected);
-    bool ok = idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' arity mismatch: expected %s got %u", trait, method, described ? expected_buf.data : "?", got);
-    idm_buf_destroy(&expected_buf);
-    return ok;
-}
-
-static bool runtime_trait_requires(IdmRuntime *rt, const char *trait, const char *required) {
-    IdmRuntimeTraitContract *contract = runtime_trait_find_contract(rt, trait);
-    if (!contract) return false;
-    for (size_t i = 0; i < contract->requirement_count; i++) {
-        if (strcmp(contract->requirements[i], required) == 0) return true;
-        if (runtime_trait_requires(rt, contract->requirements[i], required)) return true;
-    }
-    return false;
-}
-
-static void staged_trait_contract_destroy(IdmRuntimeTraitContract *contract) {
-    runtime_trait_contract_destroy(contract);
-}
-
-static void staged_trait_methods_destroy(IdmRuntimeTraitMethod *methods, size_t count) {
-    for (size_t i = 0; i < count; i++) runtime_trait_method_destroy(&methods[i]);
-    free(methods);
-}
-
-bool idm_trait_define(IdmRuntime *rt, const char *trait, const IdmTraitRequirementSpec *requirements, size_t requirement_count, const IdmTraitMethodSpec *methods, size_t method_count, IdmError *err) {
-    if (!trait || !*trait) return idm_error_set(err, idm_span_unknown(NULL), "trait definition requires a name");
-    for (size_t i = 0; i < requirement_count; i++) {
-        if (!requirements[i].name || !*requirements[i].name) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' has an unnamed requirement", trait);
-        if (strcmp(requirements[i].name, trait) == 0) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' cannot require itself", trait);
-        if (!runtime_trait_find_contract(rt, requirements[i].name)) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' requires undefined trait '%s'", trait, requirements[i].name);
-        if (runtime_trait_requires(rt, requirements[i].name, trait)) return idm_error_set(err, idm_span_unknown(NULL), "trait requirement cycle involving '%s' and '%s'", trait, requirements[i].name);
-        for (size_t j = i + 1u; j < requirement_count; j++) {
-            if (strcmp(requirements[i].name, requirements[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' requires trait '%s' more than once", trait, requirements[i].name);
-        }
-    }
-    for (size_t i = 0; i < method_count; i++) {
-        if (!methods[i].name || !*methods[i].name) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' has an unnamed method", trait);
-        if (methods[i].has_default && !idm_is_closure(methods[i].default_impl)) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s.%s' default is not a function", trait, methods[i].name);
-        for (size_t j = i + 1u; j < method_count; j++) {
-            if (strcmp(methods[i].name, methods[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' declares method '%s' more than once", trait, methods[i].name);
-        }
-    }
-
-    if (runtime_trait_find_contract(rt, trait)) {
-        if (!runtime_trait_contract_compatible(rt, trait, requirements, requirement_count, methods, method_count)) {
-            idm_error_set(err, idm_span_unknown(NULL), "trait '%s' is already defined with an incompatible contract", trait);
-            return idm_error_reason(rt, err, "trait-redefinition", 1, idm_atom(rt, trait));
-        }
-        IdmTraitWorld *w = trait_world(rt);
-        for (size_t i = 0; i < method_count; i++) {
-            IdmRuntimeTraitMethod *existing = runtime_trait_find_method(rt, trait, methods[i].name);
-            existing->has_default = methods[i].has_default;
-            existing->default_impl = methods[i].has_default ? idm_value_copy(rt, &rt->immortal, methods[i].default_impl, err) : idm_nil();
-            if (err->present) return false;
-        }
-        w->version++;
-        return true;
-    }
-
-    IdmRuntimeTraitContract staged_contract;
-    memset(&staged_contract, 0, sizeof(staged_contract));
-    staged_contract.name = idm_strdup(trait);
-    staged_contract.requirement_count = requirement_count;
-    if (!staged_contract.name) {
-        staged_trait_contract_destroy(&staged_contract);
-        return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    if (requirement_count != 0) {
-        staged_contract.requirements = calloc(requirement_count, sizeof(*staged_contract.requirements));
-        if (!staged_contract.requirements) {
-            staged_trait_contract_destroy(&staged_contract);
-            return idm_error_oom(err, idm_span_unknown(NULL));
-        }
-        for (size_t i = 0; i < requirement_count; i++) {
-            staged_contract.requirements[i] = idm_strdup(requirements[i].name);
-            if (!staged_contract.requirements[i]) {
-                staged_trait_contract_destroy(&staged_contract);
-                return idm_error_oom(err, idm_span_unknown(NULL));
-            }
-        }
-    }
-
-    IdmRuntimeTraitMethod *staged = method_count == 0 ? NULL : calloc(method_count, sizeof(*staged));
-    if (method_count != 0 && !staged) {
-        staged_trait_contract_destroy(&staged_contract);
-        return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    for (size_t i = 0; i < method_count; i++) {
-        staged[i].trait = idm_strdup(trait);
-        staged[i].method = idm_strdup(methods[i].name);
-        if (!staged[i].trait || !staged[i].method) {
-            staged_trait_contract_destroy(&staged_contract);
-            staged_trait_methods_destroy(staged, method_count);
-            return idm_error_oom(err, idm_span_unknown(NULL));
-        }
-        staged[i].arity = methods[i].arity;
-        staged[i].has_default = methods[i].has_default;
-        staged[i].default_impl = methods[i].has_default ? idm_value_copy(rt, &rt->immortal, methods[i].default_impl, err) : idm_nil();
-        if (err->present) {
-            staged_trait_contract_destroy(&staged_contract);
-            staged_trait_methods_destroy(staged, method_count);
-            return false;
-        }
-    }
-
-    IdmTraitWorld *w = trait_world(rt);
-    if (!trait_contracts_reserve(w, w->contract_count + 1u, err)) {
-        staged_trait_contract_destroy(&staged_contract);
-        staged_trait_methods_destroy(staged, method_count);
-        return false;
-    }
-    if (!trait_methods_reserve(w, w->method_count + method_count, err)) {
-        staged_trait_contract_destroy(&staged_contract);
-        staged_trait_methods_destroy(staged, method_count);
-        return false;
-    }
-    w->contracts[w->contract_count++] = staged_contract;
-    for (size_t i = 0; i < method_count; i++) w->methods[w->method_count++] = staged[i];
-    free(staged);
-    w->version++;
-    return true;
-}
-
-static void staged_trait_impls_destroy(IdmRuntimeTraitImpl *impls, size_t count) {
-    for (size_t i = 0; i < count; i++) runtime_trait_impl_destroy(&impls[i]);
-    free(impls);
-}
-
-static void runtime_trait_remove_impls(IdmTraitWorld *w, const char *trait, const char *type) {
-    size_t kept = 0;
-    for (size_t i = 0; i < w->impl_count; i++) {
-        if (strcmp(w->impls[i].type, type) == 0 && strcmp(w->impls[i].trait, trait) == 0) runtime_trait_impl_destroy(&w->impls[i]);
-        else w->impls[kept++] = w->impls[i];
-    }
-    w->impl_count = kept;
-}
-
-bool idm_trait_implement(IdmRuntime *rt, const char *trait, const char *type, const char *provider, const char *provider_key, const IdmTraitImplSpec *impls, size_t impl_count, IdmError *err) {
-    if (!trait || !*trait) return idm_error_set(err, idm_span_unknown(NULL), "implement requires a trait name");
-    if (!type || !*type) return idm_error_set(err, idm_span_unknown(NULL), "implement requires a type name");
-    if (!provider || !provider_key) return idm_error_set(err, idm_span_unknown(NULL), "implement requires a provider identity");
-    IdmRuntimeTraitContract *contract = runtime_trait_find_contract(rt, trait);
-    if (!contract) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' is not defined at runtime", trait);
-    for (size_t i = 0; i < contract->requirement_count; i++) {
-        if (!runtime_trait_find_conformance(rt, contract->requirements[i], type)) {
-            return idm_error_set(err, idm_span_unknown(NULL), "type '%s' cannot implement trait '%s' before it implements required trait '%s'", type, trait, contract->requirements[i]);
-        }
-    }
-    IdmRuntimeTraitConformance *existing = runtime_trait_find_conformance(rt, trait, type);
-    if (existing && strcmp(existing->provider_key, provider_key) != 0) {
-        idm_error_set(err, idm_span_unknown(NULL), "type '%s' already implements trait '%s' via '%s'; the implement in '%s' conflicts", type, trait, existing->provider, provider);
-        return idm_error_reason(rt, err, "trait-implement-conflict", 4, idm_atom(rt, trait), idm_atom(rt, type), idm_atom(rt, existing->provider), idm_atom(rt, provider));
-    }
-    for (size_t i = 0; i < impl_count; i++) {
-        if (!impls[i].name || !*impls[i].name) return idm_error_set(err, idm_span_unknown(NULL), "implement for trait '%s' has an unnamed method", trait);
-        IdmRuntimeTraitMethod *method = runtime_trait_find_method(rt, trait, impls[i].name);
-        if (!method) return idm_error_set(err, idm_span_unknown(NULL), "trait '%s' has no method '%s'", trait, impls[i].name);
-        if (!idm_arity_equal(&method->arity, &impls[i].arity)) return trait_arity_mismatch(err, trait, impls[i].name, &method->arity, &impls[i].arity);
-        if (!idm_is_closure(impls[i].impl)) return idm_error_set(err, idm_span_unknown(NULL), "method '%s.%s' implementation is not a function", trait, impls[i].name);
-        for (size_t j = i + 1u; j < impl_count; j++) {
-            if (strcmp(impls[i].name, impls[j].name) == 0) return idm_error_set(err, idm_span_unknown(NULL), "implement for '%s' provides method '%s' more than once", trait, impls[i].name);
-        }
-    }
-
-    IdmRuntimeTraitImpl *staged = impl_count == 0 ? NULL : calloc(impl_count, sizeof(*staged));
-    if (impl_count != 0 && !staged) return idm_error_oom(err, idm_span_unknown(NULL));
-    for (size_t i = 0; i < impl_count; i++) {
-        staged[i].trait = idm_strdup(trait);
-        staged[i].method = idm_strdup(impls[i].name);
-        staged[i].type = idm_strdup(type);
-        if (!staged[i].trait || !staged[i].method || !staged[i].type) {
-            staged_trait_impls_destroy(staged, impl_count);
-            return idm_error_oom(err, idm_span_unknown(NULL));
-        }
-        staged[i].impl = idm_value_copy(rt, &rt->immortal, impls[i].impl, err);
-        if (err->present) {
-            staged_trait_impls_destroy(staged, impl_count);
-            return false;
-        }
-    }
-    IdmTraitWorld *w = trait_world(rt);
-    if (!trait_impls_reserve(w, w->impl_count + impl_count, err)) {
-        staged_trait_impls_destroy(staged, impl_count);
-        return false;
-    }
-    if (!existing && !trait_conformances_reserve(w, w->conformance_count + 1u, err)) {
-        staged_trait_impls_destroy(staged, impl_count);
-        return false;
-    }
-    if (!existing) {
-        IdmRuntimeTraitConformance conf;
-        memset(&conf, 0, sizeof(conf));
-        conf.trait = idm_strdup(trait);
-        conf.type = idm_strdup(type);
-        conf.provider = idm_strdup(provider);
-        conf.provider_key = idm_strdup(provider_key);
-        if (!conf.trait || !conf.type || !conf.provider || !conf.provider_key) {
-            runtime_trait_conformance_destroy(&conf);
-            staged_trait_impls_destroy(staged, impl_count);
-            return idm_error_oom(err, idm_span_unknown(NULL));
-        }
-        w->conformances[w->conformance_count++] = conf;
-    } else {
-        runtime_trait_remove_impls(w, trait, type);
-    }
-    for (size_t i = 0; i < impl_count; i++) w->impls[w->impl_count++] = staged[i];
-    free(staged);
-    w->version++;
-    return true;
-}
-
-bool idm_trait_implements(IdmRuntime *rt, const char *trait, const char *type) {
-    return trait && type && runtime_trait_find_conformance(rt, trait, type) != NULL;
-}
-
-bool idm_trait_lookup(IdmRuntime *rt, const char *trait, const char *method, const char *type, uint32_t argc, IdmValue *out_impl, IdmError *err) {
-    IdmRuntimeTraitMethod *contract = runtime_trait_find_method(rt, trait, method);
-    if (!contract) return idm_error_set(err, idm_span_unknown(NULL), "trait method '%s.%s' is not defined", trait, method);
-    if (!idm_arity_accepts(&contract->arity, argc)) return trait_call_arity_mismatch(err, trait, method, &contract->arity, argc);
-    IdmRuntimeTraitImpl *impl = runtime_trait_find_impl(rt, trait, method, type);
-    if (impl) {
-        *out_impl = impl->impl;
-        return true;
-    }
-    if (!runtime_trait_find_conformance(rt, trait, type)) {
-        return idm_error_set(err, idm_span_unknown(NULL), "type '%s' does not implement trait '%s'", type, trait);
-    }
-    if (contract->has_default) {
-        *out_impl = contract->default_impl;
-        return true;
-    }
-    return idm_error_set(err, idm_span_unknown(NULL), "no implementation for method '%s.%s' on type '%s'", trait, method, type);
+    IdmValueTag tag = IDM_VAL_NIL;
+    return idm_value_type_from_name(type, &tag) && value.tag == tag;
 }
 
 bool idm_is_nil(IdmValue value) {
@@ -1791,26 +1443,72 @@ const char *idm_record_type(IdmValue value, IdmError *err) {
     return value.as.obj->as.record.type;
 }
 
-IdmValue idm_record_fields(IdmValue value, IdmError *err) {
+size_t idm_record_field_count(IdmValue value, IdmError *err) {
+    if (value.tag != IDM_VAL_RECORD) {
+        idm_error_set(err, idm_span_unknown(NULL), "expected record");
+        return 0;
+    }
+    return value.as.obj->as.record.field_count;
+}
+
+const char *idm_record_field_name(IdmValue value, size_t index, IdmError *err) {
+    if (value.tag != IDM_VAL_RECORD) {
+        idm_error_set(err, idm_span_unknown(NULL), "expected record");
+        return NULL;
+    }
+    if (index >= value.as.obj->as.record.field_count) {
+        idm_error_set(err, idm_span_unknown(NULL), "record field index out of bounds");
+        return NULL;
+    }
+    return value.as.obj->as.record.field_names[index];
+}
+
+IdmValue idm_record_field_value(IdmValue value, size_t index, IdmError *err) {
     if (value.tag != IDM_VAL_RECORD) {
         idm_error_set(err, idm_span_unknown(NULL), "expected record");
         return idm_nil();
     }
-    return value.as.obj->as.record.fields;
+    if (index >= value.as.obj->as.record.field_count) {
+        idm_error_set(err, idm_span_unknown(NULL), "record field index out of bounds");
+        return idm_nil();
+    }
+    return value.as.obj->as.record.field_values[index];
 }
 
-static const char *record_field_name(IdmValue field) {
-    if (field.tag == IDM_VAL_ATOM || field.tag == IDM_VAL_WORD) return idm_symbol_text(field.as.symbol);
-    if (field.tag == IDM_VAL_STRING) return idm_string_bytes(field);
-    return NULL;
+bool idm_record_field_named(IdmValue value, const char *field, IdmValue *out, IdmError *err) {
+    if (value.tag != IDM_VAL_RECORD) return idm_error_set(err, idm_span_unknown(NULL), "record field access expects a record");
+    if (!field || !*field) return idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
+    for (size_t i = 0; i < value.as.obj->as.record.field_count; i++) {
+        if (strcmp(value.as.obj->as.record.field_names[i], field) == 0) {
+            if (out) *out = value.as.obj->as.record.field_values[i];
+            return true;
+        }
+    }
+    return idm_error_set(err, idm_span_unknown(NULL), "record '%s' has no field '%s'", value.as.obj->as.record.type, field);
 }
 
-bool idm_record_field(IdmValue value, IdmValue field, IdmValue *out, IdmError *err) {
-    if (value.tag != IDM_VAL_RECORD) return idm_error_set(err, idm_span_unknown(NULL), "record-field expects a record");
-    const char *name = record_field_name(field);
-    if (!name) return idm_error_set(err, idm_span_unknown(NULL), "record field name must be an atom, word, or string");
-    if (idm_dict_get(value.as.obj->as.record.fields, field, out)) return true;
-    return idm_error_set(err, idm_span_unknown(NULL), "record '%s' has no field '%s'", value.as.obj->as.record.type, name);
+bool idm_record_field_project(IdmValue value, const char *type, const char *field, uint32_t field_index, IdmValue *out, IdmError *err) {
+    if (value.tag != IDM_VAL_RECORD) return idm_error_set(err, idm_span_unknown(NULL), "record field access expects a record");
+    if (!type || !*type) return idm_error_set(err, idm_span_unknown(NULL), "record field type must be a non-empty name");
+    if (!field || !*field) return idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
+    if (strcmp(value.as.obj->as.record.type, type) != 0) {
+        return idm_error_set(err, idm_span_unknown(NULL), "field '%s' expects record type '%s', got '%s'", field, type, value.as.obj->as.record.type);
+    }
+    if ((size_t)field_index >= value.as.obj->as.record.field_count) {
+        return idm_error_set(err, idm_span_unknown(NULL), "record '%s' has no field slot %u for '%s'", type, field_index, field);
+    }
+    const char *actual = value.as.obj->as.record.field_names[field_index];
+    if (strcmp(actual, field) != 0) {
+        return idm_error_set(err, idm_span_unknown(NULL), "record '%s' field slot %u is '%s', not '%s'", type, field_index, actual, field);
+    }
+    if (out) *out = value.as.obj->as.record.field_values[field_index];
+    return true;
+}
+
+bool idm_record_is_a(IdmValue value, const char *type) {
+    if (!type) return false;
+    if (strcmp(type, "record") == 0) return value.tag == IDM_VAL_RECORD;
+    return value.tag == IDM_VAL_RECORD && strcmp(value.as.obj->as.record.type, type) == 0;
 }
 
 IdmRegex *idm_regex_value_get(IdmValue value, IdmError *err) {
@@ -1999,8 +1697,13 @@ bool idm_value_equal(IdmValue a, IdmValue b) {
         case IDM_VAL_CLOSURE:
             return a.as.obj == b.as.obj;
         case IDM_VAL_RECORD:
-            return strcmp(a.as.obj->as.record.type, b.as.obj->as.record.type) == 0 &&
-                   idm_value_equal(a.as.obj->as.record.fields, b.as.obj->as.record.fields);
+            if (strcmp(a.as.obj->as.record.type, b.as.obj->as.record.type) != 0) return false;
+            if (a.as.obj->as.record.field_count != b.as.obj->as.record.field_count) return false;
+            for (size_t i = 0; i < a.as.obj->as.record.field_count; i++) {
+                if (strcmp(a.as.obj->as.record.field_names[i], b.as.obj->as.record.field_names[i]) != 0) return false;
+                if (!idm_value_equal(a.as.obj->as.record.field_values[i], b.as.obj->as.record.field_values[i])) return false;
+            }
+            return true;
         case IDM_VAL_REGEX:
             return a.as.obj == b.as.obj;
         case IDM_VAL_REGEX_RESULT:
@@ -2264,7 +1967,20 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
             dst->as.record.type = idm_strdup(src->as.record.type);
             if (!dst->as.record.type) return idm_error_oom(err, idm_span_unknown(NULL));
             heap_account_unlocked(target, dst, strlen(dst->as.record.type) + 1u);
-            return copy_intern(rt, target, src->as.record.fields, &dst->as.record.fields, map, stack, err);
+            dst->as.record.field_count = src->as.record.field_count;
+            if (src->as.record.field_count != 0) {
+                dst->as.record.field_names = calloc(src->as.record.field_count, sizeof(*dst->as.record.field_names));
+                dst->as.record.field_values = calloc(src->as.record.field_count, sizeof(*dst->as.record.field_values));
+                if (!dst->as.record.field_names || !dst->as.record.field_values) return idm_error_oom(err, idm_span_unknown(NULL));
+                heap_account_unlocked(target, dst, src->as.record.field_count * (sizeof(*dst->as.record.field_names) + sizeof(*dst->as.record.field_values)));
+                for (size_t i = 0; i < src->as.record.field_count; i++) {
+                    dst->as.record.field_names[i] = idm_strdup(src->as.record.field_names[i]);
+                    if (!dst->as.record.field_names[i]) return idm_error_oom(err, idm_span_unknown(NULL));
+                    heap_account_unlocked(target, dst, strlen(dst->as.record.field_names[i]) + 1u);
+                    if (!copy_intern(rt, target, src->as.record.field_values[i], &dst->as.record.field_values[i], map, stack, err)) return false;
+                }
+            }
+            return true;
         case IDM_OBJ_SYNTAX:
             dst->as.syntax = idm_syn_clone(src->as.syntax);
             if (!dst->as.syntax && src->as.syntax) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -2302,9 +2018,9 @@ IdmValue idm_value_copy_locked(IdmRuntime *rt, IdmHeap *target, IdmValue value, 
 }
 
 IdmValue idm_value_copy(IdmRuntime *rt, IdmHeap *target, IdmValue value, IdmError *err) {
-    pthread_mutex_lock(&target->lock);
+    heap_lock(target);
     IdmValue out = idm_value_copy_locked(rt, target, value, err);
-    pthread_mutex_unlock(&target->lock);
+    heap_unlock(target);
     return out;
 }
 

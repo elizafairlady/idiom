@@ -29,6 +29,12 @@ typedef struct {
     size_t cap;
 } IdmBuffer;
 
+typedef struct {
+    const char *name;
+    uint64_t start_ns;
+    bool active;
+} IdmProfileScope;
+
 IdmSpan idm_span_unknown(const char *file);
 
 void idm_error_init(IdmError *err);
@@ -76,5 +82,12 @@ char *idm_strdup(const char *s);
 char *idm_strndup(const char *s, size_t n);
 bool idm_read_file(const char *path, char **out, size_t *out_len, IdmError *err);
 bool idm_read_stream(FILE *stream, const char *name, char **out, size_t *out_len, IdmError *err);
+
+bool idm_profile_enabled(void);
+uint64_t idm_profile_now_ns(void);
+void idm_profile_scope_begin(IdmProfileScope *scope, const char *name);
+void idm_profile_scope_end(IdmProfileScope *scope);
+void idm_profile_count(const char *name, uint64_t amount);
+void idm_profile_report(FILE *out);
 
 #endif

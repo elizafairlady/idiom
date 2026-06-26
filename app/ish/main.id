@@ -27,6 +27,8 @@ export trait Prompt do
   method continuation-prompt _state -> "...> "
 end
 
+implement Prompt on dict
+
 defn prompt-state status jobs -> %{:cwd (pwd) :status status :jobs jobs :cols term-cols}
 
 defn fenced-prompt do

@@ -73,11 +73,18 @@ typedef struct SavedFunctionContext_s {
 } SavedFunctionContext;
 typedef struct {
     char *trait;
+    char *trait_key;
     char *name;
     char *provider;
     char *provider_key;
     IdmArity arity;
     bool is_field;
+    uint32_t field_index;
+    bool has_dispatch;
+    bool dispatch_env;
+    uint32_t dispatch_frame;
+    uint32_t dispatch_slot;
+    char *dispatch_env_key;
     IdmScopeSet scopes;
 } MethodSurfaceDef;
 typedef struct {
@@ -96,13 +103,24 @@ typedef struct {
     size_t requirement_count;
     IdmTraitMethodDef *methods;
     size_t method_count;
+    bool dispatch_env;
+    char *dispatch_env_key;
 } TraitDef;
+typedef struct {
+    char *trait;
+    char *type;
+    char *method;
+    IdmArity arity;
+    bool impl_env;
+    char *impl_env_key;
+    uint32_t impl_slot;
+} MethodImplDef;
 typedef struct {
     char *name;
     char *identity;
     bool exported;
     IdmScopeSet scopes;
-    char **fields;
+    IdmPkgTypeField *fields;
     size_t field_count;
 } TypeDef;
 typedef struct {
@@ -133,6 +151,7 @@ typedef struct {
 } SavedHooks;
 typedef struct {
     const void *art;
+    unsigned char hash[32];
     IdmScopeId base;
     size_t init_emit_mark[2];
     size_t runtime_init_mark[2];
@@ -150,6 +169,7 @@ typedef struct {
     size_t type_count;
     size_t method_surface_count;
     size_t decl_method_count;
+    size_t method_impl_count;
     size_t decl_core_syntax_count;
     size_t decl_source_reader_count;
     size_t activation_count;
@@ -208,6 +228,9 @@ typedef struct {
     MethodSurfaceDef *method_surfaces;
     size_t method_surface_count;
     size_t method_surface_cap;
+    MethodImplDef *method_impls;
+    size_t method_impl_count;
+    size_t method_impl_cap;
     IdmTraitMethodDef *decl_methods;
     size_t decl_method_count;
     size_t decl_method_cap;
@@ -241,6 +264,7 @@ typedef struct {
     SavedFunctionContext *enclosing;
     IdmPhaseEnv *phase_env;
     const char *trait_name;
+    const char *trait_key;
     bool kernel_wrap;
     bool kernel_phase_seeded;
     ArtifactRuntimeState *artifact_bases;
@@ -346,8 +370,10 @@ IdmCore *expand_error(IdmError *err, IdmSpan span, const char *fmt, ...);
 IdmCore *expand_activate(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmSyntax *const *items, size_t index, size_t count, IdmSpan span, IdmError *err);
 IdmCore *expand_fn_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmError *err);
+IdmCore *expand_match_form(ExpandContext *ctx, const IdmSyntax *form, IdmError *err);
 bool function_literal_arity(const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmArity *out_arity, IdmError *err);
 IdmCore *expand_implement_trait_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err);
+IdmCore *build_method_dispatch_refresh_core(ExpandContext *ctx, IdmSpan span, IdmError *err);
 IdmCore *expand_macro_use(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmError *err);
 IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t payload, IdmError *err);
 IdmCore *expand_core_syntax_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t core_syntax_index, IdmError *err);
@@ -379,8 +405,8 @@ bool install_artifact_protocols(ExpandContext *ctx, const IdmPkgProtocol *protoc
 bool install_artifact_grammars(ExpandContext *ctx, const IdmPkgGrammar *grammars, size_t grammar_count, const IdmScopeSet *scopes, const char *qualifier, IdmScopeId min_id, int64_t delta, const char *provider, const char *provider_key, IdmError *err);
 bool ctx_reader_artifact_from_active_grammars(ExpandContext *ctx, const char *surface, IdmReaderArtifact **out, IdmError *err);
 bool install_imported_operator(ExpandContext *ctx, const IdmOperatorDef *op, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err);
-bool install_method_surface(ExpandContext *ctx, const char *trait, const char *name, IdmArity arity, bool is_field, const IdmScopeSet *scopes, const char *provider, const char *provider_key, IdmError *err);
-IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const char *field, IdmSpan span, IdmError *err);
+bool install_method_surface(ExpandContext *ctx, const char *trait, const char *trait_key, const char *name, IdmArity arity, bool is_field, uint32_t field_index, const IdmScopeSet *scopes, const char *provider, const char *provider_key, bool has_dispatch, bool dispatch_env, const char *dispatch_env_key, uint32_t dispatch_slot, IdmError *err);
+IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const char *type, const char *field, uint32_t field_index, IdmSpan span, IdmError *err);
 bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err);
 IdmCore *literal_from_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 bool local_expand_callback(void *user, IdmRuntime *rt, const IdmSyntax *syntax, IdmSyntax **out_syntax, IdmError *err);
@@ -396,6 +422,7 @@ void grammar_def_destroy(GrammarDef *grammar);
 void macro_def_destroy(MacroDef *macro);
 void phase_syntax_fn_destroy(PhaseSyntaxFn *fn);
 bool materialize_capture(ExpandContext *ctx, const IdmSyntax *word, const IdmBinding *b, uint32_t *out);
+bool materialize_slot_capture(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, uint32_t frame_id, uint32_t slot, IdmArity arity, uint32_t *out);
 const IdmOperatorDef *op_lookup(const ExpandContext *ctx, const IdmSyntax *syn, bool want_prefix);
 const IdmOperatorDef *op_lookup_syntax_capture(const ExpandContext *ctx, const IdmSyntax *syn, bool want_left, IdmError *err);
 bool operator_capture_compile(const char *capture, uint8_t *out_kind, bool *out_left, uint32_t *out_count);

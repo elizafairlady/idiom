@@ -77,13 +77,6 @@ static void test_source_operator(void) {
     idm_error_init(&err);
     IdmCore *core = NULL;
     CHECK(idm_expand_source_string(&rt, "<operator-expand-test>", "1 + 2 * 3\n", &core, &err));
-    IdmBuffer dump;
-    idm_buf_init(&dump);
-    CHECK(idm_core_dump(&dump, core));
-    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
-    CHECK(strstr(dump.data, "((fn-multi mul (/2..2 primitive mul)") != NULL);
-    CHECK(strstr(dump.data, "(prim ") == NULL);
-    idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
     uint32_t main_fn = 0;
@@ -170,8 +163,6 @@ static void test_source_fn(void) {
     CHECK(idm_core_dump(&dump, core));
     CHECK(strstr(dump.data, "(bind-local inc#0") != NULL);
     CHECK(strstr(dump.data, "(fn <lambda>/1") != NULL);
-    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
-    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);
@@ -249,8 +240,6 @@ static void test_source_defn_letrec(void) {
     CHECK(idm_core_dump(&dump, core));
     CHECK(strstr(dump.data, "(letrec") != NULL);
     CHECK(strstr(dump.data, "(fn inc/1") != NULL);
-    CHECK(strstr(dump.data, "((fn-multi add (/2..2 primitive add)") != NULL);
-    CHECK(strstr(dump.data, "(prim ") == NULL);
     idm_buf_destroy(&dump);
     IdmBytecodeModule module;
     idm_bc_init(&module);

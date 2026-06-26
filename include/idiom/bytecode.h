@@ -26,16 +26,19 @@ typedef enum {
     IDM_OP_LOAD_ENV,
     IDM_OP_STORE_ENV,
     IDM_OP_LOAD_PACKAGE_SLOT,
+    IDM_OP_STORE_PACKAGE_SLOT,
     IDM_OP_PUSH_PACKAGE_ENV,
     IDM_OP_POP_PACKAGE_ENV,
-    IDM_OP_DEFINE_TRAIT,
-    IDM_OP_IMPLEMENT_TRAIT,
-    IDM_OP_CALL_METHOD,
+    IDM_OP_MAKE_RECORD,
+    IDM_OP_RECORD_FIELD,
+    IDM_OP_RECORD_IS,
     IDM_OP_LIST_CONS,
     IDM_OP_LIST_APPEND,
     IDM_OP_MAKE_VALUE_SEQUENCE,
     IDM_OP_MAKE_SYNTAX,
     IDM_OP_STRING_CONCAT,
+    IDM_OP_CALL_PRIMITIVE,
+    IDM_OP_MATCH,
 } IdmOpcode;
 
 typedef struct {
@@ -93,6 +96,7 @@ typedef struct IdmBytecodeModule {
     size_t selector_by_offset_count;
     bool selectors_prepared;
     bool literals_interned;
+    bool verified;
     uint64_t selector_generation;
 } IdmBytecodeModule;
 

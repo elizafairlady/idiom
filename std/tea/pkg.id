@@ -82,40 +82,25 @@ implement Command on closure do
   method run-command cmd -> cmd
 end
 
-defn append-list xs ys -> reverse-list (reverse-list xs '()) ys
-
-defn messages-from-list do
+defn messages-rev-from-list do
   '() acc -> acc
-  '(h . t) acc -> messages-from-list t (append-list acc (command-messages h))
+  '(h . t) acc -> messages-rev-from-list t (reverse-list (command-messages h) acc)
 end
 
 defn command-result-messages do
-  {:tea-batch commands} -> messages-from-list commands '()
-  {:tea-sequence commands} -> messages-from-list commands '()
+  {:tea-batch commands} -> reverse-list (messages-rev-from-list commands '()) '()
+  {:tea-sequence commands} -> reverse-list (messages-rev-from-list commands '()) '()
   msg -> list msg
 end
 
 export defn command-messages do
   cmd when (eq? cmd none) -> '()
-  cmd when (implements? Command cmd) -> command-result-messages (run-command cmd)
-  cmd -> error {:tea :not-command cmd}
+  cmd -> command-result-messages (run-command cmd)
 end
 
-export defn step model msg do
-  if (eq? (implements? Model model) :false) do
-    error {:tea :not-model model}
-  else do
-    update model msg
-  end
-end
+export defn step model msg -> update model msg
 
-export defn start model do
-  if (eq? (implements? Model model) :false) do
-    error {:tea :not-model model}
-  else do
-    Program model :running (command-messages (init model))
-  end
-end
+export defn start model -> Program model :running (command-messages (init model))
 
 defn halted? status -> cond (eq? status :running) :false :true
 
@@ -144,7 +129,7 @@ defn run-pending-list do
   program '() -> program
   program '(msg . rest) -> do
     next = advance program &msg
-    all = append-list next.pending rest
+    all = reverse-list (reverse-list next.pending '()) rest
     run-pending-list (Program next.model next.status '()) all
   end
 end

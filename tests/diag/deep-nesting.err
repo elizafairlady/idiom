@@ -1,1 +1,1 @@
-tests/diag/deep-nesting.id:1:629: error: reader artifact nested too deeply
+tests/diag/deep-nesting.id:1:630: error: reader artifact nested too deeply

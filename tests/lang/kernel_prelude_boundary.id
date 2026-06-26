@@ -33,6 +33,11 @@ suite do
     assert-eq system-result :nil
   end
 
+  test "regex raw primitives are package private" do
+    assert-expand-error "use std/regex\nraw-compile \"x\" '()" "unbound identifier 'raw-compile'"
+    assert-expand-error "use std/regex with [raw-test?]" "does not export selected name"
+  end
+
   test "declared package name does not grant primitive authority" do
     assert-expand-error "package math\nexport defn spoof -> abs (neg 5)" "unbound identifier 'abs'"
     spoof = do

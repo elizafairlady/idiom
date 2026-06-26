@@ -4,9 +4,15 @@
 #include "idiom/prims.h"
 #include "idiom/regex.h"
 
+#include <stddef.h>
+#include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#define IDM_FRAME_INLINE_CAPTURES 4u
+#define IDM_FRAME_INLINE_REGS 16u
 
 typedef struct {
     const IdmBytecodeModule *module;
@@ -15,10 +21,16 @@ typedef struct {
     IdmValue *regs;
     uint32_t reg_count;
     uint32_t reg_cap;
+    bool regs_owned;
     uint32_t return_reg;
     bool has_return;
     IdmValue closure;
     IdmEnv *env;
+    IdmValue *captures;
+    uint32_t capture_count;
+    bool captures_owned;
+    IdmValue inline_regs[IDM_FRAME_INLINE_REGS];
+    IdmValue inline_captures[IDM_FRAME_INLINE_CAPTURES];
 } Frame;
 
 typedef struct {
@@ -77,6 +89,36 @@ struct IdmExec {
 
 typedef struct IdmExec Vm;
 
+#define VM_PROFILE_OPCODE_COUNT ((size_t)IDM_OP_MATCH + 1u)
+
+static atomic_bool vm_profile_registered = false;
+static atomic_uint_fast64_t vm_profile_opcode_counts[VM_PROFILE_OPCODE_COUNT];
+
+static void vm_profile_flush_opcodes(void) {
+    char name[64];
+    for (size_t i = 0; i < VM_PROFILE_OPCODE_COUNT; i++) {
+        uint64_t count = atomic_exchange_explicit(&vm_profile_opcode_counts[i], 0, memory_order_relaxed);
+        if (count == 0) continue;
+        snprintf(name, sizeof(name), "vm.op.%s", idm_opcode_name((IdmOpcode)i));
+        idm_profile_count(name, count);
+    }
+}
+
+static bool vm_profile_active(void) {
+    if (!idm_profile_enabled()) return false;
+    bool expected = false;
+    if (atomic_compare_exchange_strong_explicit(&vm_profile_registered, &expected, true, memory_order_relaxed, memory_order_relaxed)) {
+        atexit(vm_profile_flush_opcodes);
+    }
+    return true;
+}
+
+static void vm_profile_opcode(IdmOpcode op) {
+    size_t index = (size_t)op;
+    if (index >= VM_PROFILE_OPCODE_COUNT) return;
+    atomic_fetch_add_explicit(&vm_profile_opcode_counts[index], 1, memory_order_relaxed);
+}
+
 IdmVmLimits idm_vm_default_limits(void) {
     IdmVmLimits limits;
     limits.max_registers = 1024u * 64u;
@@ -84,8 +126,51 @@ IdmVmLimits idm_vm_default_limits(void) {
     return limits;
 }
 
+static void frame_clear_captures(Frame *frame) {
+    if (frame->captures_owned) free(frame->captures);
+    frame->captures = NULL;
+    frame->capture_count = 0;
+    frame->captures_owned = false;
+}
+
+static void frame_release(Frame *frame) {
+    if (!frame) return;
+    if (frame->regs_owned) free(frame->regs);
+    frame->regs = NULL;
+    frame->regs_owned = false;
+    frame_clear_captures(frame);
+}
+
+static bool frame_set_captures(Frame *frame, const IdmValue *captures, uint32_t capture_count, IdmError *err) {
+    frame_clear_captures(frame);
+    if (capture_count == 0) return true;
+    if (capture_count <= IDM_FRAME_INLINE_CAPTURES) {
+        for (uint32_t i = 0; i < capture_count; i++) frame->inline_captures[i] = captures ? captures[i] : idm_nil();
+        frame->captures = frame->inline_captures;
+        frame->capture_count = capture_count;
+        frame->captures_owned = false;
+        return true;
+    }
+    IdmValue *copy = malloc((size_t)capture_count * sizeof(*copy));
+    if (!copy) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (uint32_t i = 0; i < capture_count; i++) copy[i] = captures ? captures[i] : idm_nil();
+    frame->captures = copy;
+    frame->capture_count = capture_count;
+    frame->captures_owned = true;
+    return true;
+}
+
+static void frame_rebase_inline_storage(Frame *frames, uintptr_t old_base, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        uintptr_t old_regs = old_base + i * sizeof(Frame) + offsetof(Frame, inline_regs);
+        if ((uintptr_t)frames[i].regs == old_regs) frames[i].regs = frames[i].inline_regs;
+        uintptr_t old_inline = old_base + i * sizeof(Frame) + offsetof(Frame, inline_captures);
+        if ((uintptr_t)frames[i].captures == old_inline) frames[i].captures = frames[i].inline_captures;
+    }
+}
+
 static void vm_reset(Vm *vm) {
-    for (size_t i = 0; i < vm->frame_count; i++) free(vm->frames[i].regs);
+    for (size_t i = 0; i < vm->frame_count; i++) frame_release(&vm->frames[i]);
     if (!vm->frames_borrowed) free(vm->frames);
     if (!vm->handlers_borrowed) free(vm->handlers);
     vm->frames = NULL;
@@ -133,9 +218,12 @@ static bool frame_reserve(Vm *vm, size_t needed, IdmError *err) {
     if (needed <= vm->frame_cap) return true;
     size_t cap = vm->frame_cap ? vm->frame_cap * 2u : 32u;
     while (cap < needed) cap *= 2u;
+    uintptr_t old_base = (uintptr_t)vm->frames;
+    bool copied_from_borrowed = vm->frames_borrowed;
     Frame *next = vm->frames_borrowed ? malloc(cap * sizeof(*next)) : realloc(vm->frames, cap * sizeof(*next));
     if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-    if (vm->frames_borrowed && vm->frame_count != 0) memcpy(next, vm->frames, vm->frame_count * sizeof(*next));
+    if (copied_from_borrowed && vm->frame_count != 0) memcpy(next, vm->frames, vm->frame_count * sizeof(*next));
+    if (old_base != 0 && old_base != (uintptr_t)next) frame_rebase_inline_storage(next, old_base, vm->frame_count);
     vm->frames = next;
     vm->frame_cap = cap;
     vm->frames_borrowed = false;
@@ -184,8 +272,20 @@ static bool push_frame(Vm *vm, const IdmBytecodeModule *module, uint32_t functio
     frame->has_return = has_return;
     frame->closure = closure;
     frame->env = env;
-    frame->regs = frame->reg_count == 0 ? NULL : malloc((size_t)frame->reg_count * sizeof(*frame->regs));
-    if (frame->reg_count != 0 && !frame->regs) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (frame->reg_count == 0) {
+        frame->regs = NULL;
+        frame->reg_cap = 0;
+        frame->regs_owned = false;
+    } else if (frame->reg_count <= IDM_FRAME_INLINE_REGS) {
+        frame->regs = frame->inline_regs;
+        frame->reg_cap = IDM_FRAME_INLINE_REGS;
+        frame->regs_owned = false;
+    } else {
+        frame->regs = malloc((size_t)frame->reg_count * sizeof(*frame->regs));
+        if (!frame->regs) return idm_error_oom(err, idm_span_unknown(NULL));
+        frame->reg_cap = frame->reg_count;
+        frame->regs_owned = true;
+    }
     for (uint32_t i = 0; i < frame->reg_count; i++) frame->regs[i] = idm_nil();
     for (uint32_t i = 0; i < argc; i++) frame->regs[i] = args ? args[i] : idm_nil();
     vm->frame_count++;
@@ -197,6 +297,10 @@ static void pop_frame(Vm *vm, Frame *out) {
     vm->frames[vm->frame_count].regs = NULL;
     vm->frames[vm->frame_count].reg_count = 0;
     vm->frames[vm->frame_count].reg_cap = 0;
+    vm->frames[vm->frame_count].regs_owned = false;
+    vm->frames[vm->frame_count].captures = NULL;
+    vm->frames[vm->frame_count].capture_count = 0;
+    vm->frames[vm->frame_count].captures_owned = false;
 }
 
 static bool raise_value(Vm *vm, IdmValue value, IdmError *err) {
@@ -847,26 +951,37 @@ static bool raise_guard_budget(const char *name, IdmError *err) {
     return idm_error_set(err, idm_span_unknown(NULL), "guard of '%s' exceeded its budget of %d reductions", display, IDM_GUARD_BUDGET);
 }
 
-static bool replace_current_frame(Vm *vm, const IdmBytecodeModule *module, uint32_t function_index, IdmValue closure, const IdmValue *args, uint32_t argc, const IdmPatternBindings *bindings, IdmError *err) {
+static bool replace_current_frame(Vm *vm, const IdmBytecodeModule *module, uint32_t function_index, IdmValue closure, IdmEnv *env, const IdmValue *captures, uint32_t capture_count, const IdmValue *args, uint32_t argc, const IdmPatternBindings *bindings, IdmError *err) {
     Frame *frame = current_frame(vm);
     if (!frame) return idm_error_set(err, idm_span_unknown(NULL), "tail clause entry without frame");
     const IdmBcFunction *fn = &module->functions[function_index];
     if (fn->arity != argc) return idm_error_set(err, idm_span_unknown(NULL), "function arity mismatch: expected %u got %u", fn->arity, argc);
     if (fn->register_count > vm->limits.max_registers) return idm_error_set(err, idm_span_unknown(NULL), "VM register limit exceeded");
-    IdmEnv *env = idm_is_closure(closure) ? idm_closure_env(closure) : frame->env;
-    if (!env) {
+    IdmEnv *entry_env = idm_is_closure(closure) ? idm_closure_env(closure) : (env ? env : frame->env);
+    if (!entry_env) {
         return idm_error_set(err, idm_span_unknown(NULL), "tail clause entry requires an explicit runtime environment");
     }
     bool has_return = frame->has_return;
     uint32_t return_reg = frame->return_reg;
+    if (!frame_set_captures(frame, captures, capture_count, err)) return false;
     if (fn->register_count > frame->reg_cap) {
-        IdmValue *regs = fn->register_count == 0 ? NULL : malloc((size_t)fn->register_count * sizeof(*regs));
-        if (fn->register_count != 0 && !regs) return idm_error_oom(err, idm_span_unknown(NULL));
+        IdmValue *regs = NULL;
+        uint32_t reg_cap = fn->register_count;
+        bool regs_owned = false;
+        if (fn->register_count <= IDM_FRAME_INLINE_REGS) {
+            regs = frame->inline_regs;
+            reg_cap = IDM_FRAME_INLINE_REGS;
+        } else {
+            regs = malloc((size_t)fn->register_count * sizeof(*regs));
+            if (!regs) return idm_error_oom(err, idm_span_unknown(NULL));
+            regs_owned = true;
+        }
         for (uint32_t i = 0; i < argc; i++) regs[i] = args ? args[i] : idm_nil();
         for (uint32_t i = argc; i < fn->register_count; i++) regs[i] = idm_nil();
-        free(frame->regs);
+        if (frame->regs_owned) free(frame->regs);
         frame->regs = regs;
-        frame->reg_cap = fn->register_count;
+        frame->reg_cap = reg_cap;
+        frame->regs_owned = regs_owned;
     } else {
         if (argc != 0) {
             if (args) memmove(frame->regs, args, (size_t)argc * sizeof(*frame->regs));
@@ -881,7 +996,7 @@ static bool replace_current_frame(Vm *vm, const IdmBytecodeModule *module, uint3
     frame->return_reg = return_reg;
     frame->has_return = has_return;
     frame->closure = closure;
-    frame->env = env;
+    frame->env = entry_env;
     return init_pattern_locals(vm, frame, fn, bindings, err);
 }
 
@@ -909,7 +1024,128 @@ static bool enter_closure_clause(Vm *vm, IdmValue callee, uint32_t function_inde
         if (!push_frame(vm, callee_module, function_index, callee, args, argc, has_return, dst, err)) return false;
         return init_pattern_locals(vm, current_frame(vm), fn, bindings, err);
     }
-    return replace_current_frame(vm, callee_module, function_index, callee, args, argc, bindings, err);
+    return replace_current_frame(vm, callee_module, function_index, callee, NULL, NULL, 0, args, argc, bindings, err);
+}
+
+static bool enter_direct_clause(Vm *vm, const IdmBytecodeModule *module, uint32_t function_index, uint32_t dst, const IdmValue *args, uint32_t argc, const IdmPatternBindings *bindings, const IdmValue *captures, uint32_t capture_count, IdmEnv *env, bool tail, IdmExecStatus *status, IdmValue *out_reason, IdmError *err) {
+    if (!module) return idm_error_set(err, idm_span_unknown(NULL), "direct clause entry requires a module");
+    if (function_index >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "clause function index %u out of bounds", function_index);
+    const IdmBcFunction *fn = &module->functions[function_index];
+    if (fn->primitive_backed) {
+        if (bindings) return idm_error_set(err, idm_span_unknown(NULL), "primitive-backed clause cannot bind patterns");
+        return execute_primitive_clause(vm, fn->primitive, dst, args, argc, status, out_reason, err);
+    }
+    if (!tail || !can_tail_replace(vm)) {
+        bool has_return = current_frame(vm) != NULL;
+        if (!push_frame(vm, module, function_index, idm_nil(), args, argc, has_return, dst, err)) return false;
+        Frame *frame = current_frame(vm);
+        if (env) frame->env = env;
+        if (!frame->env) return idm_error_set(err, idm_span_unknown(NULL), "direct clause entry requires an explicit runtime environment");
+        if (!frame_set_captures(frame, captures, capture_count, err)) return false;
+        return init_pattern_locals(vm, frame, fn, bindings, err);
+    }
+    return replace_current_frame(vm, module, function_index, idm_nil(), env, captures, capture_count, args, argc, bindings, err);
+}
+
+static bool run_guard_function_direct(Vm *caller, const IdmBytecodeModule *module, IdmEnv *env, const IdmValue *captures, uint32_t capture_count, const IdmBcFunction *candidate, const IdmPatternBindings *bindings, ClauseArgs args, bool *out_pass, bool *out_exhausted, IdmError *err) {
+    *out_pass = true;
+    if (!candidate->has_guard) return true;
+    if (candidate->guard_function >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function guard index %u out of bounds", candidate->guard_function);
+    if (!idm_arity_accepts(&module->functions[candidate->guard_function].call_arity, args.count)) return idm_error_set(err, idm_span_unknown(NULL), "function guard arity mismatch");
+
+    Vm guard_vm;
+    memset(&guard_vm, 0, sizeof(guard_vm));
+    Frame guard_frames[IDM_GUARD_FRAME_SLOTS];
+    Handler guard_handlers[IDM_GUARD_HANDLER_SLOTS];
+    vm_borrow_storage(&guard_vm, guard_frames, IDM_GUARD_FRAME_SLOTS, guard_handlers, IDM_GUARD_HANDLER_SLOTS);
+    guard_vm.rt = caller->rt;
+    guard_vm.module = module;
+    guard_vm.limits = caller->limits;
+    guard_vm.root_env = env ? env : (caller->root_env ? caller->root_env : caller->rt->main_env);
+    if (!enter_direct_clause(&guard_vm, module, candidate->guard_function, 0u, args.values, args.count, bindings, captures, capture_count, guard_vm.root_env, false, NULL, NULL, err)) { vm_reset(&guard_vm); return false; }
+
+    IdmError guard_err;
+    idm_error_init(&guard_err);
+    IdmValue result = idm_nil();
+    IdmExecStatus status = IDM_EXEC_DONE;
+    if (!vm_run_call(&guard_vm, IDM_GUARD_BUDGET, &status, &result, &guard_err)) {
+        idm_error_clear(&guard_err);
+        *out_pass = false;
+        return true;
+    }
+    idm_error_clear(&guard_err);
+    if (status == IDM_EXEC_YIELD) {
+        if (out_exhausted) *out_exhausted = true;
+        *out_pass = false;
+        return true;
+    }
+    if (status != IDM_EXEC_DONE) {
+        *out_pass = false;
+        return true;
+    }
+    *out_pass = idm_value_ok(result);
+    return true;
+}
+
+typedef struct {
+    Vm *vm;
+    const IdmBytecodeModule *module;
+    IdmEnv *env;
+    const IdmValue *captures;
+    uint32_t capture_count;
+    ClauseArgs args;
+    bool exhausted;
+} DirectSelectorGuardCtx;
+
+static bool direct_selector_guard(void *user, uint32_t function_index, const IdmPatternBindings *bindings, bool *out_pass, IdmError *err) {
+    DirectSelectorGuardCtx *ctx = user;
+    if (function_index >= ctx->module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "selector chose invalid function %u", function_index);
+    const IdmBcFunction *candidate = &ctx->module->functions[function_index];
+    return run_guard_function_direct(ctx->vm, ctx->module, ctx->env, ctx->captures, ctx->capture_count, candidate, bindings, ctx->args, out_pass, &ctx->exhausted, err);
+}
+
+static bool execute_match_op(Vm *vm, Frame *frame, const IdmBytecodeModule *module, size_t instr_ip, IdmExecStatus *status, IdmValue *out_reason, IdmError *err) {
+    uint32_t dst = module->code[frame->ip++];
+    uint32_t first_arg = module->code[frame->ip++];
+    uint32_t argc = module->code[frame->ip++];
+    uint32_t entry_count = module->code[frame->ip++];
+    uint32_t capture_count = module->code[frame->ip++];
+    uint32_t first_capture = module->code[frame->ip++];
+    bool tail = module->code[frame->ip++] != 0;
+    if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "MATCH requires entries");
+    frame->ip += entry_count;
+    const IdmValue *args = NULL;
+    const IdmValue *captures = NULL;
+    if (!frame_reg_slice(frame, first_arg, argc, &args, err)) return false;
+    if (!frame_reg_slice(frame, first_capture, capture_count, &captures, err)) return false;
+    IdmPatternSelector *selector = idm_bc_selector_at(module, instr_ip);
+    if (!selector) return idm_error_set(err, idm_span_unknown(NULL), "MATCH selector missing");
+    ClauseSelection selected;
+    clause_selection_init(&selected);
+    ClauseArgs clause_args = clause_args_from(args, argc);
+    DirectSelectorGuardCtx guard_ctx;
+    guard_ctx.vm = vm;
+    guard_ctx.module = module;
+    guard_ctx.env = frame->env;
+    guard_ctx.captures = captures;
+    guard_ctx.capture_count = capture_count;
+    guard_ctx.args = clause_args;
+    guard_ctx.exhausted = false;
+    bool sel_ok = idm_pattern_selector_select(vm->rt, selector, args, argc, direct_selector_guard, &guard_ctx, &selected.function_index, &selected.bindings, &selected.has_bindings, &selected.matched, err);
+    selected.guard_budget_exhausted = guard_ctx.exhausted;
+    if (!sel_ok) {
+        clause_selection_destroy(&selected);
+        return false;
+    }
+    if (!selected.matched) {
+        bool budget_exhausted = selected.guard_budget_exhausted;
+        clause_selection_destroy(&selected);
+        if (budget_exhausted) return raise_guard_budget("match", err);
+        return raise_no_clause(vm, "match", clause_args, err);
+    }
+    bool entered = enter_direct_clause(vm, module, selected.function_index, dst, args, argc, selected.has_bindings ? &selected.bindings : NULL, captures, capture_count, frame->env, tail, status, out_reason, err);
+    clause_selection_destroy(&selected);
+    return entered;
 }
 
 static bool execute_call_op(Vm *vm, Frame *frame, const IdmBytecodeModule *module, size_t instr_ip, IdmExecStatus *status, IdmValue *out_reason, IdmError *err) {
@@ -1114,243 +1350,81 @@ static const char *module_const_text(const IdmBytecodeModule *module, uint32_t i
     return NULL;
 }
 
-static bool module_const_value(const IdmBytecodeModule *module, uint32_t index, const char *what, IdmValue *out, IdmError *err) {
+static const char *module_const_contract_text(const IdmBytecodeModule *module, uint32_t index, const char *what, IdmError *err) {
     if (index >= module->const_count) {
-        return idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", what, index);
+        idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", what, index);
+        return NULL;
     }
-    *out = module->constants[index];
-    return true;
+    IdmValue value = module->constants[index];
+    if (value.tag == IDM_VAL_NIL) return NULL;
+    if (value.tag == IDM_VAL_ATOM || value.tag == IDM_VAL_WORD) return idm_symbol_text(value.as.symbol);
+    if (value.tag == IDM_VAL_STRING) return idm_string_bytes(value);
+    idm_error_set(err, idm_span_unknown(NULL), "%s constant must be nil or a name", what);
+    return NULL;
 }
 
-static bool trait_name_value_text(IdmValue value, const char **out) {
-    if (value.tag == IDM_VAL_ATOM || value.tag == IDM_VAL_WORD) {
-        *out = idm_symbol_text(value.as.symbol);
-        return true;
-    }
-    if (value.tag == IDM_VAL_STRING) {
-        *out = idm_string_bytes(value);
-        return true;
-    }
-    return false;
-}
-
-static size_t trait_candidate_count(IdmValue traits) {
-    if (traits.tag == IDM_VAL_TUPLE || traits.tag == IDM_VAL_VECTOR) return idm_sequence_count(traits);
-    return 1u;
-}
-
-static bool trait_candidate_at(IdmValue traits, size_t index, const char **out, IdmError *err) {
-    IdmValue value = traits;
-    if (traits.tag == IDM_VAL_TUPLE || traits.tag == IDM_VAL_VECTOR) value = idm_sequence_item(traits, index, err);
-    if (err && err->present) return false;
-    if (trait_name_value_text(value, out)) return true;
-    return idm_error_set(err, idm_span_unknown(NULL), "method call trait candidate must be a name");
-}
-
-static bool append_trait_candidates(IdmBuffer *buf, IdmValue traits, IdmError *err) {
-    size_t count = trait_candidate_count(traits);
-    for (size_t i = 0; i < count; i++) {
-        const char *trait = NULL;
-        if (!trait_candidate_at(traits, i, &trait, err)) return false;
-        if (i != 0 && !idm_buf_append(buf, ", ")) return false;
-        if (!idm_buf_append(buf, trait)) return false;
-    }
-    return true;
-}
-
-static IdmArity read_arity_operands(const IdmBytecodeModule *module, Frame *frame) {
-    IdmArity arity;
-    arity.kind = (IdmArityKind)module->code[frame->ip++];
-    arity.min = module->code[frame->ip++];
-    arity.max = module->code[frame->ip++];
-    uint64_t lo = module->code[frame->ip++];
-    uint64_t hi = module->code[frame->ip++];
-    arity.mask = lo | (hi << 32);
-    return arity;
-}
-
-static bool op_define_trait(Vm *vm, Frame *frame, IdmError *err) {
+static bool op_make_record(Vm *vm, Frame *frame, IdmError *err) {
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     uint32_t dst = module->code[frame->ip++];
-    uint32_t first_default = module->code[frame->ip++];
-    uint32_t trait_const = module->code[frame->ip++];
-    uint32_t requirement_count = module->code[frame->ip++];
-    uint32_t method_count = module->code[frame->ip++];
-    const char *trait = module_const_text(module, trait_const, "DEFINE_TRAIT trait", err);
-    if (!trait) return false;
-    const IdmValue *defaults = NULL;
-    if (!frame_reg_slice(frame, first_default, method_count, &defaults, err)) return false;
-    IdmTraitRequirementSpec *requirements = requirement_count == 0 ? NULL : calloc(requirement_count, sizeof(*requirements));
-    if (requirement_count != 0 && !requirements) return idm_error_oom(err, idm_span_unknown(NULL));
-    IdmTraitMethodSpec *specs = method_count == 0 ? NULL : calloc(method_count, sizeof(*specs));
-    if (method_count != 0 && !specs) {
-        free(requirements);
-        return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    bool ok = true;
-    for (uint32_t i = 0; i < requirement_count && ok; i++) {
-        uint32_t requirement_const = module->code[frame->ip++];
-        const char *requirement = module_const_text(module, requirement_const, "DEFINE_TRAIT requirement", err);
-        if (!requirement) { ok = false; break; }
-        requirements[i].name = requirement;
-    }
-    for (uint32_t i = 0; i < method_count && ok; i++) {
-        uint32_t method_const = module->code[frame->ip++];
-        IdmArity arity = read_arity_operands(module, frame);
-        uint32_t has_default = module->code[frame->ip++];
-        const char *method = module_const_text(module, method_const, "DEFINE_TRAIT method", err);
-        if (!method) { ok = false; break; }
-        specs[i].name = method;
-        specs[i].arity = arity;
-        specs[i].has_default = has_default != 0;
-    }
-    if (!ok) { free(requirements); free(specs); return false; }
-    for (uint32_t i = 0; i < method_count; i++) {
-        specs[i].default_impl = defaults ? defaults[i] : idm_nil();
-    }
-    ok = idm_trait_define(vm->rt, trait, requirements, requirement_count, specs, method_count, err);
-    free(requirements);
-    free(specs);
-    if (!ok) return false;
-    return frame_reg_write(frame, dst, idm_atom(vm->rt, "ok"), err);
-}
-
-static bool op_implement_trait(Vm *vm, Frame *frame, IdmError *err) {
-    const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
-    uint32_t dst = module->code[frame->ip++];
-    uint32_t first_impl = module->code[frame->ip++];
-    uint32_t trait_const = module->code[frame->ip++];
     uint32_t type_const = module->code[frame->ip++];
-    uint32_t provider_const = module->code[frame->ip++];
-    uint32_t provider_key_const = module->code[frame->ip++];
-    uint32_t impl_count = module->code[frame->ip++];
-    const char *trait = module_const_text(module, trait_const, "IMPLEMENT_TRAIT trait", err);
-    if (!trait) return false;
-    const char *type = module_const_text(module, type_const, "IMPLEMENT_TRAIT type", err);
+    uint32_t first_field = module->code[frame->ip++];
+    uint32_t field_count = module->code[frame->ip++];
+    const char *type = module_const_text(module, type_const, "MAKE_RECORD type", err);
     if (!type) return false;
-    const char *provider = module_const_text(module, provider_const, "IMPLEMENT_TRAIT provider", err);
-    if (!provider) return false;
-    const char *provider_key = module_const_text(module, provider_key_const, "IMPLEMENT_TRAIT provider key", err);
-    if (!provider_key) return false;
-    const IdmValue *impls = NULL;
-    if (!frame_reg_slice(frame, first_impl, impl_count, &impls, err)) return false;
-    IdmTraitImplSpec *specs = impl_count == 0 ? NULL : calloc(impl_count, sizeof(*specs));
-    if (impl_count != 0 && !specs) return idm_error_oom(err, idm_span_unknown(NULL));
+    const IdmValue *field_values = NULL;
+    if (!frame_reg_slice(frame, first_field, field_count, &field_values, err)) return false;
+    const char **field_names = field_count == 0 ? NULL : calloc(field_count, sizeof(*field_names));
+    if (field_count != 0 && !field_names) return idm_error_oom(err, idm_span_unknown(NULL));
     bool ok = true;
-    for (uint32_t i = 0; i < impl_count && ok; i++) {
-        uint32_t method_const = module->code[frame->ip++];
-        IdmArity arity = read_arity_operands(module, frame);
-        const char *method = module_const_text(module, method_const, "IMPLEMENT_TRAIT method", err);
-        if (!method) { ok = false; break; }
-        specs[i].name = method;
-        specs[i].arity = arity;
+    for (uint32_t i = 0; i < field_count && ok; i++) {
+        uint32_t field_const = module->code[frame->ip++];
+        uint32_t contract_const = module->code[frame->ip++];
+        field_names[i] = module_const_text(module, field_const, "MAKE_RECORD field", err);
+        if (!field_names[i]) ok = false;
+        const char *contract = ok ? module_const_contract_text(module, contract_const, "MAKE_RECORD field contract", err) : NULL;
+        if (ok && err && err->present) ok = false;
+        if (ok && contract && !idm_value_matches_type_name(field_values[i], contract)) {
+            ok = idm_error_set(err, idm_span_unknown(NULL), "record field '%s' expects %s, got %s", field_names[i], contract, idm_value_dispatch_type_name(field_values[i]));
+        }
     }
-    if (!ok) { free(specs); return false; }
-    for (uint32_t i = 0; i < impl_count; i++) {
-        specs[i].impl = impls ? impls[i] : idm_nil();
+    IdmValue record = idm_nil();
+    if (ok) {
+        record = idm_record(vm->rt, type, field_names, field_values, field_count, err);
+        ok = !(err && err->present);
     }
-    ok = idm_trait_implement(vm->rt, trait, type, provider, provider_key, specs, impl_count, err);
-    free(specs);
+    free(field_names);
     if (!ok) return false;
-    return frame_reg_write(frame, dst, idm_atom(vm->rt, "ok"), err);
+    return frame_reg_write(frame, dst, record, err);
 }
 
-typedef struct {
-    IdmValue traits;
-    const char *method;
-    const char *receiver_type;
-    uint32_t argc;
-} MethodImplementationRequest;
-
-static bool resolve_method_implementation(Vm *vm, const MethodImplementationRequest *request, IdmValue *out_impl, IdmError *err) {
-    size_t count = trait_candidate_count(request->traits);
-    if (count == 0) return idm_error_set(err, idm_span_unknown(NULL), "method '%s' has no trait candidates", request->method);
-    if (count == 1u) {
-        const char *trait = NULL;
-        if (!trait_candidate_at(request->traits, 0, &trait, err)) return false;
-        return idm_trait_lookup(vm->rt, trait, request->method, request->receiver_type, request->argc, out_impl, err);
-    }
-
-    IdmValue match = idm_nil();
-    size_t match_count = 0;
-    IdmBuffer matching;
-    idm_buf_init(&matching);
-    for (size_t i = 0; i < count; i++) {
-        const char *trait = NULL;
-        if (!trait_candidate_at(request->traits, i, &trait, err)) {
-            idm_buf_destroy(&matching);
-            return false;
-        }
-        IdmError probe;
-        idm_error_init(&probe);
-        IdmValue impl = idm_nil();
-        if (idm_trait_lookup(vm->rt, trait, request->method, request->receiver_type, request->argc, &impl, &probe)) {
-            if (match_count != 0 && !idm_buf_append(&matching, ", ")) {
-                idm_error_clear(&probe);
-                idm_buf_destroy(&matching);
-                return idm_error_oom(err, idm_span_unknown(NULL));
-            }
-            if (!idm_buf_append(&matching, trait)) {
-                idm_error_clear(&probe);
-                idm_buf_destroy(&matching);
-                return idm_error_oom(err, idm_span_unknown(NULL));
-            }
-            if (match_count == 0) match = impl;
-            match_count++;
-        }
-        idm_error_clear(&probe);
-    }
-
-    if (match_count == 1u) {
-        *out_impl = match;
-        idm_buf_destroy(&matching);
-        return true;
-    }
-    if (match_count > 1u) {
-        bool ok = idm_error_set(err, idm_span_unknown(NULL), "ambiguous method '%s' on type '%s'; matching traits: %s", request->method, request->receiver_type, matching.data ? matching.data : "?");
-        idm_buf_destroy(&matching);
-        return ok;
-    }
-    IdmBuffer candidates;
-    idm_buf_init(&candidates);
-    bool listed = append_trait_candidates(&candidates, request->traits, err);
-    if (!listed && !(err && err->present)) idm_error_oom(err, idm_span_unknown(NULL));
-    if (!listed) {
-        idm_buf_destroy(&matching);
-        idm_buf_destroy(&candidates);
-        return false;
-    }
-    bool ok = idm_error_set(err, idm_span_unknown(NULL), "method '%s' is available via %s but is not implemented on type '%s'", request->method, candidates.data ? candidates.data : "?", request->receiver_type);
-    idm_buf_destroy(&matching);
-    idm_buf_destroy(&candidates);
-    return ok;
-}
-
-static bool op_call_method(Vm *vm, Frame *frame, IdmExecStatus *status, IdmValue *out_reason, IdmError *err) {
+static bool op_record_field(Vm *vm, Frame *frame, IdmError *err) {
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     uint32_t dst = module->code[frame->ip++];
-    uint32_t trait_const = module->code[frame->ip++];
-    uint32_t method_const = module->code[frame->ip++];
-    uint32_t first_arg = module->code[frame->ip++];
-    uint32_t argc = module->code[frame->ip++];
-    bool tail = module->code[frame->ip++] != 0;
-    if (argc == 0) return idm_error_set(err, idm_span_unknown(NULL), "CALL_METHOD requires a receiver");
-    const IdmValue *args = NULL;
-    if (!frame_reg_slice(frame, first_arg, argc, &args, err)) return false;
-    IdmValue receiver = args[0];
-    const char *type = idm_value_dispatch_type_name(receiver);
-    IdmValue impl = idm_nil();
-    IdmValue traits = idm_nil();
-    if (!module_const_value(module, trait_const, "CALL_METHOD trait", &traits, err)) return false;
-    const char *method = module_const_text(module, method_const, "CALL_METHOD method", err);
-    if (!method) return false;
-    MethodImplementationRequest request;
-    request.traits = traits;
-    request.method = method;
-    request.receiver_type = type;
-    request.argc = argc;
-    if (!resolve_method_implementation(vm, &request, &impl, err)) return false;
-    return call_closure_clause(vm, dst, impl, args, argc, tail, status, out_reason, err);
+    uint32_t receiver_reg = module->code[frame->ip++];
+    uint32_t type_const = module->code[frame->ip++];
+    uint32_t field_const = module->code[frame->ip++];
+    uint32_t field_index = module->code[frame->ip++];
+    const char *type = module_const_text(module, type_const, "RECORD_FIELD type", err);
+    if (!type) return false;
+    const char *field = module_const_text(module, field_const, "RECORD_FIELD field", err);
+    if (!field) return false;
+    IdmValue receiver = idm_nil();
+    if (!frame_reg_value(frame, receiver_reg, &receiver, err)) return false;
+    IdmValue value = idm_nil();
+    if (!idm_record_field_project(receiver, type, field, field_index, &value, err)) return false;
+    return frame_reg_write(frame, dst, value, err);
+}
+
+static bool op_record_is(Vm *vm, Frame *frame, IdmError *err) {
+    const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
+    uint32_t dst = module->code[frame->ip++];
+    uint32_t value_reg = module->code[frame->ip++];
+    uint32_t type_const = module->code[frame->ip++];
+    const char *type = module_const_text(module, type_const, "RECORD_IS type", err);
+    if (!type) return false;
+    IdmValue value = idm_nil();
+    if (!frame_reg_value(frame, value_reg, &value, err)) return false;
+    return frame_reg_write(frame, dst, idm_bool(vm->rt, idm_record_is_a(value, type)), err);
 }
 
 static bool package_env_push(Vm *vm, Frame *frame, IdmError *err) {
@@ -1468,6 +1542,7 @@ static bool op_string_concat(Vm *vm, Frame *frame, IdmError *err) {
 
 static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
     IdmRuntime *rt = vm->rt;
+    bool profile_ops = vm_profile_active();
     *status = IDM_EXEC_DONE;
     if (vm->has_pending_raise) {
         vm->has_pending_raise = false;
@@ -1495,6 +1570,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
             return false;
         }
         IdmOpcode op = (IdmOpcode)module->code[frame->ip++];
+        if (profile_ops) vm_profile_opcode(op);
         uint32_t operand = 0;
         switch (op) {
             case IDM_OP_HALT:
@@ -1518,10 +1594,16 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
             case IDM_OP_LOAD_CAPTURE: {
                 uint32_t dst = module->code[frame->ip++];
                 operand = module->code[frame->ip++];
-                if (frame->closure.tag != IDM_VAL_CLOSURE) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_CAPTURE requires a closure frame");
-                if (operand >= idm_closure_capture_count(frame->closure)) return idm_error_set(err, idm_span_unknown(NULL), "capture index %u out of bounds", operand);
-                IdmValue value = idm_closure_capture(frame->closure, operand, err);
-                if (err && err->present) return false;
+                IdmValue value = idm_nil();
+                if (frame->capture_count != 0 || frame->captures) {
+                    if (operand >= frame->capture_count) return idm_error_set(err, idm_span_unknown(NULL), "capture index %u out of bounds", operand);
+                    value = frame->captures[operand];
+                } else {
+                    if (frame->closure.tag != IDM_VAL_CLOSURE) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_CAPTURE requires a closure frame");
+                    if (operand >= idm_closure_capture_count(frame->closure)) return idm_error_set(err, idm_span_unknown(NULL), "capture index %u out of bounds", operand);
+                    value = idm_closure_capture(frame->closure, operand, err);
+                    if (err && err->present) return false;
+                }
                 if (!frame_reg_write(frame, dst, value, err)) return false;
                 break;
             }
@@ -1608,6 +1690,19 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
             case IDM_OP_CALL:
                 if (!execute_call_op(vm, frame, module, instr_ip, status, out_reason, err)) return false;
                 break;
+            case IDM_OP_CALL_PRIMITIVE: {
+                uint32_t dst = module->code[frame->ip++];
+                uint32_t primitive = module->code[frame->ip++];
+                uint32_t first_arg = module->code[frame->ip++];
+                uint32_t argc = module->code[frame->ip++];
+                const IdmValue *args = NULL;
+                if (!frame_reg_slice(frame, first_arg, argc, &args, err)) return false;
+                if (!execute_primitive_clause(vm, primitive, dst, args, argc, status, out_reason, err)) return false;
+                break;
+            }
+            case IDM_OP_MATCH:
+                if (!execute_match_op(vm, frame, module, instr_ip, status, out_reason, err)) return false;
+                break;
             case IDM_OP_LIST_CONS:
                 if (!op_list_cons(vm, frame, err)) return false;
                 break;
@@ -1630,17 +1725,17 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 Frame returning;
                 pop_frame(vm, &returning);
                 if (vm->frame_count == 0) {
-                    free(returning.regs);
+                    frame_release(&returning);
                     *status = IDM_EXEC_DONE;
                     *out_result = value;
                     return true;
                 }
                 Frame *caller = current_frame(vm);
                 if (returning.has_return && !frame_reg_write(caller, returning.return_reg, value, err)) {
-                    free(returning.regs);
+                    frame_release(&returning);
                     return false;
                 }
-                free(returning.regs);
+                frame_release(&returning);
                 break;
             }
             case IDM_OP_JUMP:
@@ -1665,14 +1760,14 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
             case IDM_OP_POP_PACKAGE_ENV:
                 if (!package_env_pop(vm, frame, err)) return false;
                 break;
-            case IDM_OP_DEFINE_TRAIT:
-                if (!op_define_trait(vm, frame, err)) return false;
+            case IDM_OP_MAKE_RECORD:
+                if (!op_make_record(vm, frame, err)) return false;
                 break;
-            case IDM_OP_IMPLEMENT_TRAIT:
-                if (!op_implement_trait(vm, frame, err)) return false;
+            case IDM_OP_RECORD_FIELD:
+                if (!op_record_field(vm, frame, err)) return false;
                 break;
-            case IDM_OP_CALL_METHOD:
-                if (!op_call_method(vm, frame, status, out_reason, err)) return false;
+            case IDM_OP_RECORD_IS:
+                if (!op_record_is(vm, frame, err)) return false;
                 break;
             case IDM_OP_RESCUE_PUSH: {
                 operand = module->code[frame->ip++];
@@ -1712,6 +1807,22 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 IdmEnv *env = idm_package_env_get_or_create(vm->rt, key);
                 if (!env) return idm_error_oom(err, idm_span_unknown(NULL));
                 if (!frame_reg_write(frame, dst, idm_env_slot_get(env, slot), err)) return false;
+                break;
+            }
+            case IDM_OP_STORE_PACKAGE_SLOT: {
+                uint32_t key_const = module->code[frame->ip++];
+                uint32_t slot = module->code[frame->ip++];
+                uint32_t src = module->code[frame->ip++];
+                const char *key = module_const_text(module, key_const, "STORE_PACKAGE_SLOT key", err);
+                if (!key) return false;
+                IdmValue value = idm_nil();
+                if (!frame_reg_value(frame, src, &value, err)) return false;
+                IdmEnv *env = idm_package_env_get_or_create(vm->rt, key);
+                if (!env) return idm_error_oom(err, idm_span_unknown(NULL));
+                if (!idm_env_slot_ensure(env, slot, err)) return false;
+                value = idm_value_copy(vm->rt, &vm->rt->immortal, value, err);
+                if (err->present) return false;
+                idm_env_slot_set(env, slot, value);
                 break;
             }
             case IDM_OP_STORE_ENV: {
@@ -1774,7 +1885,7 @@ static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue 
         while (vm->frame_count > handler.frame_count) {
             Frame discarded;
             pop_frame(vm, &discarded);
-            free(discarded.regs);
+            frame_release(&discarded);
         }
         Frame *frame = current_frame(vm);
         if (!frame) return false;
@@ -1793,26 +1904,34 @@ static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue 
 }
 
 static bool ensure_module_ready(const IdmBytecodeModule *module, IdmError *err) {
-    if (!idm_bc_verify(module, err)) return false;
     if (!idm_bc_is_finalized(module)) return idm_error_set(err, idm_span_unknown(NULL), "bytecode module is not finalized");
+    if (!module->verified) return idm_error_set(err, idm_span_unknown(NULL), "bytecode module is not verified");
     return true;
 }
 
 static bool vm_run_limited_in_env(IdmRuntime *rt, const IdmBytecodeModule *module, uint32_t function_index, IdmVmLimits limits, IdmEnv *env, IdmValue *out, IdmError *err) {
-    if (!ensure_module_ready(module, err)) return false;
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "vm.run");
+    if (!ensure_module_ready(module, err)) {
+        idm_profile_scope_end(&prof);
+        return false;
+    }
     Vm vm;
     memset(&vm, 0, sizeof(vm));
     vm.rt = rt;
     vm.module = module;
     vm.limits = limits;
     vm.root_env = env;
-    if (!push_frame(&vm, module, function_index, idm_nil(), NULL, 0, false, 0, err)) { vm_reset(&vm); return false; }
+    if (!push_frame(&vm, module, function_index, idm_nil(), NULL, 0, false, 0, err)) { vm_reset(&vm); idm_profile_scope_end(&prof); return false; }
     IdmExecStatus status = IDM_EXEC_DONE;
     IdmValue result = idm_nil();
     IdmValue reason = idm_nil();
     bool ok = vm_run_loop(&vm, -1, &status, &result, &reason, err);
     vm_reset(&vm);
-    if (!ok) return false;
+    if (!ok) {
+        idm_profile_scope_end(&prof);
+        return false;
+    }
     if (status == IDM_EXEC_EXIT) {
         IdmBuffer buf;
         idm_buf_init(&buf);
@@ -1823,9 +1942,13 @@ static bool vm_run_limited_in_env(IdmRuntime *rt, const IdmBytecodeModule *modul
             idm_error_set(err, idm_span_unknown(NULL), "program exited outside the scheduler");
         }
         idm_buf_destroy(&buf);
+        idm_profile_scope_end(&prof);
         return false;
     }
     if (out) *out = result;
+    idm_profile_count("vm.run.code_words", module ? (uint64_t)module->code_count : 0u);
+    idm_profile_count("vm.run.functions", module ? (uint64_t)module->function_count : 0u);
+    idm_profile_scope_end(&prof);
     return true;
 }
 
@@ -1842,9 +1965,20 @@ bool idm_vm_run_in_env(IdmRuntime *rt, const IdmBytecodeModule *module, uint32_t
 }
 
 bool idm_vm_call_function(IdmRuntime *rt, const IdmBytecodeModule *module, uint32_t function_index, const IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
-    if (!ensure_module_ready(module, err)) return false;
-    if (function_index >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "function index %u out of bounds", function_index);
-    if (module->functions[function_index].arity != argc) return idm_error_set(err, idm_span_unknown(NULL), "function arity mismatch: expected %u got %u", module->functions[function_index].arity, argc);
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "vm.call_function");
+    if (!ensure_module_ready(module, err)) {
+        idm_profile_scope_end(&prof);
+        return false;
+    }
+    if (function_index >= module->function_count) {
+        idm_profile_scope_end(&prof);
+        return idm_error_set(err, idm_span_unknown(NULL), "function index %u out of bounds", function_index);
+    }
+    if (module->functions[function_index].arity != argc) {
+        idm_profile_scope_end(&prof);
+        return idm_error_set(err, idm_span_unknown(NULL), "function arity mismatch: expected %u got %u", module->functions[function_index].arity, argc);
+    }
     Vm vm;
     memset(&vm, 0, sizeof(vm));
     vm.rt = rt;
@@ -1852,16 +1986,30 @@ bool idm_vm_call_function(IdmRuntime *rt, const IdmBytecodeModule *module, uint3
     vm.limits = idm_vm_default_limits();
     if (!push_frame(&vm, module, function_index, idm_nil(), args, argc, false, 0, err)) {
         vm_reset(&vm);
+        idm_profile_scope_end(&prof);
         return false;
     }
-    return vm_run_call(&vm, -1, NULL, out, err);
+    bool ok = vm_run_call(&vm, -1, NULL, out, err);
+    idm_profile_scope_end(&prof);
+    return ok;
 }
 
 bool idm_vm_call_closure(IdmRuntime *rt, IdmValue closure, const IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
-    if (!idm_is_closure(closure)) return idm_error_set(err, idm_span_unknown(NULL), "call target must be a function value");
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "vm.call_closure");
+    if (!idm_is_closure(closure)) {
+        idm_profile_scope_end(&prof);
+        return idm_error_set(err, idm_span_unknown(NULL), "call target must be a function value");
+    }
     const IdmBytecodeModule *module = idm_closure_module(closure);
-    if (!module) return idm_error_set(err, idm_span_unknown(NULL), "function value has no backing module");
-    if (!ensure_module_ready(module, err)) return false;
+    if (!module) {
+        idm_profile_scope_end(&prof);
+        return idm_error_set(err, idm_span_unknown(NULL), "function value has no backing module");
+    }
+    if (!ensure_module_ready(module, err)) {
+        idm_profile_scope_end(&prof);
+        return false;
+    }
     Vm vm;
     memset(&vm, 0, sizeof(vm));
     vm.rt = rt;
@@ -1869,9 +2017,12 @@ bool idm_vm_call_closure(IdmRuntime *rt, IdmValue closure, const IdmValue *args,
     vm.limits = idm_vm_default_limits();
     if (!call_value(&vm, 0, closure, args, argc, false, NULL, NULL, err)) {
         vm_reset(&vm);
+        idm_profile_scope_end(&prof);
         return false;
     }
-    return vm_run_call(&vm, -1, NULL, out, err);
+    bool ok = vm_run_call(&vm, -1, NULL, out, err);
+    idm_profile_scope_end(&prof);
+    return ok;
 }
 
 IdmExec *idm_exec_create(IdmRuntime *rt, const IdmBytecodeModule *module, IdmScheduler *sched, IdmActor *self, IdmVmLimits limits, IdmError *err) {
@@ -1992,15 +2143,19 @@ IdmExec *idm_current_exec(void) {
 }
 
 bool idm_exec_step(IdmExec *exec, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "vm.exec_step");
     if (exec->frame_count == 0) {
         *status = IDM_EXEC_DONE;
         *out_result = exec->has_direct_result ? exec->direct_result : idm_nil();
+        idm_profile_scope_end(&prof);
         return true;
     }
     IdmExec *prev = g_current_exec;
     g_current_exec = exec;
     bool ok = vm_run_loop(exec, budget, status, out_result, out_reason, err);
     g_current_exec = prev;
+    idm_profile_scope_end(&prof);
     return ok;
 }
 
@@ -2076,6 +2231,7 @@ void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user)
     for (size_t f = 0; f < exec->frame_count; f++) {
         const Frame *frame = &exec->frames[f];
         for (uint32_t i = 0; i < frame->reg_count; i++) visit(user, frame->regs[i]);
+        for (uint32_t i = 0; i < frame->capture_count; i++) visit(user, frame->captures[i]);
         visit(user, frame->closure);
     }
     if (exec->has_direct_result) visit(user, exec->direct_result);

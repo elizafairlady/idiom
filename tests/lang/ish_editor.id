@@ -1,6 +1,7 @@
 use std/test
 use std/string
 use app/ish
+import std/tea as Tea
 use std/term
 activate Test
 
@@ -140,6 +141,12 @@ suite do
     assert-eq tag :submit
     {t2 s2} = step fresh {:char "q"}
     assert-eq {t2 (dict-get s2 :buffer :nil)} {:render "q"}
+  end
+  test "tea-model-emits-editor-tag-without-state-channel" do
+    {model cmd} = Tea.step (tea-model fresh) {:editor-key {:char "x"}}
+    {tag st} = step fresh {:char "x"}
+    assert-inspect (Tea.command-messages cmd) "({:editor :render})"
+    assert-eq {tag (dict-get st :buffer :nil) model.view} {:render "x" "x"}
   end
   test "decode-byte-table" do
     assert-eq (decode-byte 1) :c-a

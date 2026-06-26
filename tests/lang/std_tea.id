@@ -42,6 +42,8 @@ suite do
   test "batch-and-sequence-commands" do
     assert-inspect (command-messages (batch (list (emit :a) (none) (emit :b)))) "(:a :b)"
     assert-inspect (command-messages (sequence (list (emit :first) (emit :second)))) "(:first :second)"
+    assert-inspect (command-messages (batch (list (emit :a) (batch (list (emit :b) (emit :c)))))) "(:a :b :c)"
+    assert-inspect (command-messages (fn -> :later)) "(:later)"
   end
 
   test "run-messages-drains-command-messages" do

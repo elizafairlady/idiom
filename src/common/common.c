@@ -1,8 +1,112 @@
 #include "idiom/common.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+typedef struct {
+    char *name;
+    uint64_t calls;
+    uint64_t total_ns;
+    uint64_t count;
+} IdmProfileMetric;
+
+static pthread_mutex_t profile_lock = PTHREAD_MUTEX_INITIALIZER;
+static IdmProfileMetric *profile_metrics = NULL;
+static size_t profile_metric_count = 0;
+static size_t profile_metric_cap = 0;
+static int profile_state = -1;
+static bool profile_report_registered = false;
+
+static void idm_profile_report_stderr(void) {
+    idm_profile_report(stderr);
+}
+
+bool idm_profile_enabled(void) {
+    if (profile_state >= 0) return profile_state != 0;
+    const char *v = getenv("IDIOMPROFILE");
+    profile_state = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
+    if (profile_state && !profile_report_registered) {
+        atexit(idm_profile_report_stderr);
+        profile_report_registered = true;
+    }
+    return profile_state != 0;
+}
+
+uint64_t idm_profile_now_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static IdmProfileMetric *profile_metric_get(const char *name) {
+    for (size_t i = 0; i < profile_metric_count; i++) {
+        if (strcmp(profile_metrics[i].name, name) == 0) return &profile_metrics[i];
+    }
+    if (profile_metric_count == profile_metric_cap) {
+        size_t cap = profile_metric_cap ? profile_metric_cap * 2u : 64u;
+        IdmProfileMetric *grown = realloc(profile_metrics, cap * sizeof(*grown));
+        if (!grown) return NULL;
+        profile_metrics = grown;
+        profile_metric_cap = cap;
+    }
+    IdmProfileMetric *m = &profile_metrics[profile_metric_count];
+    memset(m, 0, sizeof(*m));
+    m->name = idm_strdup(name);
+    if (!m->name) return NULL;
+    profile_metric_count++;
+    return m;
+}
+
+void idm_profile_scope_begin(IdmProfileScope *scope, const char *name) {
+    if (!scope) return;
+    scope->name = name;
+    scope->active = false;
+    scope->start_ns = 0;
+    if (!idm_profile_enabled() || !name || !*name) return;
+    scope->start_ns = idm_profile_now_ns();
+    scope->active = true;
+}
+
+void idm_profile_scope_end(IdmProfileScope *scope) {
+    if (!scope || !scope->active) return;
+    uint64_t end_ns = idm_profile_now_ns();
+    uint64_t elapsed = end_ns >= scope->start_ns ? end_ns - scope->start_ns : 0;
+    pthread_mutex_lock(&profile_lock);
+    IdmProfileMetric *m = profile_metric_get(scope->name);
+    if (m) {
+        m->calls++;
+        m->total_ns += elapsed;
+    }
+    pthread_mutex_unlock(&profile_lock);
+    scope->active = false;
+}
+
+void idm_profile_count(const char *name, uint64_t amount) {
+    if (!idm_profile_enabled() || !name || !*name) return;
+    pthread_mutex_lock(&profile_lock);
+    IdmProfileMetric *m = profile_metric_get(name);
+    if (m) m->count += amount;
+    pthread_mutex_unlock(&profile_lock);
+}
+
+void idm_profile_report(FILE *out) {
+    if (!out || !idm_profile_enabled()) return;
+    pthread_mutex_lock(&profile_lock);
+    for (size_t i = 0; i < profile_metric_count; i++) {
+        const IdmProfileMetric *m = &profile_metrics[i];
+        uint64_t avg = m->calls ? m->total_ns / m->calls : 0;
+        fprintf(out, "idiom-profile\t%s\tcalls\t%llu\ttotal_ns\t%llu\tavg_ns\t%llu\tcount\t%llu\n",
+                m->name ? m->name : "",
+                (unsigned long long)m->calls,
+                (unsigned long long)m->total_ns,
+                (unsigned long long)avg,
+                (unsigned long long)m->count);
+    }
+    pthread_mutex_unlock(&profile_lock);
+}
 
 IdmSpan idm_span_unknown(const char *file) {
     IdmSpan span;
@@ -359,6 +463,8 @@ char *idm_strndup(const char *s, size_t n) {
 }
 
 bool idm_read_stream(FILE *stream, const char *name, char **out, size_t *out_len, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "io.read_stream");
     IdmBuffer buf;
     idm_buf_init(&buf);
     char chunk[4096];
@@ -366,11 +472,13 @@ bool idm_read_stream(FILE *stream, const char *name, char **out, size_t *out_len
         size_t n = fread(chunk, 1u, sizeof(chunk), stream);
         if (n != 0 && !idm_buf_append_n(&buf, chunk, n)) {
             idm_buf_destroy(&buf);
+            idm_profile_scope_end(&prof);
             return idm_error_oom(err, idm_span_unknown(name));
         }
         if (n < sizeof(chunk)) {
             if (ferror(stream)) {
                 idm_buf_destroy(&buf);
+                idm_profile_scope_end(&prof);
                 return idm_error_set(err, idm_span_unknown(name), "read failed: %s", strerror(errno));
             }
             break;
@@ -378,15 +486,29 @@ bool idm_read_stream(FILE *stream, const char *name, char **out, size_t *out_len
     }
     size_t len = buf.len;
     *out = idm_buf_take(&buf);
-    if (!*out) return idm_error_oom(err, idm_span_unknown(name));
+    if (!*out) {
+        idm_profile_scope_end(&prof);
+        return idm_error_oom(err, idm_span_unknown(name));
+    }
     if (out_len) *out_len = len;
+    idm_profile_count("io.read_bytes", (uint64_t)len);
+    idm_profile_scope_end(&prof);
     return true;
 }
 
 bool idm_read_file(const char *path, char **out, size_t *out_len, IdmError *err) {
+    IdmProfileScope prof;
+    idm_profile_scope_begin(&prof, "io.read_file");
     FILE *f = fopen(path, "rb");
-    if (!f) return idm_error_set(err, idm_span_unknown(path), "open failed: %s", strerror(errno));
+    if (!f) {
+        idm_profile_scope_end(&prof);
+        return idm_error_set(err, idm_span_unknown(path), "open failed: %s", strerror(errno));
+    }
     bool ok = idm_read_stream(f, path, out, out_len, err);
-    if (fclose(f) != 0 && ok) return idm_error_set(err, idm_span_unknown(path), "close failed: %s", strerror(errno));
+    if (fclose(f) != 0 && ok) {
+        idm_profile_scope_end(&prof);
+        return idm_error_set(err, idm_span_unknown(path), "close failed: %s", strerror(errno));
+    }
+    idm_profile_scope_end(&prof);
     return ok;
 }

@@ -16,6 +16,6 @@ do
   println (box-tag (box 9))
 end
 println (try do
-  box-show (make-record "box" %{:v 1})
+  box-show %{:v 1}
   rescue _r -> :no-raw-dispatch
 end)

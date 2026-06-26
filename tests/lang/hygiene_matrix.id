@@ -456,7 +456,7 @@ suite do
       end
     end
     match got do
-      {:error {:runtime msg}} -> assert (contains? msg "Qx#")
+      {:error msg} -> assert (contains? msg "Qx#")
     end
   end
   test "macro-introduced pattern bind does not capture" do

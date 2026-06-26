@@ -197,32 +197,20 @@ record EditorModel do
   field state
 end
 
-defn model-result tag state -> EditorModel (sput state :tea-result tag)
+export defn tea-model state -> EditorModel state
 
 implement Tea.Model on EditorModel do
   method init _model -> (Tea.none)
   method update model msg -> match msg do
     {:editor-key key} -> match (step-state (model.state) key) do
-      {tag st} -> {(model-result tag st) (Tea.none)}
+      {tag st} -> {(EditorModel st) (Tea.emit {:editor tag})}
     end
     _ -> {model (Tea.none)}
   end
   method view model -> buffer-of (model.state)
 end
 
-defn clear-tea-result state -> dict-del state :tea-result
-
-defn apply-editor-key model key do
-  {next _cmd} = Tea.step model {:editor-key key}
-  st = next.state
-  tag = sget st :tea-result
-  {tag (EditorModel (clear-tea-result st))}
-end
-
-export defn step state key do
-  {tag model} = apply-editor-key (EditorModel state) key
-  {tag model.state}
-end
+export defn step state key -> step-state state key
 
 export defn reset state ->
   state |> sput :buffer "" |> sput :cursor 0 |> sput :mode :edit |> sput :hist-pos (sub 0 1) |> sput :row 0 |> sput :below 0
@@ -309,29 +297,29 @@ defn finish-cancel state do
   {:cancel (reset state)}
 end
 
-defn edit-loop model -> match read-key do
-  :eof -> {:eof model.state}
-  {:signal :resize} -> sput model.state :cols term-cols |> paint |> EditorModel |> edit-loop
-  {:signal _} -> finish-cancel model.state
-  :unknown -> edit-loop model
-  :esc -> edit-loop model
-  key -> match (apply-editor-key model key) do
-    {:render next} -> next.state |> paint |> EditorModel |> edit-loop
+defn edit-loop state -> match read-key do
+  :eof -> {:eof state}
+  {:signal :resize} -> sput state :cols term-cols |> paint |> edit-loop
+  {:signal _} -> finish-cancel state
+  :unknown -> edit-loop state
+  :esc -> edit-loop state
+  key -> match (step-state state key) do
+    {:render next} -> next |> paint |> edit-loop
     {:clear st} -> do
       home = csi "H"
       clear = csi "2J"
       tty-write "${home}${clear}"
-      sput st.state :row 0 |> paint |> EditorModel |> edit-loop
+      sput st :row 0 |> paint |> edit-loop
     end
-    {:submit next} -> finish-line next.state
-    {:cancel next} -> finish-cancel next.state
-    {:eof next} -> {:eof next.state}
+    {:submit next} -> finish-line next
+    {:cancel next} -> finish-cancel next
+    {:eof next} -> {:eof next}
   end
 end
 
 defn raw-read state do
   tty-raw!
-  edit-loop (EditorModel (paint state))
+  edit-loop (paint state)
 end
 
 defn cooked-line state -> match tty-read-line do

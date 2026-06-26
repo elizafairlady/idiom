@@ -1948,6 +1948,10 @@ static bool primitive_seeds_push(PrimitiveSeed **seeds, size_t *count, size_t *c
     return true;
 }
 
+static bool primitive_seed_exports(const char *home) {
+    return !home || strcmp(home, "regex") != 0;
+}
+
 static bool seed_virtual_package_primitives(ExpandContext *ctx, IdmSyntax *const *work, size_t work_count, IdmScopeId package_scope, PrimitiveSeed **out_seeds, size_t *out_count, IdmError *err) {
     *out_seeds = NULL;
     *out_count = 0;
@@ -1987,7 +1991,7 @@ static bool seed_virtual_package_primitives(ExpandContext *ctx, IdmSyntax *const
             }
         }
         if (ok) ok = record_package_slot(ctx, info->name, slot, &scopes, arity);
-        if (ok) ok = record_export(ctx, info->name, slot, arity);
+        if (ok && primitive_seed_exports(home)) ok = record_export(ctx, info->name, slot, arity);
         if (ok) ok = primitive_seeds_push(&seeds, &seed_count, &seed_cap, info->name, primitive, arity, slot, err, name_syntax->span);
         idm_scope_set_destroy(&scopes);
         idm_syn_free(name_syntax);
@@ -3192,6 +3196,67 @@ static bool body_is_clauses(const IdmSyntax *body) {
             syn_is_word(tok, "def") || syn_is_word(tok, "defmacro")) return false;
     }
     return false;
+}
+
+IdmCore *expand_match_form(ExpandContext *ctx, const IdmSyntax *form, IdmError *err) {
+    if (!syn_is_form(form, "%-match") || form->as.seq.count != 3u) return expand_error(err, form ? form->span : idm_span_unknown(NULL), "%-match expects a scrutinee and clause body");
+    const IdmSyntax *body = form->as.seq.items[2];
+    if (!body_is_clauses(body)) return expand_error(err, body ? body->span : form->span, "match requires a do/end clause body");
+    IdmCore *scrutinee = expand_syntax(ctx, form->as.seq.items[1], err);
+    if (!scrutinee) return NULL;
+    SavedFunctionContext saved;
+    begin_function_context(ctx, &saved);
+    IdmCore *match = idm_core_match(form->span);
+    if (!match || !idm_core_match_add_scrutinee(match, scrutinee)) {
+        idm_core_free(match);
+        idm_core_free(scrutinee);
+        end_function_context(ctx, &saved);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
+    }
+    bool ok = true;
+    for (size_t i = 1; ok && i < body->as.seq.count; i++) {
+        IdmPattern **patterns = NULL;
+        uint32_t pattern_count = 0;
+        IdmPatternLocal *pattern_locals = NULL;
+        uint32_t pattern_local_count = 0;
+        IdmCore *guard = NULL;
+        uint32_t arity = 0;
+        IdmCore *clause_body = expand_match_clause(ctx, body->as.seq.items[i], &patterns, &pattern_count, &pattern_locals, &pattern_local_count, &guard, &arity, err);
+        if (!clause_body) {
+            ok = false;
+            break;
+        }
+        if (arity != match->as.match_expr.scrutinee_count) {
+            expand_error(err, body->as.seq.items[i]->span, "match clause arity does not match scrutinee count");
+            ok = false;
+        } else if (!idm_core_match_add_clause_take(match, arity, patterns, pattern_count, pattern_locals, pattern_local_count, guard, clause_body)) {
+            if (!err->present) idm_error_oom(err, body->as.seq.items[i]->span);
+            ok = false;
+        }
+        if (!ok) {
+            idm_core_free(clause_body);
+            idm_core_free(guard);
+            for (uint32_t p = 0; p < pattern_count; p++) idm_pat_free(patterns[p]);
+            free(patterns);
+            for (uint32_t p = 0; p < pattern_local_count; p++) free(pattern_locals[p].name);
+            free(pattern_locals);
+            break;
+        }
+    }
+    if (ok) {
+        for (size_t i = 0; i < ctx->capture_count; i++) {
+            if (!idm_core_match_add_capture(match, ctx->captures[i].kind, ctx->captures[i].name, ctx->captures[i].source_index)) {
+                ok = idm_error_oom(err, form->span);
+                break;
+            }
+        }
+    }
+    end_function_context(ctx, &saved);
+    if (!ok) {
+        idm_core_free(match);
+        return NULL;
+    }
+    return match;
 }
 
 static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body, size_t clause_end, const char *debug_name, bool defn_style, IdmError *err) {

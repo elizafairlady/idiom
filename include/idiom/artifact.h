@@ -63,6 +63,10 @@ typedef struct {
     IdmCore *default_fn;
     IdmScopeSet scopes;
     bool exported;
+    uint32_t dispatch_slot;
+    bool has_dispatch;
+    uint32_t default_slot;
+    bool has_default_slot;
 } IdmTraitMethodDef;
 
 typedef struct {
@@ -253,10 +257,25 @@ typedef struct {
 } IdmPkgTrait;
 
 typedef struct {
+    char *trait;
+    char *type;
+    char *method;
+    IdmArity arity;
+    bool impl_env;
+    char *impl_env_key;
+    uint32_t impl_slot;
+} IdmPkgMethodImpl;
+
+typedef struct {
+    char *name;
+    char *contract;
+} IdmPkgTypeField;
+
+typedef struct {
     char *name;
     char *identity;
     IdmScopeSet scopes;
-    char **fields;
+    IdmPkgTypeField *fields;
     size_t field_count;
 } IdmPkgType;
 
@@ -287,6 +306,8 @@ struct IdmArtifact {
     size_t type_count;
     IdmPkgTrait *traits;
     size_t trait_count;
+    IdmPkgMethodImpl *method_impls;
+    size_t method_impl_count;
     IdmPkgProtocol *protocols;
     size_t protocol_count;
     IdmScopeId scope_base;
@@ -313,6 +334,7 @@ void idm_trait_method_def_destroy(IdmTraitMethodDef *method);
 void idm_trait_requirement_def_destroy(IdmTraitRequirementDef *requirement);
 void idm_pkg_macro_destroy(IdmPkgMacro *macro);
 void idm_pkg_core_syntax_destroy(IdmPkgCoreSyntax *core_syntax);
+void idm_pkg_method_impl_destroy(IdmPkgMethodImpl *impl);
 void idm_grammar_terminal_destroy(IdmGrammarTerminal *terminal);
 void idm_reader_pattern_program_destroy(IdmReaderPatternProgram *program);
 void idm_reader_ctor_program_destroy(IdmReaderCtorProgram *program);

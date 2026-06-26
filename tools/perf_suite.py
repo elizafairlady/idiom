@@ -95,6 +95,8 @@ CASES = [
     {
         "name": "pattern_matrix",
         "summary": "64-clause tuple pattern matrix dispatch",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current syntax-case/pattern surface",
         "files": {
             "idiom": "pattern_matrix.id",
             "python": "pattern_matrix.py",
@@ -107,6 +109,8 @@ CASES = [
     {
         "name": "regex_scan",
         "summary": "compiled regex boolean match in a hot loop",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current regex package/surface",
         "files": {
             "idiom": "regex_scan.id",
             "python": "regex_scan.py",
@@ -119,6 +123,8 @@ CASES = [
     {
         "name": "regex_capture",
         "summary": "compiled regex result/capture in a hot loop",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current regex package/surface",
         "files": {
             "idiom": "regex_capture.id",
             "python": "regex_capture.py",
@@ -131,6 +137,8 @@ CASES = [
     {
         "name": "actor_spawn",
         "summary": "spawn one lightweight process and receive one message per iteration",
+        "base_ref_default": False,
+        "base_ref_skip": "requires current actor/runtime surface",
         "files": {
             "idiom": "actor_spawn.id",
             "elixir": "actor_spawn.exs",
@@ -148,7 +156,7 @@ CASES = [
     },
     {
         "name": "editor_line",
-        "summary": "TEA-style line editor state updates over a bounded input trace",
+        "summary": "line editor state updates over a bounded input trace",
         "base_ref_default": False,
         "base_ref_skip": "requires current app/ish editor package",
         "files": {
@@ -207,15 +215,13 @@ EXTERNAL_RUNTIME_COMMANDS = {
     "elisp": ("emacs", "--quick", "--batch", "--script"),
 }
 
-IDIOM_LANES = {
-    "source-hit",
-    "source-fill",
-    "source-nocache",
-    "build-hit",
-    "build-fill",
-    "build-nocache",
-    "sealed-hit",
-    "sealed-nocache",
+IDIOM_MODES = ("source", "build", "sealed")
+CACHE_MODES = ("hot", "cold", "off")
+CACHE_ALIASES = {
+    "hit": "hot",
+    "fill": "cold",
+    "nocache": "off",
+    "no-cache": "off",
 }
 
 
@@ -290,64 +296,94 @@ def runtime_file(kind, filename):
     return PERF / kind / filename
 
 
-def parse_idiom_lanes(value, with_sealed):
-    lanes = [part.strip() for part in (value or "source-hit").split(",") if part.strip()]
-    if with_sealed:
-        for lane in ("sealed-hit", "sealed-nocache"):
-            if lane not in lanes:
-                lanes.append(lane)
-    unknown = set(lanes).difference(IDIOM_LANES)
+def parse_csv(value, default, allowed, name, aliases=None):
+    raw = default if value is None or value == "" else value
+    items = []
+    for part in raw.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if aliases:
+            item = aliases.get(item, item)
+        items.append(item)
+    unknown = sorted(set(items).difference(allowed))
     if unknown:
-        fail(f"unknown Idiom lane(s): {', '.join(sorted(unknown))}")
-    return lanes
+        fail(f"unknown {name}: {', '.join(unknown)}")
+    return items
 
 
-def add_idiom_runtimes(runtimes, prefix, binary, cwd, lanes, artifact_root):
-    for lane in lanes:
-        lane_kind, cache_mode = lane.split("-", 1)
-        info = {
-            "kind": "idiom",
-            "cmd": [str(binary)],
-            "cwd": cwd,
-            "available": True,
-            "lane": lane_kind,
-            "cache_mode": cache_mode,
-        }
-        if cache_mode == "nocache":
-            info["env"] = {"IDIOMCACHE": "0"}
-        if lane_kind in ("build", "sealed"):
-            info["artifact_dir"] = artifact_root / prefix / lane
-        if lane_kind == "sealed":
-            info["sealed_cache"] = {}
-        runtimes[f"{prefix}-{lane}"] = info
+def parse_runtime_targets(value):
+    allowed = {"idiom", "base", *EXTERNAL_RUNTIME_COMMANDS.keys()}
+    return parse_csv(value, "", allowed, "runtime(s)") if value else None
+
+
+def runtime_key(runtime):
+    if runtime["kind"] != "idiom":
+        return runtime["target"]
+    return f"{runtime['target']}:{runtime['mode']}:{runtime['cache']}"
+
+
+def runtime_dir(runtime):
+    if runtime["kind"] != "idiom":
+        return runtime["target"]
+    return f"{runtime['target']}/{runtime['mode']}-{runtime['cache']}"
+
+
+def add_idiom_runtimes(runtimes, target, binary, cwd, modes, caches, artifact_root):
+    for mode in modes:
+        for cache in caches:
+            if mode == "sealed" and cache == "cold":
+                continue
+            info = {
+                "kind": "idiom",
+                "target": target,
+                "cmd": [str(binary)],
+                "cwd": cwd,
+                "available": True,
+                "mode": mode,
+                "cache": cache,
+                "env": {"IDIOMROOT": str(Path(cwd) / "std")},
+            }
+            if cache == "off":
+                info["env"]["IDIOMCACHE"] = "0"
+            if mode in ("build", "sealed"):
+                info["artifact_dir"] = artifact_root / target / f"{mode}-{cache}"
+            if mode == "sealed":
+                info["sealed_cache"] = {}
+            runtimes[runtime_key(info)] = info
+
+
+def wants(targets, name):
+    return targets is None or name in targets
 
 
 def discover_runtimes(args):
     runtimes = {}
-    if args.idiom_current:
+    targets = args.runtime_targets
+    if args.idiom_current and wants(targets, "idiom"):
         current = Path(args.idiom_current)
         if not current.exists():
             fail(f"current idiom binary does not exist: {current}")
-        add_idiom_runtimes(runtimes, "idiom-current", current, ROOT, args.idiom_lanes, args.artifact_dir)
-    if args.idiom_base:
+        add_idiom_runtimes(runtimes, "idiom", current, ROOT, args.modes, args.cache, args.artifact_dir)
+    if args.idiom_base and wants(targets, "base"):
         base = Path(args.idiom_base)
         if not base.exists():
             fail(f"base idiom binary does not exist: {base}")
         base_cwd = Path(args.idiom_base_cwd) if args.idiom_base_cwd else ROOT
-        add_idiom_runtimes(runtimes, "idiom-base", base, base_cwd, args.idiom_lanes, args.artifact_dir)
+        add_idiom_runtimes(runtimes, "base", base, base_cwd, args.modes, args.cache, args.artifact_dir)
+    elif targets and "base" in targets:
+        fail("runtime 'base' requires --base-ref or --idiom-base")
     if not args.no_external:
         for name, command in EXTERNAL_RUNTIME_COMMANDS.items():
+            if not wants(targets, name):
+                continue
             exe = shutil.which(command[0])
+            info = {"kind": name, "target": name, "mode": "run", "cache": None, "cwd": ROOT}
             if exe:
-                runtimes[name] = {"kind": name, "cmd": [exe, *command[1:]], "cwd": ROOT, "available": True}
+                info.update({"cmd": [exe, *command[1:]], "available": True})
             else:
-                runtimes[name] = {"kind": name, "cmd": list(command), "cwd": ROOT, "available": False}
-    if args.runtimes:
-        wanted = set(part.strip() for part in args.runtimes.split(",") if part.strip())
-        unknown = wanted.difference(runtimes)
-        if unknown:
-            fail(f"unknown runtime(s): {', '.join(sorted(unknown))}")
-        runtimes = {name: info for name, info in runtimes.items() if name in wanted}
+                info.update({"cmd": list(command), "available": False})
+            runtimes[runtime_key(info)] = info
     return runtimes
 
 
@@ -378,17 +414,17 @@ def command_for(runtime, case):
     path = runtime_file(kind, filename)
     if not path.exists():
         fail(f"benchmark file does not exist: {path}")
-    if runtime.get("lane") == "build":
+    if runtime.get("mode") == "build":
         artifact_dir = runtime["artifact_dir"]
         artifact_dir.mkdir(parents=True, exist_ok=True)
         return [*runtime["cmd"], "build", str(path), "-o", str(artifact_dir / case["name"])]
-    if runtime.get("lane") == "sealed":
+    if runtime.get("mode") == "sealed":
         cache = runtime["sealed_cache"]
         if case["name"] not in cache:
             artifact_dir = runtime["artifact_dir"]
             artifact_dir.mkdir(parents=True, exist_ok=True)
             artifact = artifact_dir / case["name"]
-            run_checked([*runtime["cmd"], "build", str(path), "-o", str(artifact)], cwd=runtime.get("cwd"))
+            run_checked([*runtime["cmd"], "build", str(path), "-o", str(artifact)], cwd=runtime.get("cwd"), extra_env=runtime.get("env"))
             cache[case["name"]] = artifact
         return [*runtime["cmd"], str(cache[case["name"]])]
     return [*runtime["cmd"], str(path)]
@@ -413,7 +449,7 @@ def timed_run(cmd, timeout, cwd=None, extra_env=None, before=None):
 
 def measure(cmd, cwd, runs, warmups, timeout, expected, runtime):
     before = None
-    if runtime.get("cache_mode") == "fill":
+    if runtime.get("cache") == "cold":
         before = lambda: purge_ic(runtime.get("cwd") or ROOT)
     extra_env = runtime.get("env")
     for _ in range(warmups):
@@ -436,26 +472,10 @@ def measure(cmd, cwd, runs, warmups, timeout, expected, runtime):
 
 
 def expected_for_case(case, runtimes, timeout):
-    for preferred in (
-        "idiom-current-source-hit",
-        "idiom-current-source-fill",
-        "idiom-current-source-nocache",
-        "idiom-current-sealed-hit",
-        "idiom-current-sealed-nocache",
-        "idiom-base-source-hit",
-        "idiom-base-source-fill",
-        "idiom-base-source-nocache",
-        "idiom-base-sealed-hit",
-        "idiom-base-sealed-nocache",
-        "python",
-        "ruby",
-        "bash",
-        "elixir",
-    ):
-        runtime = runtimes.get(preferred)
-        if not runtime or not runtime.get("available"):
+    for runtime in runtimes.values():
+        if not runtime.get("available"):
             continue
-        if runtime.get("lane") == "build":
+        if runtime.get("mode") == "build":
             continue
         cmd = command_for(runtime, case)
         if not cmd:
@@ -463,7 +483,7 @@ def expected_for_case(case, runtimes, timeout):
         _, output = timed_run(cmd, timeout, runtime.get("cwd"), runtime.get("env"))
         return output
     for runtime in runtimes.values():
-        if runtime.get("available") and runtime.get("lane") == "build":
+        if runtime.get("available") and runtime.get("mode") == "build":
             return ""
     fail(f"no available runtime can establish expected output for {case['name']}")
 
@@ -472,10 +492,10 @@ def emit_idiom_dumps(cases, runtimes, dump_dir, timeout):
     if not dump_dir:
         return
     dump_dir.mkdir(parents=True, exist_ok=True)
-    for label, runtime in runtimes.items():
-        if runtime["kind"] != "idiom" or not runtime.get("available") or runtime.get("lane") != "source":
+    for runtime in runtimes.values():
+        if runtime["kind"] != "idiom" or not runtime.get("available") or runtime.get("mode") != "source":
             continue
-        label_dir = dump_dir / label
+        label_dir = dump_dir / runtime_dir(runtime)
         label_dir.mkdir(parents=True, exist_ok=True)
         for case in cases:
             filename = case["files"].get("idiom")
@@ -488,8 +508,8 @@ def emit_idiom_dumps(cases, runtimes, dump_dir, timeout):
             (label_dir / f"{case['name']}.bytecode").write_text(bytecode.stdout)
 
 
-def run_callgrind(case, label, runtime, expected, out_dir, timeout):
-    if not out_dir or runtime["kind"] != "idiom" or runtime.get("lane") != "source" or runtime.get("cache_mode") != "hit" or not runtime.get("available"):
+def run_callgrind(case, runtime, expected, out_dir, timeout):
+    if not out_dir or runtime["kind"] != "idiom" or runtime.get("mode") != "source" or runtime.get("cache") != "hot" or not runtime.get("available"):
         return None
     valgrind = shutil.which("valgrind")
     if not valgrind:
@@ -497,7 +517,7 @@ def run_callgrind(case, label, runtime, expected, out_dir, timeout):
     cmd = command_for(runtime, case)
     if not cmd:
         return None
-    label_dir = out_dir / label
+    label_dir = out_dir / runtime_dir(runtime)
     label_dir.mkdir(parents=True, exist_ok=True)
     out_file = label_dir / f"{case['name']}.callgrind"
     proc = run_checked(
@@ -507,42 +527,80 @@ def run_callgrind(case, label, runtime, expected, out_dir, timeout):
     )
     output = proc.stdout.strip()
     if output != expected:
-        fail(f"unexpected callgrind output for {case['name']} {label}: got {output!r}, expected {expected!r}")
+        fail(f"unexpected callgrind output for {case['name']} {runtime_key(runtime)}: got {output!r}, expected {expected!r}")
     return str(out_file)
 
 
+def runtime_display(runtime):
+    return {
+        "runtime": runtime["target"],
+        "mode": runtime.get("mode") or "-",
+        "cache": runtime.get("cache") or "-",
+    }
+
+
+def find_measurement(case_result, runtime, mode=None, cache=None):
+    for measurement in case_result["measurements"]:
+        if measurement["runtime"] != runtime:
+            continue
+        if mode is not None and measurement["mode"] != mode:
+            continue
+        if cache is not None and measurement["cache"] != cache:
+            continue
+        return measurement
+    return None
+
+
 def print_table(results, runtimes):
-    labels = [name for name, info in runtimes.items() if info.get("available")]
-    skipped = [name for name, info in runtimes.items() if not info.get("available")]
-    runtime_width = max(14, *(len(label) for label in labels), len("runtime"), len("current/base"))
+    rows = [runtime_display(info) for info in runtimes.values() if info.get("available")]
+    skipped = [runtime_display(info)["runtime"] for info in runtimes.values() if not info.get("available")]
+    runtime_width = max(7, *(len(row["runtime"]) for row in rows), len("runtime"), len("base/idiom"))
+    mode_width = max(4, *(len(row["mode"]) for row in rows), len("mode"))
+    cache_width = max(5, *(len(row["cache"]) for row in rows), len("cache"))
+    has_base = any(find_measurement(case_result, "base") for case_result in results)
     if skipped:
         print("skipped missing runtimes: " + ", ".join(skipped))
     print("")
-    print(f"{'case':<18} {'runtime':<{runtime_width}} {'median ms':>10} {'min ms':>10} {'mean ms':>10} {'x current':>10} {'x base':>8}")
-    print("-" * (72 + runtime_width))
+    if has_base:
+        header = (
+            f"{'case':<18} {'runtime':<{runtime_width}} {'mode':<{mode_width}} {'cache':<{cache_width}} "
+            f"{'median ms':>10} {'min ms':>10} {'mean ms':>10} {'x idiom':>8} {'x base':>8}"
+        )
+    else:
+        header = (
+            f"{'case':<18} {'runtime':<{runtime_width}} {'mode':<{mode_width}} {'cache':<{cache_width}} "
+            f"{'median ms':>10} {'min ms':>10} {'mean ms':>10} {'x idiom':>8}"
+        )
+    print(header)
+    print("-" * len(header))
     for case_result in results:
-        by_runtime = case_result["runtimes"]
-        current = by_runtime.get("idiom-current-source-hit", {}).get("median_ms")
-        base = by_runtime.get("idiom-base-source-hit", {}).get("median_ms")
+        idiom = find_measurement(case_result, "idiom")
+        base = find_measurement(case_result, "base")
+        idiom_median = idiom.get("median_ms") if idiom else None
+        base_median = base.get("median_ms") if base else None
         first = True
-        for label in labels:
-            stats = by_runtime.get(label)
-            if not stats:
-                continue
-            x_current = stats["median_ms"] / current if current else None
-            x_base = stats["median_ms"] / base if base else None
+        for stats in case_result["measurements"]:
+            x_idiom = stats["median_ms"] / idiom_median if idiom_median else None
+            x_base = stats["median_ms"] / base_median if base_median else None
             case_name = case_result["name"] if first else ""
-            current_text = f"{x_current:.2f}" if x_current is not None else "-"
+            idiom_text = f"{x_idiom:.2f}" if x_idiom is not None else "-"
             base_text = f"{x_base:.2f}" if x_base is not None else "-"
-            print(
-                f"{case_name:<18} {label:<{runtime_width}} "
+            row = (
+                f"{case_name:<18} {stats['runtime']:<{runtime_width}} {stats['mode']:<{mode_width}} {stats['cache']:<{cache_width}} "
                 f"{stats['median_ms']:>10.3f} {stats['min_ms']:>10.3f} {stats['mean_ms']:>10.3f} "
-                f"{current_text:>10} {base_text:>8}"
+                f"{idiom_text:>8}"
             )
+            if has_base:
+                row = f"{row} {base_text:>8}"
+            print(row)
             first = False
-        if current and base:
-            speedup = base / current
-            print(f"{'':<18} {'current/base':<{runtime_width}} {'':>10} {'':>10} {'':>10} {speedup:>10.2f} {'':>8}")
+        if idiom_median and base_median:
+            speedup = base_median / idiom_median
+            if has_base:
+                print(
+                    f"{'':<18} {'base/idiom':<{runtime_width}} {'':<{mode_width}} {'':<{cache_width}} "
+                    f"{'':>10} {'':>10} {'':>10} {speedup:>8.2f} {'':>8}"
+                )
 
 
 def main(argv):
@@ -556,9 +614,10 @@ def main(argv):
     parser.add_argument("--quick", action="store_true", help="Use 3 measured runs and 0 warmups.")
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--cases", help="Comma-separated benchmark case names.")
-    parser.add_argument("--runtimes", help="Comma-separated runtime labels.")
+    parser.add_argument("--runtimes", help="Comma-separated runtime targets: idiom, base, python, ruby, bash, elixir, elisp.")
     parser.add_argument("--no-external", action="store_true")
-    parser.add_argument("--idiom-lanes", help="Comma-separated Idiom lanes: source-hit,source-fill,source-nocache,build-hit,build-fill,build-nocache,sealed-hit,sealed-nocache.")
+    parser.add_argument("--modes", default="source", help="Comma-separated Idiom modes: source, build, sealed.")
+    parser.add_argument("--cache", default="hot", help="Comma-separated Idiom cache modes: hot, cold, off.")
     parser.add_argument("--with-sealed", action="store_true", help="Also benchmark Idiom sealed bytecode artifacts.")
     parser.add_argument("--json-out", type=Path)
     parser.add_argument("--dump-dir", type=Path, help="Write 'idiomc dump core' and 'idiomc dump bytecode' outputs for Idiom cases.")
@@ -573,7 +632,11 @@ def main(argv):
         fail("--runs must be >= 1")
     if args.warmups < 0:
         fail("--warmups must be >= 0")
-    args.idiom_lanes = parse_idiom_lanes(args.idiom_lanes, args.with_sealed)
+    args.modes = parse_csv(args.modes, "source", IDIOM_MODES, "mode(s)")
+    if args.with_sealed and "sealed" not in args.modes:
+        args.modes.append("sealed")
+    args.cache = parse_csv(args.cache, "hot", CACHE_MODES, "cache mode(s)", CACHE_ALIASES)
+    args.runtime_targets = parse_runtime_targets(args.runtimes)
 
     cases = selected_cases(args)
     if args.list:
@@ -605,21 +668,22 @@ def main(argv):
                 "name": case["name"],
                 "summary": case["summary"],
                 "expected": expected,
-                "runtimes": {},
+                "measurements": [],
             }
             print(f"running {case['name']}: {case['summary']}", file=sys.stderr)
-            for label, runtime in runtimes.items():
+            for runtime in runtimes.values():
                 if not runtime.get("available"):
                     continue
                 cmd = command_for(runtime, case)
                 if not cmd:
                     continue
-                runtime_expected = None if runtime.get("lane") == "build" else expected
+                runtime_expected = None if runtime.get("mode") == "build" else expected
                 stats = measure(cmd, runtime.get("cwd"), args.runs, args.warmups, args.timeout, runtime_expected, runtime)
-                profile = run_callgrind(case, label, runtime, expected, args.callgrind_dir, args.timeout)
+                stats.update(runtime_display(runtime))
+                profile = run_callgrind(case, runtime, expected, args.callgrind_dir, args.timeout)
                 if profile:
                     stats["callgrind"] = profile
-                case_result["runtimes"][label] = stats
+                case_result["measurements"].append(stats)
             results.append(case_result)
     finally:
         if base_tmp is not None:
@@ -631,7 +695,8 @@ def main(argv):
         "runs": args.runs,
         "warmups": args.warmups,
         "base_ref": args.base_ref,
-        "idiom_lanes": args.idiom_lanes,
+        "idiom_modes": args.modes,
+        "cache": args.cache,
         "dump_dir": str(args.dump_dir) if args.dump_dir else None,
         "callgrind_dir": str(args.callgrind_dir) if args.callgrind_dir else None,
         "results": results,
