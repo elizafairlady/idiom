@@ -35,9 +35,10 @@ IdmCore *literal_from_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError 
         case IDM_SYN_NIL:
             return idm_core_literal(idm_nil(), syn->span);
         case IDM_SYN_INT:
+            if (!idm_fixnum_fits(syn->as.integer)) { idm_error_set(err, syn->span, "integer literal exceeds 62-bit fixnum range"); return NULL; }
             return idm_core_literal(idm_int(syn->as.integer), syn->span);
         case IDM_SYN_FLOAT:
-            return idm_core_literal(idm_float(syn->as.real), syn->span);
+            return idm_core_literal(idm_float(ctx->rt, syn->as.real, err), syn->span);
         case IDM_SYN_ATOM:
             if (strcmp(syn->as.text, "nil") == 0) return idm_core_literal(idm_nil(), syn->span);
             return idm_core_literal(idm_atom(ctx->rt, syn->as.text), syn->span);
@@ -57,11 +58,12 @@ bool value_from_literal_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmValu
             *out = idm_nil();
             return true;
         case IDM_SYN_INT:
+            if (!idm_fixnum_fits(syn->as.integer)) return idm_error_set(err, syn->span, "integer literal exceeds 62-bit fixnum range");
             *out = idm_int(syn->as.integer);
             return true;
         case IDM_SYN_FLOAT:
-            *out = idm_float(syn->as.real);
-            return true;
+            *out = idm_float(ctx->rt, syn->as.real, err);
+            return !(err && err->present);
         case IDM_SYN_ATOM:
             if (strcmp(syn->as.text, "nil") == 0) {
                 *out = idm_nil();

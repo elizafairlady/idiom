@@ -353,10 +353,10 @@ static bool op_tty_block(Vm *vm, IdmPrimitive prim, const IdmValue *args, uint32
     vm->tty_timeout_ms = 0;
     if (prim == IDM_PRIM_TTY_READ) {
         IdmValue timeout = args[0];
-        if (timeout.tag == IDM_VAL_INT && timeout.as.i >= 0) {
+        if (idm_value_tag(timeout) == IDM_VAL_INT && idm_int_value(timeout) >= 0) {
             vm->tty_has_timeout = true;
-            vm->tty_timeout_ms = timeout.as.i;
-        } else if (timeout.tag != IDM_VAL_NIL) {
+            vm->tty_timeout_ms = idm_int_value(timeout);
+        } else if (idm_value_tag(timeout) != IDM_VAL_NIL) {
             idm_error_set(err, idm_span_unknown(NULL), "tty-read timeout must be a non-negative integer or :nil");
             return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "tty-read"), timeout);
         }
@@ -367,8 +367,8 @@ static bool op_tty_block(Vm *vm, IdmPrimitive prim, const IdmValue *args, uint32
 }
 
 static bool port_stream_value(IdmRuntime *rt, IdmValue value, const char **out, IdmError *err) {
-    if (value.tag == IDM_VAL_ATOM) {
-        const char *text = idm_symbol_text(value.as.symbol);
+    if (idm_value_tag(value) == IDM_VAL_ATOM) {
+        const char *text = idm_symbol_text(idm_value_symbol(value));
         if (strcmp(text, "stdout") == 0 || strcmp(text, "stderr") == 0) {
             *out = text;
             return true;
@@ -386,19 +386,19 @@ static bool op_port_read_block(Vm *vm, const IdmValue *args, uint32_t argc, IdmE
     IdmValue port = args[0];
     IdmValue streamv = args[1];
     IdmValue maxv = args[2];
-    if (port.tag != IDM_VAL_PORT) {
+    if (idm_value_tag(port) != IDM_VAL_PORT) {
         idm_error_set(err, idm_span_unknown(NULL), "port-read expects a port");
         return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "port-read"), port);
     }
     const char *stream = NULL;
     if (!port_stream_value(vm->rt, streamv, &stream, err)) return false;
-    if (maxv.tag != IDM_VAL_INT || maxv.as.i <= 0) {
+    if (idm_value_tag(maxv) != IDM_VAL_INT || idm_int_value(maxv) <= 0) {
         idm_error_set(err, idm_span_unknown(NULL), "port-read expects a positive byte count");
         return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "port-read"), maxv);
     }
     vm->port_read_port = port;
     vm->port_read_stream = stream;
-    vm->port_read_max = (size_t)maxv.as.i;
+    vm->port_read_max = (size_t)idm_int_value(maxv);
     vm->has_port_read_request = true;
     return true;
 }
@@ -410,11 +410,11 @@ static bool op_port_write_block(Vm *vm, const IdmValue *args, uint32_t argc, Idm
     }
     IdmValue port = args[0];
     IdmValue data = args[1];
-    if (port.tag != IDM_VAL_PORT) {
+    if (idm_value_tag(port) != IDM_VAL_PORT) {
         idm_error_set(err, idm_span_unknown(NULL), "port-write expects a port");
         return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "port-write"), port);
     }
-    if (data.tag != IDM_VAL_STRING) {
+    if (idm_value_tag(data) != IDM_VAL_STRING) {
         idm_error_set(err, idm_span_unknown(NULL), "port-write expects a string");
         return idm_error_reason(vm->rt, err, "type-error", 2, idm_atom(vm->rt, "port-write"), data);
     }
@@ -506,7 +506,7 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
             if (!idm_sched_spawn_monitor(vm->sched, thunk, vm, vm->self, &pid, &ref, err)) return false;
             IdmValue items[2] = { pid, ref };
             IdmValue result = idm_tuple(vm->rt, items, 2u, err);
-            if (result.tag != IDM_VAL_TUPLE) return false;
+            if (idm_value_tag(result) != IDM_VAL_TUPLE) return false;
             *out = result;
             return true;
         }
@@ -514,8 +514,8 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
             if (!primitive_exact_arity(primitive, argc, 2u, err)) return false;
             IdmValue target = args[0];
             IdmValue msg = args[1];
-            if (target.tag != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "send expects a pid target");
-            idm_sched_send(vm->sched, target.as.id, msg);
+            if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "send expects a pid target");
+            idm_sched_send(vm->sched, idm_value_id(target), msg);
             *out = msg;
             return true;
         }
@@ -524,10 +524,10 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
             if (argc == 2u) {
                 IdmValue target = args[0];
                 IdmValue reason = args[1];
-                if (target.tag != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "exit signal expects a pid target");
+                if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "exit signal expects a pid target");
                 bool self_exits = false;
                 IdmValue exit_reason = idm_nil();
-                if (!idm_sched_exit_signal(vm->sched, vm->self, target.as.id, reason, &self_exits, &exit_reason, err)) return false;
+                if (!idm_sched_exit_signal(vm->sched, vm->self, idm_value_id(target), reason, &self_exits, &exit_reason, err)) return false;
                 if (self_exits) {
                     if (!status) return idm_error_set(err, idm_span_unknown(NULL), "exit signal requires a schedulable VM step");
                     *status = IDM_EXEC_EXIT;
@@ -547,10 +547,10 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
         case IDM_PRIM_LINK: {
             if (!primitive_exact_arity(primitive, argc, 1u, err)) return false;
             IdmValue target = args[0];
-            if (target.tag != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "link expects a pid");
+            if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "link expects a pid");
             bool self_exits = false;
             IdmValue exit_reason = idm_nil();
-            if (!idm_sched_link(vm->sched, vm->self, target.as.id, &self_exits, &exit_reason, err)) return false;
+            if (!idm_sched_link(vm->sched, vm->self, idm_value_id(target), &self_exits, &exit_reason, err)) return false;
             if (self_exits) {
                 if (!status) return idm_error_set(err, idm_span_unknown(NULL), "link exit requires a schedulable VM step");
                 *status = IDM_EXEC_EXIT;
@@ -563,24 +563,24 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
         case IDM_PRIM_UNLINK: {
             if (!primitive_exact_arity(primitive, argc, 1u, err)) return false;
             IdmValue target = args[0];
-            if (target.tag != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "unlink expects a pid");
-            idm_sched_unlink(vm->sched, vm->self, target.as.id);
+            if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "unlink expects a pid");
+            idm_sched_unlink(vm->sched, vm->self, idm_value_id(target));
             *out = idm_atom(vm->rt, "ok");
             return true;
         }
         case IDM_PRIM_MONITOR: {
             if (!primitive_exact_arity(primitive, argc, 1u, err)) return false;
             IdmValue target = args[0];
-            if (target.tag != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "monitor expects a pid");
+            if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "monitor expects a pid");
             IdmValue ref = idm_nil();
-            if (!idm_sched_monitor(vm->sched, vm->self, target.as.id, &ref, err)) return false;
+            if (!idm_sched_monitor(vm->sched, vm->self, idm_value_id(target), &ref, err)) return false;
             *out = ref;
             return true;
         }
         case IDM_PRIM_DEMONITOR: {
             if (!primitive_exact_arity(primitive, argc, 1u, err)) return false;
             IdmValue ref = args[0];
-            if (ref.tag != IDM_VAL_REF) return idm_error_set(err, idm_span_unknown(NULL), "demonitor expects a reference");
+            if (idm_value_tag(ref) != IDM_VAL_REF) return idm_error_set(err, idm_span_unknown(NULL), "demonitor expects a reference");
             idm_sched_demonitor(vm->sched, vm->self, ref);
             *out = idm_atom(vm->rt, "ok");
             return true;
@@ -606,7 +606,7 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
             if (!primitive_exact_arity(primitive, argc, 1u, err)) return false;
             if (!status) return idm_error_set(err, idm_span_unknown(NULL), "await requires a schedulable VM step");
             IdmValue port = args[0];
-            if (port.tag != IDM_VAL_PORT) return idm_error_set(err, idm_span_unknown(NULL), "await expects a port");
+            if (idm_value_tag(port) != IDM_VAL_PORT) return idm_error_set(err, idm_span_unknown(NULL), "await expects a port");
             vm->await_port = port;
             vm->has_await = true;
             *status = IDM_EXEC_BLOCK_AWAIT;
@@ -1344,8 +1344,8 @@ static const char *module_const_text(const IdmBytecodeModule *module, uint32_t i
         return NULL;
     }
     IdmValue value = module->constants[index];
-    if (value.tag == IDM_VAL_ATOM || value.tag == IDM_VAL_WORD) return idm_symbol_text(value.as.symbol);
-    if (value.tag == IDM_VAL_STRING) return idm_string_bytes(value);
+    if (idm_value_tag(value) == IDM_VAL_ATOM || idm_value_tag(value) == IDM_VAL_WORD) return idm_symbol_text(idm_value_symbol(value));
+    if (idm_value_tag(value) == IDM_VAL_STRING) return idm_string_bytes(value);
     idm_error_set(err, idm_span_unknown(NULL), "%s constant must be a name", what);
     return NULL;
 }
@@ -1356,9 +1356,9 @@ static const char *module_const_contract_text(const IdmBytecodeModule *module, u
         return NULL;
     }
     IdmValue value = module->constants[index];
-    if (value.tag == IDM_VAL_NIL) return NULL;
-    if (value.tag == IDM_VAL_ATOM || value.tag == IDM_VAL_WORD) return idm_symbol_text(value.as.symbol);
-    if (value.tag == IDM_VAL_STRING) return idm_string_bytes(value);
+    if (idm_value_tag(value) == IDM_VAL_NIL) return NULL;
+    if (idm_value_tag(value) == IDM_VAL_ATOM || idm_value_tag(value) == IDM_VAL_WORD) return idm_symbol_text(idm_value_symbol(value));
+    if (idm_value_tag(value) == IDM_VAL_STRING) return idm_string_bytes(value);
     idm_error_set(err, idm_span_unknown(NULL), "%s constant must be nil or a name", what);
     return NULL;
 }
@@ -1432,9 +1432,9 @@ static bool package_env_push(Vm *vm, Frame *frame, IdmError *err) {
     uint32_t key_const = module->code[frame->ip++];
     if (key_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "PUSH_PACKAGE_ENV constant out of bounds");
     IdmValue key_value = module->constants[key_const];
-    if (key_value.tag != IDM_VAL_ATOM && key_value.tag != IDM_VAL_WORD) return idm_error_set(err, idm_span_unknown(NULL), "PUSH_PACKAGE_ENV expects a key constant");
+    if (idm_value_tag(key_value) != IDM_VAL_ATOM && idm_value_tag(key_value) != IDM_VAL_WORD) return idm_error_set(err, idm_span_unknown(NULL), "PUSH_PACKAGE_ENV expects a key constant");
     IdmEnv *parent = frame->env ? frame->env : vm->rt->main_env;
-    IdmEnv *child = idm_package_env_get_or_create(vm->rt, idm_symbol_text(key_value.as.symbol));
+    IdmEnv *child = idm_package_env_get_or_create(vm->rt, idm_symbol_text(idm_value_symbol(key_value)));
     if (!child) return idm_error_oom(err, idm_span_unknown(NULL));
     if (vm->env_save_count == vm->env_save_cap) {
         size_t cap = vm->env_save_cap ? vm->env_save_cap * 2u : 8u;
@@ -1599,7 +1599,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                     if (operand >= frame->capture_count) return idm_error_set(err, idm_span_unknown(NULL), "capture index %u out of bounds", operand);
                     value = frame->captures[operand];
                 } else {
-                    if (frame->closure.tag != IDM_VAL_CLOSURE) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_CAPTURE requires a closure frame");
+                    if (idm_value_tag(frame->closure) != IDM_VAL_CLOSURE) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_CAPTURE requires a closure frame");
                     if (operand >= idm_closure_capture_count(frame->closure)) return idm_error_set(err, idm_span_unknown(NULL), "capture index %u out of bounds", operand);
                     value = idm_closure_capture(frame->closure, operand, err);
                     if (err && err->present) return false;
@@ -1820,9 +1820,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 IdmEnv *env = idm_package_env_get_or_create(vm->rt, key);
                 if (!env) return idm_error_oom(err, idm_span_unknown(NULL));
                 if (!idm_env_slot_ensure(env, slot, err)) return false;
-                value = idm_value_copy(vm->rt, &vm->rt->immortal, value, err);
-                if (err->present) return false;
-                idm_env_slot_set(env, slot, value);
+                if (!idm_env_slot_set(vm->rt, env, slot, value, err)) return false;
                 break;
             }
             case IDM_OP_STORE_ENV: {
@@ -1831,9 +1829,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 IdmValue value = idm_nil();
                 if (!frame_reg_value(frame, src, &value, err)) return false;
                 if (!idm_env_slot_ensure(frame->env, operand, err)) return false;
-                value = idm_value_copy(vm->rt, &vm->rt->immortal, value, err);
-                if (err->present) return false;
-                idm_env_slot_set(frame->env, operand, value);
+                if (!idm_env_slot_set(vm->rt, frame->env, operand, value, err)) return false;
                 break;
             }
             default:

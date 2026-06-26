@@ -72,7 +72,7 @@ static void test_gc_stress(void) {
     IdmValue out = idm_nil();
     CHECK(idm_sched_run_main(sched, main_fn, &out, &err));
     CHECK(!err.present);
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 100);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 100);
     idm_sched_destroy(sched);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -92,7 +92,7 @@ static void test_heap_accounting_sweep(void) {
     memset(payload, 'x', 10000u);
     IdmValue s = idm_string_n(&rt, payload, 10000u, &err);
     free(payload);
-    CHECK(!err.present && s.tag == IDM_VAL_STRING);
+    CHECK(!err.present && idm_value_tag(s) == IDM_VAL_STRING);
     CHECK(idm_heap_bytes(&rt.heap) >= baseline + 10000u);
     idm_heap_sweep(&rt.heap);
     CHECK(idm_heap_bytes(&rt.heap) == baseline);
@@ -125,7 +125,7 @@ static void test_gc_recurring_collection(void) {
     IdmValue out = idm_nil();
     CHECK(idm_sched_run_main(sched, main_fn, &out, &err));
     CHECK(!err.present);
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 0);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 0);
     CHECK(idm_heap_bytes(&rt.heap) < baseline + 5u * 1024u * 1024u);
     idm_sched_destroy(sched);
     idm_bc_destroy(&module);
@@ -202,7 +202,7 @@ static void test_temp_registry_backstop(void) {
     CHECK(sched != NULL);
     IdmValue out = idm_nil();
     CHECK(idm_sched_run_main(sched, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_STRING);
+    CHECK(idm_value_tag(out) == IDM_VAL_STRING);
     char path[256];
     size_t len = idm_string_length(out) < sizeof(path) - 1u ? idm_string_length(out) : sizeof(path) - 1u;
     memcpy(path, idm_string_bytes(out), len);

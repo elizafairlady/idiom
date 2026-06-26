@@ -6,11 +6,11 @@ use std/enum
 
 suite do
   test "integer-overflow-traps" do
-    assert-eq (assert-raises (fn do 9223372036854775807 + 1 end)) {:error {:overflow :add}}
-    assert-eq (assert-raises (fn do 0 - 9223372036854775807 - 2 end)) {:error {:overflow :sub}}
-    assert-eq (assert-raises (fn do 4611686018427387904 * 4 end)) {:error {:overflow :mul}}
+    assert-eq (assert-raises (fn do 4611686018427387903 + 1 end)) {:error {:overflow :add}}
+    assert-eq (assert-raises (fn do 0 - 4611686018427387903 - 2 end)) {:error {:overflow :sub}}
+    assert-eq (assert-raises (fn do 4611686018427387903 * 4 end)) {:error {:overflow :mul}}
     assert-eq (assert-raises (fn do 2 ** 64 end)) {:error {:overflow :pow}}
-    int-min = 0 - 9223372036854775807 - 1
+    int-min = 0 - 4611686018427387903 - 1
     assert-eq (assert-raises (fn do neg int-min end)) {:error {:overflow :neg}}
     assert-eq (assert-raises (fn do int-min / -1 end)) {:error {:overflow :div}}
     assert-eq (assert-raises (fn do int-min % -1 end)) {:error {:overflow :mod}}
@@ -27,10 +27,10 @@ suite do
     assert-eq (assert-raises (fn do 1 %% 0 end)) {:error {:div-by-zero :floor-mod}}
   end
   test "int64-boundary-literals" do
-    assert-eq 9223372036854775807 (9223372036854775806 + 1)
-    assert-eq -9223372036854775808 (0 - 9223372036854775807 - 1)
-    assert-inspect 9223372036854775807 "9223372036854775807"
-    assert-inspect -9223372036854775808 "-9223372036854775808"
+    assert-eq 4611686018427387903 (4611686018427387902 + 1)
+    assert-eq -4611686018427387904 (0 - 4611686018427387903 - 1)
+    assert-inspect 4611686018427387903 "4611686018427387903"
+    assert-inspect -4611686018427387904 "-4611686018427387904"
   end
   test "negative-literals-after-open-delimiters" do
     assert-eq {-3 -1} {(neg 3) (neg 1)}

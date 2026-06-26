@@ -38,7 +38,7 @@ static void test_source_quote(void) {
     check_value_written(&rt, "':ok\n", ":ok");
     check_value_written(&rt, "'(a b c)\n", "(a b c)");
     check_value_written(&rt, "'(a (b c))\n", "(a (b c))");
-    check_value_written(&rt, "'()\n", "()");
+    check_value_written(&rt, "'()\n", ":nil");
     check_value_written(&rt, "'[1 2]\n", "[1 2]");
     check_value_written(&rt, "x = 5\n`(a ,x c)\n", "(a 5 c)");
     check_value_written(&rt, "xs = '(1 2 3)\n`(a ,@xs z)\n", "(a 1 2 3 z)");
@@ -84,7 +84,7 @@ static void test_source_operator(void) {
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 7);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 7);
     idm_bc_destroy(&module);
     idm_core_free(core);
 
@@ -94,7 +94,7 @@ static void test_source_operator(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -105,7 +105,7 @@ static void test_source_operator(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -116,7 +116,7 @@ static void test_source_operator(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -127,7 +127,7 @@ static void test_source_operator(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -143,7 +143,7 @@ static void test_source_operator(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -171,7 +171,7 @@ static void test_source_fn(void) {
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -182,7 +182,7 @@ static void test_source_fn(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -193,7 +193,7 @@ static void test_source_fn(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 3);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 3);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -204,7 +204,7 @@ static void test_source_fn(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 3);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 3);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -248,7 +248,7 @@ static void test_source_defn_letrec(void) {
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -259,7 +259,7 @@ static void test_source_defn_letrec(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -270,7 +270,7 @@ static void test_source_defn_letrec(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -281,7 +281,7 @@ static void test_source_defn_letrec(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 7);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 7);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -292,7 +292,7 @@ static void test_source_defn_letrec(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 15);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 15);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -313,7 +313,7 @@ static void test_source_match(void) {
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -324,7 +324,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 7);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 7);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -335,7 +335,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -346,7 +346,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -357,7 +357,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -383,7 +383,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -409,7 +409,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 1);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 1);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -420,7 +420,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 1);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 1);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -431,7 +431,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 2);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 2);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -442,7 +442,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -453,7 +453,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -464,7 +464,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -475,7 +475,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -486,7 +486,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -497,7 +497,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);
@@ -508,7 +508,7 @@ static void test_source_match(void) {
     CHECK(idm_core_compile_main(core, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(core);

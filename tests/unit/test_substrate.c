@@ -141,7 +141,7 @@ static void test_values(void) {
     idm_heap_collect(&rt.heap, roots, 1u);
     CHECK(idm_heap_object_count(&rt.heap) == 2u);
     IdmValue car = idm_car(list, &err);
-    CHECK(car.tag == IDM_VAL_INT && car.as.i == 1);
+    CHECK(idm_value_tag(car) == IDM_VAL_INT && idm_int_value(car) == 1);
     idm_error_clear(&err);
     idm_runtime_destroy(&rt);
 }
@@ -1249,7 +1249,7 @@ static void test_vm_call_and_locals(void) {
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 41);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 41);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_error_clear(&err);
@@ -1281,7 +1281,7 @@ static void test_vm_tail_call_reuses_frame(void) {
     limits.max_frames = 1;
     IdmValue out = idm_nil();
     CHECK(idm_vm_run_limited(&rt, &module, main_fn, limits, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 99);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 99);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_error_clear(&err);
@@ -1345,7 +1345,7 @@ static void test_vm_guard_error_is_clause_failure(void) {
 
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_error_clear(&err);
@@ -1375,7 +1375,7 @@ static void test_bytecode_link_finalizes_after_intern(void) {
     CHECK(idm_bc_is_finalized(&linked));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &linked, fn_off + main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 7);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 7);
     CHECK(!err.present);
     idm_bc_destroy(&linked);
     idm_bc_destroy(&src);
@@ -1427,7 +1427,7 @@ static void test_core_compile_and_vm(void) {
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     idm_bc_destroy(&module);
     idm_core_free(add);
 
@@ -1440,7 +1440,7 @@ static void test_core_compile_and_vm(void) {
     CHECK(idm_core_compile_main(cond_expr, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 2);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 2);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(cond_expr);
@@ -1596,8 +1596,8 @@ static void test_pattern_selector(void) {
     CHECK(matched && has && fn == 7u);
     const IdmValue *h = idm_pattern_bindings_get(&bindings, "h");
     const IdmValue *t = idm_pattern_bindings_get(&bindings, "t");
-    CHECK(h && h->tag == IDM_VAL_INT && h->as.i == 1);
-    CHECK(t && t->tag == IDM_VAL_INT && t->as.i == 2);
+    CHECK(h && idm_value_tag(*h) == IDM_VAL_INT && idm_int_value(*h) == 1);
+    CHECK(t && idm_value_tag(*t) == IDM_VAL_INT && idm_int_value(*t) == 2);
     CHECK(!err.present);
     idm_pattern_bindings_destroy(&bindings);
     idm_pattern_selector_free(selector);
@@ -1673,7 +1673,7 @@ static void test_core_do_and_local_bind(void) {
     CHECK(module.functions[main_fn].local_count == 1u);
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(bind);
@@ -1685,7 +1685,7 @@ static void test_core_do_and_local_bind(void) {
     CHECK(idm_core_compile_main(do_expr, &module, &main_fn, &err));
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 2);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 2);
     idm_bc_destroy(&module);
     idm_core_free(do_expr);
 
@@ -1721,7 +1721,7 @@ static void test_core_fn_literal_and_call(void) {
     idm_buf_destroy(&dis);
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(call);
@@ -1868,7 +1868,7 @@ static void test_core_letrec_recursion(void) {
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 15);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 15);
     CHECK(!err.present);
     idm_bc_destroy(&module);
     idm_core_free(letrec);
@@ -1895,7 +1895,7 @@ static void test_source_expansion_capabilities(void) {
     CHECK(idm_bc_intern_literals(&rt, &module, &err));
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(&rt, &module, main_fn, &out, &err));
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == 42);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == 42);
     idm_bc_destroy(&module);
     idm_core_free(core);
     CHECK(!err.present);
@@ -1951,7 +1951,7 @@ static void test_intern_stability(void) {
     }
     IdmValue again = idm_atom(&rt, "first-symbol");
     CHECK(idm_value_equal(first, again));
-    CHECK_STR(idm_symbol_text(first.as.symbol), "first-symbol");
+    CHECK_STR(idm_symbol_text(idm_value_symbol(first)), "first-symbol");
     idm_error_clear(&err);
     idm_runtime_destroy(&rt);
 }
@@ -1974,7 +1974,7 @@ static void test_bytecode_serialize_roundtrip(void) {
     IdmValue out1 = idm_nil();
     CHECK(idm_vm_run(&rt, &m1, main_fn, &out1, &err));
     CHECK(!err.present);
-    CHECK(out1.tag == IDM_VAL_INT && out1.as.i == 42);
+    CHECK(idm_value_tag(out1) == IDM_VAL_INT && idm_int_value(out1) == 42);
     IdmBuffer blob;
     idm_buf_init(&blob);
     CHECK(idm_ic_serialize(&m1, &blob, &err));
@@ -1993,7 +1993,7 @@ static void test_bytecode_serialize_roundtrip(void) {
     IdmValue out2 = idm_nil();
     CHECK(idm_vm_run(&rt, &m2, main_fn, &out2, &err));
     CHECK(!err.present);
-    CHECK(out2.tag == IDM_VAL_INT && out2.as.i == 42);
+    CHECK(idm_value_tag(out2) == IDM_VAL_INT && idm_int_value(out2) == 42);
     IdmBytecodeModule m3;
     idm_bc_init(&m3);
     CHECK(!idm_ic_deserialize(&rt, (const unsigned char *)"XX", 2u, &m3, &err));
@@ -2126,7 +2126,7 @@ static void test_module_syntax_constant_roundtrip(void) {
     idm_bc_init(&m2);
     CHECK(idm_ic_deserialize(&rt, (const unsigned char *)blob.data, blob.len, &m2, &err));
     CHECK(!err.present);
-    CHECK(m2.const_count == 1 && m2.constants[0].tag == IDM_VAL_SYNTAX);
+    CHECK(m2.const_count == 1 && idm_value_tag(m2.constants[0]) == IDM_VAL_SYNTAX);
     const IdmSyntax *back = idm_syntax_get(m2.constants[0], &err);
     CHECK(back != NULL && !err.present);
     CHECK(idm_syn_scope_contains(back->as.seq.items[0], 0, 21u));
@@ -2186,7 +2186,7 @@ static void test_string_constant_nul_roundtrip(void) {
     idm_bc_init(&m2);
     CHECK(idm_ic_deserialize(&rt, (const unsigned char *)blob.data, blob.len, &m2, &err));
     CHECK(!err.present);
-    CHECK(m2.const_count == 1 && m2.constants[0].tag == IDM_VAL_STRING);
+    CHECK(m2.const_count == 1 && idm_value_tag(m2.constants[0]) == IDM_VAL_STRING);
     CHECK(idm_string_length(m2.constants[0]) == sizeof(bytes) - 1u);
     CHECK(memcmp(idm_string_bytes(m2.constants[0]), bytes, sizeof(bytes) - 1u) == 0);
     idm_buf_destroy(&blob);
@@ -2270,10 +2270,10 @@ static void test_value_copy(void) {
     IdmValue copy = idm_value_copy(&rt, &rt.heap, orig, &err);
     CHECK(!err.present);
     CHECK(idm_value_equal(orig, copy));
-    CHECK(orig.as.obj != copy.as.obj);
+    CHECK(idm_boxed_object(orig) != idm_boxed_object(copy));
     IdmValue cs = idm_sequence_item(copy, 0u, &err);
     IdmValue os = idm_sequence_item(orig, 0u, &err);
-    CHECK(cs.as.obj != os.as.obj);
+    CHECK(idm_boxed_object(cs) != idm_boxed_object(os));
     CHECK(idm_value_equal(cs, os));
 
     IdmValue k = idm_cell(&rt, idm_nil(), &err);
@@ -2282,12 +2282,12 @@ static void test_value_copy(void) {
     CHECK(idm_cell_set(k, t, &err));
     IdmValue tcopy = idm_value_copy(&rt, &rt.heap, t, &err);
     CHECK(!err.present);
-    CHECK(tcopy.as.obj != t.as.obj);
+    CHECK(idm_boxed_object(tcopy) != idm_boxed_object(t));
     IdmValue kcopy = idm_sequence_item(tcopy, 1u, &err);
-    CHECK(kcopy.tag == IDM_VAL_CELL);
-    CHECK(kcopy.as.obj != k.as.obj);
+    CHECK(idm_value_tag(kcopy) == IDM_VAL_CELL);
+    CHECK(idm_boxed_object(kcopy) != idm_boxed_object(k));
     IdmValue inner = idm_cell_get(kcopy, &err);
-    CHECK(inner.as.obj == tcopy.as.obj);
+    CHECK(idm_boxed_object(inner) == idm_boxed_object(tcopy));
 
     idm_runtime_destroy(&rt);
 }

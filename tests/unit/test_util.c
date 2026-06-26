@@ -43,7 +43,7 @@ void check_operator_eval(IdmRuntime *rt, const char *source, const char *expect_
     IdmValue out = idm_nil();
     CHECK(idm_vm_run(rt, &module, main_fn, &out, &err));
     CHECK(!err.present);
-    CHECK(out.tag == IDM_VAL_INT && out.as.i == expect_value);
+    CHECK(idm_value_tag(out) == IDM_VAL_INT && idm_int_value(out) == expect_value);
     idm_bc_destroy(&module);
     idm_core_free(core);
     idm_error_clear(&err);

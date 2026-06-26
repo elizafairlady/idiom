@@ -32,7 +32,6 @@ typedef enum {
     IDM_VAL_FLOAT,
     IDM_VAL_STRING,
     IDM_VAL_PAIR,
-    IDM_VAL_EMPTY_LIST,
     IDM_VAL_TUPLE,
     IDM_VAL_VECTOR,
     IDM_VAL_DICT,
@@ -44,19 +43,60 @@ typedef enum {
     IDM_VAL_PORT,
     IDM_VAL_RECORD,
     IDM_VAL_REGEX,
-    IDM_VAL_REGEX_RESULT
+    IDM_VAL_REGEX_RESULT,
+    IDM_VAL_BIGNUM
 } IdmValueTag;
 
 typedef struct {
-    IdmValueTag tag;
-    union {
-        int64_t i;
-        double f;
-        IdmObject *obj;
-        IdmSymbol *symbol;
-        uint64_t id;
-    } as;
+    uint64_t bits;
 } IdmValue;
+
+typedef enum {
+    IDM_IMM_EMPTY = 0,
+    IDM_IMM_ATOM,
+    IDM_IMM_WORD,
+    IDM_IMM_PID,
+    IDM_IMM_REF,
+    IDM_IMM_PORT
+} IdmImmCtor;
+
+#define IDM_FIXNUM_MAX ((int64_t)0x3FFFFFFFFFFFFFFFLL)
+#define IDM_FIXNUM_MIN ((int64_t)0xC000000000000000LL)
+
+static inline bool idm_is_fixnum(IdmValue v) { return (v.bits & 1u) != 0u; }
+static inline int64_t idm_fixnum_value(IdmValue v) { return (int64_t)v.bits >> 1; }
+static inline bool idm_fixnum_fits(int64_t i) { return i >= IDM_FIXNUM_MIN && i <= IDM_FIXNUM_MAX; }
+static inline IdmValue idm_fixnum(int64_t i) { IdmValue v; v.bits = ((uint64_t)i << 1) | 1u; return v; }
+static inline bool idm_is_immediate(IdmValue v) { return (v.bits & 3u) == 2u; }
+static inline IdmImmCtor idm_immediate_ctor(IdmValue v) { return (IdmImmCtor)((v.bits >> 2) & 0x3Fu); }
+static inline uint64_t idm_immediate_payload(IdmValue v) { return v.bits >> 8; }
+static inline IdmValue idm_immediate(IdmImmCtor ctor, uint64_t payload) {
+    IdmValue v;
+    v.bits = (payload << 8) | ((uint64_t)(ctor & 0x3Fu) << 2) | 2u;
+    return v;
+}
+static inline bool idm_is_boxed(IdmValue v) { return v.bits != 0u && (v.bits & 7u) == 0u; }
+static inline IdmObject *idm_boxed_object(IdmValue v) { return (IdmObject *)(uintptr_t)v.bits; }
+static inline IdmValue idm_from_boxed(IdmObject *obj) { IdmValue v; v.bits = (uint64_t)(uintptr_t)obj; return v; }
+
+IdmValueTag idm_boxed_value_tag(IdmValue value);
+
+static inline IdmValueTag idm_value_tag(IdmValue v) {
+    if (v.bits == 0u) return IDM_VAL_NIL;
+    if (v.bits & 1u) return IDM_VAL_INT;
+    if ((v.bits & 3u) == 2u) {
+        switch (idm_immediate_ctor(v)) {
+            case IDM_IMM_EMPTY: return IDM_VAL_NIL;
+            case IDM_IMM_ATOM: return IDM_VAL_ATOM;
+            case IDM_IMM_WORD: return IDM_VAL_WORD;
+            case IDM_IMM_PID: return IDM_VAL_PID;
+            case IDM_IMM_REF: return IDM_VAL_REF;
+            case IDM_IMM_PORT: return IDM_VAL_PORT;
+        }
+        return IDM_VAL_NIL;
+    }
+    return idm_boxed_value_tag(v);
+}
 
 typedef struct {
     IdmValue key;
@@ -147,7 +187,7 @@ struct IdmRuntime {
 IdmEnv *idm_package_env_get_or_create(IdmRuntime *rt, const char *key);
 IdmEnv *idm_env_fresh(IdmRuntime *rt);
 bool idm_env_slot_ensure(IdmEnv *env, uint32_t id, IdmError *err);
-void idm_env_slot_set(IdmEnv *env, uint32_t id, IdmValue value);
+bool idm_env_slot_set(IdmRuntime *rt, IdmEnv *env, uint32_t id, IdmValue value, IdmError *err);
 IdmValue idm_env_slot_get(const IdmEnv *env, uint32_t id);
 
 void idm_runtime_init(IdmRuntime *rt);
@@ -177,7 +217,11 @@ size_t idm_heap_bytes(const IdmHeap *heap);
 IdmValue idm_nil(void);
 IdmValue idm_empty_list(void);
 IdmValue idm_int(int64_t value);
-IdmValue idm_float(double value);
+IdmValue idm_float(IdmRuntime *rt, double value, IdmError *err);
+int64_t idm_int_value(IdmValue value);
+double idm_float_value(IdmValue value);
+IdmSymbol *idm_value_symbol(IdmValue value);
+uint64_t idm_value_id(IdmValue value);
 IdmValue idm_word(IdmRuntime *rt, const char *text);
 IdmValue idm_atom(IdmRuntime *rt, const char *text);
 IdmValue idm_bool(IdmRuntime *rt, bool value);

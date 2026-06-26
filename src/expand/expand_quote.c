@@ -100,10 +100,11 @@ static IdmCore *quasisyntax_template(ExpandContext *ctx, const IdmSyntax *templa
         return syntax_build_core(ctx, IDM_SYNTAX_BUILD_ATOM, string_literal(ctx, template->as.text, template->span, err), template_ctx, template->span, err);
     }
     if (template->kind == IDM_SYN_INT) {
+        if (!idm_fixnum_fits(template->as.integer)) { idm_error_set(err, template->span, "integer literal exceeds 62-bit fixnum range"); return NULL; }
         return syntax_build_core(ctx, IDM_SYNTAX_BUILD_INT, idm_core_literal(idm_int(template->as.integer), template->span), template_ctx, template->span, err);
     }
     if (template->kind == IDM_SYN_FLOAT) {
-        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_FLOAT, idm_core_literal(idm_float(template->as.real), template->span), template_ctx, template->span, err);
+        return syntax_build_core(ctx, IDM_SYNTAX_BUILD_FLOAT, idm_core_literal(idm_float(ctx->rt, template->as.real, err), template->span), template_ctx, template->span, err);
     }
     if (template->kind == IDM_SYN_STRING) {
         return syntax_build_core(ctx, IDM_SYNTAX_BUILD_STRING, string_literal(ctx, template->as.text, template->span, err), template_ctx, template->span, err);
@@ -153,8 +154,8 @@ static bool quote_datum(ExpandContext *ctx, const IdmSyntax *t, IdmValue *out, I
         case IDM_SYN_NIL: *out = idm_nil(); return true;
         case IDM_SYN_WORD: *out = idm_word(ctx->rt, t->as.text); return true;
         case IDM_SYN_ATOM: *out = strcmp(t->as.text, "nil") == 0 ? idm_nil() : idm_atom(ctx->rt, t->as.text); return true;
-        case IDM_SYN_INT: *out = idm_int(t->as.integer); return true;
-        case IDM_SYN_FLOAT: *out = idm_float(t->as.real); return true;
+        case IDM_SYN_INT: if (!idm_fixnum_fits(t->as.integer)) return idm_error_set(err, t->span, "integer literal exceeds 62-bit fixnum range"); *out = idm_int(t->as.integer); return true;
+        case IDM_SYN_FLOAT: *out = idm_float(ctx->rt, t->as.real, err); return !(err && err->present);
         case IDM_SYN_STRING: *out = idm_string(ctx->rt, t->as.text, err); return !(err && err->present);
         case IDM_SYN_VECTOR:
         case IDM_SYN_TUPLE: {

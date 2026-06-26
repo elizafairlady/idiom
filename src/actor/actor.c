@@ -211,7 +211,7 @@ static uint64_t now_ms(void) {
 }
 
 static bool reason_is_atom(IdmValue reason, const char *name) {
-    return reason.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(reason.as.symbol), name) == 0;
+    return idm_value_tag(reason) == IDM_VAL_ATOM && strcmp(idm_symbol_text(idm_value_symbol(reason)), name) == 0;
 }
 
 static bool reason_is_normal(IdmValue reason) {
@@ -1080,7 +1080,7 @@ bool idm_sched_spawn_link(IdmScheduler *sched, IdmValue thunk, const IdmExec *pa
     bool ok = sched_spawn_locked(sched, thunk, parent, &pid, err);
     if (ok) {
         *out_pid = pid;
-        ok = sched_link_locked(sched, self, pid.as.id, self_should_exit, self_exit_reason, err);
+        ok = sched_link_locked(sched, self, idm_value_id(pid), self_should_exit, self_exit_reason, err);
     }
     sched_unlock(sched);
     return ok;
@@ -1092,7 +1092,7 @@ bool idm_sched_spawn_monitor(IdmScheduler *sched, IdmValue thunk, const IdmExec 
     bool ok = sched_spawn_locked(sched, thunk, parent, &pid, err);
     if (ok) {
         *out_pid = pid;
-        ok = sched_monitor_locked(sched, self, pid.as.id, out_ref, err);
+        ok = sched_monitor_locked(sched, self, idm_value_id(pid), out_ref, err);
     }
     sched_unlock(sched);
     return ok;
@@ -1100,8 +1100,8 @@ bool idm_sched_spawn_monitor(IdmScheduler *sched, IdmValue thunk, const IdmExec 
 
 bool idm_sched_demonitor(IdmScheduler *sched, IdmActor *self, IdmValue ref) {
     sched_lock(sched);
-    if (ref.tag != IDM_VAL_REF) { sched_unlock(sched); return false; }
-    uint64_t ref_id = ref.as.id;
+    if (idm_value_tag(ref) != IDM_VAL_REF) { sched_unlock(sched); return false; }
+    uint64_t ref_id = idm_value_id(ref);
     uint64_t target_pid = 0;
     for (size_t i = 0; i < self->mon_out_count; i++) {
         if (self->mon_out[i].ref == ref_id) {
@@ -1162,11 +1162,11 @@ bool idm_actor_mailbox_remove(IdmActor *actor, size_t index, IdmValue *out) {
 bool idm_actor_recv_no_match(IdmActor *actor, IdmValue timeout, IdmRecvDecision *out, IdmError *err) {
     if (!actor->recv_waiting) {
         actor->recv_waiting = true;
-        if (timeout.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(timeout.as.symbol), "infinity") == 0) {
+        if (idm_value_tag(timeout) == IDM_VAL_ATOM && strcmp(idm_symbol_text(idm_value_symbol(timeout)), "infinity") == 0) {
             actor->recv_has_deadline = false;
-        } else if (timeout.tag == IDM_VAL_INT && timeout.as.i >= 0) {
+        } else if (idm_value_tag(timeout) == IDM_VAL_INT && idm_int_value(timeout) >= 0) {
             actor->recv_has_deadline = true;
-            actor->recv_deadline_ms = now_ms() + (uint64_t)timeout.as.i;
+            actor->recv_deadline_ms = now_ms() + (uint64_t)idm_int_value(timeout);
         } else {
             actor->recv_waiting = false;
             return idm_error_set(err, idm_span_unknown(NULL), "receive timeout must be a non-negative integer or :infinity");
@@ -1519,7 +1519,7 @@ static bool run_slice(IdmScheduler *sched, uint64_t pid, IdmError *err) {
                         terminate(sched, actor, idm_atom(sched->rt, "noproc"));
                         break;
                     }
-                    PortEntry *entry = sched_find_port(sched, port_val.as.id);
+                    PortEntry *entry = sched_find_port(sched, idm_value_id(port_val));
                     if (!entry) {
                         terminate(sched, actor, idm_atom(sched->rt, "noproc"));
                         break;
@@ -1531,7 +1531,7 @@ static bool run_slice(IdmScheduler *sched, uint64_t pid, IdmError *err) {
                         if (!idm_exec_push_result(actor->exec, r, err)) { sched_unlock(sched); return false; }
                         if (!ready_push(sched, actor->pid, err)) { sched_unlock(sched); return false; }
                     } else {
-                        actor->await_port_id = port_val.as.id;
+                        actor->await_port_id = idm_value_id(port_val);
                         actor->status = ACT_WAITING_AWAIT;
                     }
                     break;
@@ -1544,7 +1544,7 @@ static bool run_slice(IdmScheduler *sched, uint64_t pid, IdmError *err) {
                         terminate(sched, actor, idm_atom(sched->rt, "noproc"));
                         break;
                     }
-                    PortEntry *entry = sched_find_port(sched, port_val.as.id);
+                    PortEntry *entry = sched_find_port(sched, idm_value_id(port_val));
                     if (!entry || (!entry->port && !entry->has_result)) {
                         IdmValue closed = idm_atom(sched->rt, "closed");
                         if (!idm_exec_push_result(actor->exec, closed, err)) { sched_unlock(sched); return false; }
@@ -1554,7 +1554,7 @@ static bool run_slice(IdmScheduler *sched, uint64_t pid, IdmError *err) {
                         if (!idm_exec_push_result(actor->exec, closed, err)) { sched_unlock(sched); return false; }
                         if (!ready_push(sched, actor->pid, err)) { sched_unlock(sched); return false; }
                     } else {
-                        actor->port_io_port_id = port_val.as.id;
+                        actor->port_io_port_id = idm_value_id(port_val);
                         actor->port_io_stream = stream;
                         actor->port_io_max = max;
                         actor->status = ACT_WAITING_PORT_READ;
@@ -1569,13 +1569,13 @@ static bool run_slice(IdmScheduler *sched, uint64_t pid, IdmError *err) {
                         terminate(sched, actor, idm_atom(sched->rt, "noproc"));
                         break;
                     }
-                    PortEntry *entry = sched_find_port(sched, port_val.as.id);
+                    PortEntry *entry = sched_find_port(sched, idm_value_id(port_val));
                     if (!entry || !entry->port) {
                         IdmValue closed = idm_atom(sched->rt, "closed");
                         if (!idm_exec_push_result(actor->exec, closed, err)) { sched_unlock(sched); return false; }
                         if (!ready_push(sched, actor->pid, err)) { sched_unlock(sched); return false; }
                     } else {
-                        actor->port_io_port_id = port_val.as.id;
+                        actor->port_io_port_id = idm_value_id(port_val);
                         actor->port_io_data = data;
                         actor->status = ACT_WAITING_PORT_WRITE;
                         if (!sched_service_port_io(sched, err)) { sched_unlock(sched); return false; }
@@ -1897,16 +1897,16 @@ static bool sched_run_thunk(IdmScheduler *sched, IdmValue thunk, bool interrupt_
         sched_unlock(sched);
         return false;
     }
-    sched->eval_pid = pid.as.id;
-    if (register_session && sched->rt->repl) idm_repl_set_session_pid(sched->rt->repl, pid.as.id);
-    IdmActor *actor = sched_lookup(sched, pid.as.id);
+    sched->eval_pid = idm_value_id(pid);
+    if (register_session && sched->rt->repl) idm_repl_set_session_pid(sched->rt->repl, idm_value_id(pid));
+    IdmActor *actor = sched_lookup(sched, idm_value_id(pid));
     actor->diag_retain = true;
     if (actor->exited) {
         sched->eval_done = true;
         sched->eval_reason = actor->exit_reason;
         if (!reason_is_normal(actor->exit_reason)) retain_diag(sched, actor->exit_reason);
     } else if (interrupt_target) {
-        sched->interrupt_pid = pid.as.id;
+        sched->interrupt_pid = idm_value_id(pid);
         sched->interrupt_struck = false;
     }
     sched_unlock(sched);
@@ -1982,9 +1982,9 @@ bool idm_sched_run_session(IdmScheduler *sched, IdmValue thunk, bool register_se
 
 int idm_sched_session_status(IdmScheduler *sched, IdmValue value, IdmValue reason) {
     if (reason_is_normal(reason)) {
-        return value.tag == IDM_VAL_INT ? (int)(((value.as.i % 256) + 256) % 256) : 0;
+        return idm_value_tag(value) == IDM_VAL_INT ? (int)(((idm_int_value(value) % 256) + 256) % 256) : 0;
     }
-    if (reason.tag == IDM_VAL_INT) return (int)(((reason.as.i % 256) + 256) % 256);
+    if (idm_value_tag(reason) == IDM_VAL_INT) return (int)(((idm_int_value(reason) % 256) + 256) % 256);
     char *diag = idm_sched_take_diagnostic(sched);
     if (diag) {
         fprintf(stderr, "%s\n", diag);

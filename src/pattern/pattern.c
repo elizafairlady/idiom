@@ -772,7 +772,7 @@ static const IdmSyntax *syntax_pattern_unwrap_expr_group(const IdmSyntaxPattern 
 }
 
 static bool syntax_bound_value_equal(IdmValue a, IdmValue b) {
-    if (a.tag == IDM_VAL_SYNTAX && b.tag == IDM_VAL_SYNTAX) {
+    if (idm_value_tag(a) == IDM_VAL_SYNTAX && idm_value_tag(b) == IDM_VAL_SYNTAX) {
         return syntax_literal_equal(idm_syntax_value_get(a), idm_syntax_value_get(b));
     }
     if (idm_is_empty_list(a) && idm_is_empty_list(b)) return true;
@@ -1206,14 +1206,14 @@ static bool selector_child_access(IdmPatternSelector *selector, SelAccessKind ki
 }
 
 static bool literal_can_be_disjoint_ctor(IdmValue value) {
-    switch (value.tag) {
+    switch (idm_value_tag(value)) {
         case IDM_VAL_NIL:
         case IDM_VAL_ATOM:
         case IDM_VAL_WORD:
         case IDM_VAL_INT:
         case IDM_VAL_FLOAT:
         case IDM_VAL_STRING:
-        case IDM_VAL_EMPTY_LIST:
+        case IDM_VAL_BIGNUM:
         case IDM_VAL_PID:
         case IDM_VAL_REF:
         case IDM_VAL_PORT:
@@ -1718,7 +1718,7 @@ static bool selector_eval_access(IdmRuntime *rt, const IdmPatternSelector *selec
             IdmValue parent = idm_nil();
             bool ok = false;
             if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || (parent.tag != IDM_VAL_VECTOR && parent.tag != IDM_VAL_TUPLE) || access->index >= idm_sequence_count(parent)) return true;
+            if (!ok || (idm_value_tag(parent) != IDM_VAL_VECTOR && idm_value_tag(parent) != IDM_VAL_TUPLE) || access->index >= idm_sequence_count(parent)) return true;
             *out = idm_sequence_item(parent, access->index, err);
             if (err && err->present) return false;
             *out_available = true;
@@ -1728,7 +1728,7 @@ static bool selector_eval_access(IdmRuntime *rt, const IdmPatternSelector *selec
             IdmValue parent = idm_nil();
             bool ok = false;
             if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || parent.tag != access->seq_tag) return true;
+            if (!ok || idm_value_tag(parent) != access->seq_tag) return true;
             size_t n = idm_sequence_count(parent);
             if (access->index > n) return true;
             size_t rest_count = n - access->index;
@@ -1788,7 +1788,7 @@ static bool selector_match_value(IdmRuntime *rt, IdmValue value, const SelPat *p
         case SEL_PAT_VECTOR:
         case SEL_PAT_TUPLE: {
             IdmValueTag tag = pat->kind == SEL_PAT_VECTOR ? IDM_VAL_VECTOR : IDM_VAL_TUPLE;
-            if (value.tag != tag || idm_sequence_count(value) != pat->as.seq.count) return false;
+            if (idm_value_tag(value) != tag || idm_sequence_count(value) != pat->as.seq.count) return false;
             for (size_t i = 0; i < pat->as.seq.count; i++) {
                 IdmValue item = idm_sequence_item(value, i, err);
                 if (err && err->present) return false;
@@ -1799,7 +1799,7 @@ static bool selector_match_value(IdmRuntime *rt, IdmValue value, const SelPat *p
         case SEL_PAT_VECTOR_REST:
         case SEL_PAT_TUPLE_REST: {
             IdmValueTag tag = pat->kind == SEL_PAT_VECTOR_REST ? IDM_VAL_VECTOR : IDM_VAL_TUPLE;
-            if (value.tag != tag || idm_sequence_count(value) < pat->as.seq_rest.count) return false;
+            if (idm_value_tag(value) != tag || idm_sequence_count(value) < pat->as.seq_rest.count) return false;
             for (size_t i = 0; i < pat->as.seq_rest.count; i++) {
                 IdmValue item = idm_sequence_item(value, i, err);
                 if (err && err->present) return false;
@@ -1832,7 +1832,7 @@ static bool selector_match_value(IdmRuntime *rt, IdmValue value, const SelPat *p
             }
             return true;
         case SEL_PAT_SYNTAX:
-            if (value.tag != IDM_VAL_SYNTAX) return false;
+            if (idm_value_tag(value) != IDM_VAL_SYNTAX) return false;
             return syntax_pattern_match(rt, pat->as.syntax, idm_syntax_value_get(value), bindings, err);
         case SEL_PAT_TYPE:
             return idm_value_matches_type_name(value, pat->as.name.name);

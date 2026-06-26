@@ -124,7 +124,7 @@ static size_t capture_limit_from_env(void) {
 }
 
 static bool value_is_atom(IdmValue v, const char *name) {
-    return v.tag == IDM_VAL_ATOM && strcmp(idm_symbol_text(v.as.symbol), name) == 0;
+    return idm_value_tag(v) == IDM_VAL_ATOM && strcmp(idm_symbol_text(idm_value_symbol(v)), name) == 0;
 }
 
 static bool parse_stdio_policy(IdmValue v, StdioPolicy *out) {
@@ -175,7 +175,7 @@ static bool list_to_array(IdmValue list, IdmValue **out_items, size_t *out_count
 }
 
 static char *dup_string_value(IdmValue v) {
-    if (v.tag != IDM_VAL_STRING) return idm_strdup("");
+    if (idm_value_tag(v) != IDM_VAL_STRING) return idm_strdup("");
     return idm_strndup(idm_string_bytes(v), idm_string_length(v));
 }
 
@@ -200,13 +200,13 @@ static bool part_append_text(IdmValue part, const IdmExec *exec_ctx, Stage *stag
     idm_error_clear(&ignore);
     if (value_is_atom(tag, "lit") || value_is_atom(tag, "glob") || value_is_atom(tag, "temp")) {
         if (value_is_atom(tag, "glob")) *is_glob = true;
-        const char *text = payload.tag == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
-        size_t len = payload.tag == IDM_VAL_STRING ? idm_string_length(payload) : 0;
+        const char *text = idm_value_tag(payload) == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
+        size_t len = idm_value_tag(payload) == IDM_VAL_STRING ? idm_string_length(payload) : 0;
         if (value_is_atom(tag, "temp") && !stage_own_temp(stage, text)) return false;
         return idm_buf_append_n(out, text, len);
     }
     if (value_is_atom(tag, "env")) {
-        const char *name = payload.tag == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
+        const char *name = idm_value_tag(payload) == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
         const char *value = idm_exec_env_get(exec_ctx, name);
         if (!value) value = getenv(name);
         return idm_buf_append(out, value ? value : "");
@@ -313,8 +313,8 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
             IdmValue fd = idm_sequence_item(r, 2, &ignore);
             IdmValue target = idm_sequence_item(r, 3, &ignore);
             out->kind = REDIR_FILE;
-            out->fd = fd.tag == IDM_VAL_INT ? (int)fd.as.i : 1;
-            const char *ops = op.tag == IDM_VAL_ATOM ? idm_symbol_text(op.as.symbol) : ">";
+            out->fd = idm_value_tag(fd) == IDM_VAL_INT ? (int)idm_int_value(fd) : 1;
+            const char *ops = idm_value_tag(op) == IDM_VAL_ATOM ? idm_symbol_text(idm_value_symbol(op)) : ">";
             out->op = strcmp(ops, "<") == 0 ? '<'
                     : strcmp(ops, ">>") == 0 ? 'a'
                     : strcmp(ops, "&>") == 0 ? 'b'
@@ -330,8 +330,8 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
             IdmValue a = idm_sequence_item(r, 1, &ignore);
             IdmValue b = idm_sequence_item(r, 2, &ignore);
             out->kind = REDIR_DUP;
-            out->fd = a.tag == IDM_VAL_INT ? (int)a.as.i : 2;
-            out->dup_to = b.tag == IDM_VAL_INT ? (int)b.as.i : 1;
+            out->fd = idm_value_tag(a) == IDM_VAL_INT ? (int)idm_int_value(a) : 2;
+            out->dup_to = idm_value_tag(b) == IDM_VAL_INT ? (int)idm_int_value(b) : 1;
         } else {
             free(redirs);
             return false;

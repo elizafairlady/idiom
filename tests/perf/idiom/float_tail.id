@@ -1,0 +1,5 @@
+defn loop i n acc -> if i >= n do acc else do
+  loop (i + 1) n (acc + (i * 1.5) + 0.25)
+end
+
+println (str (loop 0 500000 0.0))

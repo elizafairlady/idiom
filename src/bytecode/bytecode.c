@@ -1583,14 +1583,13 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
 
 static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError *err) {
     if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "value nested too deeply for .ic");
-    switch (v.tag) {
+    switch (idm_value_tag(v)) {
         case IDM_VAL_NIL: return idm_buf_put_u8(out, 0u);
-        case IDM_VAL_EMPTY_LIST: return idm_buf_put_u8(out, 13u);
-        case IDM_VAL_INT: return idm_buf_put_u8(out, 1u) && idm_buf_put_u64(out, (uint64_t)v.as.i);
-        case IDM_VAL_FLOAT: { uint64_t bits; double d = v.as.f; memcpy(&bits, &d, 8u); return idm_buf_put_u8(out, 2u) && idm_buf_put_u64(out, bits); }
+        case IDM_VAL_INT: return idm_buf_put_u8(out, 1u) && idm_buf_put_u64(out, (uint64_t)idm_int_value(v));
+        case IDM_VAL_FLOAT: { uint64_t bits; double d = idm_float_value(v); memcpy(&bits, &d, 8u); return idm_buf_put_u8(out, 2u) && idm_buf_put_u64(out, bits); }
         case IDM_VAL_STRING: return idm_buf_put_u8(out, 3u) && idm_buf_put_str(out, idm_string_bytes(v), idm_string_length(v));
-        case IDM_VAL_ATOM: { const char *s = idm_symbol_text(v.as.symbol); return idm_buf_put_u8(out, 4u) && idm_buf_put_str(out, s, strlen(s)); }
-        case IDM_VAL_WORD: { const char *s = idm_symbol_text(v.as.symbol); return idm_buf_put_u8(out, 5u) && idm_buf_put_str(out, s, strlen(s)); }
+        case IDM_VAL_ATOM: { const char *s = idm_symbol_text(idm_value_symbol(v)); return idm_buf_put_u8(out, 4u) && idm_buf_put_str(out, s, strlen(s)); }
+        case IDM_VAL_WORD: { const char *s = idm_symbol_text(idm_value_symbol(v)); return idm_buf_put_u8(out, 5u) && idm_buf_put_str(out, s, strlen(s)); }
         case IDM_VAL_PAIR: {
             IdmError ignore; idm_error_init(&ignore);
             IdmValue car = idm_car(v, &ignore), cdr = idm_cdr(v, &ignore);
@@ -1600,7 +1599,7 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
         case IDM_VAL_TUPLE:
         case IDM_VAL_VECTOR: {
             size_t n = idm_sequence_count(v);
-            if (!idm_buf_put_u8(out, v.tag == IDM_VAL_TUPLE ? 7u : 8u) || !idm_buf_put_u32(out, (uint32_t)n)) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (!idm_buf_put_u8(out, idm_value_tag(v) == IDM_VAL_TUPLE ? 7u : 8u) || !idm_buf_put_u32(out, (uint32_t)n)) return idm_error_oom(err, idm_span_unknown(NULL));
             for (size_t i = 0; i < n; i++) {
                 IdmError ignore; idm_error_init(&ignore);
                 IdmValue item = idm_sequence_item(v, i, &ignore);
@@ -1897,7 +1896,7 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
         case 0u: *out = idm_nil(); return true;
         case 13u: *out = idm_empty_list(); return true;
         case 1u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated int"); *out = idm_int((int64_t)bits); return true; }
-        case 2u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated float"); double d; memcpy(&d, &bits, 8u); *out = idm_float(d); return true; }
+        case 2u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated float"); double d; memcpy(&d, &bits, 8u); *out = idm_float(rt, d, err); return !(err && err->present); }
         case 3u: { size_t n = 0; char *s = idm_rd_string(r, &n); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated string"); *out = idm_string_n(rt, s, n, err); free(s); return !(err && err->present); }
         case 4u: { char *s = idm_rd_string(r, NULL); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated atom"); *out = idm_atom(rt, s); free(s); return true; }
         case 5u: { char *s = idm_rd_string(r, NULL); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated word"); *out = idm_word(rt, s); free(s); return true; }
@@ -2706,7 +2705,7 @@ bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t 
 
 static bool value_relocate_syntax(IdmRuntime *rt, IdmValue v, IdmScopeId min_id, int64_t delta, IdmValue *out, bool *changed, IdmError *err) {
     *out = v;
-    switch (v.tag) {
+    switch (idm_value_tag(v)) {
         case IDM_VAL_SYNTAX: {
             const IdmSyntax *syn = idm_syntax_get(v, err);
             if (!syn) return false;
@@ -2747,7 +2746,7 @@ static bool value_relocate_syntax(IdmRuntime *rt, IdmValue v, IdmScopeId min_id,
                 }
             }
             if (child_changed) {
-                *out = v.tag == IDM_VAL_TUPLE ? idm_tuple(rt, items, n, err) : idm_vector(rt, items, n, err);
+                *out = idm_value_tag(v) == IDM_VAL_TUPLE ? idm_tuple(rt, items, n, err) : idm_vector(rt, items, n, err);
                 if (err && err->present) {
                     free(items);
                     return false;

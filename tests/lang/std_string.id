@@ -114,8 +114,8 @@ suite do
     assert-eq ("42" |> parse-int) {:ok 42}
     assert-eq ("-17" |> parse-int) {:ok -17}
     assert-eq ("+5" |> parse-int) {:ok 5}
-    assert-eq (parse-int "9223372036854775807") {:ok 9223372036854775807}
-    assert-eq (parse-int "-9223372036854775808") {:ok -9223372036854775808}
+    assert-eq (parse-int "4611686018427387903") {:ok 4611686018427387903}
+    assert-eq (parse-int "-4611686018427387904") {:ok -4611686018427387904}
     assert-inspect (parse-int "") "{:error {:parse :int \"\"}}"
     assert-inspect (parse-int " 42") "{:error {:parse :int \" 42\"}}"
     assert-inspect (parse-int "42 ") "{:error {:parse :int \"42 \"}}"

@@ -206,7 +206,7 @@ static bool prog_build_test_closures(RxProg *prog, IdmError *err);
 static bool regex_start_candidate(const RxProg *prog, const char *s, size_t len, size_t pos);
 
 static bool require_string_arg(IdmRuntime *rt, const char *name, IdmValue v, const char **out, size_t *out_len, IdmError *err) {
-    if (v.tag != IDM_VAL_STRING) {
+    if (idm_value_tag(v) != IDM_VAL_STRING) {
         idm_error_set(err, idm_span_unknown(NULL), "%s expects a string", name);
         return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, name), v);
     }
@@ -236,11 +236,11 @@ static bool parse_options_list(IdmRuntime *rt, IdmValue options, uint32_t *flags
     while (idm_is_pair(cur)) {
         IdmValue item = idm_car(cur, err);
         if (err && err->present) return false;
-        if (item.tag != IDM_VAL_ATOM && item.tag != IDM_VAL_STRING) {
+        if (idm_value_tag(item) != IDM_VAL_ATOM && idm_value_tag(item) != IDM_VAL_STRING) {
             idm_error_set(err, idm_span_unknown(NULL), "regex option must be an atom or string");
             return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "raw-compile"), item);
         }
-        const char *text = item.tag == IDM_VAL_ATOM ? idm_symbol_text(item.as.symbol) : idm_string_bytes(item);
+        const char *text = idm_value_tag(item) == IDM_VAL_ATOM ? idm_symbol_text(idm_value_symbol(item)) : idm_string_bytes(item);
         if (!parse_flag_atom(text, flags)) return idm_error_set(err, idm_span_unknown(NULL), "unknown regex option '%s'", text);
         cur = idm_cdr(cur, err);
         if (err && err->present) return false;
@@ -251,12 +251,12 @@ static bool parse_options_list(IdmRuntime *rt, IdmValue options, uint32_t *flags
 
 static bool parse_options(IdmRuntime *rt, IdmValue options, uint32_t *out_flags, IdmError *err) {
     uint32_t flags = 0;
-    if (options.tag == IDM_VAL_NIL || idm_is_empty_list(options)) {
+    if (idm_value_tag(options) == IDM_VAL_NIL || idm_is_empty_list(options)) {
         *out_flags = 0;
         return true;
     }
-    if (options.tag == IDM_VAL_ATOM || options.tag == IDM_VAL_STRING) {
-        const char *text = options.tag == IDM_VAL_ATOM ? idm_symbol_text(options.as.symbol) : idm_string_bytes(options);
+    if (idm_value_tag(options) == IDM_VAL_ATOM || idm_value_tag(options) == IDM_VAL_STRING) {
+        const char *text = idm_value_tag(options) == IDM_VAL_ATOM ? idm_symbol_text(idm_value_symbol(options)) : idm_string_bytes(options);
         if (!parse_flag_atom(text, &flags)) return idm_error_set(err, idm_span_unknown(NULL), "unknown regex option '%s'", text);
         *out_flags = flags;
         return true;
@@ -270,8 +270,8 @@ static bool parse_options(IdmRuntime *rt, IdmValue options, uint32_t *out_flags,
         for (size_t i = 0; i < idm_sequence_count(options); i++) {
             IdmValue item = idm_sequence_item(options, i, err);
             if (err && err->present) return false;
-            if (item.tag != IDM_VAL_ATOM && item.tag != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "regex option must be an atom or string");
-            const char *text = item.tag == IDM_VAL_ATOM ? idm_symbol_text(item.as.symbol) : idm_string_bytes(item);
+            if (idm_value_tag(item) != IDM_VAL_ATOM && idm_value_tag(item) != IDM_VAL_STRING) return idm_error_set(err, idm_span_unknown(NULL), "regex option must be an atom or string");
+            const char *text = idm_value_tag(item) == IDM_VAL_ATOM ? idm_symbol_text(idm_value_symbol(item)) : idm_string_bytes(item);
             if (!parse_flag_atom(text, &flags)) return idm_error_set(err, idm_span_unknown(NULL), "unknown regex option '%s'", text);
         }
         *out_flags = flags;
@@ -2111,7 +2111,7 @@ static bool nfa_run(const RxProg *prog, const char *s, size_t len, size_t offset
 
 static bool result_set_subject(IdmRegexResult *result, IdmValue subject, const char *s, size_t len, IdmError *err) {
     result->subject_len = len;
-    if (subject.tag == IDM_VAL_STRING && idm_string_bytes(subject) == s && idm_string_length(subject) == len) {
+    if (idm_value_tag(subject) == IDM_VAL_STRING && idm_string_bytes(subject) == s && idm_string_length(subject) == len) {
         result->subject_value = subject;
         result->subject = (char *)s;
         result->owns_subject = false;
@@ -2538,7 +2538,7 @@ IdmRegexResult *idm_regex_result_clone_with_subject(const IdmRegexResult *src, I
     if (!r) return NULL;
     const char *subject_bytes = src->subject ? src->subject : "";
     size_t subject_len = src->subject ? src->subject_len : 0u;
-    if (subject.tag == IDM_VAL_STRING) {
+    if (idm_value_tag(subject) == IDM_VAL_STRING) {
         subject_bytes = idm_string_bytes(subject);
         subject_len = idm_string_length(subject);
     }
@@ -2740,17 +2740,17 @@ bool idm_regex_result_text_value(IdmRuntime *rt, IdmValue result, IdmValue *out,
 }
 
 static bool capture_index(IdmValue index, size_t max, size_t *out, IdmError *err) {
-    if (index.tag != IDM_VAL_INT || index.as.i < 0 || (uint64_t)index.as.i >= max) {
+    if (idm_value_tag(index) != IDM_VAL_INT || idm_int_value(index) < 0 || (uint64_t)idm_int_value(index) >= max) {
         return idm_error_set(err, idm_span_unknown(NULL), "capture index out of range");
     }
-    *out = (size_t)index.as.i;
+    *out = (size_t)idm_int_value(index);
     return true;
 }
 
 static bool capture_by_name(IdmRegexResult *r, IdmValue name, size_t *out, IdmError *err) {
     const char *text = NULL;
-    if (name.tag == IDM_VAL_ATOM || name.tag == IDM_VAL_WORD) text = idm_symbol_text(name.as.symbol);
-    else if (name.tag == IDM_VAL_STRING) text = idm_string_bytes(name);
+    if (idm_value_tag(name) == IDM_VAL_ATOM || idm_value_tag(name) == IDM_VAL_WORD) text = idm_symbol_text(idm_value_symbol(name));
+    else if (idm_value_tag(name) == IDM_VAL_STRING) text = idm_string_bytes(name);
     if (!text) return idm_error_set(err, idm_span_unknown(NULL), "capture name must be an atom, word, or string");
     if (!r->group_names) return idm_error_set(err, idm_span_unknown(NULL), "unknown capture name '%s'", text);
     for (size_t i = 1; i < r->capture_count; i++) {

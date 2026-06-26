@@ -524,11 +524,11 @@ static void test_record_ishc_roundtrip(void) {
     IdmValue out2 = idm_nil();
     CHECK(idm_vm_run(&rt2, &m2, main_fn, &out2, &err));
     CHECK(!err.present);
-    CHECK(out2.tag == IDM_VAL_RECORD);
+    CHECK(idm_value_tag(out2) == IDM_VAL_RECORD);
     CHECK_STR(idm_record_type(out2, &err), "ConstRecord");
     IdmValue field = idm_nil();
     CHECK(idm_record_field_named(out2, "x", &field, &err));
-    CHECK(field.tag == IDM_VAL_INT && field.as.i == 42);
+    CHECK(idm_value_tag(field) == IDM_VAL_INT && idm_int_value(field) == 42);
     CHECK(!err.present);
 
     idm_bc_destroy(&m2);
