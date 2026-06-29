@@ -9,9 +9,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IDM_IC_VERSION 40u
+#define IDM_IC_VERSION 42u
+#define IDM_IC_MIN_READ_VERSION 42u
 
-static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err);
+static const IdmOpcodeInfo opcode_infos[IDM_OP_COUNT] = {
+#define IDM_OPCODE_INFO(name, fixed, count_index, repeat, roles, repeat_roles, reg_roles, reg_ranges, flow_kind, branch, tail) \
+    [IDM_OP_##name] = {#name, fixed, count_index, repeat, roles, repeat_roles, reg_roles, reg_ranges, flow_kind, branch, tail},
+    IDM_OPCODE_LIST(IDM_OPCODE_INFO)
+#undef IDM_OPCODE_INFO
+};
 
 static bool valid_value_sequence_kind(uint32_t kind) {
     return kind <= (uint32_t)IDM_VALUE_SEQ_DICT;
@@ -19,35 +25,6 @@ static bool valid_value_sequence_kind(uint32_t kind) {
 
 static bool valid_syntax_build_kind(uint32_t kind) {
     return kind <= (uint32_t)IDM_SYNTAX_BUILD_GROUP;
-}
-
-static bool put_serialized_arity(IdmBuffer *out, IdmArity arity) {
-    return idm_buf_put_u8(out, (uint8_t)arity.kind) &&
-           idm_buf_put_u32(out, arity.min) &&
-           idm_buf_put_u32(out, arity.max) &&
-           idm_buf_put_u64(out, arity.mask);
-}
-
-static IdmArity read_serialized_arity(IdmByteReader *r) {
-    IdmArity arity;
-    arity.kind = (IdmArityKind)idm_rd_u8(r);
-    arity.min = idm_rd_u32(r);
-    arity.max = idm_rd_u32(r);
-    arity.mask = idm_rd_u64(r);
-    return arity;
-}
-
-static bool primitive_by_home_name(const char *home, const char *name, IdmPrimitive *out) {
-    if (!home || !name) return false;
-    for (size_t i = 0; i < idm_primitive_count(); i++) {
-        IdmPrimitive primitive = (IdmPrimitive)i;
-        const IdmPrimitiveInfo *info = idm_primitive_info(primitive);
-        if (info && strcmp(idm_primitive_home(primitive), home) == 0 && strcmp(info->name, name) == 0) {
-            if (out) *out = primitive;
-            return true;
-        }
-    }
-    return false;
 }
 
 static bool put_primitive_ref(IdmBuffer *out, uint32_t primitive, IdmError *err) {
@@ -67,7 +44,7 @@ static bool read_primitive_ref(IdmByteReader *r, IdmPrimitive *out, IdmError *er
         free(name);
         return idm_error_set(err, idm_span_unknown(NULL), "truncated primitive reference");
     }
-    bool ok = primitive_by_home_name(home, name, out);
+    bool ok = idm_primitive_lookup(home, name, out);
     if (!ok) idm_error_set(err, idm_span_unknown(NULL), "unknown primitive '%s/%s'", home, name);
     free(home);
     free(name);
@@ -122,11 +99,7 @@ static bool span_file_index(IdmBytecodeModule *module, const char *file, uint32_
         }
     }
     if (module->span_file_count == module->span_file_cap) {
-        size_t cap = module->span_file_cap ? module->span_file_cap * 2u : 4u;
-        char **grown = realloc(module->span_files, cap * sizeof(*grown));
-        if (!grown) return false;
-        module->span_files = grown;
-        module->span_file_cap = cap;
+        if (!idm_grow((void **)&module->span_files, &module->span_file_cap, sizeof(*module->span_files), 4u, module->span_file_count + 1u)) return false;
     }
     char *name = idm_strdup(file);
     if (!name) return false;
@@ -151,11 +124,7 @@ bool idm_bc_note_span(IdmBytecodeModule *module, IdmSpan span) {
         if (module->spans[last].file == file_index && module->spans[last].line == span.line && module->spans[last].column == span.column) return true;
     }
     if (module->span_count == module->span_cap) {
-        size_t cap = module->span_cap ? module->span_cap * 2u : 32u;
-        void *grown = realloc(module->spans, cap * sizeof(*module->spans));
-        if (!grown) return false;
-        module->spans = grown;
-        module->span_cap = cap;
+        if (!idm_grow((void **)&module->spans, &module->span_cap, sizeof(*module->spans), 32u, module->span_count + 1u)) return false;
     }
     module->spans[module->span_count].offset = (uint32_t)module->code_count;
     module->spans[module->span_count].file = file_index;
@@ -195,11 +164,7 @@ bool idm_bc_note_name(IdmBytecodeModule *module, size_t offset, const char *name
         }
     }
     if (module->name_note_count == module->name_note_cap) {
-        size_t cap = module->name_note_cap ? module->name_note_cap * 2u : 32u;
-        IdmBcNameNote *grown = realloc(module->name_notes, cap * sizeof(*grown));
-        if (!grown) return false;
-        module->name_notes = grown;
-        module->name_note_cap = cap;
+        if (!idm_grow((void **)&module->name_notes, &module->name_note_cap, sizeof(*module->name_notes), 32u, module->name_note_count + 1u)) return false;
     }
     char *copy = idm_strdup(name);
     if (!copy) return false;
@@ -268,11 +233,7 @@ void idm_bc_destroy(IdmBytecodeModule *module) {
 
 bool idm_bc_add_const(IdmBytecodeModule *module, IdmValue value, uint32_t *out_index) {
     if (module->const_count == module->const_cap) {
-        size_t cap = module->const_cap ? module->const_cap * 2u : 16u;
-        IdmValue *next = realloc(module->constants, cap * sizeof(*next));
-        if (!next) return false;
-        module->constants = next;
-        module->const_cap = cap;
+        if (!idm_grow((void **)&module->constants, &module->const_cap, sizeof(*module->constants), 16u, module->const_count + 1u)) return false;
     }
     if (module->const_count > UINT32_MAX) return false;
     uint32_t index = (uint32_t)module->const_count;
@@ -341,7 +302,7 @@ bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError 
             if (!intern_pattern_literals(rt, fn->param_patterns[p], err)) return false;
     }
     module->literals_interned = true;
-    return idm_bc_prepare_selectors(module, err);
+    return idm_bc_prepare_selectors(rt, module, err);
 }
 
 bool idm_bc_is_finalized(const IdmBytecodeModule *module) {
@@ -350,11 +311,7 @@ bool idm_bc_is_finalized(const IdmBytecodeModule *module) {
 
 bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t arity, uint32_t local_count, size_t entry, uint32_t *out_index) {
     if (module->function_count == module->function_cap) {
-        size_t cap = module->function_cap ? module->function_cap * 2u : 8u;
-        IdmBcFunction *next = realloc(module->functions, cap * sizeof(*next));
-        if (!next) return false;
-        module->functions = next;
-        module->function_cap = cap;
+        if (!idm_grow((void **)&module->functions, &module->function_cap, sizeof(*module->functions), 8u, module->function_count + 1u)) return false;
     }
     if (module->function_count > UINT32_MAX) return false;
     uint32_t index = (uint32_t)module->function_count;
@@ -383,11 +340,7 @@ bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t a
 
 bool idm_bc_add_primitive_function(IdmBytecodeModule *module, const char *name, IdmArity arity, uint32_t primitive, uint32_t *out_index) {
     if (module->function_count == module->function_cap) {
-        size_t cap = module->function_cap ? module->function_cap * 2u : 8u;
-        IdmBcFunction *next = realloc(module->functions, cap * sizeof(*next));
-        if (!next) return false;
-        module->functions = next;
-        module->function_cap = cap;
+        if (!idm_grow((void **)&module->functions, &module->function_cap, sizeof(*module->functions), 8u, module->function_count + 1u)) return false;
     }
     if (module->function_count > UINT32_MAX) return false;
     uint32_t index = (uint32_t)module->function_count;
@@ -476,11 +429,7 @@ bool idm_bc_set_function_guard(IdmBytecodeModule *module, uint32_t function_inde
 
 bool idm_bc_emit(IdmBytecodeModule *module, uint32_t word, size_t *out_offset) {
     if (module->code_count == module->code_cap) {
-        size_t cap = module->code_cap ? module->code_cap * 2u : 64u;
-        uint32_t *next = realloc(module->code, cap * sizeof(*next));
-        if (!next) return false;
-        module->code = next;
-        module->code_cap = cap;
+        if (!idm_grow((void **)&module->code, &module->code_cap, sizeof(*module->code), 64u, module->code_count + 1u)) return false;
     }
     if (out_offset) *out_offset = module->code_count;
     module->code[module->code_count++] = word;
@@ -507,55 +456,79 @@ bool idm_bc_patch_u32(IdmBytecodeModule *module, size_t operand_offset, uint32_t
     return true;
 }
 
-const char *idm_opcode_name(IdmOpcode op) {
-    switch (op) {
-        case IDM_OP_HALT: return "HALT";
-        case IDM_OP_MOVE: return "MOVE";
-        case IDM_OP_LOAD_CONST: return "LOAD_CONST";
-        case IDM_OP_LOAD_CAPTURE: return "LOAD_CAPTURE";
-        case IDM_OP_MAKE_CELL: return "MAKE_CELL";
-        case IDM_OP_LOAD_CELL: return "LOAD_CELL";
-        case IDM_OP_STORE_CELL: return "STORE_CELL";
-        case IDM_OP_MAKE_CLOSURE: return "MAKE_CLOSURE";
-        case IDM_OP_MAKE_CLOSURE_CAPTURES: return "MAKE_CLOSURE_CAPTURES";
-        case IDM_OP_MAKE_MULTI_CLOSURE: return "MAKE_MULTI_CLOSURE";
-        case IDM_OP_CALL: return "CALL";
-        case IDM_OP_RETURN: return "RETURN";
-        case IDM_OP_JUMP: return "JUMP";
-        case IDM_OP_JUMP_IF_FALSE: return "JUMP_IF_FALSE";
-        case IDM_OP_RECV: return "RECV";
-        case IDM_OP_RESCUE_PUSH: return "RESCUE_PUSH";
-        case IDM_OP_RESCUE_POP: return "RESCUE_POP";
-        case IDM_OP_RAISE: return "RAISE";
-        case IDM_OP_LOAD_RAISED: return "LOAD_RAISED";
-        case IDM_OP_LOAD_ENV: return "LOAD_ENV";
-        case IDM_OP_STORE_ENV: return "STORE_ENV";
-        case IDM_OP_LOAD_PACKAGE_SLOT: return "LOAD_PACKAGE_SLOT";
-        case IDM_OP_STORE_PACKAGE_SLOT: return "STORE_PACKAGE_SLOT";
-        case IDM_OP_PUSH_PACKAGE_ENV: return "PUSH_PACKAGE_ENV";
-        case IDM_OP_POP_PACKAGE_ENV: return "POP_PACKAGE_ENV";
-        case IDM_OP_MAKE_RECORD: return "MAKE_RECORD";
-        case IDM_OP_RECORD_FIELD: return "RECORD_FIELD";
-        case IDM_OP_RECORD_IS: return "RECORD_IS";
-        case IDM_OP_LIST_CONS: return "LIST_CONS";
-        case IDM_OP_LIST_APPEND: return "LIST_APPEND";
-        case IDM_OP_MAKE_VALUE_SEQUENCE: return "MAKE_VALUE_SEQUENCE";
-        case IDM_OP_MAKE_SYNTAX: return "MAKE_SYNTAX";
-        case IDM_OP_STRING_CONCAT: return "STRING_CONCAT";
-        case IDM_OP_CALL_PRIMITIVE: return "CALL_PRIMITIVE";
-        case IDM_OP_MATCH: return "MATCH";
-    }
-    return "<bad-op>";
+const IdmOpcodeInfo *idm_opcode_info(IdmOpcode op) {
+    size_t index = (size_t)op;
+    if (index >= (size_t)IDM_OP_COUNT) return NULL;
+    return &opcode_infos[index];
 }
 
-static bool verify_operand(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t *operand, IdmError *err) {
-    if (*ip >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s missing operand", idm_opcode_name(op));
-    *operand = module->code[(*ip)++];
+bool idm_opcode_valid(IdmOpcode op) {
+    return idm_opcode_info(op) != NULL;
+}
+
+size_t idm_opcode_count(void) {
+    return (size_t)IDM_OP_COUNT;
+}
+
+const char *idm_opcode_name(IdmOpcode op) {
+    const IdmOpcodeInfo *info = idm_opcode_info(op);
+    return info ? info->name : "<bad-op>";
+}
+
+bool idm_bc_instruction_width(const IdmBytecodeModule *module, size_t offset, size_t *out_width, IdmError *err) {
+    if (offset >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "instruction offset %zu out of bounds", offset);
+    IdmOpcode op = (IdmOpcode)module->code[offset];
+    const IdmOpcodeInfo *info = idm_opcode_info(op);
+    if (!info) return idm_error_set(err, idm_span_unknown(NULL), "invalid opcode %u at offset %zu", (unsigned)op, offset);
+    size_t width = 1u + (size_t)info->fixed_operands;
+    if (width > module->code_count - offset) return idm_error_set(err, idm_span_unknown(NULL), "%s truncated at offset %zu", info->name, offset);
+    if (info->count_operand != IDM_OPCODE_NO_COUNT) {
+        if (info->count_operand >= info->fixed_operands || info->repeat_width == 0) {
+            return idm_error_set(err, idm_span_unknown(NULL), "%s has invalid opcode metadata", info->name);
+        }
+        uint32_t count = module->code[offset + 1u + (size_t)info->count_operand];
+        if (count > (SIZE_MAX - width) / (size_t)info->repeat_width) return idm_error_set(err, idm_span_unknown(NULL), "%s payload length overflow", info->name);
+        width += (size_t)count * (size_t)info->repeat_width;
+        if (width > module->code_count - offset) return idm_error_set(err, idm_span_unknown(NULL), "%s payload out of bounds at offset %zu", info->name, offset);
+    }
+    if (out_width) *out_width = width;
     return true;
 }
 
-bool idm_bc_build_selector_for_entries(const IdmBytecodeModule *module, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err) {
+typedef struct {
+    IdmOpcode op;
+    const IdmOpcodeInfo *info;
+    size_t offset;
+    size_t width;
+    const uint32_t *operands;
+    uint32_t repeat_count;
+    const uint32_t *repeat_operands;
+} IdmBcInstr;
+
+static char opcode_role_at(const char *roles, size_t index) {
+    char role = roles ? roles[index] : '\0';
+    return role ? role : 'r';
+}
+
+static bool decode_instr(const IdmBytecodeModule *module, size_t offset, IdmBcInstr *out, IdmError *err) {
+    size_t width = 0;
+    if (!idm_bc_instruction_width(module, offset, &width, err)) return false;
+    IdmOpcode op = (IdmOpcode)module->code[offset];
+    const IdmOpcodeInfo *info = idm_opcode_info(op);
+    if (!info) return idm_error_set(err, idm_span_unknown(NULL), "invalid opcode %u at offset %zu", (unsigned)op, offset);
+    out->op = op;
+    out->info = info;
+    out->offset = offset;
+    out->width = width;
+    out->operands = &module->code[offset + 1u];
+    out->repeat_count = info->count_operand == IDM_OPCODE_NO_COUNT ? 0u : out->operands[info->count_operand];
+    out->repeat_operands = &module->code[offset + 1u + (size_t)info->fixed_operands];
+    return true;
+}
+
+bool idm_bc_build_selector_for_entries(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err) {
     *out = NULL;
+    if (!rt) return idm_error_set(err, idm_span_unknown(NULL), "selector requires a runtime");
     if (!module) return idm_error_set(err, idm_span_unknown(NULL), "closure requires a module");
     if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "selector requires at least one entry");
     IdmPatternSelectorClause *clauses = calloc(entry_count, sizeof(*clauses));
@@ -576,7 +549,7 @@ bool idm_bc_build_selector_for_entries(const IdmBytecodeModule *module, const ui
         clauses[i].trivial_match = fn->trivial_match;
         clauses[i].has_guard = fn->has_guard;
     }
-    bool ok = idm_pattern_selector_build(clauses, entry_count, out, err);
+    bool ok = idm_pattern_selector_build(rt, clauses, entry_count, out, err);
     free(clauses);
     return ok;
 }
@@ -591,14 +564,10 @@ static bool selector_site_add_take(IdmBytecodeModule *module, size_t offset, Idm
         return idm_error_set(err, idm_span_unknown(NULL), "selector site offset is out of bounds");
     }
     if (module->selector_site_count == module->selector_site_cap) {
-        size_t cap = module->selector_site_cap ? module->selector_site_cap * 2u : 16u;
-        IdmBcSelectorSite *grown = realloc(module->selector_sites, cap * sizeof(*grown));
-        if (!grown) {
+        if (!idm_grow((void **)&module->selector_sites, &module->selector_site_cap, sizeof(*module->selector_sites), 16u, module->selector_site_count + 1u)) {
             idm_pattern_selector_free(selector);
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
-        module->selector_sites = grown;
-        module->selector_site_cap = cap;
     }
     module->selector_sites[module->selector_site_count].offset = (uint32_t)offset;
     module->selector_sites[module->selector_site_count].selector = selector;
@@ -607,10 +576,46 @@ static bool selector_site_add_take(IdmBytecodeModule *module, size_t offset, Idm
     return true;
 }
 
-static bool selector_site_for_entries(IdmBytecodeModule *module, size_t offset, const uint32_t *entries, size_t entry_count, IdmError *err) {
+static bool selector_site_for_entries(IdmRuntime *rt, IdmBytecodeModule *module, size_t offset, const uint32_t *entries, size_t entry_count, IdmError *err) {
     IdmPatternSelector *selector = NULL;
-    if (!idm_bc_build_selector_for_entries(module, entries, entry_count, &selector, err)) return false;
+    if (!idm_bc_build_selector_for_entries(rt, module, entries, entry_count, &selector, err)) return false;
     return selector_site_add_take(module, offset, selector, err);
+}
+
+static bool selector_site_for_instr(IdmRuntime *rt, IdmBytecodeModule *module, const IdmBcInstr *instr, IdmError *err) {
+    uint32_t fixed_entries[8];
+    size_t fixed_count = 0;
+    for (uint8_t i = 0; i < instr->info->fixed_operands; i++) {
+        if (opcode_role_at(instr->info->operand_roles, i) == 'f') fixed_entries[fixed_count++] = instr->operands[i];
+    }
+    size_t repeat_functions = 0;
+    for (uint8_t part = 0; part < instr->info->repeat_width; part++) {
+        if (opcode_role_at(instr->info->repeat_roles, part) == 'f') repeat_functions++;
+    }
+    if (fixed_count == 0 && repeat_functions == 0) return true;
+    if (repeat_functions == 0) return selector_site_for_entries(rt, module, instr->offset, fixed_entries, fixed_count, err);
+    if (fixed_count == 0 && repeat_functions == 1u && instr->info->repeat_width == 1u) {
+        return selector_site_for_entries(rt, module, instr->offset, instr->repeat_operands, instr->repeat_count, err);
+    }
+    size_t repeat_count = (size_t)instr->repeat_count * repeat_functions;
+    if (repeat_functions != 0 && repeat_count / repeat_functions != instr->repeat_count) {
+        return idm_error_set(err, idm_span_unknown(NULL), "%s selector entry count overflow", instr->info->name);
+    }
+    size_t entry_count = fixed_count + repeat_count;
+    uint32_t *entries = entry_count == 0 ? NULL : malloc(entry_count * sizeof(*entries));
+    if (entry_count != 0 && !entries) return idm_error_oom(err, idm_span_unknown(NULL));
+    size_t at = 0;
+    for (size_t i = 0; i < fixed_count; i++) entries[at++] = fixed_entries[i];
+    for (uint32_t item = 0; item < instr->repeat_count; item++) {
+        for (uint8_t part = 0; part < instr->info->repeat_width; part++) {
+            if (opcode_role_at(instr->info->repeat_roles, part) == 'f') {
+                entries[at++] = instr->repeat_operands[(size_t)item * (size_t)instr->info->repeat_width + (size_t)part];
+            }
+        }
+    }
+    bool ok = selector_site_for_entries(rt, module, instr->offset, entries, entry_count, err);
+    free(entries);
+    return ok;
 }
 
 IdmPatternSelector *idm_bc_selector_at(const IdmBytecodeModule *module, size_t offset) {
@@ -618,15 +623,7 @@ IdmPatternSelector *idm_bc_selector_at(const IdmBytecodeModule *module, size_t o
     return module->selector_by_offset[offset];
 }
 
-static bool skip_words(const IdmBytecodeModule *module, size_t *ip, IdmOpcode op, uint32_t count, IdmError *err) {
-    uint32_t ignored = 0;
-    for (uint32_t i = 0; i < count; i++) {
-        if (!verify_operand(module, ip, op, &ignored, err)) return false;
-    }
-    return true;
-}
-
-bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err) {
+bool idm_bc_prepare_selectors(IdmRuntime *rt, IdmBytecodeModule *module, IdmError *err) {
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "bytecode.prepare_selectors");
     if (module->selectors_prepared) {
@@ -640,116 +637,17 @@ bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err) {
     if (module->code_count != 0 && !module->selector_by_offset) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->function_count; i++) {
         uint32_t entry = (uint32_t)i;
-        if (!idm_bc_build_selector_for_entries(module, &entry, 1u, &module->functions[i].selector, err)) {
+        if (!idm_bc_build_selector_for_entries(rt, module, &entry, 1u, &module->functions[i].selector, err)) {
             selectors_clear(module);
             return false;
         }
     }
     size_t ip = 0;
     while (ip < module->code_count) {
-        size_t offset = ip;
-        IdmOpcode op = (IdmOpcode)module->code[ip++];
-        uint32_t operand = 0;
-        switch (op) {
-            case IDM_OP_HALT:
-            case IDM_OP_RESCUE_POP:
-            case IDM_OP_POP_PACKAGE_ENV:
-                break;
-            case IDM_OP_RETURN:
-            case IDM_OP_RAISE:
-            case IDM_OP_LOAD_RAISED:
-                if (!skip_words(module, &ip, op, 1u, err)) return false;
-                break;
-            case IDM_OP_MOVE:
-            case IDM_OP_LOAD_CONST:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_MAKE_CELL:
-            case IDM_OP_LOAD_CELL:
-            case IDM_OP_STORE_CELL:
-            case IDM_OP_LOAD_ENV:
-            case IDM_OP_STORE_ENV:
-            case IDM_OP_JUMP_IF_FALSE:
-                if (!skip_words(module, &ip, op, 2u, err)) return false;
-                break;
-            case IDM_OP_LIST_CONS:
-            case IDM_OP_LIST_APPEND:
-            case IDM_OP_LOAD_PACKAGE_SLOT:
-            case IDM_OP_STORE_PACKAGE_SLOT:
-                if (!skip_words(module, &ip, op, 3u, err)) return false;
-                break;
-            case IDM_OP_MAKE_RECORD: {
-                if (!skip_words(module, &ip, op, 3u, err)) return false;
-                uint32_t field_count = 0;
-                if (!verify_operand(module, &ip, op, &field_count, err)) return false;
-                if (!skip_words(module, &ip, op, field_count * 2u, err)) return false;
-                break;
-            }
-            case IDM_OP_JUMP:
-            case IDM_OP_RESCUE_PUSH:
-            case IDM_OP_PUSH_PACKAGE_ENV:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
-            case IDM_OP_RECV:
-                if (!skip_words(module, &ip, op, 5u, err)) return false;
-                break;
-            case IDM_OP_MAKE_CLOSURE:
-                if (!skip_words(module, &ip, op, 1u, err)) { selectors_clear(module); return false; }
-                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
-                if (!selector_site_for_entries(module, offset, &operand, 1u, err)) { selectors_clear(module); return false; }
-                break;
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-                if (!skip_words(module, &ip, op, 1u, err)) { selectors_clear(module); return false; }
-                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
-                if (!selector_site_for_entries(module, offset, &operand, 1u, err)) { selectors_clear(module); return false; }
-                if (!skip_words(module, &ip, op, 2u, err)) { selectors_clear(module); return false; }
-                break;
-            case IDM_OP_MAKE_MULTI_CLOSURE: {
-                if (!verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
-                uint32_t entry_count = 0;
-                uint32_t capture_count = 0;
-                if (!verify_operand(module, &ip, op, &entry_count, err) ||
-                    !verify_operand(module, &ip, op, &capture_count, err) ||
-                    !verify_operand(module, &ip, op, &operand, err)) { selectors_clear(module); return false; }
-                (void)capture_count;
-                if (ip + entry_count > module->code_count) { selectors_clear(module); return idm_error_set(err, idm_span_unknown(NULL), "MAKE_MULTI_CLOSURE entries out of bounds"); }
-                if (!selector_site_for_entries(module, offset, &module->code[ip], entry_count, err)) { selectors_clear(module); return false; }
-                ip += entry_count;
-                break;
-            }
-            case IDM_OP_CALL:
-                if (!skip_words(module, &ip, op, 5u, err)) { selectors_clear(module); return false; }
-                break;
-            case IDM_OP_MATCH: {
-                if (!skip_words(module, &ip, op, 3u, err)) { selectors_clear(module); return false; }
-                uint32_t entry_count = 0;
-                if (!verify_operand(module, &ip, op, &entry_count, err)) { selectors_clear(module); return false; }
-                if (!skip_words(module, &ip, op, 3u, err)) { selectors_clear(module); return false; }
-                if (entry_count == 0) { selectors_clear(module); return idm_error_set(err, idm_span_unknown(NULL), "MATCH requires entries"); }
-                if (ip + entry_count > module->code_count) { selectors_clear(module); return idm_error_set(err, idm_span_unknown(NULL), "MATCH entries out of bounds"); }
-                if (!selector_site_for_entries(module, offset, &module->code[ip], entry_count, err)) { selectors_clear(module); return false; }
-                ip += entry_count;
-                break;
-            }
-            case IDM_OP_RECORD_IS:
-                if (!skip_words(module, &ip, op, 3u, err)) { selectors_clear(module); return false; }
-                break;
-            case IDM_OP_RECORD_FIELD:
-                if (!skip_words(module, &ip, op, 5u, err)) { selectors_clear(module); return false; }
-                break;
-            case IDM_OP_MAKE_VALUE_SEQUENCE:
-            case IDM_OP_CALL_PRIMITIVE:
-                if (!skip_words(module, &ip, op, 4u, err)) { selectors_clear(module); return false; }
-                break;
-            case IDM_OP_STRING_CONCAT:
-                if (!skip_words(module, &ip, op, 3u, err)) { selectors_clear(module); return false; }
-                break;
-            case IDM_OP_MAKE_SYNTAX:
-                if (!skip_words(module, &ip, op, 4u, err)) { selectors_clear(module); return false; }
-                break;
-            default:
-                selectors_clear(module);
-                return idm_error_set(err, idm_span_unknown(NULL), "selector preparation: invalid opcode %u at offset %zu", (unsigned)op, offset);
-        }
+        IdmBcInstr instr;
+        if (!decode_instr(module, ip, &instr, err)) { selectors_clear(module); return false; }
+        if (!selector_site_for_instr(rt, module, &instr, err)) { selectors_clear(module); return false; }
+        ip += instr.width;
     }
     module->selectors_prepared = true;
     idm_profile_count("bytecode.prepare_selectors.functions", (uint64_t)module->function_count);
@@ -758,274 +656,56 @@ bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err) {
     return true;
 }
 
+static bool verify_reference_role(const IdmBytecodeModule *module, const IdmBcInstr *instr, char role, uint32_t word, size_t *targets, size_t *target_count, IdmError *err) {
+    switch (role) {
+        case 'r':
+            return true;
+        case 'c':
+            if (word < module->const_count) return true;
+            return idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", instr->info->name, word);
+        case 'f':
+            if (word < module->function_count) return true;
+            return idm_error_set(err, idm_span_unknown(NULL), "%s function %u out of bounds", instr->info->name, word);
+        case 'j':
+            if (word >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u out of bounds", instr->info->name, word);
+            targets[(*target_count)++] = word;
+            return true;
+        case 'm':
+            return word != 0 ? true : idm_error_set(err, idm_span_unknown(NULL), "%s requires at least one entry", instr->info->name);
+        case 't':
+            return word <= 1u ? true : idm_error_set(err, idm_span_unknown(NULL), "%s tail flag must be 0 or 1", instr->info->name);
+        case 'p':
+            return idm_primitive_info((IdmPrimitive)word) != NULL ? true : idm_error_set(err, idm_span_unknown(NULL), "%s primitive %u out of bounds", instr->info->name, word);
+        case 'v':
+            return valid_value_sequence_kind(word) ? true : idm_error_set(err, idm_span_unknown(NULL), "%s kind %u is invalid", instr->info->name, word);
+        case 'y':
+            return valid_syntax_build_kind(word) ? true : idm_error_set(err, idm_span_unknown(NULL), "%s kind %u is invalid", instr->info->name, word);
+        default:
+            return idm_error_set(err, idm_span_unknown(NULL), "%s has invalid operand role '%c'", instr->info->name, role);
+    }
+}
+
+static bool verify_instr_references(const IdmBytecodeModule *module, const IdmBcInstr *instr, size_t *targets, size_t *target_count, IdmError *err) {
+    for (uint8_t i = 0; i < instr->info->fixed_operands; i++) {
+        if (!verify_reference_role(module, instr, opcode_role_at(instr->info->operand_roles, i), instr->operands[i], targets, target_count, err)) return false;
+    }
+    for (uint32_t item = 0; item < instr->repeat_count; item++) {
+        for (uint8_t part = 0; part < instr->info->repeat_width; part++) {
+            size_t index = (size_t)item * (size_t)instr->info->repeat_width + (size_t)part;
+            if (!verify_reference_role(module, instr, opcode_role_at(instr->info->repeat_roles, part), instr->repeat_operands[index], targets, target_count, err)) return false;
+        }
+    }
+    return true;
+}
+
 static bool verify_scan(const IdmBytecodeModule *module, unsigned char *is_start, size_t *targets, size_t *target_count, IdmError *err) {
     size_t ip = 0;
     while (ip < module->code_count) {
+        IdmBcInstr instr;
+        if (!decode_instr(module, ip, &instr, err)) return false;
         is_start[ip] = 1u;
-        IdmOpcode op = (IdmOpcode)module->code[ip++];
-        uint32_t operand = 0;
-        switch (op) {
-            case IDM_OP_HALT:
-            case IDM_OP_RESCUE_POP:
-            case IDM_OP_POP_PACKAGE_ENV:
-                break;
-            case IDM_OP_RETURN:
-            case IDM_OP_RAISE:
-            case IDM_OP_LOAD_RAISED:
-                if (!skip_words(module, &ip, op, 1u, err)) return false;
-                break;
-            case IDM_OP_MOVE:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_MAKE_CELL:
-            case IDM_OP_LOAD_CELL:
-            case IDM_OP_STORE_CELL:
-            case IDM_OP_LOAD_ENV:
-            case IDM_OP_STORE_ENV:
-                if (!skip_words(module, &ip, op, 2u, err)) return false;
-                break;
-            case IDM_OP_LIST_CONS:
-            case IDM_OP_LIST_APPEND:
-                if (!skip_words(module, &ip, op, 3u, err)) return false;
-                break;
-            case IDM_OP_MAKE_RECORD: {
-                uint32_t dst = 0;
-                uint32_t type_const = 0;
-                uint32_t first_arg = 0;
-                uint32_t field_count = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                (void)dst;
-                if (!verify_operand(module, &ip, op, &type_const, err)) return false;
-                if (type_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_RECORD type constant %u out of bounds", type_const);
-                if (!verify_operand(module, &ip, op, &first_arg, err)) return false;
-                (void)first_arg;
-                if (!verify_operand(module, &ip, op, &field_count, err)) return false;
-                for (uint32_t i = 0; i < field_count; i++) {
-                    uint32_t field_const = 0;
-                    uint32_t contract_const = 0;
-                    if (!verify_operand(module, &ip, op, &field_const, err)) return false;
-                    if (field_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_RECORD field constant %u out of bounds", field_const);
-                    if (!verify_operand(module, &ip, op, &contract_const, err)) return false;
-                    if (contract_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_RECORD field contract constant %u out of bounds", contract_const);
-                }
-                break;
-            }
-            case IDM_OP_RECORD_IS: {
-                uint32_t dst = 0;
-                uint32_t value_reg = 0;
-                uint32_t name_const = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                (void)dst;
-                if (!verify_operand(module, &ip, op, &value_reg, err)) return false;
-                (void)value_reg;
-                if (!verify_operand(module, &ip, op, &name_const, err)) return false;
-                if (name_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", idm_opcode_name(op), name_const);
-                break;
-            }
-            case IDM_OP_RECORD_FIELD: {
-                uint32_t dst = 0;
-                uint32_t value_reg = 0;
-                uint32_t type_const = 0;
-                uint32_t field_const = 0;
-                uint32_t field_index = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                (void)dst;
-                if (!verify_operand(module, &ip, op, &value_reg, err)) return false;
-                (void)value_reg;
-                if (!verify_operand(module, &ip, op, &type_const, err)) return false;
-                if (type_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "RECORD_FIELD type constant %u out of bounds", type_const);
-                if (!verify_operand(module, &ip, op, &field_const, err)) return false;
-                if (field_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "RECORD_FIELD field constant %u out of bounds", field_const);
-                if (!verify_operand(module, &ip, op, &field_index, err)) return false;
-                (void)field_index;
-                break;
-            }
-            case IDM_OP_LOAD_CONST:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_CONST index %u out of bounds", operand);
-                break;
-            case IDM_OP_PUSH_PACKAGE_ENV:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "PUSH_PACKAGE_ENV index %u out of bounds", operand);
-                break;
-            case IDM_OP_MAKE_CLOSURE:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_CLOSURE function %u out of bounds", operand);
-                break;
-            case IDM_OP_LOAD_PACKAGE_SLOT: {
-                uint32_t key_const = 0;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &key_const, err)) return false;
-                if (key_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "LOAD_PACKAGE_SLOT key constant %u out of bounds", key_const);
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
-            }
-            case IDM_OP_STORE_PACKAGE_SLOT: {
-                uint32_t key_const = 0;
-                if (!verify_operand(module, &ip, op, &key_const, err)) return false;
-                if (key_const >= module->const_count) return idm_error_set(err, idm_span_unknown(NULL), "STORE_PACKAGE_SLOT key constant %u out of bounds", key_const);
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
-            }
-            case IDM_OP_CALL: {
-                uint32_t dst = 0;
-                uint32_t callee = 0;
-                uint32_t first_arg = 0;
-                uint32_t argc = 0;
-                uint32_t tail_flag = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                if (!verify_operand(module, &ip, op, &callee, err)) return false;
-                if (!verify_operand(module, &ip, op, &first_arg, err)) return false;
-                (void)dst;
-                (void)callee;
-                (void)first_arg;
-                if (!verify_operand(module, &ip, op, &argc, err)) return false;
-                if (!verify_operand(module, &ip, op, &tail_flag, err)) return false;
-                if (tail_flag > 1u) return idm_error_set(err, idm_span_unknown(NULL), "CALL tail flag must be 0 or 1");
-                break;
-            }
-            case IDM_OP_MATCH: {
-                uint32_t dst = 0;
-                uint32_t first_arg = 0;
-                uint32_t argc = 0;
-                uint32_t entry_count = 0;
-                uint32_t capture_count = 0;
-                uint32_t first_capture = 0;
-                uint32_t tail_flag = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                if (!verify_operand(module, &ip, op, &first_arg, err)) return false;
-                if (!verify_operand(module, &ip, op, &argc, err)) return false;
-                if (!verify_operand(module, &ip, op, &entry_count, err)) return false;
-                if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "MATCH requires at least one entry");
-                if (!verify_operand(module, &ip, op, &capture_count, err)) return false;
-                if (!verify_operand(module, &ip, op, &first_capture, err)) return false;
-                if (!verify_operand(module, &ip, op, &tail_flag, err)) return false;
-                if (tail_flag > 1u) return idm_error_set(err, idm_span_unknown(NULL), "MATCH tail flag must be 0 or 1");
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    uint32_t entry = 0;
-                    if (!verify_operand(module, &ip, op, &entry, err)) return false;
-                    if (entry >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MATCH function %u out of bounds", entry);
-                }
-                (void)dst;
-                (void)first_arg;
-                (void)argc;
-                (void)capture_count;
-                (void)first_capture;
-                break;
-            }
-            case IDM_OP_CALL_PRIMITIVE: {
-                uint32_t dst = 0;
-                uint32_t primitive = 0;
-                uint32_t first_arg = 0;
-                uint32_t argc = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                if (!verify_operand(module, &ip, op, &primitive, err)) return false;
-                if (!idm_primitive_info((IdmPrimitive)primitive)) return idm_error_set(err, idm_span_unknown(NULL), "CALL_PRIMITIVE primitive %u out of bounds", primitive);
-                if (!verify_operand(module, &ip, op, &first_arg, err)) return false;
-                if (!verify_operand(module, &ip, op, &argc, err)) return false;
-                (void)dst;
-                (void)first_arg;
-                (void)argc;
-                break;
-            }
-            case IDM_OP_MAKE_VALUE_SEQUENCE: {
-                uint32_t dst = 0;
-                uint32_t kind = 0;
-                uint32_t first_item = 0;
-                uint32_t count = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                (void)dst;
-                if (!verify_operand(module, &ip, op, &kind, err)) return false;
-                if (!valid_value_sequence_kind(kind)) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_VALUE_SEQUENCE kind %u is invalid", kind);
-                if (!verify_operand(module, &ip, op, &first_item, err)) return false;
-                (void)first_item;
-                if (!verify_operand(module, &ip, op, &count, err)) return false;
-                (void)count;
-                break;
-            }
-            case IDM_OP_MAKE_SYNTAX: {
-                uint32_t dst = 0;
-                uint32_t kind = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                (void)dst;
-                if (!verify_operand(module, &ip, op, &kind, err)) return false;
-                if (!valid_syntax_build_kind(kind)) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_SYNTAX kind %u is invalid", kind);
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
-            }
-            case IDM_OP_MAKE_MULTI_CLOSURE: {
-                uint32_t dst = 0;
-                uint32_t entry_count = 0;
-                uint32_t capture_count = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                (void)dst;
-                if (!verify_operand(module, &ip, op, &entry_count, err)) return false;
-                if (entry_count == 0) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_MULTI_CLOSURE requires at least one entry");
-                if (!verify_operand(module, &ip, op, &capture_count, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                (void)operand;
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    uint32_t entry = 0;
-                    if (!verify_operand(module, &ip, op, &entry, err)) return false;
-                    if (entry >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_MULTI_CLOSURE function %u out of bounds", entry);
-                }
-                (void)capture_count;
-                break;
-            }
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "MAKE_CLOSURE_CAPTURES function %u out of bounds", operand);
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                break;
-            case IDM_OP_STRING_CONCAT: {
-                uint32_t first_item = 0;
-                uint32_t count = 0;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &first_item, err)) return false;
-                (void)first_item;
-                if (!verify_operand(module, &ip, op, &count, err)) return false;
-                (void)count;
-                break;
-            }
-            case IDM_OP_JUMP:
-            case IDM_OP_RESCUE_PUSH:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u out of bounds", idm_opcode_name(op), operand);
-                targets[(*target_count)++] = operand;
-                break;
-            case IDM_OP_JUMP_IF_FALSE:
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (!verify_operand(module, &ip, op, &operand, err)) return false;
-                if (operand >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "%s target %u out of bounds", idm_opcode_name(op), operand);
-                targets[(*target_count)++] = operand;
-                break;
-            case IDM_OP_RECV: {
-                uint32_t dst = 0;
-                uint32_t timeout = 0;
-                uint32_t receiver = 0;
-                uint32_t target = 0;
-                uint32_t tail_flag = 0;
-                if (!verify_operand(module, &ip, op, &dst, err)) return false;
-                if (!verify_operand(module, &ip, op, &timeout, err)) return false;
-                if (!verify_operand(module, &ip, op, &receiver, err)) return false;
-                (void)dst;
-                (void)timeout;
-                (void)receiver;
-                if (!verify_operand(module, &ip, op, &target, err)) return false;
-                if (target >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "RECV target %u out of bounds", target);
-                targets[(*target_count)++] = target;
-                if (!verify_operand(module, &ip, op, &tail_flag, err)) return false;
-                if (tail_flag > 1u) return idm_error_set(err, idm_span_unknown(NULL), "RECV tail flag must be 0 or 1");
-                break;
-            }
-            default:
-                return idm_error_set(err, idm_span_unknown(NULL), "invalid opcode %u at offset %zu", (unsigned)op, ip - 1u);
-        }
+        if (!verify_instr_references(module, &instr, targets, target_count, err)) return false;
+        ip += instr.width;
     }
     return true;
 }
@@ -1040,6 +720,47 @@ static bool verify_reg_range(uint32_t register_count, IdmOpcode op, const char *
     if (first < register_count && count <= register_count - first) return true;
     unsigned long long last = (unsigned long long)first + (unsigned long long)count - 1u;
     return idm_error_set(err, idm_span_unknown(NULL), "%s %s register range r%u..r%llu out of bounds for %u registers", idm_opcode_name(op), role, first, last, register_count);
+}
+
+static const char *register_role_label(char role) {
+    switch (role) {
+        case 'd': return "destination";
+        case 's': return "source";
+        default: return "operand";
+    }
+}
+
+static bool verify_instr_registers(const IdmBcFunction *fn, const IdmBcInstr *instr, IdmError *err) {
+    for (uint8_t i = 0; i < instr->info->fixed_operands; i++) {
+        char role = opcode_role_at(instr->info->register_roles, i);
+        switch (role) {
+            case 'r':
+                break;
+            case 'd':
+            case 's':
+                if (!verify_reg(fn->register_count, instr->op, register_role_label(role), instr->operands[i], err)) return false;
+                break;
+            default:
+                return idm_error_set(err, idm_span_unknown(NULL), "%s has invalid register role '%c'", instr->info->name, role);
+        }
+    }
+    const char *ranges = instr->info->register_ranges ? instr->info->register_ranges : "";
+    size_t len = strlen(ranges);
+    if ((len % 2u) != 0) return idm_error_set(err, idm_span_unknown(NULL), "%s has invalid register range metadata", instr->info->name);
+    for (size_t i = 0; i < len; i += 2u) {
+        char base_ch = ranges[i];
+        char count_ch = ranges[i + 1u];
+        if (base_ch < '0' || base_ch > '9' || count_ch < '0' || count_ch > '9') {
+            return idm_error_set(err, idm_span_unknown(NULL), "%s has invalid register range metadata", instr->info->name);
+        }
+        uint8_t base_index = (uint8_t)(base_ch - '0');
+        uint8_t count_index = (uint8_t)(count_ch - '0');
+        if (base_index >= instr->info->fixed_operands || count_index >= instr->info->fixed_operands) {
+            return idm_error_set(err, idm_span_unknown(NULL), "%s has out-of-bounds register range metadata", instr->info->name);
+        }
+        if (!verify_reg_range(fn->register_count, instr->op, "range", instr->operands[base_index], instr->operands[count_index], err)) return false;
+    }
+    return true;
 }
 
 static bool verify_enqueue_target(const IdmBytecodeModule *module, const unsigned char *is_start, unsigned char *seen, size_t *work, size_t *work_count, uint32_t target, IdmOpcode op, IdmError *err) {
@@ -1072,6 +793,43 @@ static bool verify_enqueue_tail_next(const IdmBytecodeModule *module, const unsi
     return true;
 }
 
+static bool instr_fixed_operand(const IdmBcInstr *instr, uint8_t index, const char *role, uint32_t *out, IdmError *err) {
+    if (index < instr->info->fixed_operands) {
+        *out = instr->operands[index];
+        return true;
+    }
+    return idm_error_set(err, idm_span_unknown(NULL), "%s has invalid %s metadata", instr->info->name, role);
+}
+
+static bool verify_instr_flow(const IdmBytecodeModule *module, const unsigned char *is_start, unsigned char *seen, size_t *work, size_t *work_count, const IdmBcInstr *instr, IdmError *err) {
+    size_t next = instr->offset + instr->width;
+    uint32_t target = 0;
+    uint32_t tail = 0;
+    switch (instr->info->flow) {
+        case IDM_OPCODE_FLOW_NEXT:
+            return verify_enqueue_next(module, is_start, seen, work, work_count, next, instr->op, err);
+        case IDM_OPCODE_FLOW_TERMINAL:
+            return true;
+        case IDM_OPCODE_FLOW_JUMP:
+            return instr_fixed_operand(instr, instr->info->branch_operand, "branch", &target, err) &&
+                   verify_enqueue_target(module, is_start, seen, work, work_count, target, instr->op, err);
+        case IDM_OPCODE_FLOW_BRANCH:
+            return instr_fixed_operand(instr, instr->info->branch_operand, "branch", &target, err) &&
+                   verify_enqueue_target(module, is_start, seen, work, work_count, target, instr->op, err) &&
+                   verify_enqueue_next(module, is_start, seen, work, work_count, next, instr->op, err);
+        case IDM_OPCODE_FLOW_BRANCH_TAIL:
+            return instr_fixed_operand(instr, instr->info->branch_operand, "branch", &target, err) &&
+                   instr_fixed_operand(instr, instr->info->tail_operand, "tail", &tail, err) &&
+                   verify_enqueue_target(module, is_start, seen, work, work_count, target, instr->op, err) &&
+                   (tail ? verify_enqueue_tail_next(module, is_start, seen, work, work_count, next, instr->op, err) : verify_enqueue_next(module, is_start, seen, work, work_count, next, instr->op, err));
+        case IDM_OPCODE_FLOW_TAIL_FALLTHROUGH:
+            return instr_fixed_operand(instr, instr->info->tail_operand, "tail", &tail, err) &&
+                   (tail ? verify_enqueue_tail_next(module, is_start, seen, work, work_count, next, instr->op, err) : verify_enqueue_next(module, is_start, seen, work, work_count, next, instr->op, err));
+        default:
+            return idm_error_set(err, idm_span_unknown(NULL), "%s has invalid flow metadata", instr->info->name);
+    }
+}
+
 static bool verify_function_registers(const IdmBytecodeModule *module, uint32_t function_index, const unsigned char *is_start, IdmError *err) {
     const IdmBcFunction *fn = &module->functions[function_index];
     if (fn->primitive_backed) return true;
@@ -1087,250 +845,12 @@ static bool verify_function_registers(const IdmBytecodeModule *module, uint32_t 
     work[work_count++] = fn->entry;
     bool ok = true;
     while (ok && work_count != 0) {
-        size_t ip = work[--work_count];
-        size_t instr_ip = ip;
-        IdmOpcode op = (IdmOpcode)module->code[ip++];
-        uint32_t a = 0;
-        uint32_t b = 0;
-        uint32_t c = 0;
-        uint32_t d = 0;
-        uint32_t e = 0;
-        uint32_t f = 0;
-        uint32_t g = 0;
-        switch (op) {
-            case IDM_OP_HALT:
-                break;
-            case IDM_OP_RESCUE_POP:
-            case IDM_OP_POP_PACKAGE_ENV:
-                ok = verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_RETURN:
-            case IDM_OP_RAISE:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_reg(fn->register_count, op, "source", a, err);
-                break;
-            case IDM_OP_LOAD_RAISED:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_MOVE:
-            case IDM_OP_MAKE_CELL:
-            case IDM_OP_LOAD_CELL:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg(fn->register_count, op, "source", b, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_LOAD_CONST:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_LOAD_ENV:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_STORE_CELL:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_reg(fn->register_count, op, "cell", a, err) &&
-                     verify_reg(fn->register_count, op, "value", b, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_STORE_ENV:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_reg(fn->register_count, op, "source", b, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_LIST_CONS:
-            case IDM_OP_LIST_APPEND:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg(fn->register_count, op, "head", b, err) &&
-                     verify_reg(fn->register_count, op, "tail", c, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_LOAD_PACKAGE_SLOT:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_STORE_PACKAGE_SLOT:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_reg(fn->register_count, op, "source", c, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_JUMP:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_enqueue_target(module, is_start, seen, work, &work_count, a, op, err);
-                break;
-            case IDM_OP_RESCUE_PUSH:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_enqueue_target(module, is_start, seen, work, &work_count, a, op, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_PUSH_PACKAGE_ENV:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_JUMP_IF_FALSE:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_reg(fn->register_count, op, "condition", a, err) &&
-                     verify_enqueue_target(module, is_start, seen, work, &work_count, b, op, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_RECV:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_operand(module, &ip, op, &e, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg(fn->register_count, op, "timeout", b, err) &&
-                     verify_reg(fn->register_count, op, "receiver", c, err) &&
-                     verify_enqueue_target(module, is_start, seen, work, &work_count, d, op, err) &&
-                     (e ? verify_enqueue_tail_next(module, is_start, seen, work, &work_count, ip, op, err) : verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err));
-                break;
-            case IDM_OP_MAKE_CLOSURE:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg_range(fn->register_count, op, "capture", c, d, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_MAKE_MULTI_CLOSURE: {
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg_range(fn->register_count, op, "capture", d, c, err);
-                for (uint32_t i = 0; ok && i < b; i++) ok = verify_operand(module, &ip, op, &e, err);
-                if (ok) ok = verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            }
-            case IDM_OP_CALL:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_operand(module, &ip, op, &e, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg(fn->register_count, op, "callee", b, err) &&
-                     verify_reg_range(fn->register_count, op, "argument", c, d, err) &&
-                     (e ? verify_enqueue_tail_next(module, is_start, seen, work, &work_count, ip, op, err) : verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err));
-                break;
-            case IDM_OP_CALL_PRIMITIVE:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     (idm_primitive_info((IdmPrimitive)b) != NULL || idm_error_set(err, idm_span_unknown(NULL), "CALL_PRIMITIVE primitive %u out of bounds", b)) &&
-                     verify_reg_range(fn->register_count, op, "argument", c, d, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_MATCH:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_operand(module, &ip, op, &e, err) &&
-                     verify_operand(module, &ip, op, &f, err) &&
-                     verify_operand(module, &ip, op, &g, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg_range(fn->register_count, op, "argument", b, c, err) &&
-                     verify_reg_range(fn->register_count, op, "capture", f, e, err) &&
-                     (g <= 1u || idm_error_set(err, idm_span_unknown(NULL), "MATCH tail flag must be 0 or 1"));
-                for (uint32_t i = 0; ok && i < d; i++) {
-                    ok = verify_operand(module, &ip, op, &a, err) &&
-                         (a < module->function_count || idm_error_set(err, idm_span_unknown(NULL), "MATCH function %u out of bounds", a));
-                }
-                if (ok && d == 0) ok = idm_error_set(err, idm_span_unknown(NULL), "MATCH requires at least one entry");
-                if (ok) ok = g ? verify_enqueue_tail_next(module, is_start, seen, work, &work_count, ip, op, err) : verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_MAKE_RECORD: {
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg_range(fn->register_count, op, "field", c, d, err);
-                for (uint32_t i = 0; ok && i < d; i++) {
-                    ok = verify_operand(module, &ip, op, &e, err) &&
-                         verify_operand(module, &ip, op, &e, err);
-                }
-                if (ok) ok = verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            }
-            case IDM_OP_RECORD_IS:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg(fn->register_count, op, "value", b, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_RECORD_FIELD:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_operand(module, &ip, op, &e, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg(fn->register_count, op, "value", b, err) &&
-                     (c < module->const_count || idm_error_set(err, idm_span_unknown(NULL), "RECORD_FIELD type constant %u out of bounds", c)) &&
-                     (d < module->const_count || idm_error_set(err, idm_span_unknown(NULL), "RECORD_FIELD field constant %u out of bounds", d)) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_MAKE_VALUE_SEQUENCE:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg_range(fn->register_count, op, "item", c, d, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_MAKE_SYNTAX:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_operand(module, &ip, op, &d, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg(fn->register_count, op, "context", c, err) &&
-                     verify_reg(fn->register_count, op, "payload", d, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            case IDM_OP_STRING_CONCAT:
-                ok = verify_operand(module, &ip, op, &a, err) &&
-                     verify_operand(module, &ip, op, &b, err) &&
-                     verify_operand(module, &ip, op, &c, err) &&
-                     verify_reg(fn->register_count, op, "destination", a, err) &&
-                     verify_reg_range(fn->register_count, op, "item", b, c, err) &&
-                     verify_enqueue_next(module, is_start, seen, work, &work_count, ip, op, err);
-                break;
-            default:
-                ok = idm_error_set(err, idm_span_unknown(NULL), "invalid opcode %u at offset %zu", (unsigned)op, instr_ip);
-                break;
-        }
+        size_t instr_ip = work[--work_count];
+        IdmBcInstr instr;
+        ok = decode_instr(module, instr_ip, &instr, err);
+        if (!ok) break;
+        ok = verify_instr_registers(fn, &instr, err) &&
+             verify_instr_flow(module, is_start, seen, work, &work_count, &instr, err);
     }
     free(seen);
     free(work);
@@ -1393,6 +913,45 @@ static bool append_function_ref(IdmBuffer *buf, const IdmBytecodeModule *module,
     return idm_buf_appendf(buf, " %u", function_index);
 }
 
+static bool append_disasm_operand(IdmBuffer *buf, const IdmBytecodeModule *module, char role, uint32_t word) {
+    switch (role) {
+        case 'c':
+            return idm_buf_appendf(buf, " const=%u", word);
+        case 'f':
+            return append_function_ref(buf, module, word);
+        case 'j':
+            return idm_buf_appendf(buf, " target=%u", word);
+        case 'm':
+            return idm_buf_appendf(buf, " entries=%u", word);
+        case 't':
+            return idm_buf_appendf(buf, " tail=%u", word);
+        case 'p': {
+            const char *name = idm_primitive_info((IdmPrimitive)word) ? idm_primitive_name((IdmPrimitive)word) : "?";
+            return idm_buf_appendf(buf, " primitive=%s#%u", name, word);
+        }
+        case 'v':
+        case 'y':
+            return idm_buf_appendf(buf, " kind=%u", word);
+        case 'r':
+            return idm_buf_appendf(buf, " %u", word);
+        default:
+            return idm_buf_appendf(buf, " %u", word);
+    }
+}
+
+static bool append_disasm_operands(IdmBuffer *buf, const IdmBytecodeModule *module, const IdmBcInstr *instr) {
+    for (uint8_t i = 0; i < instr->info->fixed_operands; i++) {
+        if (!append_disasm_operand(buf, module, opcode_role_at(instr->info->operand_roles, i), instr->operands[i])) return false;
+    }
+    for (uint32_t item = 0; item < instr->repeat_count; item++) {
+        for (uint8_t part = 0; part < instr->info->repeat_width; part++) {
+            size_t index = (size_t)item * (size_t)instr->info->repeat_width + (size_t)part;
+            if (!append_disasm_operand(buf, module, opcode_role_at(instr->info->repeat_roles, part), instr->repeat_operands[index])) return false;
+        }
+    }
+    return true;
+}
+
 static bool append_name_note(IdmBuffer *buf, const IdmBytecodeModule *module, size_t offset) {
     const char *name = name_note_at(module, offset);
     return name ? idm_buf_appendf(buf, " #+name: %s", name) : true;
@@ -1415,168 +974,20 @@ bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module) {
     size_t ip = 0;
     while (ip < module->code_count) {
         size_t offset = ip;
-        IdmOpcode op = (IdmOpcode)module->code[ip++];
-        if (!idm_buf_appendf(buf, "%04zu %-16s", offset, idm_opcode_name(op))) return false;
-        switch (op) {
-            case IDM_OP_RETURN:
-            case IDM_OP_RAISE:
-            case IDM_OP_LOAD_RAISED:
-                if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u", module->code[ip++])) return false;
-                break;
-            case IDM_OP_MOVE:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_MAKE_CELL:
-            case IDM_OP_LOAD_CELL:
-            case IDM_OP_STORE_CELL:
-            case IDM_OP_LOAD_ENV:
-            case IDM_OP_STORE_ENV:
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u r%u", module->code[ip], module->code[ip + 1u])) return false;
-                ip += 2u;
-                break;
-            case IDM_OP_LIST_CONS:
-            case IDM_OP_LIST_APPEND:
-                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u r%u r%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
-                ip += 3u;
-                break;
-            case IDM_OP_LOAD_CONST:
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u const=%u", module->code[ip], module->code[ip + 1u])) return false;
-                ip += 2u;
-                break;
-            case IDM_OP_MAKE_CLOSURE:
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u", module->code[ip++])) return false;
-                if (!append_function_ref(buf, module, module->code[ip++])) return false;
-                break;
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u", module->code[ip++])) return false;
-                if (!append_function_ref(buf, module, module->code[ip++])) return false;
-                if (!idm_buf_appendf(buf, " first=r%u count=%u", module->code[ip], module->code[ip + 1u])) return false;
-                ip += 2u;
-                break;
-            case IDM_OP_JUMP:
-            case IDM_OP_RESCUE_PUSH:
-                if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " %u", module->code[ip++])) return false;
-                break;
-            case IDM_OP_JUMP_IF_FALSE:
-                if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u %u", module->code[ip], module->code[ip + 1u])) return false;
-                ip += 2u;
-                break;
-            case IDM_OP_LOAD_PACKAGE_SLOT:
-                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u key=%u slot=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
-                ip += 3u;
-                break;
-            case IDM_OP_STORE_PACKAGE_SLOT:
-                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " key=%u slot=%u r%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
-                ip += 3u;
-                break;
-            case IDM_OP_RECV:
-                if (ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u timeout=r%u receiver=r%u target=%u tail=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u], module->code[ip + 4u])) return false;
-                ip += 5u;
-                break;
-            case IDM_OP_MAKE_VALUE_SEQUENCE:
-                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u kind=%u first=r%u count=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u])) return false;
-                ip += 4u;
-                break;
-            case IDM_OP_MAKE_SYNTAX:
-                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u kind=%u ctx=r%u payload=r%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u])) return false;
-                ip += 4u;
-                break;
-            case IDM_OP_CALL: {
-                if (ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u callee=r%u first=r%u argc=%u tail=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u], module->code[ip + 4u])) return false;
-                ip += 5u;
-                break;
-            }
-            case IDM_OP_CALL_PRIMITIVE: {
-                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t primitive = module->code[ip + 1u];
-                const char *name = idm_primitive_info((IdmPrimitive)primitive) ? idm_primitive_name((IdmPrimitive)primitive) : "?";
-                if (!idm_buf_appendf(buf, " r%u primitive=%s#%u first=r%u argc=%u", module->code[ip], name, primitive, module->code[ip + 2u], module->code[ip + 3u])) return false;
-                ip += 4u;
-                break;
-            }
-            case IDM_OP_MATCH: {
-                if (ip + 7u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t dst = module->code[ip++];
-                uint32_t first_arg = module->code[ip++];
-                uint32_t argc = module->code[ip++];
-                uint32_t entry_count = module->code[ip++];
-                uint32_t capture_count = module->code[ip++];
-                uint32_t first_capture = module->code[ip++];
-                uint32_t tail = module->code[ip++];
-                if (!idm_buf_appendf(buf, " r%u first=r%u argc=%u entries=%u captures=r%u.. count=%u tail=%u", dst, first_arg, argc, entry_count, first_capture, capture_count, tail)) return false;
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    if (!append_function_ref(buf, module, module->code[ip++])) return false;
-                }
-                break;
-            }
-            case IDM_OP_PUSH_PACKAGE_ENV: {
-                if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t name_const = module->code[ip++];
-                if (!idm_buf_appendf(buf, " name=%u", name_const)) return false;
-                break;
-            }
-            case IDM_OP_MAKE_MULTI_CLOSURE: {
-                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t dst = module->code[ip++];
-                uint32_t entry_count = module->code[ip++];
-                uint32_t capture_count = module->code[ip++];
-                uint32_t first_capture = module->code[ip++];
-                if (!idm_buf_appendf(buf, " r%u entries=%u first=r%u captures=%u", dst, entry_count, first_capture, capture_count)) return false;
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    if (ip >= module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    if (!append_function_ref(buf, module, module->code[ip++])) return false;
-                }
-                break;
-            }
-            case IDM_OP_MAKE_RECORD: {
-                if (ip + 4u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                uint32_t dst = module->code[ip++];
-                uint32_t type_const = module->code[ip++];
-                uint32_t first = module->code[ip++];
-                uint32_t field_count = module->code[ip++];
-                if (!idm_buf_appendf(buf, " r%u type=%u first=r%u fields=%u", dst, type_const, first, field_count)) return false;
-                for (uint32_t i = 0; i < field_count; i++) {
-                    if (ip + 2u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                    uint32_t field_const = module->code[ip++];
-                    uint32_t contract_const = module->code[ip++];
-                    if (!idm_buf_appendf(buf, " %u:%u", field_const, contract_const)) return false;
-                }
-                break;
-            }
-            case IDM_OP_RECORD_FIELD:
-                if (ip + 5u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u receiver=r%u type=%u field=%u index=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u], module->code[ip + 3u], module->code[ip + 4u])) return false;
-                ip += 5u;
-                break;
-            case IDM_OP_RECORD_IS:
-                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u value=r%u type=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
-                ip += 3u;
-                break;
-            case IDM_OP_STRING_CONCAT:
-                if (ip + 3u > module->code_count) return idm_buf_append(buf, " <missing>\n");
-                if (!idm_buf_appendf(buf, " r%u first=r%u count=%u", module->code[ip], module->code[ip + 1u], module->code[ip + 2u])) return false;
-                ip += 3u;
-                break;
-            default:
-                break;
+        IdmBcInstr instr;
+        IdmError decode_error;
+        idm_error_init(&decode_error);
+        bool ok = decode_instr(module, ip, &instr, &decode_error);
+        idm_error_clear(&decode_error);
+        if (!ok) {
+            IdmOpcode op = (IdmOpcode)module->code[ip];
+            return idm_buf_appendf(buf, "%04zu %-16s <missing>\n", offset, idm_opcode_name(op));
         }
+        if (!idm_buf_appendf(buf, "%04zu %-16s", offset, instr.info->name)) return false;
+        if (!append_disasm_operands(buf, module, &instr)) return false;
         if (!append_name_note(buf, module, offset)) return false;
         if (!idm_buf_append_char(buf, '\n')) return false;
+        ip += instr.width;
     }
     return true;
 }
@@ -1586,6 +997,21 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
     switch (idm_value_tag(v)) {
         case IDM_VAL_NIL: return idm_buf_put_u8(out, 0u);
         case IDM_VAL_INT: return idm_buf_put_u8(out, 1u) && idm_buf_put_u64(out, (uint64_t)idm_int_value(v));
+        case IDM_VAL_BIGNUM: {
+            const uint32_t *limbs = NULL;
+            size_t count = 0u;
+            int sign = 0;
+            if (!idm_bignum_view(v, &limbs, &count, &sign)) return idm_error_set(err, idm_span_unknown(NULL), "invalid bignum constant");
+            if (count > UINT32_MAX) return idm_error_set(err, idm_span_unknown(NULL), "bignum constant is too large");
+            uint8_t sign_tag = sign < 0 ? 1u : (sign > 0 ? 2u : 0u);
+            if (!idm_buf_put_u8(out, 16u) || !idm_buf_put_u8(out, sign_tag) || !idm_buf_put_u32(out, (uint32_t)count)) {
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            for (size_t i = 0; i < count; i++) {
+                if (!idm_buf_put_u32(out, limbs[i])) return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            return true;
+        }
         case IDM_VAL_FLOAT: { uint64_t bits; double d = idm_float_value(v); memcpy(&bits, &d, 8u); return idm_buf_put_u8(out, 2u) && idm_buf_put_u64(out, bits); }
         case IDM_VAL_STRING: return idm_buf_put_u8(out, 3u) && idm_buf_put_str(out, idm_string_bytes(v), idm_string_length(v));
         case IDM_VAL_ATOM: { const char *s = idm_symbol_text(idm_value_symbol(v)); return idm_buf_put_u8(out, 4u) && idm_buf_put_str(out, s, strlen(s)); }
@@ -1621,7 +1047,8 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
         case IDM_VAL_RECORD: {
             IdmError ignore;
             idm_error_init(&ignore);
-            const char *type = idm_record_type(v, &ignore);
+            IdmSymbol *type_symbol = idm_record_type_symbol(v, &ignore);
+            const char *type = type_symbol ? idm_symbol_text(type_symbol) : NULL;
             size_t n = idm_record_field_count(v, &ignore);
             idm_error_clear(&ignore);
             if (!idm_buf_put_u8(out, 11u) ||
@@ -1630,7 +1057,8 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
             for (size_t i = 0; i < n; i++) {
                 IdmError field_err;
                 idm_error_init(&field_err);
-                const char *name = idm_record_field_name(v, i, &field_err);
+                IdmSymbol *name_symbol = idm_record_field_name_symbol(v, i, &field_err);
+                const char *name = name_symbol ? idm_symbol_text(name_symbol) : NULL;
                 IdmValue value = idm_record_field_value(v, i, &field_err);
                 bool ok = !(field_err.present);
                 idm_error_clear(&field_err);
@@ -1679,10 +1107,7 @@ static bool serialize_syntax_pattern(IdmBuffer *out, const IdmSyntaxPattern *pat
             }
             if (has_rest) {
                 if (!idm_buf_put_u32(out, (uint32_t)pat->as.seq.rest_index) ||
-                    !idm_buf_put_u8(out, pat->as.seq.rest_name ? 1u : 0u)) {
-                    return idm_error_oom(err, idm_span_unknown(NULL));
-                }
-                if (pat->as.seq.rest_name && !idm_buf_put_str(out, pat->as.seq.rest_name, strlen(pat->as.seq.rest_name))) {
+                    !idm_buf_put_opt_str(out, pat->as.seq.rest_name)) {
                     return idm_error_oom(err, idm_span_unknown(NULL));
                 }
             }
@@ -1735,102 +1160,16 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned de
     }
 }
 
-static bool serialize_code_word(IdmBuffer *out, const IdmBytecodeModule *module, size_t *ip, IdmError *err) {
-    if (*ip >= module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic code stream");
-    if (!idm_buf_put_u32(out, module->code[(*ip)++])) return idm_error_oom(err, idm_span_unknown(NULL));
-    return true;
-}
-
 static bool serialize_code(IdmBuffer *out, const IdmBytecodeModule *module, IdmError *err) {
     if (!idm_buf_put_u64(out, (uint64_t)module->code_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     size_t ip = 0;
     while (ip < module->code_count) {
-        IdmOpcode op = (IdmOpcode)module->code[ip++];
-        if (!idm_buf_put_u32(out, (uint32_t)op)) return idm_error_oom(err, idm_span_unknown(NULL));
-        switch (op) {
-            case IDM_OP_RETURN:
-            case IDM_OP_RAISE:
-            case IDM_OP_LOAD_RAISED:
-            case IDM_OP_JUMP:
-            case IDM_OP_RESCUE_PUSH:
-            case IDM_OP_PUSH_PACKAGE_ENV:
-                if (!serialize_code_word(out, module, &ip, err)) return false;
-                break;
-            case IDM_OP_MOVE:
-            case IDM_OP_LOAD_CONST:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_MAKE_CLOSURE:
-            case IDM_OP_MAKE_CELL:
-            case IDM_OP_LOAD_CELL:
-            case IDM_OP_STORE_CELL:
-            case IDM_OP_LOAD_ENV:
-            case IDM_OP_STORE_ENV:
-            case IDM_OP_JUMP_IF_FALSE:
-                for (size_t i = 0; i < 2u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
-                break;
-            case IDM_OP_LIST_CONS:
-            case IDM_OP_LIST_APPEND:
-            case IDM_OP_LOAD_PACKAGE_SLOT:
-            case IDM_OP_STORE_PACKAGE_SLOT:
-            case IDM_OP_STRING_CONCAT:
-            case IDM_OP_RECORD_IS:
-                for (size_t i = 0; i < 3u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
-                break;
-            case IDM_OP_RECORD_FIELD:
-                for (size_t i = 0; i < 5u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
-                break;
-            case IDM_OP_MAKE_VALUE_SEQUENCE:
-            case IDM_OP_MAKE_SYNTAX:
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-            case IDM_OP_CALL_PRIMITIVE:
-                for (size_t i = 0; i < 4u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
-                break;
-            case IDM_OP_RECV:
-            case IDM_OP_CALL:
-                for (size_t i = 0; i < 5u; i++) if (!serialize_code_word(out, module, &ip, err)) return false;
-                break;
-            case IDM_OP_MATCH: {
-                if (ip + 7u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic match");
-                uint32_t entry_count = module->code[ip + 3u];
-                for (size_t i = 0; i < 7u; i++) {
-                    if (!serialize_code_word(out, module, &ip, err)) return false;
-                }
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    if (!serialize_code_word(out, module, &ip, err)) return false;
-                }
-                break;
-            }
-            case IDM_OP_MAKE_MULTI_CLOSURE: {
-                if (ip + 4u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic multi closure");
-                uint32_t dst = module->code[ip++];
-                uint32_t entry_count = module->code[ip++];
-                uint32_t capture_count = module->code[ip++];
-                uint32_t first_capture = module->code[ip++];
-                if (!idm_buf_put_u32(out, dst) ||
-                    !idm_buf_put_u32(out, entry_count) ||
-                    !idm_buf_put_u32(out, capture_count) ||
-                    !idm_buf_put_u32(out, first_capture)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    if (!serialize_code_word(out, module, &ip, err)) return false;
-                }
-                (void)capture_count;
-                break;
-            }
-            case IDM_OP_MAKE_RECORD: {
-                if (ip + 4u > module->code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic record construction");
-                uint32_t field_count = module->code[ip + 3u];
-                for (size_t i = 0; i < 4u; i++) {
-                    if (!serialize_code_word(out, module, &ip, err)) return false;
-                }
-                for (uint32_t i = 0; i < field_count; i++) {
-                    if (!serialize_code_word(out, module, &ip, err)) return false;
-                    if (!serialize_code_word(out, module, &ip, err)) return false;
-                }
-                break;
-            }
-            default:
-                break;
+        size_t width = 0;
+        if (!idm_bc_instruction_width(module, ip, &width, err)) return false;
+        for (size_t i = 0; i < width; i++) {
+            if (!idm_buf_put_u32(out, module->code[ip + i])) return idm_error_oom(err, idm_span_unknown(NULL));
         }
+        ip += width;
     }
     return true;
 }
@@ -1850,8 +1189,8 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
             !idm_buf_put_u32(out, f->register_count) ||
             !idm_buf_put_u64(out, (uint64_t)f->entry)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (!idm_buf_put_u8(out, f->has_guard ? 1u : 0u) || !idm_buf_put_u32(out, f->guard_function)) return idm_error_oom(err, idm_span_unknown(NULL));
-        if (!put_serialized_arity(out, f->call_arity) ||
-            !idm_buf_put_u8(out, f->primitive_backed ? 1u : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (!idm_arity_serialize(out, f->call_arity, err)) return false;
+        if (!idm_buf_put_u8(out, f->primitive_backed ? 1u : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (f->primitive_backed) {
             if (!put_primitive_ref(out, f->primitive, err)) return false;
         } else if (!idm_buf_put_str(out, "", 0u) || !idm_buf_put_str(out, "", 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1894,8 +1233,28 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
     if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic value");
     switch (tag) {
         case 0u: *out = idm_nil(); return true;
-        case 13u: *out = idm_empty_list(); return true;
         case 1u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated int"); *out = idm_int((int64_t)bits); return true; }
+        case 16u: {
+            uint8_t sign_tag = idm_rd_u8(r);
+            uint32_t count = idm_rd_u32(r);
+            if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated bignum");
+            if (sign_tag > 2u) return idm_error_set(err, idm_span_unknown(NULL), "invalid bignum sign");
+            int sign = sign_tag == 1u ? -1 : (sign_tag == 2u ? 1 : 0);
+            if ((count == 0u) != (sign == 0)) return idm_error_set(err, idm_span_unknown(NULL), "invalid bignum zero encoding");
+            uint32_t *limbs = NULL;
+            if (count != 0u) {
+                limbs = malloc((size_t)count * sizeof(*limbs));
+                if (!limbs) return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            for (uint32_t i = 0; i < count; i++) limbs[i] = idm_rd_u32(r);
+            if (!r->ok) {
+                free(limbs);
+                return idm_error_set(err, idm_span_unknown(NULL), "truncated bignum");
+            }
+            *out = idm_int_from_limbs(rt, limbs, count, sign, err);
+            free(limbs);
+            return !(err && err->present);
+        }
         case 2u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated float"); double d; memcpy(&d, &bits, 8u); *out = idm_float(rt, d, err); return !(err && err->present); }
         case 3u: { size_t n = 0; char *s = idm_rd_string(r, &n); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated string"); *out = idm_string_n(rt, s, n, err); free(s); return !(err && err->present); }
         case 4u: { char *s = idm_rd_string(r, NULL); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated atom"); *out = idm_atom(rt, s); free(s); return true; }
@@ -1929,12 +1288,17 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
         case 11u: {
             char *type = idm_rd_string(r, NULL);
             if (!type) return idm_error_set(err, idm_span_unknown(NULL), "truncated record type");
-            uint32_t n = idm_rd_u32(r);
-            if (!r->ok) {
+            if (!*type) {
                 free(type);
-                return idm_error_set(err, idm_span_unknown(NULL), "truncated record fields");
+                return idm_error_set(err, idm_span_unknown(NULL), "record type must be a non-empty name");
             }
-            char **field_names = n == 0 ? NULL : calloc(n, sizeof(*field_names));
+            IdmSymbol *type_symbol = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, type);
+            uint32_t n = idm_rd_u32(r);
+            if (!type_symbol || !r->ok) {
+                free(type);
+                return type_symbol ? idm_error_set(err, idm_span_unknown(NULL), "truncated record fields") : idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            IdmSymbol **field_names = n == 0 ? NULL : calloc(n, sizeof(*field_names));
             IdmValue *field_values = n == 0 ? NULL : calloc(n, sizeof(*field_values));
             if ((n != 0 && !field_names) || (n != 0 && !field_values)) {
                 free(field_names);
@@ -1944,19 +1308,30 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
             }
             bool ok = true;
             for (uint32_t i = 0; ok && i < n; i++) {
-                field_names[i] = idm_rd_string(r, NULL);
-                if (!field_names[i]) {
+                char *field_name = idm_rd_string(r, NULL);
+                if (!field_name) {
                     idm_error_set(err, idm_span_unknown(NULL), "truncated record field name");
+                    ok = false;
+                } else if (!*field_name) {
+                    idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
                     ok = false;
                 } else if (!deserialize_value(rt, r, &field_values[i], depth + 1u, err)) {
                     ok = false;
+                } else {
+                    field_names[i] = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, field_name);
+                    if (!field_names[i]) ok = idm_error_oom(err, idm_span_unknown(NULL));
                 }
+                free(field_name);
             }
             if (ok) {
-                *out = idm_record(rt, type, (const char *const *)field_names, field_values, n, err);
-                ok = !(err && err->present);
+                IdmRecordShape *shape = idm_record_shape_intern_symbols(rt, type_symbol, field_names, n, err);
+                if (shape) {
+                    *out = idm_record_from_shape(rt, shape, field_values, err);
+                    ok = !(err && err->present);
+                } else {
+                    ok = false;
+                }
             }
-            for (uint32_t i = 0; i < n; i++) free(field_names[i]);
             free(field_names);
             free(field_values);
             free(type);
@@ -2030,18 +1405,7 @@ static IdmSyntaxPattern *deserialize_syntax_pattern(IdmRuntime *rt, IdmByteReade
             char *rest_name = NULL;
             if (has_rest) {
                 rest_index = idm_rd_u32(r);
-                uint8_t has_name = idm_rd_u8(r);
-                if (!r->ok || has_name > 1u) {
-                    idm_error_set(err, span, "truncated syntax rest pattern");
-                    return NULL;
-                }
-                if (has_name) {
-                    rest_name = idm_rd_string(r, NULL);
-                    if (!rest_name) {
-                        idm_error_set(err, span, "truncated syntax rest pattern name");
-                        return NULL;
-                    }
-                }
+                if (!idm_rd_opt_str(r, &rest_name, err)) return NULL;
                 if (rest_index > count) {
                     free(rest_name);
                     idm_error_set(err, span, "invalid syntax rest pattern index");
@@ -2159,108 +1523,33 @@ static bool deserialize_code_word(IdmBytecodeModule *module, IdmByteReader *r, I
 }
 
 static bool deserialize_code(IdmBytecodeModule *module, IdmByteReader *r, uint64_t code_count, IdmError *err) {
+    if (code_count > (uint64_t)SIZE_MAX) return idm_error_set(err, idm_span_unknown(NULL), ".ic code is too large");
     while (module->code_count < code_count && r->ok) {
+        size_t start = module->code_count;
         uint32_t raw_op = idm_rd_u32(r);
         if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic opcode");
         IdmOpcode op = (IdmOpcode)raw_op;
+        const IdmOpcodeInfo *info = idm_opcode_info(op);
+        if (!info) return idm_error_set(err, idm_span_unknown(NULL), "invalid .ic opcode %u", raw_op);
         if (!idm_bc_emit(module, raw_op, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-        switch (op) {
-            case IDM_OP_RETURN:
-            case IDM_OP_RAISE:
-            case IDM_OP_LOAD_RAISED:
-            case IDM_OP_JUMP:
-            case IDM_OP_RESCUE_PUSH:
-            case IDM_OP_PUSH_PACKAGE_ENV:
+        if ((uint64_t)module->code_count + info->fixed_operands > code_count) {
+            return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic %s", info->name);
+        }
+        for (uint8_t i = 0; i < info->fixed_operands; i++) {
+            if (!deserialize_code_word(module, r, err)) return false;
+        }
+        if (info->count_operand != IDM_OPCODE_NO_COUNT) {
+            if (info->count_operand >= info->fixed_operands || info->repeat_width == 0) {
+                return idm_error_set(err, idm_span_unknown(NULL), "%s has invalid opcode metadata", info->name);
+            }
+            uint32_t count = module->code[start + 1u + (size_t)info->count_operand];
+            uint64_t extra = (uint64_t)count * (uint64_t)info->repeat_width;
+            if ((uint64_t)module->code_count + extra > code_count) {
+                return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic %s payload", info->name);
+            }
+            for (uint64_t i = 0; i < extra; i++) {
                 if (!deserialize_code_word(module, r, err)) return false;
-                break;
-            case IDM_OP_MOVE:
-            case IDM_OP_LOAD_CONST:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_MAKE_CLOSURE:
-            case IDM_OP_MAKE_CELL:
-            case IDM_OP_LOAD_CELL:
-            case IDM_OP_STORE_CELL:
-            case IDM_OP_LOAD_ENV:
-            case IDM_OP_STORE_ENV:
-            case IDM_OP_JUMP_IF_FALSE:
-                for (size_t i = 0; i < 2u; i++) if (!deserialize_code_word(module, r, err)) return false;
-                break;
-            case IDM_OP_LIST_CONS:
-            case IDM_OP_LIST_APPEND:
-            case IDM_OP_LOAD_PACKAGE_SLOT:
-            case IDM_OP_STORE_PACKAGE_SLOT:
-            case IDM_OP_STRING_CONCAT:
-            case IDM_OP_RECORD_IS:
-                for (size_t i = 0; i < 3u; i++) if (!deserialize_code_word(module, r, err)) return false;
-                break;
-            case IDM_OP_RECORD_FIELD:
-                for (size_t i = 0; i < 5u; i++) if (!deserialize_code_word(module, r, err)) return false;
-                break;
-            case IDM_OP_MAKE_VALUE_SEQUENCE:
-            case IDM_OP_MAKE_SYNTAX:
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-            case IDM_OP_CALL_PRIMITIVE:
-                for (size_t i = 0; i < 4u; i++) if (!deserialize_code_word(module, r, err)) return false;
-                break;
-            case IDM_OP_RECV:
-            case IDM_OP_CALL:
-                for (size_t i = 0; i < 5u; i++) if (!deserialize_code_word(module, r, err)) return false;
-                break;
-            case IDM_OP_MATCH: {
-                uint32_t dst = idm_rd_u32(r);
-                uint32_t first_arg = idm_rd_u32(r);
-                uint32_t argc = idm_rd_u32(r);
-                uint32_t entry_count = idm_rd_u32(r);
-                uint32_t capture_count = idm_rd_u32(r);
-                uint32_t first_capture = idm_rd_u32(r);
-                uint32_t tail = idm_rd_u32(r);
-                if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic match");
-                if (!idm_bc_emit(module, dst, NULL) ||
-                    !idm_bc_emit(module, first_arg, NULL) ||
-                    !idm_bc_emit(module, argc, NULL) ||
-                    !idm_bc_emit(module, entry_count, NULL) ||
-                    !idm_bc_emit(module, capture_count, NULL) ||
-                    !idm_bc_emit(module, first_capture, NULL) ||
-                    !idm_bc_emit(module, tail, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    if (!deserialize_code_word(module, r, err)) return false;
-                }
-                break;
             }
-            case IDM_OP_MAKE_MULTI_CLOSURE: {
-                uint32_t dst = idm_rd_u32(r);
-                uint32_t entry_count = idm_rd_u32(r);
-                uint32_t capture_count = idm_rd_u32(r);
-                uint32_t first_capture = idm_rd_u32(r);
-                if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic multi closure");
-                if (!idm_bc_emit(module, dst, NULL) ||
-                    !idm_bc_emit(module, entry_count, NULL) ||
-                    !idm_bc_emit(module, capture_count, NULL) ||
-                    !idm_bc_emit(module, first_capture, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < entry_count; i++) {
-                    if (!deserialize_code_word(module, r, err)) return false;
-                }
-                (void)capture_count;
-                break;
-            }
-            case IDM_OP_MAKE_RECORD: {
-                uint32_t dst = idm_rd_u32(r);
-                uint32_t type_const = idm_rd_u32(r);
-                uint32_t first = idm_rd_u32(r);
-                uint32_t field_count = idm_rd_u32(r);
-                if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic record construction");
-                if (!idm_bc_emit(module, dst, NULL) ||
-                    !idm_bc_emit(module, type_const, NULL) ||
-                    !idm_bc_emit(module, first, NULL) ||
-                    !idm_bc_emit(module, field_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < field_count; i++) {
-                    if (!deserialize_code_word(module, r, err)) return false;
-                    if (!deserialize_code_word(module, r, err)) return false;
-                }
-                break;
-            }
-            default:
-                break;
         }
     }
     if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic code");
@@ -2276,7 +1565,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     if (len < 8u || memcmp(data, "IDMC", 4u) != 0) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "not an .ic module"); }
     r.pos = 4u;
     uint32_t version = idm_rd_u32(&r);
-    if (version != IDM_IC_VERSION) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
+    if (version < IDM_IC_MIN_READ_VERSION || version > IDM_IC_VERSION) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
     uint32_t const_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < const_count && r.ok; i++) {
         IdmValue v;
@@ -2299,7 +1588,13 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
         uint64_t entry = idm_rd_u64(&r);
         uint8_t has_guard = idm_rd_u8(&r);
         uint32_t guard_function = idm_rd_u32(&r);
-        IdmArity call_arity = read_serialized_arity(&r);
+        IdmArity call_arity = idm_arity_unknown();
+        if (!idm_arity_deserialize(&r, &call_arity, err)) {
+            free(name);
+            free(deferred_guards);
+            idm_bc_destroy(module);
+            return false;
+        }
         uint8_t primitive_backed = idm_rd_u8(&r);
         IdmPrimitive primitive = 0;
         if (primitive_backed) {
@@ -2394,11 +1689,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
         uint32_t column = idm_rd_u32(&r);
         if (!r.ok || file >= module->span_file_count) break;
         if (module->span_count == module->span_cap) {
-            size_t cap = module->span_cap ? module->span_cap * 2u : 32u;
-            void *grown = realloc(module->spans, cap * sizeof(*module->spans));
-            if (!grown) { idm_bc_destroy(module); return idm_error_oom(err, idm_span_unknown(NULL)); }
-            module->spans = grown;
-            module->span_cap = cap;
+            if (!idm_grow((void **)&module->spans, &module->span_cap, sizeof(*module->spans), 32u, module->span_count + 1u)) { idm_bc_destroy(module); return idm_error_oom(err, idm_span_unknown(NULL)); }
         }
         module->spans[module->span_count].offset = offset;
         module->spans[module->span_count].file = file;
@@ -2435,149 +1726,64 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     return true;
 }
 
+static bool reloc_add(uint32_t value, uint32_t delta, const char *what, uint32_t *out, IdmError *err) {
+    if (value > UINT32_MAX - delta) return idm_error_set(err, idm_span_unknown(NULL), "%s relocation overflow", what);
+    *out = value + delta;
+    return true;
+}
+
+static bool reloc_word(uint32_t word, char role, uint32_t const_off, uint32_t fn_off, uint32_t code_off, uint32_t *out, IdmError *err) {
+    switch (role) {
+        case 'r':
+        case 'm':
+        case 't':
+        case 'p':
+        case 'v':
+        case 'y':
+            *out = word;
+            return true;
+        case 'c':
+            return reloc_add(word, const_off, "constant", out, err);
+        case 'f':
+            return reloc_add(word, fn_off, "function", out, err);
+        case 'j':
+            return reloc_add(word, code_off, "code target", out, err);
+        default:
+            return idm_error_set(err, idm_span_unknown(NULL), "invalid operand relocation role '%c'", role);
+    }
+}
+
+static bool reloc_emit_word(IdmBytecodeModule *dst, uint32_t word, char role, uint32_t const_off, uint32_t fn_off, uint32_t code_off, IdmError *err) {
+    uint32_t relocated = 0;
+    if (!reloc_word(word, role, const_off, fn_off, code_off, &relocated, err)) return false;
+    if (!idm_bc_emit(dst, relocated, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+    return true;
+}
+
 static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t const_off, uint32_t fn_off, uint32_t code_off, IdmError *err) {
     size_t ip = 0;
     while (ip < src->code_count) {
+        size_t offset = ip;
+        size_t width = 0;
+        if (!idm_bc_instruction_width(src, offset, &width, err)) return false;
         IdmOpcode op = (IdmOpcode)src->code[ip++];
+        const IdmOpcodeInfo *info = idm_opcode_info(op);
+        if (!info) return idm_error_set(err, idm_span_unknown(NULL), "relocation: invalid opcode %u", (unsigned)op);
         if (!idm_bc_emit(dst, (uint32_t)op, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-        switch (op) {
-            case IDM_OP_HALT:
-            case IDM_OP_RESCUE_POP:
-            case IDM_OP_POP_PACKAGE_ENV:
-                break;
-            case IDM_OP_RETURN:
-            case IDM_OP_RAISE:
-            case IDM_OP_LOAD_RAISED:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_PUSH_PACKAGE_ENV:
-                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_MOVE:
-            case IDM_OP_LOAD_CAPTURE:
-            case IDM_OP_MAKE_CELL:
-            case IDM_OP_LOAD_CELL:
-            case IDM_OP_STORE_CELL:
-            case IDM_OP_LOAD_ENV:
-            case IDM_OP_STORE_ENV:
-            case IDM_OP_CALL:
-                for (size_t i = 0; i < (op == IDM_OP_CALL ? 5u : 2u); i++) {
-                    if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                }
-                break;
-            case IDM_OP_LIST_CONS:
-            case IDM_OP_LIST_APPEND:
-            case IDM_OP_STRING_CONCAT:
-                for (size_t i = 0; i < 3u; i++) {
-                    if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                }
-                break;
-            case IDM_OP_MAKE_RECORD: {
-                uint32_t dst_reg = src->code[ip++];
-                uint32_t type_const = src->code[ip++];
-                uint32_t first = src->code[ip++];
-                uint32_t field_count = src->code[ip++];
-                if (!idm_bc_emit(dst, dst_reg, NULL) ||
-                    !idm_bc_emit(dst, type_const + const_off, NULL) ||
-                    !idm_bc_emit(dst, first, NULL) ||
-                    !idm_bc_emit(dst, field_count, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < field_count; i++) {
-                    uint32_t field_const = src->code[ip++];
-                    uint32_t contract_const = src->code[ip++];
-                    if (!idm_bc_emit(dst, field_const + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                    if (!idm_bc_emit(dst, contract_const + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                }
-                break;
-            }
-            case IDM_OP_RECORD_IS:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_RECORD_FIELD:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_LOAD_CONST:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_LOAD_PACKAGE_SLOT:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_STORE_PACKAGE_SLOT:
-                if (!idm_bc_emit(dst, src->code[ip++] + const_off, NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_MAKE_CLOSURE:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_MAKE_CLOSURE_CAPTURES:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + fn_off, NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_MAKE_MULTI_CLOSURE: {
-                uint32_t dst_reg = src->code[ip++];
-                uint32_t entry_count = src->code[ip++];
-                uint32_t capture_count = src->code[ip++];
-                uint32_t first_capture = src->code[ip++];
-                if (!idm_bc_emit(dst, dst_reg, NULL) || !idm_bc_emit(dst, entry_count, NULL) ||
-                    !idm_bc_emit(dst, capture_count, NULL) || !idm_bc_emit(dst, first_capture, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < entry_count; i++) if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            }
-            case IDM_OP_MATCH: {
-                uint32_t dst_reg = src->code[ip++];
-                uint32_t first_arg = src->code[ip++];
-                uint32_t argc = src->code[ip++];
-                uint32_t entry_count = src->code[ip++];
-                uint32_t capture_count = src->code[ip++];
-                uint32_t first_capture = src->code[ip++];
-                uint32_t tail = src->code[ip++];
-                if (!idm_bc_emit(dst, dst_reg, NULL) ||
-                    !idm_bc_emit(dst, first_arg, NULL) ||
-                    !idm_bc_emit(dst, argc, NULL) ||
-                    !idm_bc_emit(dst, entry_count, NULL) ||
-                    !idm_bc_emit(dst, capture_count, NULL) ||
-                    !idm_bc_emit(dst, first_capture, NULL) ||
-                    !idm_bc_emit(dst, tail, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (uint32_t i = 0; i < entry_count; i++) if (!idm_bc_emit(dst, src->code[ip++] + fn_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            }
-            case IDM_OP_JUMP:
-            case IDM_OP_RESCUE_PUSH:
-                if (!idm_bc_emit(dst, src->code[ip++] + code_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_JUMP_IF_FALSE:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + code_off, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_RECV:
-                if (!idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++] + code_off, NULL) ||
-                    !idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                break;
-            case IDM_OP_MAKE_VALUE_SEQUENCE:
-            case IDM_OP_MAKE_SYNTAX:
-            case IDM_OP_CALL_PRIMITIVE:
-                for (size_t i = 0; i < 4u; i++) {
-                    if (!idm_bc_emit(dst, src->code[ip++], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
-                }
-                break;
-            default:
-                return idm_error_set(err, idm_span_unknown(NULL), "relocation: invalid opcode %u", (unsigned)op);
+        uint32_t repeat_count = 0;
+        for (uint8_t i = 0; i < info->fixed_operands; i++) {
+            uint32_t word = src->code[ip++];
+            if (info->count_operand == i) repeat_count = word;
+            if (!reloc_emit_word(dst, word, opcode_role_at(info->operand_roles, i), const_off, fn_off, code_off, err)) return false;
         }
+        if (info->count_operand != IDM_OPCODE_NO_COUNT) {
+            for (uint32_t item = 0; item < repeat_count; item++) {
+                for (uint8_t part = 0; part < info->repeat_width; part++) {
+                    if (!reloc_emit_word(dst, src->code[ip++], opcode_role_at(info->repeat_roles, part), const_off, fn_off, code_off, err)) return false;
+                }
+            }
+        }
+        if (ip != offset + width) return idm_error_set(err, idm_span_unknown(NULL), "%s relocation width mismatch", info->name);
     }
     return true;
 }
@@ -2587,11 +1793,7 @@ static bool link_spans(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
         uint32_t file_index = 0;
         if (!span_file_index(dst, src->span_files[src->spans[i].file], &file_index)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (dst->span_count == dst->span_cap) {
-            size_t cap = dst->span_cap ? dst->span_cap * 2u : 32u;
-            void *grown = realloc(dst->spans, cap * sizeof(*dst->spans));
-            if (!grown) return idm_error_oom(err, idm_span_unknown(NULL));
-            dst->spans = grown;
-            dst->span_cap = cap;
+            if (!idm_grow((void **)&dst->spans, &dst->span_cap, sizeof(*dst->spans), 32u, dst->span_count + 1u)) return idm_error_oom(err, idm_span_unknown(NULL));
         }
         dst->spans[dst->span_count].offset = src->spans[i].offset + code_off;
         dst->spans[dst->span_count].file = file_index;
@@ -2606,15 +1808,7 @@ static bool link_name_notes(IdmBytecodeModule *dst, const IdmBytecodeModule *src
     if (src->name_note_count == 0) return true;
     size_t needed = dst->name_note_count + src->name_note_count;
     if (needed > dst->name_note_cap) {
-        size_t cap = dst->name_note_cap ? dst->name_note_cap : 32u;
-        while (cap < needed) {
-            if (cap > SIZE_MAX / 2u) return idm_error_oom(err, idm_span_unknown(NULL));
-            cap *= 2u;
-        }
-        IdmBcNameNote *grown = realloc(dst->name_notes, cap * sizeof(*grown));
-        if (!grown) return idm_error_oom(err, idm_span_unknown(NULL));
-        dst->name_notes = grown;
-        dst->name_note_cap = cap;
+        if (!idm_grow((void **)&dst->name_notes, &dst->name_note_cap, sizeof(*dst->name_notes), 32u, needed)) return idm_error_oom(err, idm_span_unknown(NULL));
     }
     for (size_t i = 0; i < src->name_note_count; i++) {
         if (src->name_notes[i].offset > UINT32_MAX - code_off) return idm_error_set(err, idm_span_unknown(NULL), "linked name note offset overflow");

@@ -53,11 +53,7 @@ bool idm_scope_set_add(IdmScopeSet *set, IdmScopeId scope) {
     size_t index = lower_bound(set, scope, &found);
     if (found) return true;
     if (set->count == set->cap) {
-        size_t cap = set->cap ? set->cap * 2u : 4u;
-        IdmScopeId *items = realloc(set->items, cap * sizeof(*items));
-        if (!items) return false;
-        set->items = items;
-        set->cap = cap;
+        if (!idm_grow((void **)&set->items, &set->cap, sizeof(*set->items), 4u, set->count + 1u)) return false;
     }
     memmove(set->items + index + 1u, set->items + index, (set->count - index) * sizeof(*set->items));
     set->items[index] = scope;
@@ -112,6 +108,35 @@ bool idm_scope_set_write(IdmBuffer *buf, const IdmScopeSet *set) {
         if (!idm_buf_appendf(buf, "%u", set->items[i])) return false;
     }
     return idm_buf_append_char(buf, '}');
+}
+
+bool idm_scope_set_serialize(IdmBuffer *out, const IdmScopeSet *set, IdmError *err) {
+    static const IdmScopeSet empty = {0};
+    const IdmScopeSet *src = set ? set : &empty;
+    if (src->count > UINT32_MAX || !idm_buf_put_u32(out, (uint32_t)src->count)) {
+        return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
+    }
+    for (size_t i = 0; i < src->count; i++) {
+        if (!idm_buf_put_u32(out, src->items[i])) {
+            return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
+        }
+    }
+    return true;
+}
+
+bool idm_scope_set_deserialize(IdmByteReader *r, IdmScopeSet *set, IdmError *err) {
+    idm_scope_set_init(set);
+    uint32_t count = idm_rd_u32(r);
+    if (!r->ok) return false;
+    if ((size_t)count > (r->len - r->pos) / sizeof(uint32_t)) {
+        return err ? idm_error_set(err, idm_span_unknown(NULL), "scope set exceeds payload") : false;
+    }
+    for (uint32_t i = 0; i < count; i++) {
+        IdmScopeId id = idm_rd_u32(r);
+        if (!r->ok) return false;
+        if (!idm_scope_set_add(set, id)) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
+    }
+    return true;
 }
 
 void idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta) {
@@ -200,6 +225,33 @@ bool idm_arity_add_exact(IdmArity *arity, uint32_t exact) {
     return true;
 }
 
+bool idm_arity_merge(IdmArity *dst, const IdmArity *src) {
+    if (!dst) return false;
+    if (!src || src->kind == IDM_ARITY_UNKNOWN) return true;
+    if (dst->kind == IDM_ARITY_UNKNOWN) {
+        *dst = *src;
+        return true;
+    }
+    if (src->kind == IDM_ARITY_SET) {
+        for (uint32_t argc = src->min; argc <= src->max; argc++) {
+            if (idm_arity_accepts(src, argc) && !idm_arity_add_exact(dst, argc)) return false;
+            if (argc == UINT32_MAX) break;
+        }
+        return true;
+    }
+    if (dst->kind == IDM_ARITY_SET && src->max < 64u) {
+        for (uint32_t argc = src->min; argc <= src->max; argc++) {
+            if (!idm_arity_add_exact(dst, argc)) return false;
+        }
+        return true;
+    }
+    if (dst->kind == IDM_ARITY_SET) dst->kind = IDM_ARITY_RANGE;
+    if (src->min < dst->min) dst->min = src->min;
+    if (src->max > dst->max) dst->max = src->max;
+    dst->mask = 0;
+    return true;
+}
+
 bool idm_arity_accepts(const IdmArity *arity, uint32_t argc) {
     if (!arity || arity->kind == IDM_ARITY_UNKNOWN) return false;
     if (argc < arity->min || argc > arity->max) return false;
@@ -244,13 +296,37 @@ bool idm_arity_describe(IdmBuffer *buf, const IdmArity *arity) {
     return first ? idm_buf_append(buf, "<empty>") : true;
 }
 
+bool idm_arity_serialize(IdmBuffer *out, IdmArity arity, IdmError *err) {
+    if (arity.kind < IDM_ARITY_UNKNOWN || arity.kind > IDM_ARITY_SET) return idm_error_set(err, idm_span_unknown(NULL), "invalid arity kind");
+    if (!idm_buf_put_u8(out, (uint8_t)arity.kind) ||
+        !idm_buf_put_u32(out, arity.min) ||
+        !idm_buf_put_u32(out, arity.max) ||
+        !idm_buf_put_u64(out, arity.mask)) {
+        return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
+    }
+    return true;
+}
+
+bool idm_arity_deserialize(IdmByteReader *r, IdmArity *out, IdmError *err) {
+    uint8_t kind = idm_rd_u8(r);
+    uint32_t min = idm_rd_u32(r);
+    uint32_t max = idm_rd_u32(r);
+    uint64_t mask = idm_rd_u64(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated arity");
+    if (kind > (uint8_t)IDM_ARITY_SET) {
+        r->ok = false;
+        return idm_error_set(err, idm_span_unknown(NULL), "invalid arity kind");
+    }
+    out->kind = (IdmArityKind)kind;
+    out->min = min;
+    out->max = max;
+    out->mask = mask;
+    return true;
+}
+
 bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, uint32_t primitive, IdmBindingId *out_id) {
     if (table->count == table->cap) {
-        size_t cap = table->cap ? table->cap * 2u : 16u;
-        IdmBinding *items = realloc(table->items, cap * sizeof(*items));
-        if (!items) return false;
-        table->items = items;
-        table->cap = cap;
+        if (!idm_grow((void **)&table->items, &table->cap, sizeof(*table->items), 16u, table->count + 1u)) return false;
     }
     IdmBinding *binding = &table->items[table->count];
     binding->name = idm_strdup(name);
@@ -325,7 +401,7 @@ static bool binding_prefer_candidate(const IdmBinding *candidate, const IdmBindi
     return candidate_priority >= best_priority;
 }
 
-IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding) {
+static IdmResolveStatus binding_resolve_best(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding) {
     const IdmBinding *best = NULL;
     for (size_t i = 0; i < table->count; i++) {
         const IdmBinding *candidate = &table->items[i];
@@ -348,6 +424,17 @@ IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *n
     return IDM_RESOLVE_OK;
 }
 
+IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding) {
+    return binding_resolve_best(table, name, phase, space, reference_scopes, out_binding);
+}
+
+IdmResolveStatus idm_binding_resolve_scopes(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmScopeSet **out_scopes) {
+    const IdmBinding *best = NULL;
+    IdmResolveStatus status = binding_resolve_best(table, name, phase, space, reference_scopes, &best);
+    if (out_scopes) *out_scopes = status == IDM_RESOLVE_OK && best ? &best->scopes : NULL;
+    return status;
+}
+
 const char *idm_binding_space_name(IdmBindingSpace space) {
     switch (space) {
         case IDM_BIND_SPACE_DEFAULT: return "default";
@@ -357,6 +444,7 @@ const char *idm_binding_space_name(IdmBindingSpace space) {
         case IDM_BIND_SPACE_PROTOCOL: return "protocol";
         case IDM_BIND_SPACE_TRAIT: return "trait";
         case IDM_BIND_SPACE_TYPE: return "type";
+        case IDM_BIND_SPACE_FIELD: return "field";
         case IDM_BIND_SPACE_CORE_SYNTAX: return "core-syntax";
         case IDM_BIND_SPACE_GRAMMAR: return "grammar";
         case IDM_BIND_SPACE_METHOD: return "method";
@@ -378,6 +466,7 @@ const char *idm_binding_kind_name(IdmBindingKind kind) {
         case IDM_BIND_PROTOCOL: return "protocol";
         case IDM_BIND_TRAIT: return "trait";
         case IDM_BIND_TYPE: return "type";
+        case IDM_BIND_FIELD: return "field";
         case IDM_BIND_GRAMMAR: return "grammar";
         case IDM_BIND_METHOD: return "method";
     }

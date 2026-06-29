@@ -3,43 +3,74 @@
 
 #include "idiom/pattern.h"
 
+#define IDM_OPCODE_NO_COUNT 255u
+
 typedef enum {
-    IDM_OP_HALT,
-    IDM_OP_MOVE,
-    IDM_OP_LOAD_CONST,
-    IDM_OP_LOAD_CAPTURE,
-    IDM_OP_MAKE_CELL,
-    IDM_OP_LOAD_CELL,
-    IDM_OP_STORE_CELL,
-    IDM_OP_MAKE_CLOSURE,
-    IDM_OP_MAKE_CLOSURE_CAPTURES,
-    IDM_OP_MAKE_MULTI_CLOSURE,
-    IDM_OP_CALL,
-    IDM_OP_RETURN,
-    IDM_OP_JUMP,
-    IDM_OP_JUMP_IF_FALSE,
-    IDM_OP_RECV,
-    IDM_OP_RESCUE_PUSH,
-    IDM_OP_RESCUE_POP,
-    IDM_OP_RAISE,
-    IDM_OP_LOAD_RAISED,
-    IDM_OP_LOAD_ENV,
-    IDM_OP_STORE_ENV,
-    IDM_OP_LOAD_PACKAGE_SLOT,
-    IDM_OP_STORE_PACKAGE_SLOT,
-    IDM_OP_PUSH_PACKAGE_ENV,
-    IDM_OP_POP_PACKAGE_ENV,
-    IDM_OP_MAKE_RECORD,
-    IDM_OP_RECORD_FIELD,
-    IDM_OP_RECORD_IS,
-    IDM_OP_LIST_CONS,
-    IDM_OP_LIST_APPEND,
-    IDM_OP_MAKE_VALUE_SEQUENCE,
-    IDM_OP_MAKE_SYNTAX,
-    IDM_OP_STRING_CONCAT,
-    IDM_OP_CALL_PRIMITIVE,
-    IDM_OP_MATCH,
+    IDM_OPCODE_FLOW_NEXT,
+    IDM_OPCODE_FLOW_TERMINAL,
+    IDM_OPCODE_FLOW_JUMP,
+    IDM_OPCODE_FLOW_BRANCH,
+    IDM_OPCODE_FLOW_BRANCH_TAIL,
+    IDM_OPCODE_FLOW_TAIL_FALLTHROUGH
+} IdmOpcodeFlow;
+
+#define IDM_OPCODE_LIST(X) \
+    X(HALT, 0, IDM_OPCODE_NO_COUNT, 0, "", "", "", "", IDM_OPCODE_FLOW_TERMINAL, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MOVE, 2, IDM_OPCODE_NO_COUNT, 0, "rr", "", "ds", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(LOAD_CONST, 2, IDM_OPCODE_NO_COUNT, 0, "rc", "", "dr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(LOAD_CAPTURE, 2, IDM_OPCODE_NO_COUNT, 0, "rr", "", "dr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MAKE_CELL, 2, IDM_OPCODE_NO_COUNT, 0, "rr", "", "ds", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(LOAD_CELL, 2, IDM_OPCODE_NO_COUNT, 0, "rr", "", "ds", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(STORE_CELL, 2, IDM_OPCODE_NO_COUNT, 0, "rr", "", "ss", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MAKE_CLOSURE, 2, IDM_OPCODE_NO_COUNT, 0, "rf", "", "dr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MAKE_CLOSURE_CAPTURES, 4, IDM_OPCODE_NO_COUNT, 0, "rfrr", "", "drrr", "23", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MAKE_MULTI_CLOSURE, 4, 1, 1, "rmrr", "f", "drrr", "32", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(CALL, 5, IDM_OPCODE_NO_COUNT, 0, "rrrrt", "", "dsrrr", "23", IDM_OPCODE_FLOW_TAIL_FALLTHROUGH, IDM_OPCODE_NO_COUNT, 4) \
+    X(RETURN, 1, IDM_OPCODE_NO_COUNT, 0, "r", "", "s", "", IDM_OPCODE_FLOW_TERMINAL, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(JUMP, 1, IDM_OPCODE_NO_COUNT, 0, "j", "", "r", "", IDM_OPCODE_FLOW_JUMP, 0, IDM_OPCODE_NO_COUNT) \
+    X(JUMP_IF_FALSE, 2, IDM_OPCODE_NO_COUNT, 0, "rj", "", "sr", "", IDM_OPCODE_FLOW_BRANCH, 1, IDM_OPCODE_NO_COUNT) \
+    X(RECV, 5, IDM_OPCODE_NO_COUNT, 0, "rrrjt", "", "dssrr", "", IDM_OPCODE_FLOW_BRANCH_TAIL, 3, 4) \
+    X(RESCUE_PUSH, 1, IDM_OPCODE_NO_COUNT, 0, "j", "", "r", "", IDM_OPCODE_FLOW_BRANCH, 0, IDM_OPCODE_NO_COUNT) \
+    X(RESCUE_POP, 0, IDM_OPCODE_NO_COUNT, 0, "", "", "", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(RAISE, 1, IDM_OPCODE_NO_COUNT, 0, "r", "", "s", "", IDM_OPCODE_FLOW_TERMINAL, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(LOAD_RAISED, 1, IDM_OPCODE_NO_COUNT, 0, "r", "", "d", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(LOAD_ENV, 2, IDM_OPCODE_NO_COUNT, 0, "rr", "", "dr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(STORE_ENV, 2, IDM_OPCODE_NO_COUNT, 0, "rr", "", "rs", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(LOAD_PACKAGE_SLOT, 3, IDM_OPCODE_NO_COUNT, 0, "rcr", "", "drr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(STORE_PACKAGE_SLOT, 3, IDM_OPCODE_NO_COUNT, 0, "crr", "", "rrs", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(PUSH_PACKAGE_ENV, 1, IDM_OPCODE_NO_COUNT, 0, "c", "", "r", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(POP_PACKAGE_ENV, 0, IDM_OPCODE_NO_COUNT, 0, "", "", "", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MAKE_RECORD, 4, 3, 2, "rcrr", "cc", "drrr", "23", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(RECORD_FIELD, 5, IDM_OPCODE_NO_COUNT, 0, "rrccr", "", "dsrrr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(RECORD_IS, 3, IDM_OPCODE_NO_COUNT, 0, "rrc", "", "dsr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(LIST_CONS, 3, IDM_OPCODE_NO_COUNT, 0, "rrr", "", "dss", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(LIST_APPEND, 3, IDM_OPCODE_NO_COUNT, 0, "rrr", "", "dss", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MAKE_VALUE_SEQUENCE, 4, IDM_OPCODE_NO_COUNT, 0, "rvrr", "", "drrr", "23", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MAKE_SYNTAX, 4, IDM_OPCODE_NO_COUNT, 0, "ryrr", "", "drss", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(STRING_CONCAT, 3, IDM_OPCODE_NO_COUNT, 0, "rrr", "", "drr", "12", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(CALL_PRIMITIVE, 4, IDM_OPCODE_NO_COUNT, 0, "rprr", "", "drrr", "23", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MATCH, 7, 3, 1, "rrrmrrt", "f", "drrrrrr", "1254", IDM_OPCODE_FLOW_TAIL_FALLTHROUGH, IDM_OPCODE_NO_COUNT, 6)
+
+typedef enum {
+#define IDM_OPCODE_ENUM(name, fixed, count_index, repeat_width, roles, repeat_roles, reg_roles, reg_ranges, flow, branch_operand, tail_operand) IDM_OP_##name,
+    IDM_OPCODE_LIST(IDM_OPCODE_ENUM)
+#undef IDM_OPCODE_ENUM
+    IDM_OP_COUNT
 } IdmOpcode;
+
+typedef struct {
+    const char *name;
+    uint8_t fixed_operands;
+    uint8_t count_operand;
+    uint8_t repeat_width;
+    const char *operand_roles;
+    const char *repeat_roles;
+    const char *register_roles;
+    const char *register_ranges;
+    IdmOpcodeFlow flow;
+    uint8_t branch_operand;
+    uint8_t tail_operand;
+} IdmOpcodeInfo;
 
 typedef struct {
     uint32_t offset;
@@ -112,9 +143,9 @@ bool idm_bc_set_function_register_count(IdmBytecodeModule *module, uint32_t func
 bool idm_bc_note_span(IdmBytecodeModule *module, IdmSpan span);
 bool idm_bc_note_name(IdmBytecodeModule *module, size_t offset, const char *name);
 IdmSpan idm_bc_span_at(const IdmBytecodeModule *module, size_t ip);
-bool idm_bc_prepare_selectors(IdmBytecodeModule *module, IdmError *err);
+bool idm_bc_prepare_selectors(IdmRuntime *rt, IdmBytecodeModule *module, IdmError *err);
 IdmPatternSelector *idm_bc_selector_at(const IdmBytecodeModule *module, size_t offset);
-bool idm_bc_build_selector_for_entries(const IdmBytecodeModule *module, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err);
+bool idm_bc_build_selector_for_entries(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err);
 bool idm_bc_set_function_patterns_take(IdmBytecodeModule *module, uint32_t function_index, IdmPattern **patterns, uint32_t pattern_count);
 bool idm_bc_set_function_pattern_locals_take(IdmBytecodeModule *module, uint32_t function_index, IdmPatternLocal *locals, uint32_t local_count);
 bool idm_bc_set_function_guard(IdmBytecodeModule *module, uint32_t function_index, uint32_t guard_function);
@@ -123,7 +154,11 @@ bool idm_bc_emit_op(IdmBytecodeModule *module, IdmOpcode op, size_t *out_offset)
 bool idm_bc_emit_u32(IdmBytecodeModule *module, IdmOpcode op, uint32_t operand, size_t *out_offset);
 bool idm_bc_patch_u32(IdmBytecodeModule *module, size_t operand_offset, uint32_t operand);
 bool idm_bc_verify(const IdmBytecodeModule *module, IdmError *err);
+const IdmOpcodeInfo *idm_opcode_info(IdmOpcode op);
+bool idm_opcode_valid(IdmOpcode op);
+size_t idm_opcode_count(void);
 const char *idm_opcode_name(IdmOpcode op);
+bool idm_bc_instruction_width(const IdmBytecodeModule *module, size_t offset, size_t *out_width, IdmError *err);
 bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module);
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err);
 bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, IdmBytecodeModule *module, IdmError *err);

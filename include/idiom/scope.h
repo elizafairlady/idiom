@@ -26,6 +26,7 @@ typedef enum {
     IDM_BIND_SPACE_PROTOCOL,
     IDM_BIND_SPACE_TRAIT,
     IDM_BIND_SPACE_TYPE,
+    IDM_BIND_SPACE_FIELD,
     IDM_BIND_SPACE_CORE_SYNTAX,
     IDM_BIND_SPACE_GRAMMAR,
     IDM_BIND_SPACE_METHOD
@@ -44,6 +45,7 @@ typedef enum {
     IDM_BIND_PROTOCOL,
     IDM_BIND_TRAIT,
     IDM_BIND_TYPE,
+    IDM_BIND_FIELD,
     IDM_BIND_GRAMMAR,
     IDM_BIND_METHOD
 } IdmBindingKind;
@@ -103,6 +105,8 @@ bool idm_scope_set_contains(const IdmScopeSet *set, IdmScopeId scope);
 bool idm_scope_set_subset(const IdmScopeSet *a, const IdmScopeSet *b);
 bool idm_scope_set_equal(const IdmScopeSet *a, const IdmScopeSet *b);
 bool idm_scope_set_write(IdmBuffer *buf, const IdmScopeSet *set);
+bool idm_scope_set_serialize(IdmBuffer *out, const IdmScopeSet *set, IdmError *err);
+bool idm_scope_set_deserialize(IdmByteReader *r, IdmScopeSet *set, IdmError *err);
 void idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta);
 
 void idm_binding_table_init(IdmBindingTable *table);
@@ -114,15 +118,19 @@ bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, 
 bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, uint32_t primitive, IdmBindingId *out_id);
 void idm_binding_table_truncate(IdmBindingTable *table, size_t count);
 IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding);
+IdmResolveStatus idm_binding_resolve_scopes(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmScopeSet **out_scopes);
 
 IdmArity idm_arity_unknown(void);
 IdmArity idm_arity_range(uint32_t min, uint32_t max);
 IdmArity idm_arity_exact(uint32_t arity);
 bool idm_arity_add_exact(IdmArity *arity, uint32_t exact);
+bool idm_arity_merge(IdmArity *dst, const IdmArity *src);
 bool idm_arity_accepts(const IdmArity *arity, uint32_t argc);
 bool idm_arity_equal(const IdmArity *a, const IdmArity *b);
 bool idm_arity_max_accepting_at_least(const IdmArity *arity, uint32_t min, uint32_t *out);
 bool idm_arity_describe(IdmBuffer *buf, const IdmArity *arity);
+bool idm_arity_serialize(IdmBuffer *out, IdmArity arity, IdmError *err);
+bool idm_arity_deserialize(IdmByteReader *r, IdmArity *out, IdmError *err);
 
 const char *idm_binding_space_name(IdmBindingSpace space);
 const char *idm_binding_kind_name(IdmBindingKind kind);

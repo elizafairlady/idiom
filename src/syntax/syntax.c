@@ -1,4 +1,5 @@
 #include "idiom/syntax.h"
+#include "idiom/bignum.h"
 #include "idiom/value.h"
 
 #include <stdlib.h>
@@ -39,11 +40,7 @@ static IdmScopeSet *phase_scope_get_or_add(IdmPhaseScopes *scopes, int phase) {
     IdmScopeSet *existing = phase_scope_find(scopes, phase);
     if (existing) return existing;
     if (scopes->count == scopes->cap) {
-        size_t cap = scopes->cap ? scopes->cap * 2u : 2u;
-        IdmSyntaxPhaseScope *items = realloc(scopes->items, cap * sizeof(*items));
-        if (!items) return NULL;
-        scopes->items = items;
-        scopes->cap = cap;
+        if (!idm_grow((void **)&scopes->items, &scopes->cap, sizeof(*scopes->items), 2u, scopes->count + 1u)) return NULL;
     }
     IdmSyntaxPhaseScope *entry = &scopes->items[scopes->count++];
     entry->phase = phase;
@@ -105,6 +102,14 @@ IdmSyntax *idm_syn_int(int64_t value, IdmSpan span) {
     return syn;
 }
 
+IdmSyntax *idm_syn_bigint(const char *text, IdmSpan span) {
+    IdmSyntax *syn = syn_alloc(IDM_SYN_BIGINT, span);
+    if (!syn) return NULL;
+    syn->as.text = idm_strdup(text);
+    if (!syn->as.text) { free(syn); return NULL; }
+    return syn;
+}
+
 IdmSyntax *idm_syn_float(double value, IdmSpan span) {
     IdmSyntax *syn = syn_alloc(IDM_SYN_FLOAT, span);
     if (!syn) return NULL;
@@ -124,31 +129,49 @@ IdmSyntax *idm_syn_string(const char *text, IdmSpan span) {
     return idm_syn_string_n(text, strlen(text), span);
 }
 
+IdmSyntax *idm_syn_seq(IdmSyntaxKind kind, IdmSpan span) {
+    if (kind != IDM_SYN_LIST && kind != IDM_SYN_VECTOR && kind != IDM_SYN_TUPLE && kind != IDM_SYN_DICT) return NULL;
+    return syn_alloc(kind, span);
+}
+
 IdmSyntax *idm_syn_list(IdmSpan span) {
-    return syn_alloc(IDM_SYN_LIST, span);
+    return idm_syn_seq(IDM_SYN_LIST, span);
 }
 
 IdmSyntax *idm_syn_vector(IdmSpan span) {
-    return syn_alloc(IDM_SYN_VECTOR, span);
+    return idm_syn_seq(IDM_SYN_VECTOR, span);
 }
 
 IdmSyntax *idm_syn_tuple(IdmSpan span) {
-    return syn_alloc(IDM_SYN_TUPLE, span);
+    return idm_syn_seq(IDM_SYN_TUPLE, span);
 }
 
 IdmSyntax *idm_syn_dict(IdmSpan span) {
-    return syn_alloc(IDM_SYN_DICT, span);
+    return idm_syn_seq(IDM_SYN_DICT, span);
+}
+
+const char *idm_syn_kind_name(IdmSyntaxKind kind) {
+    static const IdmDatumKind datum_kinds[] = {
+        [IDM_SYN_NIL] = IDM_DATUM_NIL,
+        [IDM_SYN_WORD] = IDM_DATUM_WORD,
+        [IDM_SYN_ATOM] = IDM_DATUM_ATOM,
+        [IDM_SYN_INT] = IDM_DATUM_INT,
+        [IDM_SYN_FLOAT] = IDM_DATUM_FLOAT,
+        [IDM_SYN_STRING] = IDM_DATUM_STRING,
+        [IDM_SYN_LIST] = IDM_DATUM_LIST,
+        [IDM_SYN_VECTOR] = IDM_DATUM_VECTOR,
+        [IDM_SYN_TUPLE] = IDM_DATUM_TUPLE,
+        [IDM_SYN_DICT] = IDM_DATUM_DICT,
+        [IDM_SYN_BIGINT] = IDM_DATUM_INT,
+    };
+    return (size_t)kind < sizeof(datum_kinds) / sizeof(datum_kinds[0]) ? idm_datum_kind_name(datum_kinds[kind]) : "unknown";
 }
 
 bool idm_syn_append(IdmSyntax *seq, IdmSyntax *item) {
     if (!seq || !item) return false;
     if (seq->kind != IDM_SYN_LIST && seq->kind != IDM_SYN_VECTOR && seq->kind != IDM_SYN_TUPLE && seq->kind != IDM_SYN_DICT) return false;
     if (seq->as.seq.count == seq->as.seq.cap) {
-        size_t cap = seq->as.seq.cap ? seq->as.seq.cap * 2u : 8u;
-        IdmSyntax **items = realloc(seq->as.seq.items, cap * sizeof(*items));
-        if (!items) return false;
-        seq->as.seq.items = items;
-        seq->as.seq.cap = cap;
+        if (!idm_grow((void **)&seq->as.seq.items, &seq->as.seq.cap, sizeof(*seq->as.seq.items), 8u, seq->as.seq.count + 1u)) return false;
     }
     seq->as.seq.items[seq->as.seq.count++] = item;
     return true;
@@ -159,11 +182,7 @@ bool idm_syn_prepend_word(IdmSyntax *seq, const char *word) {
     IdmSyntax *head = idm_syn_word(word, seq->span);
     if (!head) return false;
     if (seq->as.seq.count == seq->as.seq.cap) {
-        size_t cap = seq->as.seq.cap ? seq->as.seq.cap * 2u : 8u;
-        IdmSyntax **items = realloc(seq->as.seq.items, cap * sizeof(*items));
-        if (!items) { idm_syn_free(head); return false; }
-        seq->as.seq.items = items;
-        seq->as.seq.cap = cap;
+        if (!idm_grow((void **)&seq->as.seq.items, &seq->as.seq.cap, sizeof(*seq->as.seq.items), 8u, seq->as.seq.count + 1u)) { idm_syn_free(head); return false; }
     }
     memmove(seq->as.seq.items + 1, seq->as.seq.items, seq->as.seq.count * sizeof(*seq->as.seq.items));
     seq->as.seq.items[0] = head;
@@ -224,6 +243,7 @@ static bool syn_scope_walk(IdmSyntax *syn, int phase, IdmScopeId scope, bool fli
         case IDM_SYN_INT:
         case IDM_SYN_FLOAT:
         case IDM_SYN_STRING:
+        case IDM_SYN_BIGINT:
             break;
     }
     return true;
@@ -249,11 +269,7 @@ bool idm_syn_property_set(IdmSyntax *syn, const char *key, const char *value) {
         }
     }
     if (syn->property_count == syn->property_cap) {
-        size_t cap = syn->property_cap ? syn->property_cap * 2u : 4u;
-        IdmSyntaxProperty *props = realloc(syn->properties, cap * sizeof(*props));
-        if (!props) return false;
-        syn->properties = props;
-        syn->property_cap = cap;
+        if (!idm_grow((void **)&syn->properties, &syn->property_cap, sizeof(*syn->properties), 4u, syn->property_count + 1u)) return false;
     }
     char *key_copy = idm_strdup(key);
     char *value_copy = idm_strdup(value);
@@ -279,11 +295,7 @@ const char *idm_syn_property_get(const IdmSyntax *syn, const char *key) {
 bool idm_syn_origin_push(IdmSyntax *syn, const char *origin) {
     if (!syn || !origin) return false;
     if (syn->origins.count == syn->origins.cap) {
-        size_t cap = syn->origins.cap ? syn->origins.cap * 2u : 4u;
-        char **items = realloc(syn->origins.items, cap * sizeof(*items));
-        if (!items) return false;
-        syn->origins.items = items;
-        syn->origins.cap = cap;
+        if (!idm_grow((void **)&syn->origins.items, &syn->origins.cap, sizeof(*syn->origins.items), 4u, syn->origins.count + 1u)) return false;
     }
     char *copy = idm_strdup(origin);
     if (!copy) return false;
@@ -318,6 +330,9 @@ static IdmSyntax *syn_clone_at(const IdmSyntax *syn, unsigned depth) {
         case IDM_SYN_INT:
             clone = idm_syn_int(syn->as.integer, syn->span);
             break;
+        case IDM_SYN_BIGINT:
+            clone = idm_syn_bigint(syn->as.text, syn->span);
+            break;
         case IDM_SYN_FLOAT:
             clone = idm_syn_float(syn->as.real, syn->span);
             break;
@@ -325,16 +340,10 @@ static IdmSyntax *syn_clone_at(const IdmSyntax *syn, unsigned depth) {
             clone = idm_syn_string(syn->as.text, syn->span);
             break;
         case IDM_SYN_LIST:
-            clone = idm_syn_list(syn->span);
-            break;
         case IDM_SYN_VECTOR:
-            clone = idm_syn_vector(syn->span);
-            break;
         case IDM_SYN_TUPLE:
-            clone = idm_syn_tuple(syn->span);
-            break;
         case IDM_SYN_DICT:
-            clone = idm_syn_dict(syn->span);
+            clone = idm_syn_seq(syn->kind, syn->span);
             break;
     }
     if (!clone) return NULL;
@@ -386,6 +395,7 @@ void idm_syn_free(IdmSyntax *syn) {
         case IDM_SYN_WORD:
         case IDM_SYN_ATOM:
         case IDM_SYN_STRING:
+        case IDM_SYN_BIGINT:
             free(syn->as.text);
             break;
         case IDM_SYN_LIST:
@@ -403,31 +413,44 @@ void idm_syn_free(IdmSyntax *syn) {
     free(syn);
 }
 
-static bool dump_escaped(IdmBuffer *buf, const char *text) {
-    if (!idm_buf_append_char(buf, '"')) return false;
-    for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
-        switch (*p) {
-            case '\\': if (!idm_buf_append(buf, "\\\\")) return false; break;
-            case '"': if (!idm_buf_append(buf, "\\\"")) return false; break;
-            case '\n': if (!idm_buf_append(buf, "\\n")) return false; break;
-            case '\r': if (!idm_buf_append(buf, "\\r")) return false; break;
-            case '\t': if (!idm_buf_append(buf, "\\t")) return false; break;
-            default:
-                if (*p < 32u) {
-                    if (!idm_buf_appendf(buf, "\\x%02x", *p)) return false;
-                } else if (!idm_buf_append_char(buf, (char)*p)) return false;
+bool idm_syn_equal(const IdmSyntax *a, const IdmSyntax *b) {
+    if (!a || !b || a->kind != b->kind) return false;
+    switch (a->kind) {
+        case IDM_SYN_NIL:
+            return true;
+        case IDM_SYN_WORD:
+        case IDM_SYN_ATOM:
+        case IDM_SYN_STRING:
+            return strcmp(a->as.text, b->as.text) == 0;
+        case IDM_SYN_BIGINT: {
+            bool eq = false;
+            if (idm_bignum_decimal_equal(a->as.text, strlen(a->as.text), b->as.text, strlen(b->as.text), &eq)) return eq;
+            return strcmp(a->as.text, b->as.text) == 0;
         }
+        case IDM_SYN_INT:
+            return a->as.integer == b->as.integer;
+        case IDM_SYN_FLOAT:
+            return a->as.real == b->as.real;
+        case IDM_SYN_LIST:
+        case IDM_SYN_VECTOR:
+        case IDM_SYN_TUPLE:
+        case IDM_SYN_DICT:
+            if (a->as.seq.count != b->as.seq.count) return false;
+            for (size_t i = 0; i < a->as.seq.count; i++) {
+                if (!idm_syn_equal(a->as.seq.items[i], b->as.seq.items[i])) return false;
+            }
+            return true;
     }
-    return idm_buf_append_char(buf, '"');
+    return false;
+}
+
+static bool dump_seq_item(IdmBuffer *buf, size_t index, void *user) {
+    const IdmSyntax *syn = user;
+    return idm_syn_dump(buf, syn->as.seq.items[index]);
 }
 
 static bool dump_seq(IdmBuffer *buf, const IdmSyntax *syn, const char *open, const char *close) {
-    if (!idm_buf_append(buf, open)) return false;
-    for (size_t i = 0; i < syn->as.seq.count; i++) {
-        if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
-        if (!idm_syn_dump(buf, syn->as.seq.items[i])) return false;
-    }
-    return idm_buf_append(buf, close);
+    return idm_surface_write_sequence(buf, open, close, syn->as.seq.count, dump_seq_item, (void *)syn);
 }
 
 bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn) {
@@ -437,8 +460,9 @@ bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn) {
         case IDM_SYN_WORD: return idm_buf_append(buf, syn->as.text);
         case IDM_SYN_ATOM: return idm_buf_append_char(buf, ':') && idm_buf_append(buf, syn->as.text);
         case IDM_SYN_INT: return idm_buf_appendf(buf, "%lld", (long long)syn->as.integer);
+        case IDM_SYN_BIGINT: return idm_buf_append(buf, syn->as.text);
         case IDM_SYN_FLOAT: return idm_buf_appendf(buf, "%g", syn->as.real);
-        case IDM_SYN_STRING: return dump_escaped(buf, syn->as.text);
+        case IDM_SYN_STRING: return idm_surface_write_escaped(buf, syn->as.text, strlen(syn->as.text));
         case IDM_SYN_LIST: return dump_seq(buf, syn, "(", ")");
         case IDM_SYN_VECTOR: return dump_seq(buf, syn, "[", "]");
         case IDM_SYN_TUPLE: return dump_seq(buf, syn, "{", "}");
@@ -539,12 +563,35 @@ bool idm_syn_dump_pretty(IdmBuffer *buf, const IdmSyntax *syn) {
     return syn_pretty(buf, syn, 0);
 }
 
+static bool syn_serialize_bigint_payload(IdmBuffer *out, const IdmSyntax *syn, IdmError *err) {
+    size_t len = strlen(syn->as.text);
+    size_t cap = idm_bignum_decimal_limb_cap(len);
+    if (cap > SIZE_MAX / sizeof(uint32_t)) return idm_error_set(err, syn->span, "integer literal is too large");
+    uint32_t *limbs = cap == 0u ? NULL : calloc(cap, sizeof(*limbs));
+    if (cap != 0u && !limbs) return idm_error_oom(err, syn->span);
+    size_t count = 0u;
+    int sign = 0;
+    bool parsed = idm_bignum_from_decimal(syn->as.text, len, limbs, &count, &sign);
+    if (!parsed) {
+        free(limbs);
+        return idm_error_set(err, syn->span, "invalid integer literal");
+    }
+    if (count > UINT32_MAX) {
+        free(limbs);
+        return idm_error_set(err, syn->span, "integer literal is too large");
+    }
+    uint8_t sign_tag = sign < 0 ? 1u : (sign > 0 ? 2u : 0u);
+    bool ok = idm_buf_put_u8(out, sign_tag) && idm_buf_put_u32(out, (uint32_t)count);
+    for (size_t i = 0; ok && i < count; i++) ok = idm_buf_put_u32(out, limbs[i]);
+    free(limbs);
+    return ok || idm_error_oom(err, syn->span);
+}
+
 static bool syn_serialize_depth(IdmBuffer *out, const IdmSyntax *syn, unsigned depth, IdmError *err) {
     if (!syn) return idm_error_set(err, idm_span_unknown(NULL), "cannot serialize null syntax");
     if (depth > IDM_IC_MAX_DEPTH) return idm_error_set(err, syn->span, "syntax nested too deeply to serialize");
     if (!idm_buf_put_u8(out, (uint8_t)syn->kind)) return idm_error_oom(err, syn->span);
-    bool ok = idm_buf_put_u8(out, syn->span.file ? 1u : 0u);
-    if (ok && syn->span.file) ok = idm_buf_put_str(out, syn->span.file, strlen(syn->span.file));
+    bool ok = idm_buf_put_opt_str(out, syn->span.file);
     ok = ok && idm_buf_put_u64(out, (uint64_t)syn->span.start) && idm_buf_put_u64(out, (uint64_t)syn->span.end);
     ok = ok && idm_buf_put_u32(out, syn->span.line) && idm_buf_put_u32(out, syn->span.column);
     ok = ok && idm_buf_put_u32(out, (uint32_t)syn->scopes.count);
@@ -555,9 +602,8 @@ static bool syn_serialize_depth(IdmBuffer *out, const IdmSyntax *syn, unsigned d
             ok = idm_buf_put_u32(out, syn->scopes.items[i].scopes.items[j]);
         }
     }
-    ok = ok && idm_buf_put_u8(out, syn->token_raw ? 1u : 0u);
+    ok = ok && idm_buf_put_opt_str(out, syn->token_raw);
     if (ok && syn->token_raw) {
-        ok = idm_buf_put_str(out, syn->token_raw, strlen(syn->token_raw));
         ok = ok && idm_buf_put_u8(out, syn->token_leading_space ? 1u : 0u);
         ok = ok && idm_buf_put_u8(out, syn->token_adjacent_previous ? 1u : 0u);
     }
@@ -579,6 +625,8 @@ static bool syn_serialize_depth(IdmBuffer *out, const IdmSyntax *syn, unsigned d
         case IDM_SYN_STRING:
             if (!idm_buf_put_str(out, syn->as.text, strlen(syn->as.text))) return idm_error_oom(err, syn->span);
             return true;
+        case IDM_SYN_BIGINT:
+            return syn_serialize_bigint_payload(out, syn, err);
         case IDM_SYN_INT:
             if (!idm_buf_put_u64(out, (uint64_t)syn->as.integer)) return idm_error_oom(err, syn->span);
             return true;
@@ -606,24 +654,79 @@ bool idm_syn_serialize(IdmBuffer *out, const IdmSyntax *syn, IdmError *err) {
     return syn_serialize_depth(out, syn, 0u, err);
 }
 
+static char *syn_deserialize_bigint_text(IdmByteReader *r, IdmSpan span, IdmError *err) {
+    uint8_t sign_tag = idm_rd_u8(r);
+    uint32_t wire_count = idm_rd_u32(r);
+    if (!r->ok) {
+        idm_error_set(err, span, "truncated serialized syntax bigint");
+        return NULL;
+    }
+    if (sign_tag > 2u) {
+        idm_error_set(err, span, "invalid serialized syntax bigint sign");
+        return NULL;
+    }
+    int sign = sign_tag == 1u ? -1 : (sign_tag == 2u ? 1 : 0);
+    size_t count = wire_count;
+    if ((count == 0u) != (sign == 0)) {
+        idm_error_set(err, span, "invalid serialized syntax bigint zero encoding");
+        return NULL;
+    }
+    if (count > SIZE_MAX / sizeof(uint32_t)) {
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    uint32_t *limbs = count == 0u ? NULL : malloc(count * sizeof(*limbs));
+    if (count != 0u && !limbs) {
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    for (size_t i = 0; i < count; i++) limbs[i] = idm_rd_u32(r);
+    if (!r->ok) {
+        free(limbs);
+        idm_error_set(err, span, "truncated serialized syntax bigint");
+        return NULL;
+    }
+    uint32_t *scratch = count == 0u ? NULL : malloc(count * sizeof(*scratch));
+    if (count != 0u && !scratch) {
+        free(limbs);
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    if (count != 0u) memcpy(scratch, limbs, count * sizeof(*scratch));
+    size_t digit_cap = idm_bignum_decimal_digit_cap(count);
+    if (digit_cap > SIZE_MAX - 2u) {
+        free(scratch);
+        free(limbs);
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    char *text = malloc(digit_cap + 2u);
+    if (!text) {
+        free(scratch);
+        free(limbs);
+        idm_error_oom(err, span);
+        return NULL;
+    }
+    (void)idm_bignum_to_decimal(scratch, count, sign, text);
+    free(scratch);
+    free(limbs);
+    return text;
+}
+
 static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsigned depth, IdmError *err) {
     if (depth > IDM_IC_MAX_DEPTH) {
         idm_error_set(err, idm_span_unknown(NULL), "serialized syntax nested too deeply");
         return NULL;
     }
     uint8_t kind = idm_rd_u8(r);
-    uint8_t has_file = idm_rd_u8(r);
-    if (!r->ok || kind > (uint8_t)IDM_SYN_DICT || has_file > 1u) {
+    if (!r->ok || kind > (uint8_t)IDM_SYN_BIGINT) {
         idm_error_set(err, idm_span_unknown(NULL), "truncated or invalid serialized syntax header");
         return NULL;
     }
     IdmSpan span = idm_span_unknown(NULL);
-    if (has_file) {
-        char *file = idm_rd_string(r, NULL);
-        if (!file) {
-            idm_error_set(err, idm_span_unknown(NULL), "truncated serialized syntax span file");
-            return NULL;
-        }
+    char *file = NULL;
+    if (!idm_rd_opt_str(r, &file, err)) return NULL;
+    if (file) {
         const IdmSymbol *sym = idm_intern(&rt->intern, IDM_SYMBOL_WORD, file);
         free(file);
         if (!sym) {
@@ -660,16 +763,16 @@ static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsign
             if (!r->ok || !idm_syn_scope_add(syn, phase, id)) ok = false;
         }
     }
-    uint8_t has_token = ok ? idm_rd_u8(r) : 0u;
-    if (ok && has_token) {
-        char *raw = idm_rd_string(r, NULL);
+    char *raw = NULL;
+    if (ok && !idm_rd_opt_str(r, &raw, err)) ok = false;
+    if (ok && raw) {
         uint8_t leading = idm_rd_u8(r);
         uint8_t adjacent = idm_rd_u8(r);
-        if (!raw || !r->ok) ok = false;
+        if (!r->ok) ok = false;
         else idm_syn_set_token(syn, raw, leading != 0u, adjacent != 0u);
-        free(raw);
         if (ok && !syn->token_raw) ok = false;
     }
+    free(raw);
     uint32_t property_count = ok ? idm_rd_u32(r) : 0u;
     for (uint32_t i = 0; ok && i < property_count; i++) {
         char *key = idm_rd_string(r, NULL);
@@ -698,6 +801,15 @@ static IdmSyntax *syn_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, unsign
             char *text = idm_rd_string(r, NULL);
             if (!text) {
                 idm_error_set(err, span, "truncated serialized syntax text");
+                idm_syn_free(syn);
+                return NULL;
+            }
+            syn->as.text = text;
+            return syn;
+        }
+        case IDM_SYN_BIGINT: {
+            char *text = syn_deserialize_bigint_text(r, span, err);
+            if (!text) {
                 idm_syn_free(syn);
                 return NULL;
             }

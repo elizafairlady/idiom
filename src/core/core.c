@@ -16,32 +16,8 @@ static bool append_arity(IdmBuffer *buf, const IdmArity *arity) {
     return idm_buf_append_char(buf, '/') && idm_arity_describe(buf, arity);
 }
 
-static const char *value_sequence_kind_name(IdmValueSequenceKind kind) {
-    switch (kind) {
-        case IDM_VALUE_SEQ_VECTOR: return "vector";
-        case IDM_VALUE_SEQ_TUPLE: return "tuple";
-        case IDM_VALUE_SEQ_DICT: return "dict";
-    }
-    return "unknown";
-}
-
-static const char *syntax_build_kind_name(IdmSyntaxBuildKind kind) {
-    switch (kind) {
-        case IDM_SYNTAX_BUILD_NIL: return "nil";
-        case IDM_SYNTAX_BUILD_WORD: return "word";
-        case IDM_SYNTAX_BUILD_ATOM: return "atom";
-        case IDM_SYNTAX_BUILD_INT: return "int";
-        case IDM_SYNTAX_BUILD_FLOAT: return "float";
-        case IDM_SYNTAX_BUILD_STRING: return "string";
-        case IDM_SYNTAX_BUILD_LIST: return "list";
-        case IDM_SYNTAX_BUILD_VECTOR: return "vector";
-        case IDM_SYNTAX_BUILD_TUPLE: return "tuple";
-        case IDM_SYNTAX_BUILD_DICT: return "dict";
-        case IDM_SYNTAX_BUILD_EXPR: return "expr";
-        case IDM_SYNTAX_BUILD_BODY: return "body";
-        case IDM_SYNTAX_BUILD_GROUP: return "group";
-    }
-    return "unknown";
+static const char *core_symbol_text(const IdmSymbol *symbol) {
+    return symbol ? idm_symbol_text(symbol) : NULL;
 }
 
 IdmCore *idm_core_literal(IdmValue value, IdmSpan span) {
@@ -89,11 +65,7 @@ IdmCore *idm_core_call(IdmCore *callee, IdmSpan span) {
 bool idm_core_call_add_arg(IdmCore *call, IdmCore *arg) {
     if (!call || call->kind != IDM_CORE_CALL || !arg) return false;
     if (call->as.call.arg_count == call->as.call.arg_cap) {
-        size_t cap = call->as.call.arg_cap ? call->as.call.arg_cap * 2u : 4u;
-        IdmCore **args = realloc(call->as.call.args, cap * sizeof(*args));
-        if (!args) return false;
-        call->as.call.args = args;
-        call->as.call.arg_cap = cap;
+        if (!idm_grow((void **)&call->as.call.args, &call->as.call.arg_cap, sizeof(*call->as.call.args), 4u, call->as.call.arg_count + 1u)) return false;
     }
     call->as.call.args[call->as.call.arg_count++] = arg;
     return true;
@@ -125,11 +97,7 @@ IdmCore *idm_core_value_sequence(IdmValueSequenceKind kind, IdmSpan span) {
 bool idm_core_value_sequence_add(IdmCore *core, IdmCore *item) {
     if (!core || core->kind != IDM_CORE_VALUE_SEQUENCE || !item) return false;
     if (core->as.value_sequence.count == core->as.value_sequence.cap) {
-        size_t cap = core->as.value_sequence.cap ? core->as.value_sequence.cap * 2u : 4u;
-        IdmCore **items = realloc(core->as.value_sequence.items, cap * sizeof(*items));
-        if (!items) return false;
-        core->as.value_sequence.items = items;
-        core->as.value_sequence.cap = cap;
+        if (!idm_grow((void **)&core->as.value_sequence.items, &core->as.value_sequence.cap, sizeof(*core->as.value_sequence.items), 4u, core->as.value_sequence.count + 1u)) return false;
     }
     core->as.value_sequence.items[core->as.value_sequence.count++] = item;
     return true;
@@ -151,11 +119,7 @@ IdmCore *idm_core_string_concat(IdmSpan span) {
 bool idm_core_string_concat_add(IdmCore *core, IdmCore *item) {
     if (!core || core->kind != IDM_CORE_STRING_CONCAT || !item) return false;
     if (core->as.string_concat.count == core->as.string_concat.cap) {
-        size_t cap = core->as.string_concat.cap ? core->as.string_concat.cap * 2u : 4u;
-        IdmCore **items = realloc(core->as.string_concat.items, cap * sizeof(*items));
-        if (!items) return false;
-        core->as.string_concat.items = items;
-        core->as.string_concat.cap = cap;
+        if (!idm_grow((void **)&core->as.string_concat.items, &core->as.string_concat.cap, sizeof(*core->as.string_concat.items), 4u, core->as.string_concat.count + 1u)) return false;
     }
     core->as.string_concat.items[core->as.string_concat.count++] = item;
     return true;
@@ -177,11 +141,7 @@ IdmCore *idm_core_match(IdmSpan span) {
 bool idm_core_match_add_scrutinee(IdmCore *match, IdmCore *scrutinee) {
     if (!match || match->kind != IDM_CORE_MATCH || !scrutinee) return false;
     if (match->as.match_expr.scrutinee_count == match->as.match_expr.scrutinee_cap) {
-        size_t cap = match->as.match_expr.scrutinee_cap ? match->as.match_expr.scrutinee_cap * 2u : 2u;
-        IdmCore **items = realloc(match->as.match_expr.scrutinees, cap * sizeof(*items));
-        if (!items) return false;
-        match->as.match_expr.scrutinees = items;
-        match->as.match_expr.scrutinee_cap = cap;
+        if (!idm_grow((void **)&match->as.match_expr.scrutinees, &match->as.match_expr.scrutinee_cap, sizeof(*match->as.match_expr.scrutinees), 2u, match->as.match_expr.scrutinee_count + 1u)) return false;
     }
     match->as.match_expr.scrutinees[match->as.match_expr.scrutinee_count++] = scrutinee;
     return true;
@@ -193,11 +153,7 @@ bool idm_core_match_add_capture(IdmCore *match, IdmCaptureKind kind, const char 
         if (match->as.match_expr.captures[i].kind == kind && match->as.match_expr.captures[i].index == index) return true;
     }
     if (match->as.match_expr.capture_count == match->as.match_expr.capture_cap) {
-        size_t cap = match->as.match_expr.capture_cap ? match->as.match_expr.capture_cap * 2u : 4u;
-        IdmCapture *captures = realloc(match->as.match_expr.captures, cap * sizeof(*captures));
-        if (!captures) return false;
-        match->as.match_expr.captures = captures;
-        match->as.match_expr.capture_cap = cap;
+        if (!idm_grow((void **)&match->as.match_expr.captures, &match->as.match_expr.capture_cap, sizeof(*match->as.match_expr.captures), 4u, match->as.match_expr.capture_count + 1u)) return false;
     }
     IdmCapture *capture = &match->as.match_expr.captures[match->as.match_expr.capture_count];
     capture->name = idm_strdup(name ? name : "<capture>");
@@ -212,11 +168,7 @@ bool idm_core_match_add_capture(IdmCore *match, IdmCaptureKind kind, const char 
 bool idm_core_match_add_clause_take(IdmCore *match, uint32_t arity, IdmPattern **patterns, uint32_t pattern_count, IdmPatternLocal *locals, uint32_t local_count, IdmCore *guard, IdmCore *body) {
     if (!match || match->kind != IDM_CORE_MATCH || !body) return false;
     if (match->as.match_expr.count == match->as.match_expr.cap) {
-        size_t cap = match->as.match_expr.cap ? match->as.match_expr.cap * 2u : 4u;
-        IdmFnClause *clauses = realloc(match->as.match_expr.clauses, cap * sizeof(*clauses));
-        if (!clauses) return false;
-        match->as.match_expr.clauses = clauses;
-        match->as.match_expr.cap = cap;
+        if (!idm_grow((void **)&match->as.match_expr.clauses, &match->as.match_expr.cap, sizeof(*match->as.match_expr.clauses), 4u, match->as.match_expr.count + 1u)) return false;
     }
     IdmFnClause *clause = &match->as.match_expr.clauses[match->as.match_expr.count++];
     memset(clause, 0, sizeof(*clause));
@@ -238,11 +190,7 @@ IdmCore *idm_core_do(IdmSpan span) {
 bool idm_core_do_add(IdmCore *do_expr, IdmCore *item) {
     if (!do_expr || do_expr->kind != IDM_CORE_DO || !item) return false;
     if (do_expr->as.do_expr.count == do_expr->as.do_expr.cap) {
-        size_t cap = do_expr->as.do_expr.cap ? do_expr->as.do_expr.cap * 2u : 4u;
-        IdmCore **items = realloc(do_expr->as.do_expr.items, cap * sizeof(*items));
-        if (!items) return false;
-        do_expr->as.do_expr.items = items;
-        do_expr->as.do_expr.cap = cap;
+        if (!idm_grow((void **)&do_expr->as.do_expr.items, &do_expr->as.do_expr.cap, sizeof(*do_expr->as.do_expr.items), 4u, do_expr->as.do_expr.count + 1u)) return false;
     }
     do_expr->as.do_expr.items[do_expr->as.do_expr.count++] = item;
     return true;
@@ -272,11 +220,7 @@ IdmCore *idm_core_fn(const char *name, uint32_t arity, IdmCore *body, IdmSpan sp
 bool idm_core_fn_add_capture(IdmCore *fn, IdmCaptureKind kind, const char *name, uint32_t index) {
     if (!fn || fn->kind != IDM_CORE_FN) return false;
     if (fn->as.fn.capture_count == fn->as.fn.capture_cap) {
-        size_t cap = fn->as.fn.capture_cap ? fn->as.fn.capture_cap * 2u : 4u;
-        IdmCapture *slots = realloc(fn->as.fn.captures, cap * sizeof(*slots));
-        if (!slots) return false;
-        fn->as.fn.captures = slots;
-        fn->as.fn.capture_cap = cap;
+        if (!idm_grow((void **)&fn->as.fn.captures, &fn->as.fn.capture_cap, sizeof(*fn->as.fn.captures), 4u, fn->as.fn.capture_count + 1u)) return false;
     }
     IdmCapture *capture = &fn->as.fn.captures[fn->as.fn.capture_count];
     capture->name = idm_strdup(name ? name : "<capture>");
@@ -328,11 +272,7 @@ IdmCore *idm_core_fn_multi(const char *name, IdmSpan span) {
 static IdmFnClause *fn_multi_append_clause(IdmCore *multi) {
     if (!multi || multi->kind != IDM_CORE_FN_MULTI) return NULL;
     if (multi->as.fn_multi.count == multi->as.fn_multi.cap) {
-        size_t cap = multi->as.fn_multi.cap ? multi->as.fn_multi.cap * 2u : 4u;
-        IdmFnClause *clauses = realloc(multi->as.fn_multi.clauses, cap * sizeof(*clauses));
-        if (!clauses) return NULL;
-        multi->as.fn_multi.clauses = clauses;
-        multi->as.fn_multi.cap = cap;
+        if (!idm_grow((void **)&multi->as.fn_multi.clauses, &multi->as.fn_multi.cap, sizeof(*multi->as.fn_multi.clauses), 4u, multi->as.fn_multi.count + 1u)) return NULL;
     }
     IdmFnClause *clause = &multi->as.fn_multi.clauses[multi->as.fn_multi.count++];
     memset(clause, 0, sizeof(*clause));
@@ -345,11 +285,7 @@ bool idm_core_fn_multi_add_capture(IdmCore *multi, IdmCaptureKind kind, const ch
         if (multi->as.fn_multi.captures[i].kind == kind && multi->as.fn_multi.captures[i].index == index) return true;
     }
     if (multi->as.fn_multi.capture_count == multi->as.fn_multi.capture_cap) {
-        size_t cap = multi->as.fn_multi.capture_cap ? multi->as.fn_multi.capture_cap * 2u : 4u;
-        IdmCapture *slots = realloc(multi->as.fn_multi.captures, cap * sizeof(*slots));
-        if (!slots) return false;
-        multi->as.fn_multi.captures = slots;
-        multi->as.fn_multi.capture_cap = cap;
+        if (!idm_grow((void **)&multi->as.fn_multi.captures, &multi->as.fn_multi.capture_cap, sizeof(*multi->as.fn_multi.captures), 4u, multi->as.fn_multi.capture_count + 1u)) return false;
     }
     IdmCapture *capture = &multi->as.fn_multi.captures[multi->as.fn_multi.capture_count];
     capture->name = idm_strdup(name ? name : "<capture>");
@@ -398,11 +334,7 @@ IdmCore *idm_core_letrec(IdmSpan span) {
 bool idm_core_letrec_add_env_fill(IdmCore *letrec, const char *name, IdmValue env_key, uint32_t slot, IdmCore *value, bool fill_existing) {
     if (!letrec || letrec->kind != IDM_CORE_LETREC || !value) return false;
     if (letrec->as.letrec.count == letrec->as.letrec.cap) {
-        size_t cap = letrec->as.letrec.cap ? letrec->as.letrec.cap * 2u : 4u;
-        IdmLetRecBinding *bindings = realloc(letrec->as.letrec.bindings, cap * sizeof(*bindings));
-        if (!bindings) return false;
-        letrec->as.letrec.bindings = bindings;
-        letrec->as.letrec.cap = cap;
+        if (!idm_grow((void **)&letrec->as.letrec.bindings, &letrec->as.letrec.cap, sizeof(*letrec->as.letrec.bindings), 4u, letrec->as.letrec.count + 1u)) return false;
     }
     IdmLetRecBinding *binding = &letrec->as.letrec.bindings[letrec->as.letrec.count];
     binding->name = idm_strdup(name);
@@ -422,11 +354,7 @@ bool idm_core_letrec_add_env_fill(IdmCore *letrec, const char *name, IdmValue en
 bool idm_core_letrec_add_fill(IdmCore *letrec, const char *name, uint32_t slot, IdmCore *value, bool fill_existing) {
     if (!letrec || letrec->kind != IDM_CORE_LETREC || !value) return false;
     if (letrec->as.letrec.count == letrec->as.letrec.cap) {
-        size_t cap = letrec->as.letrec.cap ? letrec->as.letrec.cap * 2u : 4u;
-        IdmLetRecBinding *bindings = realloc(letrec->as.letrec.bindings, cap * sizeof(*bindings));
-        if (!bindings) return false;
-        letrec->as.letrec.bindings = bindings;
-        letrec->as.letrec.cap = cap;
+        if (!idm_grow((void **)&letrec->as.letrec.bindings, &letrec->as.letrec.cap, sizeof(*letrec->as.letrec.bindings), 4u, letrec->as.letrec.count + 1u)) return false;
     }
     IdmLetRecBinding *binding = &letrec->as.letrec.bindings[letrec->as.letrec.count];
     binding->name = idm_strdup(name);
@@ -506,27 +434,23 @@ IdmCore *idm_core_use_package(IdmValue env_key, IdmBytecodeModule *module, bool 
     return core;
 }
 
-IdmCore *idm_core_record_construct(IdmValue type, IdmSpan span) {
+IdmCore *idm_core_record_construct(IdmSymbol *type, IdmSpan span) {
+    if (!type) return NULL;
     IdmCore *core = core_alloc(IDM_CORE_RECORD_CONSTRUCT, span);
     if (!core) return NULL;
     core->as.record_construct.type = type;
     return core;
 }
 
-bool idm_core_record_construct_add(IdmCore *core, IdmValue field, IdmValue contract, IdmCore *value) {
-    if (!core || core->kind != IDM_CORE_RECORD_CONSTRUCT || !value) return false;
+bool idm_core_record_construct_add(IdmCore *core, IdmSymbol *field, IdmSymbol *contract, IdmCore *value) {
+    if (!core || core->kind != IDM_CORE_RECORD_CONSTRUCT || !field || !value) return false;
     if (core->as.record_construct.count == core->as.record_construct.cap) {
-        size_t cap = core->as.record_construct.cap ? core->as.record_construct.cap * 2u : 4u;
-        IdmValue *names = realloc(core->as.record_construct.field_names, cap * sizeof(*names));
-        if (!names) return false;
-        core->as.record_construct.field_names = names;
-        IdmValue *contracts = realloc(core->as.record_construct.field_contracts, cap * sizeof(*contracts));
-        if (!contracts) return false;
-        core->as.record_construct.field_contracts = contracts;
-        IdmCore **values = realloc(core->as.record_construct.field_values, cap * sizeof(*values));
-        if (!values) return false;
-        core->as.record_construct.field_values = values;
-        core->as.record_construct.cap = cap;
+        IdmGrowItem items[] = {
+            { .base = (void **)&core->as.record_construct.field_names, .elem_size = sizeof(*core->as.record_construct.field_names) },
+            { .base = (void **)&core->as.record_construct.field_contracts, .elem_size = sizeof(*core->as.record_construct.field_contracts) },
+            { .base = (void **)&core->as.record_construct.field_values, .elem_size = sizeof(*core->as.record_construct.field_values) },
+        };
+        if (!idm_growv(items, 3u, &core->as.record_construct.cap, 4u, core->as.record_construct.count + 1u)) return false;
     }
     size_t index = core->as.record_construct.count;
     core->as.record_construct.field_names[index] = field;
@@ -536,23 +460,23 @@ bool idm_core_record_construct_add(IdmCore *core, IdmValue field, IdmValue contr
     return true;
 }
 
-IdmCore *idm_core_record_field(IdmCore *receiver, IdmValue type, IdmValue field, uint32_t field_index, IdmSpan span) {
-    if (!receiver) return NULL;
+IdmCore *idm_core_record_field(IdmCore *receiver, IdmSymbol *type, IdmSymbol *field, uint32_t field_index, IdmSpan span) {
+    if (!receiver || !type || !field) return NULL;
     IdmCore *core = core_alloc(IDM_CORE_RECORD_FIELD, span);
     if (!core) return NULL;
-    core->as.record_field.receiver = receiver;
     core->as.record_field.type = type;
     core->as.record_field.field = field;
+    core->as.record_field.receiver = receiver;
     core->as.record_field.field_index = field_index;
     return core;
 }
 
-IdmCore *idm_core_record_is(IdmCore *value, IdmValue type, IdmSpan span) {
-    if (!value) return NULL;
+IdmCore *idm_core_record_is(IdmCore *value, IdmSymbol *type, IdmSpan span) {
+    if (!value || !type) return NULL;
     IdmCore *core = core_alloc(IDM_CORE_RECORD_IS, span);
     if (!core) return NULL;
-    core->as.record_is.value = value;
     core->as.record_is.type = type;
+    core->as.record_is.value = value;
     return core;
 }
 
@@ -888,12 +812,14 @@ typedef struct {
 } LinkedPackage;
 
 typedef struct {
+    IdmRuntime *rt;
     LinkedPackage *linked_packages;
     size_t linked_package_count;
     size_t linked_package_cap;
 } CompileModuleCtx;
 
 typedef struct {
+    IdmRuntime *rt;
     CompileModuleCtx *module_ctx;
     IdmBytecodeModule *module;
     uint32_t function_index;
@@ -1367,6 +1293,7 @@ static bool compile_function_code(CompileModuleCtx *module_ctx, IdmBytecodeModul
     mark_celled(body, celled, lc, captures, capture_count);
     free(celled);
     CompileCtx ctx;
+    ctx.rt = module_ctx->rt;
     ctx.module_ctx = module_ctx;
     ctx.module = module;
     ctx.function_index = function_index;
@@ -1382,313 +1309,15 @@ static bool compile_function_code(CompileModuleCtx *module_ctx, IdmBytecodeModul
 }
 
 static const IdmPrimitiveInfo PRIMITIVES[] = {
-    [IDM_PRIM_ADD] = {"add", 2, 2},
-    [IDM_PRIM_SUB] = {"sub", 2, 2},
-    [IDM_PRIM_MUL] = {"mul", 2, 2},
-    [IDM_PRIM_DIV] = {"div", 2, 2},
-    [IDM_PRIM_MOD] = {"mod", 2, 2},
-    [IDM_PRIM_POW] = {"pow", 2, 2},
-    [IDM_PRIM_NEG] = {"neg", 1, 1},
-    [IDM_PRIM_EQ] = {"eq?", 2, 2},
-    [IDM_PRIM_NEQ] = {"neq?", 2, 2},
-    [IDM_PRIM_LT] = {"lt?", 2, 2},
-    [IDM_PRIM_GT] = {"gt?", 2, 2},
-    [IDM_PRIM_LTE] = {"lte?", 2, 2},
-    [IDM_PRIM_GTE] = {"gte?", 2, 2},
-    [IDM_PRIM_COND] = {"cond", 2, 3},
-    [IDM_PRIM_COMPARE] = {"compare", 2, 2},
-    [IDM_PRIM_CEIL] = {"ceil", 1, 1},
-    [IDM_PRIM_TRUNCATE] = {"truncate", 1, 1},
-    [IDM_PRIM_SIN] = {"sin", 1, 1},
-    [IDM_PRIM_COS] = {"cos", 1, 1},
-    [IDM_PRIM_TAN] = {"tan", 1, 1},
-    [IDM_PRIM_ASIN] = {"asin", 1, 1},
-    [IDM_PRIM_ACOS] = {"acos", 1, 1},
-    [IDM_PRIM_ATAN] = {"atan", 1, 1},
-    [IDM_PRIM_ATAN2] = {"atan2", 2, 2},
-    [IDM_PRIM_EXP] = {"exp", 1, 1},
-    [IDM_PRIM_LOG] = {"log", 1, 1},
-    [IDM_PRIM_LOG2] = {"log2", 1, 1},
-    [IDM_PRIM_LOG10] = {"log10", 1, 1},
-    [IDM_PRIM_HYPOT] = {"hypot", 2, 2},
-    [IDM_PRIM_NAN_P] = {"nan?", 1, 1},
-    [IDM_PRIM_FINITE_P] = {"finite?", 1, 1},
-    [IDM_PRIM_INFINITE_P] = {"infinite?", 1, 1},
-    [IDM_PRIM_NAN] = {"nan", 0, 0},
-    [IDM_PRIM_INF] = {"inf", 0, 0},
-    [IDM_PRIM_DIVMOD] = {"divmod", 2, 2},
-    [IDM_PRIM_BIT_AND] = {"bit-and", 2, 2},
-    [IDM_PRIM_BIT_OR] = {"bit-or", 2, 2},
-    [IDM_PRIM_BIT_XOR] = {"bit-xor", 2, 2},
-    [IDM_PRIM_BIT_NOT] = {"bit-not", 1, 1},
-    [IDM_PRIM_SHIFT_LEFT] = {"shift-left", 2, 2},
-    [IDM_PRIM_SHIFT_RIGHT] = {"shift-right", 2, 2},
-    [IDM_PRIM_BIT_COUNT] = {"bit-count", 1, 1},
-    [IDM_PRIM_BIT_LENGTH] = {"bit-length", 1, 1},
-    [IDM_PRIM_TO_INT] = {"to-int", 1, 1},
-    [IDM_PRIM_TO_FLOAT] = {"to-float", 1, 1},
-    [IDM_PRIM_FILE_OPEN] = {"open", 2, 2},
-    [IDM_PRIM_OK] = {"ok?", 1, 1},
-    [IDM_PRIM_CONS] = {"cons", 2, 2},
-    [IDM_PRIM_FIRST] = {"first", 1, 1},
-    [IDM_PRIM_REST] = {"rest", 1, 1},
-    [IDM_PRIM_LIST] = {"list", 0, UINT32_MAX},
-    [IDM_PRIM_TUPLE] = {"tuple", 0, UINT32_MAX},
-    [IDM_PRIM_VECTOR] = {"vector", 0, UINT32_MAX},
-    [IDM_PRIM_DICT] = {"dict", 0, UINT32_MAX},
-    [IDM_PRIM_TUPLE_GET] = {"tuple-get", 2, 2},
-    [IDM_PRIM_STR_TO_LIST] = {"str-to-list", 1, 1},
-    [IDM_PRIM_DICT_TO_LIST] = {"dict-to-list", 1, 1},
-    [IDM_PRIM_VECTOR_TO_LIST] = {"vector-to-list", 1, 1},
-    [IDM_PRIM_TUPLE_TO_LIST] = {"tuple-to-list", 1, 1},
-    [IDM_PRIM_APPLY] = {"apply", 2, 2},
-    [IDM_PRIM_APPEND] = {"append", 2, 2},
-    [IDM_PRIM_SYNTAX_KIND] = {"syntax-kind", 1, 1},
-    [IDM_PRIM_SYNTAX_PROPERTY] = {"syntax-property", 2, 2},
-    [IDM_PRIM_SYNTAX_SET_PROPERTY] = {"syntax-set-property", 3, 3},
-    [IDM_PRIM_SYNTAX_ORIGIN] = {"syntax-origin", 1, 1},
-    [IDM_PRIM_SYNTAX_LIST_PRED] = {"syntax-list?", 1, 1},
-    [IDM_PRIM_SYNTAX_LENGTH] = {"syntax-length", 1, 1},
-    [IDM_PRIM_SYNTAX_NTH] = {"syntax-nth", 2, 2},
-    [IDM_PRIM_SYNTAX_SLICE] = {"syntax-slice", 3, 3},
-    [IDM_PRIM_SYNTAX_WORD_PRED] = {"syntax-word?", 1, 1},
-    [IDM_PRIM_SYNTAX_WORD_TEXT] = {"syntax-word-text", 1, 1},
-    [IDM_PRIM_SYNTAX_ATOM_PRED] = {"syntax-atom?", 1, 1},
-    [IDM_PRIM_SYNTAX_ATOM_TEXT] = {"syntax-atom-text", 1, 1},
-    [IDM_PRIM_SYNTAX_INT_PRED] = {"syntax-int?", 1, 1},
-    [IDM_PRIM_SYNTAX_INT_VALUE] = {"syntax-int-value", 1, 1},
-    [IDM_PRIM_SYNTAX_FLOAT_VALUE] = {"syntax-float-value", 1, 1},
-    [IDM_PRIM_MAKE_SYNTAX_NIL] = {"make-syntax-nil", 1, 1},
-    [IDM_PRIM_MAKE_SYNTAX_WORD] = {"make-syntax-word", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_ATOM] = {"make-syntax-atom", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_INT] = {"make-syntax-int", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_STRING] = {"make-syntax-string", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_LIST] = {"make-syntax-list", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_VECTOR] = {"make-syntax-vector", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_TUPLE] = {"make-syntax-tuple", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_DICT] = {"make-syntax-dict", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_EXPR] = {"make-syntax-expr", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_BODY] = {"make-syntax-body", 2, 2},
-    [IDM_PRIM_MAKE_SYNTAX_GROUP] = {"make-syntax-group", 2, 2},
-    [IDM_PRIM_SYNTAX_ERROR] = {"syntax-error", 2, 2},
-    [IDM_PRIM_LOCAL_EXPAND] = {"local-expand", 1, 1},
-    [IDM_PRIM_FREE_IDENTIFIER_EQ] = {"free-identifier=?", 2, 2},
-    [IDM_PRIM_BOUND_IDENTIFIER_EQ] = {"bound-identifier=?", 2, 2},
-    [IDM_PRIM_BIND_BANG] = {"bind!", 2, 2},
-    [IDM_PRIM_SELF] = {"self", 0, 0},
-    [IDM_PRIM_SPAWN] = {"spawn", 1, 1},
-    [IDM_PRIM_SEND] = {"send", 2, 2},
-    [IDM_PRIM_EXIT] = {"exit", 0, 2},
-    [IDM_PRIM_LINK] = {"link", 1, 1},
-    [IDM_PRIM_UNLINK] = {"unlink", 1, 1},
-    [IDM_PRIM_MONITOR] = {"monitor", 1, 1},
-    [IDM_PRIM_DEMONITOR] = {"demonitor", 1, 1},
-    [IDM_PRIM_TRAP_EXIT] = {"trap-exit", 1, 1},
-    [IDM_PRIM_STR] = {"str", 1, UINT32_MAX},
-    [IDM_PRIM_CHOMP] = {"chomp", 1, 1},
-    [IDM_PRIM_CAPTURE_STDOUT] = {"capture-stdout", 1, 1},
-    [IDM_PRIM_EXEC] = {"exec", 1, 1},
-    [IDM_PRIM_AWAIT] = {"await", 1, 1},
-    [IDM_PRIM_PRINT] = {"print", 0, UINT32_MAX},
-    [IDM_PRIM_PRINTLN] = {"println", 0, UINT32_MAX},
-    [IDM_PRIM_CD] = {"cd", 1, 1},
-    [IDM_PRIM_CHDIR] = {"chdir", 1, 1},
-    [IDM_PRIM_PWD] = {"pwd", 0, 0},
-    [IDM_PRIM_WRITE_PROCSUB_TEMP] = {"write-procsub-temp", 1, 1},
-    [IDM_PRIM_MAKE_PROCSUB_TEMP] = {"make-procsub-temp", 0, 0},
-    [IDM_PRIM_ENV_GET] = {"env-get", 1, 1},
-    [IDM_PRIM_ENV_SET] = {"env-set", 2, 2},
-    [IDM_PRIM_SYNTAX_ADJACENT_PRED] = {"syntax-adjacent?", 1, 1},
-    [IDM_PRIM_SYNTAX_STRING_TEXT] = {"syntax-string-text", 1, 1},
-    [IDM_PRIM_STR_CONTAINS] = {"contains?", 2, 2},
-    [IDM_PRIM_INTERNAL_REGISTER_MACRO] = {"internal-register-macro", 2, 2},
-    [IDM_PRIM_EXPAND_CHECK] = {"expand-check", 1, 1},
-    [IDM_PRIM_INSPECT] = {"inspect", 1, 1},
-    [IDM_PRIM_STR_LEN] = {"len", 1, 1},
-    [IDM_PRIM_STR_SLICE] = {"slice", 3, 3},
-    [IDM_PRIM_STR_FIND] = {"find", 3, 3},
-    [IDM_PRIM_STR_BYTE] = {"byte", 2, 2},
-    [IDM_PRIM_BYTE_STR] = {"byte-str", 1, 1},
-    [IDM_PRIM_REGEX_COMPILE] = {"raw-compile", 2, 2},
-    [IDM_PRIM_REGEX_PRED] = {"raw-regex?", 1, 1},
-    [IDM_PRIM_REGEX_SOURCE] = {"raw-source", 1, 1},
-    [IDM_PRIM_REGEX_OPTIONS] = {"raw-options", 1, 1},
-    [IDM_PRIM_REGEX_GROUP_COUNT] = {"raw-group-count", 1, 1},
-    [IDM_PRIM_REGEX_GROUP_NAMES] = {"raw-group-names", 1, 1},
-    [IDM_PRIM_REGEX_RESULT_PRED] = {"raw-result?", 1, 1},
-    [IDM_PRIM_REGEX_SCAN_AT] = {"raw-scan-at", 3, 3},
-    [IDM_PRIM_REGEX_SCAN_FROM] = {"raw-scan-from", 3, 3},
-    [IDM_PRIM_REGEX_SCAN_FULL] = {"raw-scan-full", 2, 2},
-    [IDM_PRIM_REGEX_TEST] = {"raw-test?", 2, 2},
-    [IDM_PRIM_REGEX_RESULT_START] = {"raw-result-start", 1, 1},
-    [IDM_PRIM_REGEX_RESULT_END] = {"raw-result-end", 1, 1},
-    [IDM_PRIM_REGEX_RESULT_TEXT] = {"raw-result-text", 1, 1},
-    [IDM_PRIM_REGEX_CAPTURE] = {"raw-capture", 2, 2},
-    [IDM_PRIM_REGEX_CAPTURE_RANGE] = {"raw-capture-range", 2, 2},
-    [IDM_PRIM_REGEX_CAPTURE_NAMED] = {"raw-capture-named", 2, 2},
-    [IDM_PRIM_REGEX_CAPTURES] = {"raw-captures", 1, 1},
-    [IDM_PRIM_REGEX_SCAN_ALL] = {"raw-scan-all", 2, 2},
-    [IDM_PRIM_REGEX_REPLACE] = {"raw-replace", 3, 3},
-    [IDM_PRIM_REGEX_REPLACE_ALL] = {"raw-replace-all", 3, 3},
-    [IDM_PRIM_REGEX_SPLIT_ON] = {"raw-split-on", 2, 2},
-    [IDM_PRIM_REGEX_ESCAPE] = {"raw-escape", 1, 1},
-    [IDM_PRIM_FILE_READ] = {"read", 1, 1},
-    [IDM_PRIM_FILE_WRITE] = {"write", 2, 2},
-    [IDM_PRIM_FILE_EXISTS] = {"exists?", 1, 1},
-    [IDM_PRIM_FILE_STAT] = {"stat", 1, 1},
-    [IDM_PRIM_FILE_LIST] = {"list", 1, 1},
-    [IDM_PRIM_FILE_REMOVE] = {"remove", 1, 1},
-    [IDM_PRIM_ARGS] = {"args", 0, 0},
-    [IDM_PRIM_TIME_MS] = {"time-ms", 0, 0},
-    [IDM_PRIM_RANDOM] = {"random", 1, 1},
-    [IDM_PRIM_DICT_GET] = {"dict-get", 3, 3},
-    [IDM_PRIM_DICT_PUT] = {"dict-put", 3, 3},
-    [IDM_PRIM_DICT_DEL] = {"dict-del", 2, 2},
-    [IDM_PRIM_DICT_KEYS] = {"dict-keys", 1, 1},
-    [IDM_PRIM_DICT_VALS] = {"dict-vals", 1, 1},
-    [IDM_PRIM_DICT_HAS] = {"dict-has?", 2, 2},
-    [IDM_PRIM_DICT_SIZE] = {"dict-size", 1, 1},
-    [IDM_PRIM_ABS] = {"abs", 1, 1},
-    [IDM_PRIM_FLOOR] = {"floor", 1, 1},
-    [IDM_PRIM_ROUND] = {"round", 1, 1},
-    [IDM_PRIM_SQRT] = {"sqrt", 1, 1},
-    [IDM_PRIM_FLOOR_DIV] = {"floor-div", 2, 2},
-    [IDM_PRIM_FLOOR_MOD] = {"floor-mod", 2, 2},
-    [IDM_PRIM_PARSE_INT] = {"parse-int", 1, 1},
-    [IDM_PRIM_PARSE_FLOAT] = {"parse-float", 1, 1},
-    [IDM_PRIM_FILE_MKDIR] = {"mkdir", 1, 1},
-    [IDM_PRIM_FILE_APPEND] = {"append", 2, 2},
-    [IDM_PRIM_ORD_STR] = {"ord->str", 1, 1},
-    [IDM_PRIM_STR_ORD] = {"str->ord", 1, 1},
-    [IDM_PRIM_FROM_RUNES] = {"from-runes", 1, 1},
-    [IDM_PRIM_REPL_COMPILE] = {"repl-compile", 1, 1},
-    [IDM_PRIM_REPL_ABORT] = {"repl-abort", 1, 1},
-    [IDM_PRIM_REPL_SPAWN] = {"repl-spawn", 1, 1},
-    [IDM_PRIM_REPL_DIAGNOSTIC] = {"repl-diagnostic", 0, 0},
-    [IDM_PRIM_ISH_SESSION] = {"ish-session", 0, 0},
-    [IDM_PRIM_TTY_PRED] = {"tty?", 0, 0},
-    [IDM_PRIM_TTY_RAW] = {"tty-raw!", 0, 0},
-    [IDM_PRIM_TTY_RESTORE] = {"tty-restore!", 0, 0},
-    [IDM_PRIM_TTY_READ] = {"tty-read", 1, 1},
-    [IDM_PRIM_TTY_READ_LINE] = {"tty-read-line", 0, 0},
-    [IDM_PRIM_TTY_WRITE] = {"tty-write", 1, 1},
-    [IDM_PRIM_TTY_SIZE] = {"tty-size", 0, 0},
-    [IDM_PRIM_EPRINTLN] = {"eprintln", 0, UINT32_MAX},
-    [IDM_PRIM_PORT_STATUS] = {"port-status", 1, 1},
-    [IDM_PRIM_JOB_RESUME] = {"job-resume", 2, 2},
-    [IDM_PRIM_JOB_SIGNAL] = {"job-signal", 2, 2},
-    [IDM_PRIM_ERROR_MESSAGE] = {"error-message", 1, 1},
-    [IDM_PRIM_MAKE_ERROR] = {"make-error", 1, 1},
-    [IDM_PRIM_SPAWN_LINK] = {"spawn-link", 1, 1},
-    [IDM_PRIM_SPAWN_MONITOR] = {"spawn-monitor", 1, 1},
-    [IDM_PRIM_PORT_READ] = {"port-read", 3, 3},
-    [IDM_PRIM_PORT_WRITE] = {"port-write", 2, 2},
-    [IDM_PRIM_PORT_CLOSE_INPUT] = {"port-close-input", 1, 1},
-    [IDM_PRIM_RAISE] = {"raise", 1, 1},
-    [IDM_PRIM_IS_A_P] = {"is-a?", 2, 2},
-    [IDM_PRIM_NIL_P] = {"nil?", 1, 1},
-    [IDM_PRIM_ATOM_P] = {"atom?", 1, 1},
-    [IDM_PRIM_WORD_P] = {"word?", 1, 1},
-    [IDM_PRIM_INT_P] = {"int?", 1, 1},
-    [IDM_PRIM_FLOAT_P] = {"float?", 1, 1},
-    [IDM_PRIM_STRING_P] = {"string?", 1, 1},
-    [IDM_PRIM_PAIR_P] = {"pair?", 1, 1},
-    [IDM_PRIM_EMPTY_LIST_P] = {"empty-list?", 1, 1},
-    [IDM_PRIM_LIST_P] = {"list?", 1, 1},
-    [IDM_PRIM_TUPLE_P] = {"tuple?", 1, 1},
-    [IDM_PRIM_VECTOR_P] = {"vector?", 1, 1},
-    [IDM_PRIM_DICT_P] = {"dict?", 1, 1},
-    [IDM_PRIM_SYNTAX_P] = {"syntax?", 1, 1},
-    [IDM_PRIM_CELL_P] = {"cell?", 1, 1},
-    [IDM_PRIM_CLOSURE_P] = {"closure?", 1, 1},
-    [IDM_PRIM_PID_P] = {"pid?", 1, 1},
-    [IDM_PRIM_REF_P] = {"ref?", 1, 1},
-    [IDM_PRIM_PORT_P] = {"port?", 1, 1},
-    [IDM_PRIM_REGEX_P] = {"regex?", 1, 1},
-    [IDM_PRIM_REGEX_RESULT_P] = {"regex-result?", 1, 1},
+#define IDM_PRIMITIVE_INFO(id, name, min_arity, max_arity, home) [IDM_PRIM_##id] = {name, min_arity, max_arity},
+    IDM_PRIMITIVE_LIST(IDM_PRIMITIVE_INFO)
+#undef IDM_PRIMITIVE_INFO
 };
 
 static const char *const PRIMITIVE_HOMES[] = {
-    [IDM_PRIM_ADD] = "kernel", [IDM_PRIM_SUB] = "kernel", [IDM_PRIM_MUL] = "kernel",
-    [IDM_PRIM_DIV] = "kernel", [IDM_PRIM_MOD] = "kernel", [IDM_PRIM_POW] = "kernel",
-    [IDM_PRIM_NEG] = "kernel", [IDM_PRIM_EQ] = "kernel", [IDM_PRIM_NEQ] = "kernel",
-    [IDM_PRIM_LT] = "kernel", [IDM_PRIM_GT] = "kernel", [IDM_PRIM_LTE] = "kernel",
-    [IDM_PRIM_GTE] = "kernel", [IDM_PRIM_COND] = "kernel", [IDM_PRIM_COMPARE] = "kernel", [IDM_PRIM_APPLY] = "kernel",
-    [IDM_PRIM_CEIL] = "math", [IDM_PRIM_TRUNCATE] = "math", [IDM_PRIM_SIN] = "math",
-    [IDM_PRIM_COS] = "math", [IDM_PRIM_TAN] = "math", [IDM_PRIM_ASIN] = "math",
-    [IDM_PRIM_ACOS] = "math", [IDM_PRIM_ATAN] = "math", [IDM_PRIM_ATAN2] = "math",
-    [IDM_PRIM_EXP] = "math", [IDM_PRIM_LOG] = "math", [IDM_PRIM_LOG2] = "math",
-    [IDM_PRIM_LOG10] = "math", [IDM_PRIM_HYPOT] = "math", [IDM_PRIM_NAN_P] = "math",
-    [IDM_PRIM_FINITE_P] = "math", [IDM_PRIM_INFINITE_P] = "math", [IDM_PRIM_NAN] = "math",
-    [IDM_PRIM_INF] = "math", [IDM_PRIM_DIVMOD] = "math", [IDM_PRIM_BIT_AND] = "math",
-    [IDM_PRIM_BIT_OR] = "math", [IDM_PRIM_BIT_XOR] = "math", [IDM_PRIM_BIT_NOT] = "math",
-    [IDM_PRIM_SHIFT_LEFT] = "math", [IDM_PRIM_SHIFT_RIGHT] = "math", [IDM_PRIM_BIT_COUNT] = "math",
-    [IDM_PRIM_BIT_LENGTH] = "math", [IDM_PRIM_TO_INT] = "math", [IDM_PRIM_TO_FLOAT] = "math",
-    [IDM_PRIM_ABS] = "math", [IDM_PRIM_FLOOR] = "math", [IDM_PRIM_ROUND] = "math",
-    [IDM_PRIM_SQRT] = "math", [IDM_PRIM_FLOOR_DIV] = "kernel", [IDM_PRIM_FLOOR_MOD] = "kernel",
-    [IDM_PRIM_CONS] = "kernel", [IDM_PRIM_FIRST] = "kernel", [IDM_PRIM_REST] = "kernel",
-    [IDM_PRIM_LIST] = "kernel", [IDM_PRIM_APPEND] = "kernel",
-    [IDM_PRIM_TUPLE] = "kernel", [IDM_PRIM_TUPLE_GET] = "kernel", [IDM_PRIM_TUPLE_TO_LIST] = "kernel",
-    [IDM_PRIM_VECTOR] = "kernel", [IDM_PRIM_VECTOR_TO_LIST] = "kernel",
-    [IDM_PRIM_DICT] = "kernel", [IDM_PRIM_DICT_TO_LIST] = "kernel", [IDM_PRIM_DICT_GET] = "kernel",
-    [IDM_PRIM_DICT_PUT] = "kernel", [IDM_PRIM_DICT_DEL] = "kernel", [IDM_PRIM_DICT_KEYS] = "kernel",
-    [IDM_PRIM_DICT_VALS] = "kernel", [IDM_PRIM_DICT_HAS] = "kernel", [IDM_PRIM_DICT_SIZE] = "kernel",
-    [IDM_PRIM_STR_TO_LIST] = "kernel", [IDM_PRIM_STR_CONTAINS] = "string", [IDM_PRIM_STR_LEN] = "string",
-    [IDM_PRIM_STR_SLICE] = "string", [IDM_PRIM_STR_FIND] = "string", [IDM_PRIM_STR_BYTE] = "string",
-    [IDM_PRIM_BYTE_STR] = "string", [IDM_PRIM_CHOMP] = "string", [IDM_PRIM_PARSE_INT] = "string",
-    [IDM_PRIM_PARSE_FLOAT] = "string", [IDM_PRIM_ORD_STR] = "string", [IDM_PRIM_STR_ORD] = "string",
-    [IDM_PRIM_FROM_RUNES] = "string",
-    [IDM_PRIM_REGEX_COMPILE] = "regex", [IDM_PRIM_REGEX_PRED] = "regex", [IDM_PRIM_REGEX_SOURCE] = "regex",
-    [IDM_PRIM_REGEX_OPTIONS] = "regex", [IDM_PRIM_REGEX_GROUP_COUNT] = "regex", [IDM_PRIM_REGEX_GROUP_NAMES] = "regex",
-    [IDM_PRIM_REGEX_RESULT_PRED] = "regex", [IDM_PRIM_REGEX_SCAN_AT] = "regex", [IDM_PRIM_REGEX_SCAN_FROM] = "regex",
-    [IDM_PRIM_REGEX_SCAN_FULL] = "regex", [IDM_PRIM_REGEX_TEST] = "regex", [IDM_PRIM_REGEX_RESULT_START] = "regex",
-    [IDM_PRIM_REGEX_RESULT_END] = "regex", [IDM_PRIM_REGEX_RESULT_TEXT] = "regex", [IDM_PRIM_REGEX_CAPTURE] = "regex",
-    [IDM_PRIM_REGEX_CAPTURE_RANGE] = "regex", [IDM_PRIM_REGEX_CAPTURE_NAMED] = "regex", [IDM_PRIM_REGEX_CAPTURES] = "regex",
-    [IDM_PRIM_REGEX_SCAN_ALL] = "regex", [IDM_PRIM_REGEX_REPLACE] = "regex", [IDM_PRIM_REGEX_REPLACE_ALL] = "regex",
-    [IDM_PRIM_REGEX_SPLIT_ON] = "regex", [IDM_PRIM_REGEX_ESCAPE] = "regex",
-    [IDM_PRIM_FILE_OPEN] = "file", [IDM_PRIM_FILE_READ] = "file", [IDM_PRIM_FILE_WRITE] = "file",
-    [IDM_PRIM_FILE_EXISTS] = "file", [IDM_PRIM_FILE_STAT] = "file", [IDM_PRIM_FILE_LIST] = "file",
-    [IDM_PRIM_FILE_REMOVE] = "file", [IDM_PRIM_FILE_MKDIR] = "file", [IDM_PRIM_FILE_APPEND] = "file",
-    [IDM_PRIM_OK] = "result",
-    [IDM_PRIM_SYNTAX_KIND] = "kernel",
-    [IDM_PRIM_SYNTAX_PROPERTY] = "kernel", [IDM_PRIM_SYNTAX_SET_PROPERTY] = "kernel", [IDM_PRIM_SYNTAX_ORIGIN] = "kernel",
-    [IDM_PRIM_SYNTAX_LIST_PRED] = "kernel", [IDM_PRIM_SYNTAX_LENGTH] = "kernel", [IDM_PRIM_SYNTAX_NTH] = "kernel",
-    [IDM_PRIM_SYNTAX_SLICE] = "kernel", [IDM_PRIM_SYNTAX_WORD_PRED] = "kernel", [IDM_PRIM_SYNTAX_WORD_TEXT] = "kernel",
-    [IDM_PRIM_SYNTAX_ATOM_PRED] = "kernel", [IDM_PRIM_SYNTAX_ATOM_TEXT] = "kernel", [IDM_PRIM_SYNTAX_INT_PRED] = "kernel",
-    [IDM_PRIM_SYNTAX_INT_VALUE] = "kernel", [IDM_PRIM_MAKE_SYNTAX_WORD] = "kernel", [IDM_PRIM_MAKE_SYNTAX_ATOM] = "kernel",
-    [IDM_PRIM_MAKE_SYNTAX_INT] = "kernel", [IDM_PRIM_MAKE_SYNTAX_STRING] = "kernel", [IDM_PRIM_MAKE_SYNTAX_LIST] = "kernel",
-    [IDM_PRIM_MAKE_SYNTAX_VECTOR] = "kernel", [IDM_PRIM_MAKE_SYNTAX_TUPLE] = "kernel", [IDM_PRIM_MAKE_SYNTAX_DICT] = "kernel",
-    [IDM_PRIM_MAKE_SYNTAX_EXPR] = "kernel", [IDM_PRIM_MAKE_SYNTAX_BODY] = "kernel", [IDM_PRIM_MAKE_SYNTAX_GROUP] = "kernel",
-    [IDM_PRIM_SYNTAX_ERROR] = "kernel", [IDM_PRIM_LOCAL_EXPAND] = "kernel", [IDM_PRIM_FREE_IDENTIFIER_EQ] = "kernel",
-    [IDM_PRIM_BOUND_IDENTIFIER_EQ] = "kernel", [IDM_PRIM_BIND_BANG] = "kernel", [IDM_PRIM_SYNTAX_ADJACENT_PRED] = "kernel",
-    [IDM_PRIM_SYNTAX_STRING_TEXT] = "kernel", [IDM_PRIM_SYNTAX_FLOAT_VALUE] = "kernel",
-    [IDM_PRIM_MAKE_SYNTAX_NIL] = "kernel",
-    [IDM_PRIM_INTERNAL_REGISTER_MACRO] = "", [IDM_PRIM_EXPAND_CHECK] = "compile",
-    [IDM_PRIM_SELF] = "kernel", [IDM_PRIM_SPAWN] = "kernel", [IDM_PRIM_SEND] = "kernel",
-    [IDM_PRIM_EXIT] = "kernel", [IDM_PRIM_LINK] = "kernel", [IDM_PRIM_UNLINK] = "kernel",
-    [IDM_PRIM_MONITOR] = "kernel", [IDM_PRIM_DEMONITOR] = "kernel", [IDM_PRIM_TRAP_EXIT] = "kernel",
-    [IDM_PRIM_SPAWN_LINK] = "kernel", [IDM_PRIM_SPAWN_MONITOR] = "kernel", [IDM_PRIM_RAISE] = "kernel",
-    [IDM_PRIM_STR] = "kernel", [IDM_PRIM_CAPTURE_STDOUT] = "kernel", [IDM_PRIM_EXEC] = "kernel",
-    [IDM_PRIM_AWAIT] = "kernel", [IDM_PRIM_PRINT] = "kernel", [IDM_PRIM_PRINTLN] = "kernel",
-    [IDM_PRIM_EPRINTLN] = "kernel", [IDM_PRIM_CD] = "system", [IDM_PRIM_CHDIR] = "system",
-    [IDM_PRIM_PWD] = "system", [IDM_PRIM_WRITE_PROCSUB_TEMP] = "kernel", [IDM_PRIM_MAKE_PROCSUB_TEMP] = "kernel",
-    [IDM_PRIM_MAKE_ERROR] = "kernel", [IDM_PRIM_ERROR_MESSAGE] = "kernel",
-    [IDM_PRIM_ENV_GET] = "system", [IDM_PRIM_ENV_SET] = "system", [IDM_PRIM_INSPECT] = "kernel",
-    [IDM_PRIM_ARGS] = "system", [IDM_PRIM_TIME_MS] = "system", [IDM_PRIM_RANDOM] = "system",
-    [IDM_PRIM_REPL_COMPILE] = "kernel", [IDM_PRIM_REPL_ABORT] = "kernel", [IDM_PRIM_REPL_SPAWN] = "kernel",
-    [IDM_PRIM_REPL_DIAGNOSTIC] = "kernel", [IDM_PRIM_ISH_SESSION] = "kernel", [IDM_PRIM_TTY_PRED] = "term",
-    [IDM_PRIM_TTY_RAW] = "term", [IDM_PRIM_TTY_RESTORE] = "term", [IDM_PRIM_TTY_READ] = "term",
-    [IDM_PRIM_TTY_READ_LINE] = "term", [IDM_PRIM_TTY_WRITE] = "term", [IDM_PRIM_TTY_SIZE] = "term",
-    [IDM_PRIM_PORT_STATUS] = "port", [IDM_PRIM_JOB_RESUME] = "kernel", [IDM_PRIM_JOB_SIGNAL] = "kernel",
-    [IDM_PRIM_PORT_READ] = "port", [IDM_PRIM_PORT_WRITE] = "port", [IDM_PRIM_PORT_CLOSE_INPUT] = "port",
-    [IDM_PRIM_IS_A_P] = "kernel", [IDM_PRIM_NIL_P] = "kernel", [IDM_PRIM_ATOM_P] = "kernel",
-    [IDM_PRIM_WORD_P] = "kernel", [IDM_PRIM_INT_P] = "kernel", [IDM_PRIM_FLOAT_P] = "kernel",
-    [IDM_PRIM_STRING_P] = "kernel", [IDM_PRIM_PAIR_P] = "kernel", [IDM_PRIM_EMPTY_LIST_P] = "kernel",
-    [IDM_PRIM_LIST_P] = "kernel", [IDM_PRIM_TUPLE_P] = "kernel", [IDM_PRIM_VECTOR_P] = "kernel",
-    [IDM_PRIM_DICT_P] = "kernel", [IDM_PRIM_SYNTAX_P] = "kernel", [IDM_PRIM_CELL_P] = "kernel",
-    [IDM_PRIM_CLOSURE_P] = "kernel", [IDM_PRIM_PID_P] = "kernel", [IDM_PRIM_REF_P] = "kernel",
-    [IDM_PRIM_PORT_P] = "kernel", [IDM_PRIM_REGEX_P] = "kernel",
-    [IDM_PRIM_REGEX_RESULT_P] = "kernel",
+#define IDM_PRIMITIVE_HOME(id, name, min_arity, max_arity, home) [IDM_PRIM_##id] = home,
+    IDM_PRIMITIVE_LIST(IDM_PRIMITIVE_HOME)
+#undef IDM_PRIMITIVE_HOME
 };
 
 size_t idm_primitive_count(void) {
@@ -1717,6 +1346,28 @@ const char *idm_primitive_home(IdmPrimitive primitive) {
     if (index >= sizeof(PRIMITIVE_HOMES) / sizeof(PRIMITIVE_HOMES[0])) return "";
     const char *home = PRIMITIVE_HOMES[index];
     return home ? home : "";
+}
+
+bool idm_primitive_home_exists(const char *home) {
+    if (!home || !home[0]) return false;
+    for (size_t i = 0; i < idm_primitive_count(); i++) {
+        const char *candidate = idm_primitive_home((IdmPrimitive)i);
+        if (candidate[0] && strcmp(candidate, home) == 0) return true;
+    }
+    return false;
+}
+
+bool idm_primitive_lookup(const char *home, const char *name, IdmPrimitive *out) {
+    if (!home || !name) return false;
+    for (size_t i = 0; i < idm_primitive_count(); i++) {
+        IdmPrimitive primitive = (IdmPrimitive)i;
+        const IdmPrimitiveInfo *info = idm_primitive_info(primitive);
+        if (info && strcmp(idm_primitive_home(primitive), home) == 0 && strcmp(info->name, name) == 0) {
+            if (out) *out = primitive;
+            return true;
+        }
+    }
+    return false;
 }
 
 const char *idm_primitive_name(IdmPrimitive primitive) {
@@ -1829,6 +1480,16 @@ static bool add_const_value(IdmBytecodeModule *module, IdmValue value, uint32_t 
     return true;
 }
 
+static bool add_const_name(CompileCtx *ctx, const char *name, uint32_t *out_index, IdmError *err, IdmSpan span) {
+    if (!name) return add_const_value(ctx->module, idm_nil(), out_index, err, span);
+    if (!ctx->rt) return idm_error_set(err, span, "compiler requires a runtime to intern record metadata");
+    return add_const_value(ctx->module, idm_atom(ctx->rt, name), out_index, err, span);
+}
+
+static bool add_const_symbol(CompileCtx *ctx, const IdmSymbol *symbol, uint32_t *out_index, IdmError *err, IdmSpan span) {
+    return add_const_name(ctx, core_symbol_text(symbol), out_index, err, span);
+}
+
 static bool patch_here(IdmBytecodeModule *module, size_t operand_index, IdmError *err, IdmSpan span, const char *what) {
     if (module->code_count > UINT32_MAX) return idm_error_set(err, span, "bytecode too large");
     if (!idm_bc_patch_u32(module, operand_index, (uint32_t)module->code_count)) return idm_error_set(err, span, "failed to patch %s", what);
@@ -1843,11 +1504,7 @@ static void compile_module_ctx_destroy(CompileModuleCtx *ctx) {
 
 static bool compile_module_ctx_add_linked_package(CompileModuleCtx *ctx, IdmValue env_key, uint32_t fn_off, IdmError *err, IdmSpan span) {
     if (ctx->linked_package_count == ctx->linked_package_cap) {
-        size_t cap = ctx->linked_package_cap ? ctx->linked_package_cap * 2u : 8u;
-        LinkedPackage *items = realloc(ctx->linked_packages, cap * sizeof(*items));
-        if (!items) return idm_error_oom(err, span);
-        ctx->linked_packages = items;
-        ctx->linked_package_cap = cap;
+        if (!idm_grow((void **)&ctx->linked_packages, &ctx->linked_package_cap, sizeof(*ctx->linked_packages), 8u, ctx->linked_package_count + 1u)) return idm_error_oom(err, span);
     }
     ctx->linked_packages[ctx->linked_package_count].env_key = env_key;
     ctx->linked_packages[ctx->linked_package_count].fn_off = fn_off;
@@ -2481,13 +2138,13 @@ static bool compile_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail
                 if (!compile_expr(core->as.record_construct.field_values[i], ctx, first + i, false, err)) return false;
             }
             uint32_t type_const = 0;
-            if (!add_const_value(ctx->module, core->as.record_construct.type, &type_const, err, core->span)) return false;
+            if (!add_const_symbol(ctx, core->as.record_construct.type, &type_const, err, core->span)) return false;
             if (!emit_op4(ctx->module, IDM_OP_MAKE_RECORD, dst, type_const, first, count, NULL)) return idm_error_oom(err, core->span);
             for (uint32_t i = 0; i < count; i++) {
                 uint32_t field_const = 0;
                 uint32_t contract_const = 0;
-                if (!add_const_value(ctx->module, core->as.record_construct.field_names[i], &field_const, err, core->span)) return false;
-                if (!add_const_value(ctx->module, core->as.record_construct.field_contracts[i], &contract_const, err, core->span)) return false;
+                if (!add_const_symbol(ctx, core->as.record_construct.field_names[i], &field_const, err, core->span)) return false;
+                if (!add_const_symbol(ctx, core->as.record_construct.field_contracts[i], &contract_const, err, core->span)) return false;
                 if (!idm_bc_emit(ctx->module, field_const, NULL)) return idm_error_oom(err, core->span);
                 if (!idm_bc_emit(ctx->module, contract_const, NULL)) return idm_error_oom(err, core->span);
             }
@@ -2498,8 +2155,8 @@ static bool compile_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail
             if (!compile_expr(core->as.record_field.receiver, ctx, receiver, false, err)) return false;
             uint32_t type_const = 0;
             uint32_t field_const = 0;
-            if (!add_const_value(ctx->module, core->as.record_field.type, &type_const, err, core->span)) return false;
-            if (!add_const_value(ctx->module, core->as.record_field.field, &field_const, err, core->span)) return false;
+            if (!add_const_symbol(ctx, core->as.record_field.type, &type_const, err, core->span)) return false;
+            if (!add_const_symbol(ctx, core->as.record_field.field, &field_const, err, core->span)) return false;
             if (!emit_op5(ctx->module, IDM_OP_RECORD_FIELD, dst, receiver, type_const, field_const, core->as.record_field.field_index, NULL)) return idm_error_oom(err, core->span);
             return true;
         }
@@ -2507,7 +2164,7 @@ static bool compile_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail
             uint32_t value = ctx_alloc(ctx);
             if (!compile_expr(core->as.record_is.value, ctx, value, false, err)) return false;
             uint32_t type_const = 0;
-            if (!add_const_value(ctx->module, core->as.record_is.type, &type_const, err, core->span)) return false;
+            if (!add_const_symbol(ctx, core->as.record_is.type, &type_const, err, core->span)) return false;
             if (!emit_op3(ctx->module, IDM_OP_RECORD_IS, dst, value, type_const, NULL)) return idm_error_oom(err, core->span);
             return true;
         }
@@ -2521,7 +2178,7 @@ static bool compiler_mark_module_verified(IdmBytecodeModule *module, IdmError *e
     return true;
 }
 
-bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
+bool idm_core_compile_expression(IdmRuntime *rt, IdmCore *core, IdmBytecodeModule *module, IdmError *err) {
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "core.compile_expression");
     size_t code_start = module->code_count;
@@ -2534,6 +2191,7 @@ bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmEr
     }
     CompileModuleCtx module_ctx;
     memset(&module_ctx, 0, sizeof(module_ctx));
+    module_ctx.rt = rt;
     bool ok = compile_function_code(&module_ctx, module, fn, core, err, core ? core->span : idm_span_unknown(NULL), NULL, 0);
     compile_module_ctx_destroy(&module_ctx);
     if (ok) ok = compiler_mark_module_verified(module, err);
@@ -2545,7 +2203,7 @@ bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmEr
     return ok;
 }
 
-bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t arity, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
+bool idm_core_compile_function_body(IdmRuntime *rt, IdmCore *body, const char *name, uint32_t arity, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "core.compile_function_body");
     size_t code_start = module->code_count;
@@ -2562,6 +2220,7 @@ bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t ar
     }
     CompileModuleCtx module_ctx;
     memset(&module_ctx, 0, sizeof(module_ctx));
+    module_ctx.rt = rt;
     bool ok = compile_function_code(&module_ctx, module, fn, body, err, body->span, NULL, 0);
     compile_module_ctx_destroy(&module_ctx);
     if (!ok) {
@@ -2589,7 +2248,7 @@ static bool compile_function_entry(CompileModuleCtx *module_ctx, IdmCore *fn, Id
     return ok;
 }
 
-bool idm_core_compile_function(IdmCore *fn, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
+bool idm_core_compile_function(IdmRuntime *rt, IdmCore *fn, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "core.compile_function");
     size_t code_start = module->code_count;
@@ -2600,6 +2259,7 @@ bool idm_core_compile_function(IdmCore *fn, IdmBytecodeModule *module, uint32_t 
     }
     CompileModuleCtx module_ctx;
     memset(&module_ctx, 0, sizeof(module_ctx));
+    module_ctx.rt = rt;
     bool ok = true;
     if (core_is_primitive_only_callable(fn)) {
         ok = compile_function_entry(&module_ctx, fn, module, out_function, err);
@@ -2661,7 +2321,7 @@ bool idm_core_compile_function(IdmCore *fn, IdmBytecodeModule *module, uint32_t 
     return ok;
 }
 
-bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
+bool idm_core_compile_main(IdmRuntime *rt, IdmCore *core, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err) {
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "core.compile_main");
     size_t code_start = module->code_count;
@@ -2674,6 +2334,7 @@ bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *o
     }
     CompileModuleCtx module_ctx;
     memset(&module_ctx, 0, sizeof(module_ctx));
+    module_ctx.rt = rt;
     bool ok = compile_function_code(&module_ctx, module, fn, core, err, idm_span_unknown(NULL), NULL, 0);
     compile_module_ctx_destroy(&module_ctx);
     if (!ok) {
@@ -2738,13 +2399,13 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
                    idm_core_dump(buf, core->as.list_pair.tail) &&
                    idm_buf_append_char(buf, ')');
         case IDM_CORE_VALUE_SEQUENCE:
-            if (!idm_buf_appendf(buf, "(make-%s", value_sequence_kind_name(core->as.value_sequence.kind))) return false;
+            if (!idm_buf_appendf(buf, "(make-%s", idm_value_sequence_kind_name(core->as.value_sequence.kind))) return false;
             for (size_t i = 0; i < core->as.value_sequence.count; i++) {
                 if (!idm_buf_append_char(buf, ' ') || !idm_core_dump(buf, core->as.value_sequence.items[i])) return false;
             }
             return idm_buf_append_char(buf, ')');
         case IDM_CORE_SYNTAX_BUILD:
-            if (!idm_buf_appendf(buf, "(make-syntax:%s ", syntax_build_kind_name(core->as.syntax_build.kind))) return false;
+            if (!idm_buf_appendf(buf, "(make-syntax:%s ", idm_syntax_build_kind_name(core->as.syntax_build.kind))) return false;
             if (!idm_core_dump(buf, core->as.syntax_build.ctx)) return false;
             if (syntax_build_needs_payload(core->as.syntax_build.kind)) {
                 if (!idm_buf_append_char(buf, ' ') || !idm_core_dump(buf, core->as.syntax_build.payload)) return false;
@@ -2868,12 +2529,12 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
             return idm_core_dump(buf, core->as.use_package.cont) &&
                    idm_buf_append_char(buf, ')');
         case IDM_CORE_RECORD_CONSTRUCT:
-            if (!idm_buf_append(buf, "(record ") || !dump_value(buf, core->as.record_construct.type)) return false;
+            if (!idm_buf_append(buf, "(record ") || !idm_buf_append(buf, core_symbol_text(core->as.record_construct.type))) return false;
             for (size_t i = 0; i < core->as.record_construct.count; i++) {
                 if (!idm_buf_append(buf, " (field ") ||
-                    !dump_value(buf, core->as.record_construct.field_names[i]) ||
+                    !idm_buf_append(buf, core_symbol_text(core->as.record_construct.field_names[i])) ||
                     !idm_buf_append(buf, " : ") ||
-                    !dump_value(buf, core->as.record_construct.field_contracts[i]) ||
+                    !idm_buf_append(buf, core_symbol_text(core->as.record_construct.field_contracts[i]) ? core_symbol_text(core->as.record_construct.field_contracts[i]) : "_") ||
                     !idm_buf_append_char(buf, ' ') ||
                     !idm_core_dump(buf, core->as.record_construct.field_values[i]) ||
                     !idm_buf_append_char(buf, ')')) return false;
@@ -2883,16 +2544,16 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
             return idm_buf_append(buf, "(record-field ") &&
                    idm_core_dump(buf, core->as.record_field.receiver) &&
                    idm_buf_append_char(buf, ' ') &&
-                   dump_value(buf, core->as.record_field.type) &&
+                   idm_buf_append(buf, core_symbol_text(core->as.record_field.type)) &&
                    idm_buf_append_char(buf, ' ') &&
-                   dump_value(buf, core->as.record_field.field) &&
+                   idm_buf_append(buf, core_symbol_text(core->as.record_field.field)) &&
                    idm_buf_appendf(buf, " %u", core->as.record_field.field_index) &&
                    idm_buf_append_char(buf, ')');
         case IDM_CORE_RECORD_IS:
             return idm_buf_append(buf, "(record-is ") &&
                    idm_core_dump(buf, core->as.record_is.value) &&
                    idm_buf_append_char(buf, ' ') &&
-                   dump_value(buf, core->as.record_is.type) &&
+                   idm_buf_append(buf, core_symbol_text(core->as.record_is.type)) &&
                    idm_buf_append_char(buf, ')');
     }
     return false;
@@ -2994,13 +2655,13 @@ static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent) {
             if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.list_pair.tail, ci)) return false;
             return idm_buf_append_char(buf, ')');
         case IDM_CORE_VALUE_SEQUENCE:
-            if (!idm_buf_appendf(buf, "(make-%s", value_sequence_kind_name(core->as.value_sequence.kind))) return false;
+            if (!idm_buf_appendf(buf, "(make-%s", idm_value_sequence_kind_name(core->as.value_sequence.kind))) return false;
             for (size_t i = 0; i < core->as.value_sequence.count; i++) {
                 if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.value_sequence.items[i], ci)) return false;
             }
             return idm_buf_append_char(buf, ')');
         case IDM_CORE_SYNTAX_BUILD:
-            if (!idm_buf_appendf(buf, "(make-syntax:%s", syntax_build_kind_name(core->as.syntax_build.kind))) return false;
+            if (!idm_buf_appendf(buf, "(make-syntax:%s", idm_syntax_build_kind_name(core->as.syntax_build.kind))) return false;
             if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.syntax_build.ctx, ci)) return false;
             if (syntax_build_needs_payload(core->as.syntax_build.kind) &&
                 (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.syntax_build.payload, ci))) return false;
@@ -3155,13 +2816,13 @@ static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent) {
             return idm_buf_append_char(buf, ')');
         }
         case IDM_CORE_RECORD_CONSTRUCT:
-            if (!idm_buf_append(buf, "(record ") || !dump_value(buf, core->as.record_construct.type)) return false;
+            if (!idm_buf_append(buf, "(record ") || !idm_buf_append(buf, core_symbol_text(core->as.record_construct.type))) return false;
             for (size_t i = 0; i < core->as.record_construct.count; i++) {
                 if (!pretty_newline(buf, ci) ||
                     !idm_buf_append(buf, "(field ") ||
-                    !dump_value(buf, core->as.record_construct.field_names[i]) ||
+                    !idm_buf_append(buf, core_symbol_text(core->as.record_construct.field_names[i])) ||
                     !idm_buf_append(buf, " : ") ||
-                    !dump_value(buf, core->as.record_construct.field_contracts[i]) ||
+                    !idm_buf_append(buf, core_symbol_text(core->as.record_construct.field_contracts[i]) ? core_symbol_text(core->as.record_construct.field_contracts[i]) : "_") ||
                     !pretty_newline(buf, ci + 2) ||
                     !core_pretty(buf, core->as.record_construct.field_values[i], ci + 2) ||
                     !idm_buf_append_char(buf, ')')) return false;
@@ -3170,14 +2831,14 @@ static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent) {
         case IDM_CORE_RECORD_FIELD:
             if (!idm_buf_append(buf, "(record-field")) return false;
             if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.record_field.receiver, ci)) return false;
-            if (!pretty_newline(buf, ci) || !dump_value(buf, core->as.record_field.type)) return false;
-            if (!pretty_newline(buf, ci) || !dump_value(buf, core->as.record_field.field)) return false;
+            if (!pretty_newline(buf, ci) || !idm_buf_append(buf, core_symbol_text(core->as.record_field.type))) return false;
+            if (!pretty_newline(buf, ci) || !idm_buf_append(buf, core_symbol_text(core->as.record_field.field))) return false;
             if (!pretty_newline(buf, ci) || !idm_buf_appendf(buf, "%u", core->as.record_field.field_index)) return false;
             return idm_buf_append_char(buf, ')');
         case IDM_CORE_RECORD_IS:
             if (!idm_buf_append(buf, "(record-is")) return false;
             if (!pretty_newline(buf, ci) || !core_pretty(buf, core->as.record_is.value, ci)) return false;
-            if (!pretty_newline(buf, ci) || !dump_value(buf, core->as.record_is.type)) return false;
+            if (!pretty_newline(buf, ci) || !idm_buf_append(buf, core_symbol_text(core->as.record_is.type))) return false;
             return idm_buf_append_char(buf, ')');
         default:
             return idm_buf_append_n(buf, "", 0);

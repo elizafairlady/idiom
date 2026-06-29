@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <glob.h>
+#include <limits.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -49,13 +50,15 @@ typedef enum {
     PORT_FILE
 } PortKind;
 
+static int int_value_or_default(IdmValue value, int fallback) {
+    int64_t out = 0;
+    if (!idm_value_is_int(value) || !idm_int_to_i64(value, &out) || out < INT_MIN || out > INT_MAX) return fallback;
+    return (int)out;
+}
+
 static bool stage_own_temp(Stage *stage, const char *path) {
     if (stage->owned_temp_count == stage->owned_temp_cap) {
-        size_t cap = stage->owned_temp_cap ? stage->owned_temp_cap * 2u : 4u;
-        char **grown = realloc(stage->owned_temps, cap * sizeof(*grown));
-        if (!grown) return false;
-        stage->owned_temps = grown;
-        stage->owned_temp_cap = cap;
+        if (!idm_grow((void **)&stage->owned_temps, &stage->owned_temp_cap, sizeof(*stage->owned_temps), 4u, stage->owned_temp_count + 1u)) return false;
     }
     stage->owned_temps[stage->owned_temp_count] = idm_strdup(path);
     if (!stage->owned_temps[stage->owned_temp_count]) return false;
@@ -181,11 +184,7 @@ static char *dup_string_value(IdmValue v) {
 
 static bool argv_push(char ***argv, size_t *count, size_t *cap, char *item) {
     if (*count == *cap) {
-        size_t next = *cap ? *cap * 2u : 8u;
-        char **grown = realloc(*argv, next * sizeof(**argv));
-        if (!grown) { free(item); return false; }
-        *argv = grown;
-        *cap = next;
+        if (!idm_grow((void **)argv, cap, sizeof(**argv), 8u, *count + 1u)) { free(item); return false; }
     }
     (*argv)[(*count)++] = item;
     return true;
@@ -313,7 +312,7 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
             IdmValue fd = idm_sequence_item(r, 2, &ignore);
             IdmValue target = idm_sequence_item(r, 3, &ignore);
             out->kind = REDIR_FILE;
-            out->fd = idm_value_tag(fd) == IDM_VAL_INT ? (int)idm_int_value(fd) : 1;
+            out->fd = int_value_or_default(fd, 1);
             const char *ops = idm_value_tag(op) == IDM_VAL_ATOM ? idm_symbol_text(idm_value_symbol(op)) : ">";
             out->op = strcmp(ops, "<") == 0 ? '<'
                     : strcmp(ops, ">>") == 0 ? 'a'
@@ -330,8 +329,8 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
             IdmValue a = idm_sequence_item(r, 1, &ignore);
             IdmValue b = idm_sequence_item(r, 2, &ignore);
             out->kind = REDIR_DUP;
-            out->fd = idm_value_tag(a) == IDM_VAL_INT ? (int)idm_int_value(a) : 2;
-            out->dup_to = idm_value_tag(b) == IDM_VAL_INT ? (int)idm_int_value(b) : 1;
+            out->fd = int_value_or_default(a, 2);
+            out->dup_to = int_value_or_default(b, 1);
         } else {
             free(redirs);
             return false;

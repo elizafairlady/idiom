@@ -20,6 +20,22 @@ static size_t profile_metric_cap = 0;
 static int profile_state = -1;
 static bool profile_report_registered = false;
 
+const char *idm_datum_kind_name(IdmDatumKind kind) {
+    static const char *const names[] = {
+        [IDM_DATUM_NIL] = "nil",
+        [IDM_DATUM_WORD] = "word",
+        [IDM_DATUM_ATOM] = "atom",
+        [IDM_DATUM_INT] = "int",
+        [IDM_DATUM_FLOAT] = "float",
+        [IDM_DATUM_STRING] = "string",
+        [IDM_DATUM_LIST] = "list",
+        [IDM_DATUM_VECTOR] = "vector",
+        [IDM_DATUM_TUPLE] = "tuple",
+        [IDM_DATUM_DICT] = "dict",
+    };
+    return (size_t)kind < sizeof(names) / sizeof(names[0]) && names[kind] ? names[kind] : "unknown";
+}
+
 static void idm_profile_report_stderr(void) {
     idm_profile_report(stderr);
 }
@@ -46,11 +62,7 @@ static IdmProfileMetric *profile_metric_get(const char *name) {
         if (strcmp(profile_metrics[i].name, name) == 0) return &profile_metrics[i];
     }
     if (profile_metric_count == profile_metric_cap) {
-        size_t cap = profile_metric_cap ? profile_metric_cap * 2u : 64u;
-        IdmProfileMetric *grown = realloc(profile_metrics, cap * sizeof(*grown));
-        if (!grown) return NULL;
-        profile_metrics = grown;
-        profile_metric_cap = cap;
+        if (!idm_grow((void **)&profile_metrics, &profile_metric_cap, sizeof(*profile_metrics), 64u, profile_metric_count + 1u)) return NULL;
     }
     IdmProfileMetric *m = &profile_metrics[profile_metric_count];
     memset(m, 0, sizeof(*m));
@@ -186,9 +198,10 @@ bool idm_error_note(IdmError *err, const char *fmt, ...) {
     va_end(ap);
     size_t old_len = err->notes ? strlen(err->notes) : 0u;
     size_t add_len = strlen(line);
-    char *grown = realloc(err->notes, old_len + add_len + 8u);
-    if (!grown) return false;
-    err->notes = grown;
+    if (old_len > SIZE_MAX - add_len || old_len + add_len > SIZE_MAX - 4u) return false;
+    size_t cap = old_len;
+    size_t needed = old_len + add_len + 4u;
+    if (!idm_grow((void **)&err->notes, &cap, sizeof(*err->notes), needed, needed)) return false;
     memcpy(err->notes + old_len, "\n  ", 3u);
     memcpy(err->notes + old_len + 3u, line, add_len + 1u);
     return false;
@@ -228,17 +241,7 @@ void idm_buf_destroy(IdmBuffer *buf) {
 }
 
 bool idm_buf_reserve(IdmBuffer *buf, size_t needed) {
-    if (needed <= buf->cap) return true;
-    size_t cap = buf->cap ? buf->cap : 64u;
-    while (cap < needed) {
-        if (cap > (SIZE_MAX / 2u)) return false;
-        cap *= 2u;
-    }
-    char *next = realloc(buf->data, cap);
-    if (!next) return false;
-    buf->data = next;
-    buf->cap = cap;
-    return true;
+    return idm_grow((void **)&buf->data, &buf->cap, sizeof(*buf->data), 64u, needed);
 }
 
 bool idm_buf_append_n(IdmBuffer *buf, const char *text, size_t len) {
@@ -291,6 +294,34 @@ char *idm_buf_take(IdmBuffer *buf) {
     return data;
 }
 
+bool idm_surface_write_escaped(IdmBuffer *buf, const char *text, size_t len) {
+    if (!idm_buf_append_char(buf, '"')) return false;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char ch = (unsigned char)text[i];
+        switch (ch) {
+            case '\\': if (!idm_buf_append(buf, "\\\\")) return false; break;
+            case '"': if (!idm_buf_append(buf, "\\\"")) return false; break;
+            case '\n': if (!idm_buf_append(buf, "\\n")) return false; break;
+            case '\r': if (!idm_buf_append(buf, "\\r")) return false; break;
+            case '\t': if (!idm_buf_append(buf, "\\t")) return false; break;
+            default:
+                if (ch < 32u) {
+                    if (!idm_buf_appendf(buf, "\\x%02x", ch)) return false;
+                } else if (!idm_buf_append_char(buf, (char)ch)) return false;
+        }
+    }
+    return idm_buf_append_char(buf, '"');
+}
+
+bool idm_surface_write_sequence(IdmBuffer *buf, const char *open, const char *close, size_t count, IdmSurfaceItemWriter item, void *user) {
+    if (!idm_buf_append(buf, open)) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
+        if (!item(buf, i, user)) return false;
+    }
+    return idm_buf_append(buf, close);
+}
+
 bool idm_buf_put_u8(IdmBuffer *buf, uint8_t v) {
     char c = (char)v;
     return idm_buf_append_n(buf, &c, 1u);
@@ -315,6 +346,11 @@ bool idm_buf_put_str(IdmBuffer *buf, const char *data, size_t len) {
     if (len > UINT32_MAX) return false;
     if (!idm_buf_put_u32(buf, (uint32_t)len)) return false;
     return len == 0 ? true : idm_buf_append_n(buf, data, len);
+}
+
+bool idm_buf_put_opt_str(IdmBuffer *buf, const char *text) {
+    if (!idm_buf_put_u8(buf, text ? 1u : 0u)) return false;
+    return text ? idm_buf_put_str(buf, text, strlen(text)) : true;
 }
 
 void idm_byte_reader_init(IdmByteReader *r, const unsigned char *data, size_t len) {
@@ -369,6 +405,21 @@ char *idm_rd_string(IdmByteReader *r, size_t *out_len) {
     r->pos += n;
     if (out_len) *out_len = n;
     return s;
+}
+
+bool idm_rd_opt_str(IdmByteReader *r, char **out, IdmError *err) {
+    *out = NULL;
+    uint8_t has = idm_rd_u8(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated optional string");
+    if (has > 1u) {
+        r->ok = false;
+        return idm_error_set(err, idm_span_unknown(NULL), "invalid optional string flag");
+    }
+    if (!has) return true;
+    char *text = idm_rd_string(r, NULL);
+    if (!text) return idm_error_set(err, idm_span_unknown(NULL), "truncated optional string");
+    *out = text;
+    return true;
 }
 
 static const uint32_t SHA256_K[64] = {
@@ -460,6 +511,43 @@ char *idm_strndup(const char *s, size_t n) {
     if (n != 0) memcpy(copy, s, n);
     copy[n] = '\0';
     return copy;
+}
+
+bool idm_next_capacity(size_t current, size_t seed, size_t needed, size_t *out) {
+    if (!out) return false;
+    if (needed <= current) {
+        *out = current;
+        return true;
+    }
+    size_t next = current ? current : (seed ? seed : 1u);
+    while (next < needed) {
+        if (next > SIZE_MAX / 2u) return false;
+        next *= 2u;
+    }
+    *out = next;
+    return true;
+}
+
+bool idm_growv(IdmGrowItem *items, size_t count, size_t *cap, size_t seed, size_t needed) {
+    if (!items || count == 0 || !cap) return false;
+    if (needed <= *cap) return true;
+    size_t next = 0;
+    if (!idm_next_capacity(*cap, seed, needed, &next)) return false;
+    for (size_t i = 0; i < count; i++) {
+        if (!items[i].base || items[i].elem_size == 0 || next > SIZE_MAX / items[i].elem_size) return false;
+    }
+    for (size_t i = 0; i < count; i++) {
+        void *grown = realloc(*items[i].base, next * items[i].elem_size);
+        if (!grown) return false;
+        *items[i].base = grown;
+    }
+    *cap = next;
+    return true;
+}
+
+bool idm_grow(void **base, size_t *cap, size_t elem_size, size_t seed, size_t needed) {
+    IdmGrowItem item = { .base = base, .elem_size = elem_size };
+    return idm_growv(&item, 1u, cap, seed, needed);
 }
 
 bool idm_read_stream(FILE *stream, const char *name, char **out, size_t *out_len, IdmError *err) {

@@ -7,11 +7,11 @@
 #include <string.h>
 
 static IdmCore *zero_arity_call_if_known(IdmCore *callee, const IdmArity *arity, bool callee_position, IdmSpan span, IdmError *err);
+static IdmCore *expand_unbound_identifier(ExpandContext *ctx, const IdmSyntax *word, IdmError *err);
 static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, bool callee_position, IdmError *err);
 static IdmCore *expand_word_ref(ExpandContext *ctx, const IdmSyntax *word, IdmError *err);
 static IdmCore *expand_word_callee(ExpandContext *ctx, const IdmSyntax *word, IdmError *err);
 static bool head_is_bound(ExpandContext *ctx, const IdmSyntax *word);
-static IdmCore *expand_raise_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static const IdmSyntax *try_section_head(const IdmSyntax *stmt);
 static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, uint32_t *out_slot, IdmError *err);
 static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
@@ -23,13 +23,29 @@ typedef struct {
     size_t count;
     size_t cap;
 } MethodSurfaceGroup;
+typedef struct {
+    const TypeDef *type;
+    uint32_t field_index;
+} FieldSurfaceRef;
+typedef struct {
+    FieldSurfaceRef *items;
+    size_t count;
+    size_t cap;
+    const char *name;
+} FieldSurfaceGroup;
 static void method_surface_group_destroy(MethodSurfaceGroup *group);
+static void field_surface_group_destroy(FieldSurfaceGroup *group);
 static bool resolve_method_surface_group(ExpandContext *ctx, const IdmSyntax *word, MethodSurfaceGroup *out, IdmResolveStatus *out_status, IdmError *err);
+static bool resolve_field_surface_group(ExpandContext *ctx, const IdmSyntax *word, FieldSurfaceGroup *out, IdmResolveStatus *out_status, IdmError *err);
+static IdmCore *expand_field_surface_call_cores(ExpandContext *ctx, const FieldSurfaceGroup *group, IdmCore *receiver, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err);
 static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const MethodSurfaceGroup *group, IdmCore *receiver, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err);
 static IdmCore *parse_postfix_expr(ExpandContext *ctx, IdmSyntax *const *items, size_t *pos, size_t end, bool stop_at_operator, IdmError *err);
 static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size_t *pos, size_t end, bool stop_at_operator, IdmCore *receiver, IdmError *err);
 static bool arg_parse_at_stop(ExpandContext *ctx, IdmSyntax *const *items, size_t pos, size_t end, bool stop_at_operator);
 static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
+static bool surface_operator_boundary(ExpandContext *ctx, const IdmSyntax *syn, const IdmOperatorDef **out_syntax_capture, IdmError *err);
+static size_t surface_primary_end(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
+static bool scan_operator_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, size_t *out_syntax_op_index, const IdmOperatorDef **out_syntax_infix, bool *out_has_operator, IdmError *err);
 typedef struct { IdmSyntax *items[2]; size_t count; } SyntaxCapturePayload;
 static IdmCore *expand_syntax_capture_tail(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmCore *left, IdmSyntax *const *items, size_t cursor, size_t end, IdmError *err);
 static IdmCore *expand_syntax_capture_macro(ExpandContext *ctx, const IdmOperatorDef *op, const IdmSyntax *op_token, IdmSyntax *target_word, uint32_t payload, IdmSyntax *const *items, size_t left_start, size_t left_end, size_t cursor, size_t end, IdmError *err);
@@ -60,6 +76,29 @@ static bool syntax_is_negative_number(const IdmSyntax *syn);
 static bool adjacent_items_present(IdmSyntax *const *items, size_t start, size_t end);
 static bool flatten_adjacent_items(IdmSyntax *const *items, size_t start, size_t end, IdmSyntax ***out_items, size_t *out_count);
 
+typedef IdmCore *(*SurfaceKeywordHandler)(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
+typedef struct {
+    const char *name;
+    SurfaceKeywordHandler handler;
+    bool primary_takes_rest;
+    bool operand_takes_rest;
+} SurfaceKeywordDef;
+
+static const SurfaceKeywordDef SURFACE_KEYWORDS[] = {
+    {"fn", expand_fn_parts, true, true},
+    {"receive", expand_receive_parts, false, false},
+    {"try", expand_try_parts, false, false},
+    {"implements?", expand_implements_parts, true, false},
+};
+
+static const SurfaceKeywordDef *surface_keyword_for_syntax(const IdmSyntax *syn) {
+    if (!syn || syn->kind != IDM_SYN_WORD) return NULL;
+    for (size_t i = 0; i < sizeof(SURFACE_KEYWORDS) / sizeof(SURFACE_KEYWORDS[0]); i++) {
+        if (strcmp(syn->as.text, SURFACE_KEYWORDS[i].name) == 0) return &SURFACE_KEYWORDS[i];
+    }
+    return NULL;
+}
+
 static bool binding_phase_visible(const IdmBinding *binding, int phase) {
     return binding->phase == phase || binding->phase == IDM_PHASE_ANY;
 }
@@ -84,7 +123,7 @@ static IdmCore *method_arity_error(IdmError *err, IdmSpan span, const MethodSurf
     IdmBuffer expected;
     idm_buf_init(&expected);
     bool ok = idm_arity_describe(&expected, &method->arity);
-    expand_error(err, span, "method '%s.%s' expects %s argument(s), got %zu", method->trait, method->name, ok ? expected.data : "?", got);
+    expand_error(err, span, "method '%s.%s' expects %s argument(s), got %zu", method_surface_trait_text(method), method_surface_name_text(method), ok ? expected.data : "?", got);
     idm_buf_destroy(&expected);
     return NULL;
 }
@@ -96,63 +135,125 @@ static void method_surface_group_destroy(MethodSurfaceGroup *group) {
     group->cap = 0;
 }
 
+static void field_surface_group_destroy(FieldSurfaceGroup *group) {
+    free(group->items);
+    group->items = NULL;
+    group->count = 0;
+    group->cap = 0;
+    group->name = NULL;
+}
+
 static bool method_surface_group_add(MethodSurfaceGroup *group, const MethodSurfaceDef *method, IdmError *err, IdmSpan span) {
+    for (size_t i = 0; i < group->count; i++) {
+        if (method_surfaces_share_trait_identity(group->items[i], method)) {
+            group->items[i] = method;
+            return true;
+        }
+    }
     if (group->count == group->cap) {
-        size_t cap = group->cap ? group->cap * 2u : 4u;
-        const MethodSurfaceDef **items = realloc(group->items, cap * sizeof(*items));
-        if (!items) return idm_error_oom(err, span);
-        group->items = items;
-        group->cap = cap;
+        if (!idm_grow((void **)&group->items, &group->cap, sizeof(*group->items), 4u, group->count + 1u)) return idm_error_oom(err, span);
     }
     group->items[group->count++] = method;
     return true;
 }
 
-static bool method_surface_same_trait(const MethodSurfaceDef *a, const MethodSurfaceDef *b) {
-    if (strcmp(a->trait, b->trait) == 0) return true;
-    return strcmp(a->trait_key ? a->trait_key : "", b->trait_key ? b->trait_key : "") == 0;
+static int type_field_index(const ExpandContext *ctx, const TypeDef *type, const char *name) {
+    for (size_t i = 0; i < type->field_count; i++) {
+        if (type_field_matches_name(ctx, &type->fields[i], name)) return (int)i;
+    }
+    return -1;
 }
 
-static bool method_surface_shadowed_by_later(ExpandContext *ctx, size_t index, const IdmScopeSet *scopes) {
-    const MethodSurfaceDef *method = &ctx->method_surfaces[index];
-    for (size_t i = index + 1u; i < ctx->method_surface_count; i++) {
-        const MethodSurfaceDef *later = &ctx->method_surfaces[i];
-        if (later->is_field != method->is_field || strcmp(later->name, method->name) != 0) continue;
-        if (!idm_scope_set_equal(&later->scopes, scopes)) continue;
-        if (method_surface_same_trait(method, later)) return true;
+static bool field_surface_group_add(FieldSurfaceGroup *group, const TypeDef *type, uint32_t field_index, IdmError *err, IdmSpan span) {
+    for (size_t i = 0; i < group->count; i++) {
+        if (typed_type_same_identity(group->items[i].type, type)) {
+            group->items[i].type = type;
+            group->items[i].field_index = field_index;
+            return true;
+        }
     }
-    return false;
+    if (group->count == group->cap) {
+        if (!idm_grow((void **)&group->items, &group->cap, sizeof(*group->items), 4u, group->count + 1u)) return idm_error_oom(err, span);
+    }
+    group->items[group->count].type = type;
+    group->items[group->count].field_index = field_index;
+    group->count++;
+    return true;
 }
 
 static bool resolve_method_surface_group(ExpandContext *ctx, const IdmSyntax *word, MethodSurfaceGroup *out, IdmResolveStatus *out_status, IdmError *err) {
     out->items = NULL;
     out->count = 0;
     out->cap = 0;
-    const IdmScopeSet *best = NULL;
-    for (size_t i = 0; i < ctx->method_surface_count; i++) {
-        const MethodSurfaceDef *method = &ctx->method_surfaces[i];
-        if (strcmp(method->name, word->as.text) != 0 || !scopes_subset_for_ref(&method->scopes, word)) continue;
-        if (!best || idm_scope_set_subset(best, &method->scopes)) best = &method->scopes;
-    }
-    if (!best) {
+    if (!word || word->kind != IDM_SYN_WORD) {
         if (out_status) *out_status = IDM_RESOLVE_UNBOUND;
         return true;
     }
-    for (size_t i = 0; i < ctx->method_surface_count; i++) {
-        const MethodSurfaceDef *method = &ctx->method_surfaces[i];
-        if (strcmp(method->name, word->as.text) != 0 || !scopes_subset_for_ref(&method->scopes, word)) continue;
-        if (!idm_scope_set_subset(&method->scopes, best)) {
-            if (out_status) *out_status = IDM_RESOLVE_AMBIGUOUS;
-            return true;
-        }
+    IdmScopeSet empty;
+    idm_scope_set_init(&empty);
+    const IdmScopeSet *lookup = idm_syn_scope_set(word, 0);
+    if (!lookup) lookup = &empty;
+    const IdmScopeSet *best = NULL;
+    IdmResolveStatus status = idm_binding_resolve_scopes(&ctx->bindings, word->as.text, ctx->phase, IDM_BIND_SPACE_METHOD, lookup, &best);
+    idm_scope_set_destroy(&empty);
+    if (status != IDM_RESOLVE_OK || !best) {
+        if (out_status) *out_status = status;
+        return true;
     }
-    for (size_t i = 0; i < ctx->method_surface_count; i++) {
-        const MethodSurfaceDef *method = &ctx->method_surfaces[i];
-        if (strcmp(method->name, word->as.text) == 0 && idm_scope_set_equal(&method->scopes, best) && !method_surface_shadowed_by_later(ctx, i, best)) {
+    for (size_t i = 0; i < ctx->bindings.count; i++) {
+        const IdmBinding *binding = &ctx->bindings.items[i];
+        if (!binding_phase_visible(binding, ctx->phase) ||
+            binding->space != IDM_BIND_SPACE_METHOD ||
+            binding->kind != IDM_BIND_METHOD ||
+            strcmp(binding->name, word->as.text) != 0 ||
+            !idm_scope_set_equal(&binding->scopes, best) ||
+            binding->payload >= ctx->typed.method_surface_count) continue;
+        const MethodSurfaceDef *method = &ctx->typed.method_surfaces[binding->payload];
+        if (method_surface_matches_name(ctx, method, word->as.text) && idm_scope_set_equal(&method->scopes, best)) {
             if (!method_surface_group_add(out, method, err, word->span)) {
                 method_surface_group_destroy(out);
                 return false;
             }
+        }
+    }
+    if (out_status) *out_status = out->count == 0 ? IDM_RESOLVE_UNBOUND : IDM_RESOLVE_OK;
+    return true;
+}
+
+static bool resolve_field_surface_group(ExpandContext *ctx, const IdmSyntax *word, FieldSurfaceGroup *out, IdmResolveStatus *out_status, IdmError *err) {
+    out->items = NULL;
+    out->count = 0;
+    out->cap = 0;
+    out->name = word && word->kind == IDM_SYN_WORD ? word->as.text : NULL;
+    if (!word || word->kind != IDM_SYN_WORD) {
+        if (out_status) *out_status = IDM_RESOLVE_UNBOUND;
+        return true;
+    }
+    IdmScopeSet empty;
+    idm_scope_set_init(&empty);
+    const IdmScopeSet *lookup = idm_syn_scope_set(word, 0);
+    if (!lookup) lookup = &empty;
+    const IdmScopeSet *best = NULL;
+    IdmResolveStatus status = idm_binding_resolve_scopes(&ctx->bindings, word->as.text, ctx->phase, IDM_BIND_SPACE_FIELD, lookup, &best);
+    idm_scope_set_destroy(&empty);
+    if (status != IDM_RESOLVE_OK || !best) {
+        if (out_status) *out_status = status;
+        return true;
+    }
+    for (size_t i = 0; i < ctx->bindings.count; i++) {
+        const IdmBinding *binding = &ctx->bindings.items[i];
+        if (!binding_phase_visible(binding, ctx->phase) ||
+            binding->space != IDM_BIND_SPACE_FIELD ||
+            binding->kind != IDM_BIND_FIELD ||
+            strcmp(binding->name, word->as.text) != 0 ||
+            !idm_scope_set_equal(&binding->scopes, best)) continue;
+        const TypeDef *type = typed_type_by_index(ctx, binding->payload);
+        if (!type) continue;
+        int field_index = type_field_index(ctx, type, word->as.text);
+        if (field_index < 0) continue;
+        if (!field_surface_group_add(out, type, (uint32_t)field_index, err, word->span)) {
+            field_surface_group_destroy(out);
+            return false;
         }
     }
     if (out_status) *out_status = out->count == 0 ? IDM_RESOLVE_UNBOUND : IDM_RESOLVE_OK;
@@ -164,14 +265,6 @@ static bool method_group_accepts(const MethodSurfaceGroup *group, uint32_t argc)
         if (idm_arity_accepts(&group->items[i]->arity, argc)) return true;
     }
     return false;
-}
-
-static bool method_group_all_fields(const MethodSurfaceGroup *group) {
-    if (group->count == 0) return false;
-    for (size_t i = 0; i < group->count; i++) {
-        if (!group->items[i]->is_field) return false;
-    }
-    return true;
 }
 
 static bool method_group_max_accepting_at_least(const MethodSurfaceGroup *group, uint32_t min, uint32_t *out) {
@@ -196,14 +289,14 @@ static IdmCore *method_group_arity_error(IdmError *err, IdmSpan span, const Meth
         idm_buf_init(&arity);
         bool described = idm_arity_describe(&arity, &group->items[i]->arity);
         if (i != 0 && !idm_buf_append(&expected, ", ")) break;
-        if (!idm_buf_appendf(&expected, "%s.%s=%s", group->items[i]->trait, group->items[i]->name, described ? arity.data : "?")) {
+        if (!idm_buf_appendf(&expected, "%s.%s=%s", method_surface_trait_text(group->items[i]), method_surface_name_text(group->items[i]), described ? arity.data : "?")) {
             idm_buf_destroy(&arity);
             break;
         }
         idm_buf_destroy(&arity);
     }
     expand_error(err, span, "method '%s' has no candidate accepting %zu argument(s); candidates: %s",
-                 group->items[0]->name, got, expected.data ? expected.data : "?");
+                 method_surface_name_text(group->items[0]), got, expected.data ? expected.data : "?");
     idm_buf_destroy(&expected);
     return NULL;
 }
@@ -258,6 +351,7 @@ static bool syntax_is_literal_value(const IdmSyntax *syn) {
         case IDM_SYN_NIL:
         case IDM_SYN_ATOM:
         case IDM_SYN_INT:
+        case IDM_SYN_BIGINT:
         case IDM_SYN_FLOAT:
         case IDM_SYN_STRING:
         case IDM_SYN_VECTOR:
@@ -271,7 +365,7 @@ static bool syntax_is_literal_value(const IdmSyntax *syn) {
 
 static bool syntax_is_negative_number(const IdmSyntax *syn) {
     if (!syn) return false;
-    return (syn->kind == IDM_SYN_INT && syn->as.integer < 0) || (syn->kind == IDM_SYN_FLOAT && syn->as.real < 0.0);
+    return (syn->kind == IDM_SYN_INT && syn->as.integer < 0) || (syn->kind == IDM_SYN_BIGINT && syn->as.text[0] == '-') || (syn->kind == IDM_SYN_FLOAT && syn->as.real < 0.0);
 }
 
 static void note_unbound_context(ExpandContext *ctx, const IdmSyntax *word, IdmError *err) {
@@ -306,8 +400,33 @@ static void note_unbound_context(ExpandContext *ctx, const IdmSyntax *word, IdmE
     }
 }
 
-static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, bool callee_position, IdmError *err) {
+static IdmCore *expand_unbound_identifier(ExpandContext *ctx, const IdmSyntax *word, IdmError *err) {
+    expand_error(err, word->span, "unbound identifier '%s'", word->as.text);
+    if (err && err->present) {
+        IdmValue name = idm_string(ctx->rt, word->as.text, NULL);
+        (void)idm_error_reason(ctx->rt, err, "unbound-identifier", 1, name);
+    }
+    note_unbound_context(ctx, word, err);
+    return NULL;
+}
+
+static IdmCore *expand_frame_binding_ref(ExpandContext *ctx, const IdmSyntax *word, const IdmBinding *binding, bool callee_position, IdmError *err) {
     uint32_t cap = 0;
+    IdmCore *ref = NULL;
+    if (binding->frame_id == ctx->frame) {
+        ref = binding->kind == IDM_BIND_LOCAL ?
+              idm_core_local_ref(word->as.text, binding->payload, word->span) :
+              idm_core_arg_ref(word->as.text, binding->payload, word->span);
+        return zero_arity_call_if_known(ref, &binding->arity, callee_position, word->span, err);
+    }
+    if (materialize_capture(ctx, word, binding, &cap)) {
+        ref = idm_core_capture_ref(word->as.text, cap, word->span);
+        return zero_arity_call_if_known(ref, &binding->arity, callee_position, word->span, err);
+    }
+    return (IdmCore *)(uintptr_t)idm_error_oom(err, word->span);
+}
+
+static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, bool callee_position, IdmError *err) {
     const CaptureBinding *capture = capture_lookup_existing(ctx->captures, ctx->capture_count, word);
     if (capture) {
         IdmCore *ref = idm_core_capture_ref(capture->name, capture->capture_index, word->span);
@@ -317,26 +436,10 @@ static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, 
     const IdmBinding *binding = resolve_default(ctx, word, &status);
     if (status == IDM_RESOLVE_OK) {
         if (binding->kind == IDM_BIND_LOCAL) {
-            if (binding->frame_id == ctx->frame) {
-                IdmCore *ref = idm_core_local_ref(word->as.text, binding->payload, word->span);
-                return zero_arity_call_if_known(ref, &binding->arity, callee_position, word->span, err);
-            }
-            if (materialize_capture(ctx, word, binding, &cap)) {
-                IdmCore *ref = idm_core_capture_ref(word->as.text, cap, word->span);
-                return zero_arity_call_if_known(ref, &binding->arity, callee_position, word->span, err);
-            }
-            return (IdmCore *)(uintptr_t)idm_error_oom(err, word->span);
+            return expand_frame_binding_ref(ctx, word, binding, callee_position, err);
         }
         if (binding->kind == IDM_BIND_ARG) {
-            if (binding->frame_id == ctx->frame) {
-                IdmCore *ref = idm_core_arg_ref(word->as.text, binding->payload, word->span);
-                return zero_arity_call_if_known(ref, &binding->arity, callee_position, word->span, err);
-            }
-            if (materialize_capture(ctx, word, binding, &cap)) {
-                IdmCore *ref = idm_core_capture_ref(word->as.text, cap, word->span);
-                return zero_arity_call_if_known(ref, &binding->arity, callee_position, word->span, err);
-            }
-            return (IdmCore *)(uintptr_t)idm_error_oom(err, word->span);
+            return expand_frame_binding_ref(ctx, word, binding, callee_position, err);
         }
         if (binding->kind == IDM_BIND_ENV) {
             IdmCore *ref = idm_core_env_ref(word->as.text, binding->payload, word->span);
@@ -368,16 +471,48 @@ static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, 
         for (size_t i = 0; i < word->origins.count; i++) idm_error_note(err, "in expansion of '%s'", word->origins.items[i]);
         return NULL;
     }
+    IdmResolveStatus field_status = IDM_RESOLVE_UNBOUND;
+    FieldSurfaceGroup field_group = {0};
+    if (!resolve_field_surface_group(ctx, word, &field_group, &field_status, err)) return NULL;
+    if (field_status == IDM_RESOLVE_AMBIGUOUS) {
+        field_surface_group_destroy(&field_group);
+        return expand_error(err, word->span, "ambiguous field '%s'", word->as.text);
+    }
     IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
     MethodSurfaceGroup method_group = {0};
-    if (!resolve_method_surface_group(ctx, word, &method_group, &method_status, err)) return NULL;
+    if (!resolve_method_surface_group(ctx, word, &method_group, &method_status, err)) {
+        field_surface_group_destroy(&field_group);
+        return NULL;
+    }
+    if (method_status == IDM_RESOLVE_AMBIGUOUS) {
+        field_surface_group_destroy(&field_group);
+        method_surface_group_destroy(&method_group);
+        return expand_error(err, word->span, "ambiguous method '%s'", word->as.text);
+    }
+    if (field_group.count != 0 && method_group.count != 0) {
+        field_surface_group_destroy(&field_group);
+        method_surface_group_destroy(&method_group);
+        return expand_error(err, word->span, "ambiguous member '%s' is both a record field and a trait method", word->as.text);
+    }
+    if (field_group.count != 0) {
+        field_surface_group_destroy(&field_group);
+        method_surface_group_destroy(&method_group);
+        return expand_error(err, word->span, "field '%s' requires a receiver", word->as.text);
+    }
     if (method_group.count != 0) {
+        if (!callee_position && method_group_accepts(&method_group, 0u)) {
+            IdmCore *call = expand_method_surface_call_cores(ctx, &method_group, NULL, NULL, 0u, word->span, err);
+            field_surface_group_destroy(&field_group);
+            method_surface_group_destroy(&method_group);
+            return call;
+        }
+        field_surface_group_destroy(&field_group);
         method_surface_group_destroy(&method_group);
         return expand_error(err, word->span, "method '%s' requires a receiver", word->as.text);
     }
-    expand_error(err, word->span, "unbound identifier '%s'", word->as.text);
-    note_unbound_context(ctx, word, err);
-    return NULL;
+    field_surface_group_destroy(&field_group);
+    method_surface_group_destroy(&method_group);
+    return expand_unbound_identifier(ctx, word, err);
 }
 
 static IdmCore *expand_word_ref(ExpandContext *ctx, const IdmSyntax *word, IdmError *err) {
@@ -393,16 +528,6 @@ static bool head_is_bound(ExpandContext *ctx, const IdmSyntax *word) {
     IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
     (void)resolve_default(ctx, word, &status);
     return status == IDM_RESOLVE_OK;
-}
-
-static IdmCore *expand_raise_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
-    if (start + 1u >= end) return expand_error(err, items[start]->span, "raise requires a value");
-    IdmCore *value = expand_parts(ctx, items, start + 1u, end, err);
-    if (!value) return NULL;
-    IdmCore *call = expand_primitive_clause_call(IDM_PRIM_RAISE, items[start]->span, err);
-    if (!call) { idm_core_free(value); return NULL; }
-    if (!core_call_add_arg_or_free(call, value, err, items[start]->span)) return NULL;
-    return call;
 }
 
 static const IdmSyntax *try_section_head(const IdmSyntax *stmt) {
@@ -489,6 +614,19 @@ static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, si
     return guarded;
 }
 
+static IdmCore *implements_bool_body(ExpandContext *ctx, IdmCore *multi, const void *user, uint32_t argc, IdmSpan span, IdmError *err) {
+    bool value = *(const bool *)user;
+    IdmCore *body = idm_core_literal(idm_bool(ctx->rt, value), span);
+    (void)multi;
+    (void)argc;
+    if (!body) idm_error_oom(err, span);
+    return body;
+}
+
+static bool implements_add_bool_clause(ExpandContext *ctx, IdmCore *multi, const char *arg0_type, bool value, IdmSpan span, IdmError *err) {
+    return expand_multi_add_dispatch_clause(ctx, multi, 1u, arg0_type, implements_bool_body, &value, span, err);
+}
+
 static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
     if (start + 2u >= end) return expand_error(err, items[start]->span, "implements? expects 'implements? TRAIT value'");
     size_t trait_end = end;
@@ -522,71 +660,38 @@ static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *it
         idm_syn_free(trait_name);
         return NULL;
     }
-    const char **types = NULL;
+    const MethodImplDef **types = NULL;
     size_t type_count = 0;
     size_t type_cap = 0;
     bool ok = true;
-    for (size_t i = 0; ok && i < ctx->method_impl_count; i++) {
-        MethodImplDef *impl = &ctx->method_impls[i];
-        if (strcmp(impl->trait, trait->name) != 0) continue;
+    for (size_t i = 0; ok && i < ctx->typed.method_impl_count; i++) {
+        MethodImplDef *impl = &ctx->typed.method_impls[i];
+        const MethodSurfaceDef *surface = method_surface_by_index(ctx, impl->method_surface);
+        if (!method_surface_matches_trait(ctx, surface, trait_def_identity_text(trait))) continue;
         bool seen = false;
         for (size_t j = 0; j < type_count; j++) {
-            if (strcmp(types[j], impl->type) == 0) {
+            if (method_impl_same_type(impl, types[j])) {
                 seen = true;
                 break;
             }
         }
         if (seen) continue;
         if (type_count == type_cap) {
-            size_t cap = type_cap ? type_cap * 2u : 8u;
-            const char **next = realloc(types, cap * sizeof(*next));
-            if (!next) {
+            if (!idm_grow((void **)&types, &type_cap, sizeof(*types), 8u, type_count + 1u)) {
                 ok = idm_error_oom(err, trait_name->span);
                 break;
             }
-            types = next;
-            type_cap = cap;
         }
-        types[type_count++] = impl->type;
+        types[type_count++] = impl;
     }
     IdmCore *multi = ok ? idm_core_fn_multi("implements?", items[start]->span) : NULL;
     ok = ok && multi;
     if (!ok && !(err && err->present)) idm_error_oom(err, items[start]->span);
     for (size_t i = 0; ok && i < type_count; i++) {
-        IdmPattern **patterns = calloc(1u, sizeof(*patterns));
-        IdmCore *body = patterns ? idm_core_literal(idm_bool(ctx->rt, true), items[start]->span) : NULL;
-        if (!patterns || !body) {
-            free(patterns);
-            idm_core_free(body);
-            ok = idm_error_oom(err, items[start]->span);
-            break;
-        }
-        patterns[0] = idm_pat_type(types[i], items[start]->span);
-        if (!patterns[0] || !idm_core_fn_multi_add_clause_take(multi, 1u, patterns, 1u, NULL, 0, NULL, body)) {
-            idm_pat_free(patterns[0]);
-            free(patterns);
-            idm_core_free(body);
-            ok = idm_error_oom(err, items[start]->span);
-            break;
-        }
+        const char *type = method_impl_type_text(types[i]);
+        ok = type && implements_add_bool_clause(ctx, multi, type, true, items[start]->span, err);
     }
-    if (ok) {
-        IdmPattern **patterns = calloc(1u, sizeof(*patterns));
-        IdmCore *body = patterns ? idm_core_literal(idm_bool(ctx->rt, false), items[start]->span) : NULL;
-        if (!patterns || !body) {
-            free(patterns);
-            idm_core_free(body);
-            ok = idm_error_oom(err, items[start]->span);
-        } else {
-            patterns[0] = idm_pat_wildcard(items[start]->span);
-            if (!patterns[0] || !idm_core_fn_multi_add_clause_take(multi, 1u, patterns, 1u, NULL, 0, NULL, body)) {
-                idm_pat_free(patterns[0]);
-                free(patterns);
-                idm_core_free(body);
-                ok = idm_error_oom(err, items[start]->span);
-            }
-        }
-    }
+    if (ok) ok = implements_add_bool_clause(ctx, multi, NULL, false, items[start]->span, err);
     idm_syn_free(trait_name);
     free(types);
     if (!ok) {
@@ -688,6 +793,12 @@ static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word) {
     IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
     const IdmBinding *binding = resolve_default(ctx, word, &status);
     if (status == IDM_RESOLVE_OK && binding) return true;
+    IdmResolveStatus field_status = IDM_RESOLVE_UNBOUND;
+    FieldSurfaceGroup fields = {0};
+    if (!resolve_field_surface_group(ctx, word, &fields, &field_status, NULL)) return false;
+    bool field_ok = fields.count != 0 || field_status == IDM_RESOLVE_AMBIGUOUS;
+    field_surface_group_destroy(&fields);
+    if (field_ok) return true;
     IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
     MethodSurfaceGroup group = {0};
     if (!resolve_method_surface_group(ctx, word, &group, &method_status, NULL)) return false;
@@ -713,8 +824,8 @@ static bool method_dispatch_loc(ExpandContext *ctx, const MethodSurfaceDef *meth
     }
     if (method->dispatch_frame != ctx->frame) {
         uint32_t capture = 0;
-        if (!materialize_slot_capture(ctx, method->name, &method->scopes, method->dispatch_frame, method->dispatch_slot, method->arity, &capture)) {
-            idm_error_set(err, span, "method dispatcher '%s.%s' is not visible in this function", method->trait, method->name);
+        if (!materialize_slot_capture(ctx, method_surface_name_text(method), &method->scopes, method->dispatch_frame, method->dispatch_slot, method->arity, &capture)) {
+            idm_error_set(err, span, "method dispatcher '%s.%s' is not visible in this function", method_surface_trait_text(method), method_surface_name_text(method));
             return false;
         }
         out->kind = METHOD_DISPATCH_CAPTURE;
@@ -732,29 +843,27 @@ static IdmCore *method_dispatch_ref(ExpandContext *ctx, const MethodSurfaceDef *
     MethodDispatchLoc loc;
     if (!method_dispatch_loc(ctx, method, &loc, span, err)) return NULL;
     switch (loc.kind) {
-        case METHOD_DISPATCH_PACKAGE: return idm_core_package_ref(method->name, idm_atom(ctx->rt, loc.env_key), loc.index, span);
-        case METHOD_DISPATCH_ENV: return idm_core_env_ref(method->name, loc.index, span);
-        case METHOD_DISPATCH_CAPTURE: return idm_core_capture_ref(method->name, loc.index, span);
-        case METHOD_DISPATCH_LOCAL: return idm_core_local_ref(method->name, loc.index, span);
+        case METHOD_DISPATCH_PACKAGE: return idm_core_package_ref(method_surface_name_text(method), idm_atom(ctx->rt, loc.env_key), loc.index, span);
+        case METHOD_DISPATCH_ENV: return idm_core_env_ref(method_surface_name_text(method), loc.index, span);
+        case METHOD_DISPATCH_CAPTURE: return idm_core_capture_ref(method_surface_name_text(method), loc.index, span);
+        case METHOD_DISPATCH_LOCAL: return idm_core_local_ref(method_surface_name_text(method), loc.index, span);
     }
     return NULL;
 }
 
-static bool method_impl_matches_surface(const MethodImplDef *impl, const MethodSurfaceDef *method, uint32_t argc) {
-    return strcmp(impl->trait, method->trait) == 0 &&
-           strcmp(impl->method, method->name) == 0 &&
-           idm_arity_accepts(&impl->arity, argc);
+static bool method_impl_accepts_surface_call(const ExpandContext *ctx, const MethodImplDef *impl, const MethodSurfaceDef *method, uint32_t argc) {
+    return method_impl_matches_identity(ctx, impl, method_surface_trait_text(method), method_surface_name_text(method), NULL) && idm_arity_accepts(&impl->arity, argc);
 }
 
 typedef struct {
-    const char *type;
     const MethodSurfaceDef *method;
+    const MethodImplDef *impl;
     bool duplicate;
 } CandidateMethodType;
 
-static bool candidate_type_index(CandidateMethodType *items, size_t count, const char *type, size_t *out) {
+static bool candidate_type_index(CandidateMethodType *items, size_t count, const MethodImplDef *impl, size_t *out) {
     for (size_t i = 0; i < count; i++) {
-        if (strcmp(items[i].type, type) == 0) {
+        if (method_impl_same_type(impl, items[i].impl)) {
             if (out) *out = i;
             return true;
         }
@@ -762,21 +871,17 @@ static bool candidate_type_index(CandidateMethodType *items, size_t count, const
     return false;
 }
 
-static bool candidate_type_push(CandidateMethodType **items, size_t *count, size_t *cap, const char *type, const MethodSurfaceDef *method, IdmError *err, IdmSpan span) {
+static bool candidate_type_push(CandidateMethodType **items, size_t *count, size_t *cap, const MethodImplDef *impl, const MethodSurfaceDef *method, IdmError *err, IdmSpan span) {
     size_t existing = 0;
-    if (candidate_type_index(*items, *count, type, &existing)) {
+    if (candidate_type_index(*items, *count, impl, &existing)) {
         (*items)[existing].duplicate = true;
         return true;
     }
     if (*count == *cap) {
-        size_t next_cap = *cap ? *cap * 2u : 8u;
-        CandidateMethodType *next = realloc(*items, next_cap * sizeof(*next));
-        if (!next) return idm_error_oom(err, span);
-        *items = next;
-        *cap = next_cap;
+        if (!idm_grow((void **)items, cap, sizeof(**items), 8u, *count + 1u)) return idm_error_oom(err, span);
     }
-    (*items)[*count].type = type;
     (*items)[*count].method = method;
+    (*items)[*count].impl = impl;
     (*items)[*count].duplicate = false;
     (*count)++;
     return true;
@@ -792,11 +897,11 @@ static bool method_dispatch_ref_for_multi(ExpandContext *ctx, IdmCore *multi, co
     }
     IdmCaptureKind kind = loc.kind == METHOD_DISPATCH_CAPTURE ? IDM_CAP_UPVALUE : IDM_CAP_LOCAL;
     uint32_t index = loc.index;
-    if (!idm_core_fn_multi_add_capture(multi, kind, method->name, index)) return idm_error_oom(err, span);
+    if (!idm_core_fn_multi_add_capture(multi, kind, method_surface_name_text(method), index)) return idm_error_oom(err, span);
     for (size_t i = 0; i < multi->as.fn_multi.capture_count; i++) {
         const IdmCapture *capture = &multi->as.fn_multi.captures[i];
         if (capture->kind == kind && capture->index == index) {
-            *out = idm_core_capture_ref(method->name, (uint32_t)i, span);
+            *out = idm_core_capture_ref(method_surface_name_text(method), (uint32_t)i, span);
             return *out != NULL || idm_error_oom(err, span);
         }
     }
@@ -828,113 +933,87 @@ static IdmCore *method_ambiguity_body(ExpandContext *ctx, const char *method, co
     IdmBuffer msg;
     idm_buf_init(&msg);
     bool msg_ok = idm_buf_appendf(&msg, "ambiguous method '%s' on type '%s'", method, type);
-    IdmValue message = msg_ok ? idm_string(ctx->rt, msg.data ? msg.data : "", err) : idm_nil();
+    IdmCore *body = msg_ok ? expand_raise_message_body(ctx, msg.data ? msg.data : "", span, err) : NULL;
     idm_buf_destroy(&msg);
-    if (!msg_ok || (err && err->present)) {
-        idm_error_oom(err, span);
-        return NULL;
-    }
-    IdmCore *message_core = idm_core_literal(message, span);
-    IdmCore *make_error = message_core ? expand_primitive_clause_call(IDM_PRIM_MAKE_ERROR, span, err) : NULL;
-    if (!make_error || !core_call_add_arg_or_free(make_error, message_core, err, span)) {
-        idm_core_free(make_error);
-        return NULL;
-    }
-    IdmCore *raise = expand_primitive_clause_call(IDM_PRIM_RAISE, span, err);
-    if (!raise || !core_call_add_arg_or_free(raise, make_error, err, span)) {
-        idm_core_free(raise);
-        return NULL;
-    }
-    return raise;
+    if (!msg_ok) idm_error_oom(err, span);
+    return body;
 }
 
 static IdmCore *method_no_candidate_body(ExpandContext *ctx, const char *method, IdmSpan span, IdmError *err) {
     IdmBuffer msg;
     idm_buf_init(&msg);
     bool msg_ok = idm_buf_appendf(&msg, "method '%s' is available via candidate traits but not implemented on receiver", method);
-    IdmValue message = msg_ok ? idm_string(ctx->rt, msg.data ? msg.data : "", err) : idm_nil();
+    IdmCore *body = msg_ok ? expand_raise_message_body(ctx, msg.data ? msg.data : "", span, err) : NULL;
     idm_buf_destroy(&msg);
-    if (!msg_ok || (err && err->present)) {
-        idm_error_oom(err, span);
-        return NULL;
-    }
-    IdmCore *message_core = idm_core_literal(message, span);
-    IdmCore *make_error = message_core ? expand_primitive_clause_call(IDM_PRIM_MAKE_ERROR, span, err) : NULL;
-    if (!make_error || !core_call_add_arg_or_free(make_error, message_core, err, span)) {
-        idm_core_free(make_error);
-        return NULL;
-    }
-    IdmCore *raise = expand_primitive_clause_call(IDM_PRIM_RAISE, span, err);
-    if (!raise || !core_call_add_arg_or_free(raise, make_error, err, span)) {
-        idm_core_free(raise);
-        return NULL;
-    }
-    return raise;
+    if (!msg_ok) idm_error_oom(err, span);
+    return body;
 }
 
 static IdmCore *field_no_candidate_body(ExpandContext *ctx, const char *field, IdmSpan span, IdmError *err) {
     IdmBuffer msg;
     idm_buf_init(&msg);
     bool msg_ok = idm_buf_appendf(&msg, "field '%s' is available via candidate record types but not on receiver", field);
-    IdmValue message = msg_ok ? idm_string(ctx->rt, msg.data ? msg.data : "", err) : idm_nil();
+    IdmCore *body = msg_ok ? expand_raise_message_body(ctx, msg.data ? msg.data : "", span, err) : NULL;
     idm_buf_destroy(&msg);
-    if (!msg_ok || (err && err->present)) {
-        idm_error_oom(err, span);
-        return NULL;
-    }
-    IdmCore *message_core = idm_core_literal(message, span);
-    IdmCore *make_error = message_core ? expand_primitive_clause_call(IDM_PRIM_MAKE_ERROR, span, err) : NULL;
-    if (!make_error || !core_call_add_arg_or_free(make_error, message_core, err, span)) {
-        idm_core_free(make_error);
-        return NULL;
-    }
-    IdmCore *raise = expand_primitive_clause_call(IDM_PRIM_RAISE, span, err);
-    if (!raise || !core_call_add_arg_or_free(raise, make_error, err, span)) {
-        idm_core_free(raise);
-        return NULL;
-    }
-    return raise;
+    if (!msg_ok) idm_error_oom(err, span);
+    return body;
 }
 
-static bool field_multi_add_type_clause(ExpandContext *ctx, IdmCore *multi, const MethodSurfaceDef *field, IdmSpan span, IdmError *err) {
-    IdmPattern **patterns = calloc(1u, sizeof(*patterns));
-    if (!patterns) return idm_error_oom(err, span);
-    patterns[0] = idm_pat_type(field->trait, span);
-    IdmCore *arg = patterns[0] ? idm_core_arg_ref("arg", 0u, span) : NULL;
-    IdmCore *body = arg ? expand_record_field_core(ctx, arg, field->trait, field->name, field->field_index, span, err) : NULL;
-    bool ok = body && idm_core_fn_multi_add_clause_take(multi, 1u, patterns, 1u, NULL, 0, NULL, body);
-    if (!ok) {
-        idm_pat_free(patterns[0]);
-        free(patterns);
-        idm_core_free(body);
-        if (!err->present) idm_error_oom(err, span);
-        return false;
-    }
-    return true;
+typedef IdmCore *(*NoCandidateBodyFn)(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err);
+
+typedef struct {
+    const char *name;
+    NoCandidateBodyFn body_fn;
+} WildcardFallbackBody;
+
+static IdmCore *wildcard_fallback_body(ExpandContext *ctx, IdmCore *multi, const void *user, uint32_t argc, IdmSpan span, IdmError *err) {
+    const WildcardFallbackBody *body = user;
+    (void)multi;
+    (void)argc;
+    return body->body_fn(ctx, body->name, span, err);
+}
+
+static bool multi_add_wildcard_fallback_clause(ExpandContext *ctx, IdmCore *multi, const char *name, uint32_t argc, NoCandidateBodyFn body_fn, IdmSpan span, IdmError *err) {
+    WildcardFallbackBody body = {name, body_fn};
+    return expand_multi_add_dispatch_clause(ctx, multi, argc, NULL, wildcard_fallback_body, &body, span, err);
+}
+
+static IdmCore *field_type_clause_body(ExpandContext *ctx, IdmCore *multi, const void *user, uint32_t argc, IdmSpan span, IdmError *err) {
+    const FieldSurfaceRef *field = user;
+    IdmCore *arg = argc != 0 ? idm_core_arg_ref("arg", 0u, span) : NULL;
+    (void)multi;
+    return arg ? expand_record_field_core(ctx, arg, field->type, field->field_index, span, err) : NULL;
+}
+
+static bool field_multi_add_type_clause(ExpandContext *ctx, IdmCore *multi, const FieldSurfaceRef *field, IdmSpan span, IdmError *err) {
+    return expand_multi_add_dispatch_clause(ctx, multi, 1u, type_def_identity_text(field->type), field_type_clause_body, field, span, err);
 }
 
 static bool field_multi_add_fallback_clause(ExpandContext *ctx, IdmCore *multi, const char *field, IdmSpan span, IdmError *err) {
-    IdmPattern **patterns = calloc(1u, sizeof(*patterns));
-    if (!patterns) return idm_error_oom(err, span);
-    patterns[0] = idm_pat_wildcard(span);
-    IdmCore *body = patterns[0] ? field_no_candidate_body(ctx, field, span, err) : NULL;
-    bool ok = body && idm_core_fn_multi_add_clause_take(multi, 1u, patterns, 1u, NULL, 0, NULL, body);
-    if (!ok) {
-        idm_pat_free(patterns[0]);
-        free(patterns);
-        idm_core_free(body);
-        if (!err->present) idm_error_oom(err, span);
-        return false;
-    }
-    return true;
+    return multi_add_wildcard_fallback_clause(ctx, multi, field, 1u, field_no_candidate_body, span, err);
 }
 
-static IdmCore *expand_field_surface_call_cores(ExpandContext *ctx, const MethodSurfaceGroup *group, IdmCore *receiver, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err) {
+typedef struct {
+    const CandidateMethodType *candidate;
+    const char *method_name;
+} MethodTypeBody;
+
+static IdmCore *method_type_clause_body(ExpandContext *ctx, IdmCore *multi, const void *user, uint32_t argc, IdmSpan span, IdmError *err) {
+    const MethodTypeBody *body = user;
+    const CandidateMethodType *candidate = body->candidate;
+    const char *type = method_impl_type_text(candidate->impl);
+    if (!type) return (IdmCore *)(uintptr_t)idm_error_set(err, span, "method implementation requires a receiver type");
+    return candidate->duplicate
+        ? method_ambiguity_body(ctx, body->method_name, type, span, err)
+        : method_dispatch_call_body(ctx, multi, candidate->method, argc, span, err);
+}
+
+static IdmCore *expand_field_surface_call_cores(ExpandContext *ctx, const FieldSurfaceGroup *group, IdmCore *receiver, IdmCore **args, size_t arg_count, IdmSpan span, IdmError *err) {
     size_t argc = (receiver ? 1u : 0u) + arg_count;
     if (argc != 1u) {
         idm_core_free(receiver);
         core_args_free(args, arg_count);
-        return method_group_arity_error(err, span, group, argc);
+        return expand_error(err, span, "field '%s' expects a receiver", group->name ? group->name : "<field>");
     }
     if (!receiver) {
         receiver = args[0];
@@ -942,22 +1021,22 @@ static IdmCore *expand_field_surface_call_cores(ExpandContext *ctx, const Method
     }
     core_args_free(args, arg_count);
     if (group->count == 1u) {
-        const MethodSurfaceDef *field = group->items[0];
-        return expand_record_field_core(ctx, receiver, field->trait, field->name, field->field_index, span, err);
+        const FieldSurfaceRef *field = &group->items[0];
+        return expand_record_field_core(ctx, receiver, field->type, field->field_index, span, err);
     }
-    IdmCore *multi = idm_core_fn_multi(group->items[0]->name, span);
+    IdmCore *multi = idm_core_fn_multi(group->name ? group->name : "<field>", span);
     if (!multi) {
         idm_core_free(receiver);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     for (size_t i = 0; i < group->count; i++) {
-        if (!field_multi_add_type_clause(ctx, multi, group->items[i], span, err)) {
+        if (!field_multi_add_type_clause(ctx, multi, &group->items[i], span, err)) {
             idm_core_free(multi);
             idm_core_free(receiver);
             return NULL;
         }
     }
-    if (!field_multi_add_fallback_clause(ctx, multi, group->items[0]->name, span, err)) {
+    if (!field_multi_add_fallback_clause(ctx, multi, group->name ? group->name : "<field>", span, err)) {
         idm_core_free(multi);
         idm_core_free(receiver);
         return NULL;
@@ -977,49 +1056,14 @@ static IdmCore *expand_field_surface_call_cores(ExpandContext *ctx, const Method
 }
 
 static bool method_multi_add_type_clause(ExpandContext *ctx, IdmCore *multi, const CandidateMethodType *candidate, const char *method_name, uint32_t argc, IdmSpan span, IdmError *err) {
-    IdmPattern **patterns = argc == 0 ? NULL : calloc(argc, sizeof(*patterns));
-    if (argc != 0 && !patterns) return idm_error_oom(err, span);
-    bool ok = true;
-    for (uint32_t i = 0; i < argc && ok; i++) {
-        patterns[i] = i == 0 ? idm_pat_type(candidate->type, span) : idm_pat_wildcard(span);
-        if (!patterns[i]) ok = false;
-    }
-    IdmCore *body = ok
-        ? (candidate->duplicate
-            ? method_ambiguity_body(ctx, method_name, candidate->type, span, err)
-            : method_dispatch_call_body(ctx, multi, candidate->method, argc, span, err))
-        : NULL;
-    if (!body) ok = false;
-    if (ok) ok = idm_core_fn_multi_add_clause_take(multi, argc, patterns, argc, NULL, 0, NULL, body);
-    if (!ok) {
-        for (uint32_t i = 0; i < argc; i++) idm_pat_free(patterns ? patterns[i] : NULL);
-        free(patterns);
-        idm_core_free(body);
-        if (!err->present) idm_error_oom(err, span);
-        return false;
-    }
-    return true;
+    MethodTypeBody body = {candidate, method_name};
+    const char *type = method_impl_type_text(candidate->impl);
+    if (!type) return idm_error_set(err, span, "method implementation requires a receiver type");
+    return expand_multi_add_dispatch_clause(ctx, multi, argc, type, method_type_clause_body, &body, span, err);
 }
 
 static bool method_multi_add_fallback_clause(ExpandContext *ctx, IdmCore *multi, const char *method_name, uint32_t argc, IdmSpan span, IdmError *err) {
-    IdmPattern **patterns = argc == 0 ? NULL : calloc(argc, sizeof(*patterns));
-    if (argc != 0 && !patterns) return idm_error_oom(err, span);
-    bool ok = true;
-    for (uint32_t i = 0; i < argc && ok; i++) {
-        patterns[i] = idm_pat_wildcard(span);
-        if (!patterns[i]) ok = false;
-    }
-    IdmCore *body = ok ? method_no_candidate_body(ctx, method_name, span, err) : NULL;
-    if (!body) ok = false;
-    if (ok) ok = idm_core_fn_multi_add_clause_take(multi, argc, patterns, argc, NULL, 0, NULL, body);
-    if (!ok) {
-        for (uint32_t i = 0; i < argc; i++) idm_pat_free(patterns ? patterns[i] : NULL);
-        free(patterns);
-        idm_core_free(body);
-        if (!err->present) idm_error_oom(err, span);
-        return false;
-    }
-    return true;
+    return multi_add_wildcard_fallback_clause(ctx, multi, method_name, argc, method_no_candidate_body, span, err);
 }
 
 static IdmCore *expand_composite_method_surface_call(ExpandContext *ctx, const MethodSurfaceGroup *group, IdmCore *receiver, IdmCore **args, size_t arg_count, uint32_t argc, IdmSpan span, IdmError *err) {
@@ -1031,13 +1075,13 @@ static IdmCore *expand_composite_method_surface_call(ExpandContext *ctx, const M
         const MethodSurfaceDef *method = group->items[i];
         if (!idm_arity_accepts(&method->arity, argc)) continue;
         if (!method->has_dispatch) {
-            ok = expand_error(err, span, "method '%s.%s' has no compiled dispatcher", method->trait, method->name) != NULL;
+            ok = expand_error(err, span, "method '%s.%s' has no compiled dispatcher", method_surface_trait_text(method), method_surface_name_text(method)) != NULL;
             break;
         }
-        for (size_t j = 0; ok && j < ctx->method_impl_count; j++) {
-            const MethodImplDef *impl = &ctx->method_impls[j];
-            if (!method_impl_matches_surface(impl, method, argc)) continue;
-            ok = candidate_type_push(&types, &type_count, &type_cap, impl->type, method, err, span);
+        for (size_t j = 0; ok && j < ctx->typed.method_impl_count; j++) {
+            const MethodImplDef *impl = &ctx->typed.method_impls[j];
+            if (!method_impl_accepts_surface_call(ctx, impl, method, argc)) continue;
+            ok = candidate_type_push(&types, &type_count, &type_cap, impl, method, err, span);
         }
     }
     if (!ok) {
@@ -1046,7 +1090,8 @@ static IdmCore *expand_composite_method_surface_call(ExpandContext *ctx, const M
         core_args_free(args, arg_count);
         return NULL;
     }
-    IdmCore *multi = idm_core_fn_multi(group->items[0]->name, span);
+    const char *method_name = method_surface_name_text(group->items[0]);
+    IdmCore *multi = idm_core_fn_multi(method_name, span);
     if (!multi) {
         free(types);
         idm_core_free(receiver);
@@ -1054,7 +1099,7 @@ static IdmCore *expand_composite_method_surface_call(ExpandContext *ctx, const M
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     for (size_t i = 0; i < type_count; i++) {
-        if (!method_multi_add_type_clause(ctx, multi, &types[i], group->items[0]->name, argc, span, err)) {
+        if (!method_multi_add_type_clause(ctx, multi, &types[i], method_name, argc, span, err)) {
             free(types);
             idm_core_free(multi);
             idm_core_free(receiver);
@@ -1062,7 +1107,7 @@ static IdmCore *expand_composite_method_surface_call(ExpandContext *ctx, const M
             return NULL;
         }
     }
-    if (!method_multi_add_fallback_clause(ctx, multi, group->items[0]->name, argc, span, err)) {
+    if (!method_multi_add_fallback_clause(ctx, multi, method_name, argc, span, err)) {
         free(types);
         idm_core_free(multi);
         idm_core_free(receiver);
@@ -1112,13 +1157,13 @@ static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const Metho
     if (accepted_count == 0 || !method) {
         idm_core_free(receiver);
         core_args_free(args, arg_count);
-        return expand_error(err, span, "ambiguous method '%s'", group->items[0]->name);
+        return expand_error(err, span, "ambiguous method '%s'", method_surface_name_text(group->items[0]));
     }
     if (accepted_count > 1u) return expand_composite_method_surface_call(ctx, group, receiver, args, arg_count, (uint32_t)argc, span, err);
     if (!method->has_dispatch) {
         idm_core_free(receiver);
         core_args_free(args, arg_count);
-        return expand_error(err, span, "method '%s.%s' has no compiled dispatcher", method->trait, method->name);
+        return expand_error(err, span, "method '%s.%s' has no compiled dispatcher", method_surface_trait_text(method), method_surface_name_text(method));
     }
     IdmCore *callee = method_dispatch_ref(ctx, method, span, err);
     IdmCore *call = callee ? idm_core_call(callee, receiver ? receiver->span : span) : NULL;
@@ -1159,11 +1204,7 @@ static bool adjacent_items_present(IdmSyntax *const *items, size_t start, size_t
 
 static bool flatten_adjacent_push(IdmSyntax ***out_items, size_t *out_count, size_t *out_cap, IdmSyntax *item) {
     if (*out_count == *out_cap) {
-        size_t cap = *out_cap ? *out_cap * 2u : 8u;
-        IdmSyntax **items = realloc(*out_items, cap * sizeof(*items));
-        if (!items) return false;
-        *out_items = items;
-        *out_cap = cap;
+        if (!idm_grow((void **)out_items, out_cap, sizeof(**out_items), 8u, *out_count + 1u)) return false;
     }
     (*out_items)[(*out_count)++] = item;
     return true;
@@ -1201,34 +1242,57 @@ static IdmCore *parse_dot_tail(ExpandContext *ctx, IdmSyntax *const *items, size
             idm_core_free(receiver);
             return expand_error(err, items[dot]->span, "dot dispatch expects a method name");
         }
+        IdmResolveStatus field_status = IDM_RESOLVE_UNBOUND;
+        FieldSurfaceGroup fields = {0};
+        if (!resolve_field_surface_group(ctx, items[dot + 1u], &fields, &field_status, err)) {
+            idm_core_free(receiver);
+            return NULL;
+        }
+        if (field_status == IDM_RESOLVE_AMBIGUOUS) {
+            idm_core_free(receiver);
+            field_surface_group_destroy(&fields);
+            return expand_error(err, items[dot + 1u]->span, "ambiguous field '%s'", items[dot + 1u]->as.text);
+        }
         IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
         MethodSurfaceGroup group = {0};
         if (!resolve_method_surface_group(ctx, items[dot + 1u], &group, &method_status, err)) {
             idm_core_free(receiver);
+            field_surface_group_destroy(&fields);
             return NULL;
         }
         if (method_status == IDM_RESOLVE_AMBIGUOUS) {
             idm_core_free(receiver);
+            field_surface_group_destroy(&fields);
             method_surface_group_destroy(&group);
             return expand_error(err, items[dot + 1u]->span, "ambiguous method '%s'", items[dot + 1u]->as.text);
         }
-        if (group.count == 0) {
+        if (fields.count != 0 && group.count != 0) {
             idm_core_free(receiver);
+            field_surface_group_destroy(&fields);
+            method_surface_group_destroy(&group);
+            return expand_error(err, items[dot + 1u]->span, "ambiguous member '%s' is both a record field and a trait method", items[dot + 1u]->as.text);
+        }
+        if (fields.count == 0 && group.count == 0) {
+            idm_core_free(receiver);
+            field_surface_group_destroy(&fields);
+            method_surface_group_destroy(&group);
             return expand_error(err, items[dot + 1u]->span, "unbound method '%s'", items[dot + 1u]->as.text);
         }
-        if (method_group_all_fields(&group)) {
+        if (fields.count != 0) {
             *pos = dot + 2u;
-            receiver = expand_field_surface_call_cores(ctx, &group, receiver, NULL, 0u, items[dot + 1u]->span, err);
+            receiver = expand_field_surface_call_cores(ctx, &fields, receiver, NULL, 0u, items[dot + 1u]->span, err);
+            field_surface_group_destroy(&fields);
             method_surface_group_destroy(&group);
             if (!receiver) return NULL;
             continue;
         }
+        field_surface_group_destroy(&fields);
         const MethodSurfaceDef *method = group.items[0];
         uint32_t dot_arity = 0;
         if (!method_group_max_accepting_at_least(&group, 1u, &dot_arity)) {
             idm_core_free(receiver);
             method_surface_group_destroy(&group);
-            return expand_error(err, items[dot + 1u]->span, "method '%s.%s' cannot be used with dot dispatch because it takes no receiver", method->trait, method->name);
+            return expand_error(err, items[dot + 1u]->span, "method '%s.%s' cannot be used with dot dispatch because it takes no receiver", method_surface_trait_text(method), method_surface_name_text(method));
         }
         size_t max_extra_count = (size_t)dot_arity - 1u;
         IdmCore **args = max_extra_count ? calloc(max_extra_count, sizeof(*args)) : NULL;
@@ -1368,22 +1432,173 @@ static IdmCore *expand_cond_primitive_clause_call(ExpandContext *ctx, IdmSyntax 
     return cond;
 }
 
+static bool surface_operator_boundary(ExpandContext *ctx, const IdmSyntax *syn, const IdmOperatorDef **out_syntax_capture, IdmError *err) {
+    const IdmOperatorDef *syntax_capture = op_lookup_syntax_capture(ctx, syn, true, err);
+    if (err && err->present) return false;
+    if (out_syntax_capture) *out_syntax_capture = syntax_capture;
+    return syntax_capture || op_lookup(ctx, syn, false) != NULL;
+}
+
+static size_t delimited_body_primary_end(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
+    size_t last_body = SIZE_MAX;
+    for (size_t i = start + 1u; i < end; i++) {
+        if (syn_is_form(items[i], "%-body")) last_body = i;
+    }
+    if (last_body == SIZE_MAX) return SIZE_MAX;
+    size_t pos = last_body + 1u;
+    while (pos < end) {
+        const IdmOperatorDef *syntax_capture = NULL;
+        if (surface_operator_boundary(ctx, items[pos], &syntax_capture, err) || (err && err->present)) break;
+        pos++;
+    }
+    return pos;
+}
+
+static size_t surface_primary_end(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
+    if (start >= end) return start;
+    size_t body_end = delimited_body_primary_end(ctx, items, start, end, err);
+    if (body_end != SIZE_MAX || (err && err->present)) return body_end;
+
+    const SurfaceKeywordDef *keyword = surface_keyword_for_syntax(items[start]);
+    if (keyword && keyword->primary_takes_rest) return end;
+
+    const char *head = surface_token_text(items[start]);
+
+    size_t pos = start + 1u;
+    if (!head) return pos;
+    while (pos < end) {
+        const IdmOperatorDef *syntax_capture = NULL;
+        if (surface_operator_boundary(ctx, items[pos], &syntax_capture, err) || (err && err->present)) break;
+        if (syn_is_dot(items[pos])) break;
+        size_t arg_end = delimited_body_primary_end(ctx, items, pos, end, err);
+        if (err && err->present) break;
+        pos = arg_end == SIZE_MAX ? pos + 1u : arg_end;
+    }
+    return pos;
+}
+
+static bool scan_operator_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, size_t *out_syntax_op_index, const IdmOperatorDef **out_syntax_infix, bool *out_has_operator, IdmError *err) {
+    size_t syntax_op_index = 0;
+    const IdmOperatorDef *syntax_infix = NULL;
+    bool has_operator = op_lookup(ctx, items[start], true) != NULL;
+    bool expect_operand = true;
+    size_t i = start;
+    while (i < end) {
+        if (expect_operand) {
+            if (op_lookup(ctx, items[i], true)) {
+                has_operator = true;
+                i++;
+                continue;
+            }
+            size_t next = surface_primary_end(ctx, items, i, end, err);
+            if (err && err->present) return false;
+            if (next <= i) next = i + 1u;
+            i = next;
+            expect_operand = false;
+            continue;
+        }
+        const IdmOperatorDef *candidate = NULL;
+        if (surface_operator_boundary(ctx, items[i], &candidate, err)) {
+            if (candidate) {
+                syntax_infix = candidate;
+                syntax_op_index = i;
+                break;
+            }
+            has_operator = true;
+            i++;
+            expect_operand = true;
+            continue;
+        }
+        if (err && err->present) return false;
+        size_t next = surface_primary_end(ctx, items, i, end, err);
+        if (err && err->present) return false;
+        if (next <= i) break;
+        i = next;
+    }
+    if (out_syntax_op_index) *out_syntax_op_index = syntax_op_index;
+    if (out_syntax_infix) *out_syntax_infix = syntax_infix;
+    if (out_has_operator) *out_has_operator = has_operator;
+    return true;
+}
+
+bool surface_parts_have_operator_boundary(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
+    if (start >= end) return false;
+    size_t syntax_op_index = 0;
+    const IdmOperatorDef *syntax_infix = NULL;
+    bool has_operator = false;
+    if (!scan_operator_parts(ctx, items, start, end, &syntax_op_index, &syntax_infix, &has_operator, err)) return false;
+    (void)syntax_op_index;
+    return syntax_infix || has_operator;
+}
+
+static IdmCore *expand_operator_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, bool *handled, IdmError *err) {
+    *handled = false;
+    size_t syntax_op_index = 0;
+    const IdmOperatorDef *syntax_infix = NULL;
+    bool has_operator = false;
+    if (!scan_operator_parts(ctx, items, start, end, &syntax_op_index, &syntax_infix, &has_operator, err)) {
+        *handled = true;
+        return NULL;
+    }
+    if (syntax_infix) {
+        *handled = true;
+        return expand_syntax_capture_dispatch(ctx, syntax_infix, items[syntax_op_index], items, start, syntax_op_index, syntax_op_index + 1u, end, err);
+    }
+    if (has_operator) {
+        *handled = true;
+        EnforestParser parser = {ctx, items, end, start, err};
+        IdmCore *expr = parse_enforest_expr(&parser, 0);
+        if (!expr) return NULL;
+        if (parser.pos != end) {
+            idm_core_free(expr);
+            return expand_error(err, items[parser.pos]->span, "unexpected trailing syntax after operator expression");
+        }
+        return expr;
+    }
+    return NULL;
+}
+
 static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
     if (start >= end) return expand_error(err, idm_span_unknown(NULL), "empty expression");
     size_t len = end - start;
+    if (len > 1u) {
+        bool handled = false;
+        IdmCore *core = expand_operator_parts(ctx, items, start, end, &handled, err);
+        if (handled) return core;
+    }
     if (items[start]->kind == IDM_SYN_WORD) {
         uint32_t payload = 0;
         if (resolve_transformer(ctx, items[start], &payload, err)) return expand_macro_use_from_parts(ctx, items, start, end, payload, err);
         if (err && err->present) return NULL;
     }
     if (items[start]->kind == IDM_SYN_WORD && !head_is_bound(ctx, items[start])) {
+        IdmResolveStatus field_status = IDM_RESOLVE_UNBOUND;
+        FieldSurfaceGroup fields = {0};
+        if (!resolve_field_surface_group(ctx, items[start], &fields, &field_status, err)) return NULL;
+        if (field_status == IDM_RESOLVE_AMBIGUOUS) {
+            field_surface_group_destroy(&fields);
+            return expand_error(err, items[start]->span, "ambiguous field '%s'", items[start]->as.text);
+        }
         IdmResolveStatus method_status = IDM_RESOLVE_UNBOUND;
         MethodSurfaceGroup group = {0};
-        if (!resolve_method_surface_group(ctx, items[start], &group, &method_status, err)) return NULL;
-        if (method_status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, items[start]->span, "ambiguous method '%s'", items[start]->as.text);
-        if (group.count != 0) {
+        if (!resolve_method_surface_group(ctx, items[start], &group, &method_status, err)) {
+            field_surface_group_destroy(&fields);
+            return NULL;
+        }
+        if (method_status == IDM_RESOLVE_AMBIGUOUS) {
+            field_surface_group_destroy(&fields);
+            method_surface_group_destroy(&group);
+            return expand_error(err, items[start]->span, "ambiguous method '%s'", items[start]->as.text);
+        }
+        if (fields.count != 0 && group.count != 0) {
+            field_surface_group_destroy(&fields);
+            method_surface_group_destroy(&group);
+            return expand_error(err, items[start]->span, "ambiguous member '%s' is both a record field and a trait method", items[start]->as.text);
+        }
+        if (fields.count != 0 || group.count != 0) {
             IdmCore **args = len > 1u ? calloc(len - 1u, sizeof(*args)) : NULL;
             if (len > 1u && !args) {
+                field_surface_group_destroy(&fields);
                 method_surface_group_destroy(&group);
                 return (IdmCore *)(uintptr_t)idm_error_oom(err, items[start]->span);
             }
@@ -1394,25 +1609,25 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
                 if (!args[arg_count]) {
                     for (size_t i = 0; i < arg_count; i++) idm_core_free(args[i]);
                     free(args);
+                    field_surface_group_destroy(&fields);
                     method_surface_group_destroy(&group);
                     return NULL;
                 }
                 arg_count++;
             }
-            IdmCore *call = method_group_all_fields(&group)
-                ? expand_field_surface_call_cores(ctx, &group, NULL, args, arg_count, items[start]->span, err)
+            IdmCore *call = fields.count != 0
+                ? expand_field_surface_call_cores(ctx, &fields, NULL, args, arg_count, items[start]->span, err)
                 : expand_method_surface_call_cores(ctx, &group, NULL, args, arg_count, items[start]->span, err);
             free(args);
+            field_surface_group_destroy(&fields);
             method_surface_group_destroy(&group);
             return call;
         }
+        field_surface_group_destroy(&fields);
         method_surface_group_destroy(&group);
     }
-    if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "fn") == 0) return expand_fn_parts(ctx, items, start, end, err);
-    if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "receive") == 0) return expand_receive_parts(ctx, items, start, end, err);
-    if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "raise") == 0) return expand_raise_parts(ctx, items, start, end, err);
-    if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "try") == 0) return expand_try_parts(ctx, items, start, end, err);
-    if (items[start]->kind == IDM_SYN_WORD && strcmp(items[start]->as.text, "implements?") == 0) return expand_implements_parts(ctx, items, start, end, err);
+    const SurfaceKeywordDef *keyword = surface_keyword_for_syntax(items[start]);
+    if (keyword && keyword->handler) return keyword->handler(ctx, items, start, end, err);
     if (items[start]->kind == IDM_SYN_WORD) {
         const IdmOperatorDef *syntax_capture = op_lookup_syntax_capture(ctx, items[start], false, err);
         if (err && err->present) return NULL;
@@ -1438,9 +1653,7 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
         if (resolve_head_core_syntax(ctx, items[start], &core_syntax_fn, err)) return expand_core_syntax_use_from_parts(ctx, items, start, end, core_syntax_fn, err);
         if (err && err->present) return NULL;
         if (reserved_prefix_string(items, start, end, err)) return NULL;
-        expand_error(err, items[start]->span, "unbound identifier '%s'", items[start]->as.text);
-        note_unbound_context(ctx, items[start], err);
-        return NULL;
+        return expand_unbound_identifier(ctx, items[start], err);
     }
     if (adjacent_items_present(items, start, end)) {
         IdmSyntax **flat = NULL;
@@ -1452,31 +1665,6 @@ static IdmCore *expand_parts_inner(ExpandContext *ctx, IdmSyntax *const *items, 
     }
     if (reserved_prefix_string(items, start, end, err)) return NULL;
     if (len == 1) return expand_syntax(ctx, items[start], err);
-
-    bool has_operator = false;
-    size_t syntax_op_index = 0;
-    const IdmOperatorDef *syntax_infix = NULL;
-    for (size_t i = start; i < end; i++) {
-        if (i > start && !syntax_infix) {
-            syntax_infix = op_lookup_syntax_capture(ctx, items[i], true, err);
-            if (err && err->present) return NULL;
-            if (syntax_infix) syntax_op_index = i;
-        }
-        if (op_lookup(ctx, items[i], false) || op_lookup(ctx, items[i], true)) has_operator = true;
-    }
-    if (syntax_infix) {
-        return expand_syntax_capture_dispatch(ctx, syntax_infix, items[syntax_op_index], items, start, syntax_op_index, syntax_op_index + 1u, end, err);
-    }
-    if (has_operator) {
-        EnforestParser parser = {ctx, items, end, start, err};
-        IdmCore *expr = parse_enforest_expr(&parser, 0);
-        if (!expr) return NULL;
-        if (parser.pos != end) {
-            idm_core_free(expr);
-            return expand_error(err, items[parser.pos]->span, "unexpected trailing syntax after operator expression");
-        }
-        return expr;
-    }
 
     if (start + 1u < end && syn_is_dot(items[start + 1u])) {
         size_t pos = start;
@@ -1539,13 +1727,24 @@ static IdmCore *parse_enforest_primary(EnforestParser *parser) {
         if (!operand) return NULL;
         return make_operator_unary(parser->ctx, prefix_op, head, operand, head->span, parser->err);
     }
-    if (head->kind == IDM_SYN_WORD && op_lookup(parser->ctx, head, false)) {
-        return expand_error(parser->err, head->span, "operator '%s' cannot appear where an operand is required", head->as.text);
+    const char *head_text = surface_token_text(head);
+    if (head_text && op_lookup(parser->ctx, head, false)) {
+        return expand_error(parser->err, head->span, "operator '%s' cannot appear where an operand is required", head_text);
     }
 
-    if (head->kind == IDM_SYN_WORD && strcmp(head->as.text, "fn") == 0) {
+    size_t primary_end = delimited_body_primary_end(parser->ctx, parser->items, start, parser->end, parser->err);
+    if (parser->err && parser->err->present) return NULL;
+    if (primary_end != SIZE_MAX) {
+        parser->pos = primary_end;
+        IdmCore *core = expand_parts(parser->ctx, parser->items, start, primary_end, parser->err);
+        if (!core) return NULL;
+        return parse_dot_tail(parser->ctx, parser->items, &parser->pos, parser->end, true, core, parser->err);
+    }
+
+    const SurfaceKeywordDef *keyword = surface_keyword_for_syntax(head);
+    if (keyword && keyword->operand_takes_rest && keyword->handler) {
         parser->pos = parser->end;
-        return expand_fn_parts(parser->ctx, parser->items, start, parser->end, parser->err);
+        return keyword->handler(parser->ctx, parser->items, start, parser->end, parser->err);
     }
 
     if (head->kind == IDM_SYN_WORD && parser->pos < parser->end && !syn_is_dot(parser->items[parser->pos]) && !op_lookup(parser->ctx, parser->items[parser->pos], false)) {
@@ -1762,7 +1961,16 @@ static IdmCore *expand_syntax_capture_macro(ExpandContext *ctx, const IdmOperato
     IdmSyntax *use = operator_macro_use_start(op_token, target_word, err);
     if (!use) return NULL;
     SyntaxCapturePayload captured = {0};
+    bool right_first = op->capture_left && kind == IDM_OPERATOR_CAPTURE_EXPRESSION;
 #define MACRO_CAPTURE_FAIL(span, ...) do { expand_error(err, span, __VA_ARGS__); goto fail; } while (0)
+    if (right_first && !build_syntax_capture_payload(ctx, kind, op->capture_count, op, op_token, items, cursor, end, &captured, err)) goto fail;
+    if (right_first) {
+        for (size_t i = 0; i < captured.count; i++) {
+            IdmSyntax *arg = captured.items[i];
+            captured.items[i] = NULL;
+            if (!append_syntax_or_oom(use, arg, arg ? arg->span : op_token->span, err)) goto fail;
+        }
+    }
     if (op->capture_left) {
         if (left_start == left_end) MACRO_CAPTURE_FAIL(op_token->span, "operator '%s' requires a left operand", op->name);
         IdmSyntax *left = syntax_use_from_parts(ctx, items, left_start, left_end, err);
@@ -1770,11 +1978,13 @@ static IdmCore *expand_syntax_capture_macro(ExpandContext *ctx, const IdmOperato
     } else if (left_start != left_end) {
         MACRO_CAPTURE_FAIL(op_token->span, "operator '%s' does not accept a left operand", op->name);
     }
-    if (!build_syntax_capture_payload(ctx, kind, op->capture_count, op, op_token, items, cursor, end, &captured, err)) goto fail;
-    for (size_t i = 0; i < captured.count; i++) {
-        IdmSyntax *arg = captured.items[i];
-        captured.items[i] = NULL;
-        if (!append_syntax_or_oom(use, arg, arg ? arg->span : op_token->span, err)) goto fail;
+    if (!right_first) {
+        if (!build_syntax_capture_payload(ctx, kind, op->capture_count, op, op_token, items, cursor, end, &captured, err)) goto fail;
+        for (size_t i = 0; i < captured.count; i++) {
+            IdmSyntax *arg = captured.items[i];
+            captured.items[i] = NULL;
+            if (!append_syntax_or_oom(use, arg, arg ? arg->span : op_token->span, err)) goto fail;
+        }
     }
 #undef MACRO_CAPTURE_FAIL
     IdmCore *core = expand_macro_use(ctx, use, use->as.seq.items[1], payload, err);
@@ -1849,11 +2059,6 @@ static IdmCore *parse_enforest_expr(EnforestParser *parser, uint8_t min_prec) {
 
 static IdmCore *expand_form_expr(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     if (syn->as.seq.count < 2) return expand_error(err, syn->span, "empty %%-expr");
-    if (syn->as.seq.items[1]->kind == IDM_SYN_WORD) {
-        uint32_t payload = 0;
-        if (resolve_transformer(ctx, syn->as.seq.items[1], &payload, err)) return expand_macro_use(ctx, syn, syn->as.seq.items[1], payload, err);
-        if (err && err->present) return NULL;
-    }
     return expand_parts(ctx, syn->as.seq.items, 1, syn->as.seq.count, err);
 }
 
@@ -2067,10 +2272,6 @@ IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) 
     IdmCore *lit = literal_from_syntax(ctx, syn, err);
     if (lit || (err && err->present)) return lit;
 
-    IdmValue literal = idm_nil();
-    if (value_from_literal_syntax(ctx, syn, &literal, err)) return idm_core_literal(literal, syn->span);
-    if (err && err->present) return NULL;
-
     if (syn->kind == IDM_SYN_WORD) return expand_word_ref(ctx, syn, err);
     if (syn_is_form(syn, "%-expr")) return expand_form_expr(ctx, syn, err);
     if (syn_is_form(syn, "%-body")) return expand_form_body(ctx, syn, err);
@@ -2177,11 +2378,7 @@ IdmRepl *idm_repl_create(IdmRuntime *rt, IdmError *err) {
 
 static bool repl_track_module(IdmRepl *repl, IdmBytecodeModule *module) {
     if (repl->module_count == repl->module_cap) {
-        size_t cap = repl->module_cap ? repl->module_cap * 2u : 8u;
-        IdmBytecodeModule **grown = realloc(repl->modules, cap * sizeof(*grown));
-        if (!grown) return false;
-        repl->modules = grown;
-        repl->module_cap = cap;
+        if (!idm_grow((void **)&repl->modules, &repl->module_cap, sizeof(*repl->modules), 8u, repl->module_count + 1u)) return false;
     }
     repl->modules[repl->module_count++] = module;
     return true;
@@ -2344,7 +2541,7 @@ static IdmReplStatus repl_compile_source(IdmRepl *repl, const char *file, const 
     }
     idm_bc_init(module);
     uint32_t main_fn = 0;
-    bool compiled = idm_core_compile_main(core, module, &main_fn, err);
+    bool compiled = idm_core_compile_main(repl->rt, core, module, &main_fn, err);
     idm_core_free(core);
     if (!compiled) {
         idm_bc_destroy(module);

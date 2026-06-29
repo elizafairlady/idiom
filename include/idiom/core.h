@@ -32,231 +32,236 @@ typedef enum {
     IDM_CORE_RECORD_IS
 } IdmCoreKind;
 
+#define IDM_PRIMITIVE_LIST(X) \
+    X(ADD, "add", 2, 2, "kernel") \
+    X(SUB, "sub", 2, 2, "kernel") \
+    X(MUL, "mul", 2, 2, "kernel") \
+    X(DIV, "div", 2, 2, "kernel") \
+    X(MOD, "mod", 2, 2, "kernel") \
+    X(POW, "pow", 2, 2, "kernel") \
+    X(NEG, "neg", 1, 1, "kernel") \
+    X(EQ, "eq?", 2, 2, "kernel") \
+    X(NEQ, "neq?", 2, 2, "kernel") \
+    X(LT, "lt?", 2, 2, "kernel") \
+    X(GT, "gt?", 2, 2, "kernel") \
+    X(LTE, "lte?", 2, 2, "kernel") \
+    X(GTE, "gte?", 2, 2, "kernel") \
+    X(COND, "cond", 2, 3, "kernel") \
+    X(OK, "ok?", 1, 1, "result") \
+    X(CONS, "cons", 2, 2, "kernel") \
+    X(FIRST, "first", 1, 1, "kernel") \
+    X(REST, "rest", 1, 1, "kernel") \
+    X(LIST, "list", 0, UINT32_MAX, "kernel") \
+    X(TUPLE, "tuple", 0, UINT32_MAX, "kernel") \
+    X(VECTOR, "vector", 0, UINT32_MAX, "kernel") \
+    X(DICT, "dict", 0, UINT32_MAX, "kernel") \
+    X(TUPLE_GET, "tuple-get", 2, 2, "kernel") \
+    X(APPEND, "append", 2, 2, "kernel") \
+    X(STR_TO_LIST, "str-to-list", 1, 1, "kernel") \
+    X(DICT_TO_LIST, "dict-to-list", 1, 1, "kernel") \
+    X(VECTOR_TO_LIST, "vector-to-list", 1, 1, "kernel") \
+    X(TUPLE_TO_LIST, "tuple-to-list", 1, 1, "kernel") \
+    X(APPLY, "apply", 2, 2, "kernel") \
+    X(SYNTAX_KIND, "syntax-kind", 1, 1, "kernel") \
+    X(SYNTAX_PROPERTY, "syntax-property", 2, 2, "kernel") \
+    X(SYNTAX_SET_PROPERTY, "syntax-set-property", 3, 3, "kernel") \
+    X(SYNTAX_ORIGIN, "syntax-origin", 1, 1, "kernel") \
+    X(SYNTAX_LIST_PRED, "syntax-list?", 1, 1, "kernel") \
+    X(SYNTAX_LENGTH, "syntax-length", 1, 1, "kernel") \
+    X(SYNTAX_NTH, "syntax-nth", 2, 2, "kernel") \
+    X(SYNTAX_SLICE, "syntax-slice", 3, 3, "kernel") \
+    X(SYNTAX_WORD_PRED, "syntax-word?", 1, 1, "kernel") \
+    X(SYNTAX_WORD_TEXT, "syntax-word-text", 1, 1, "kernel") \
+    X(SYNTAX_ATOM_PRED, "syntax-atom?", 1, 1, "kernel") \
+    X(SYNTAX_ATOM_TEXT, "syntax-atom-text", 1, 1, "kernel") \
+    X(SYNTAX_INT_PRED, "syntax-int?", 1, 1, "kernel") \
+    X(SYNTAX_INT_VALUE, "syntax-int-value", 1, 1, "kernel") \
+    X(MAKE_SYNTAX_WORD, "make-syntax-word", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_ATOM, "make-syntax-atom", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_INT, "make-syntax-int", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_STRING, "make-syntax-string", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_LIST, "make-syntax-list", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_VECTOR, "make-syntax-vector", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_TUPLE, "make-syntax-tuple", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_DICT, "make-syntax-dict", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_EXPR, "make-syntax-expr", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_BODY, "make-syntax-body", 2, 2, "kernel") \
+    X(MAKE_SYNTAX_GROUP, "make-syntax-group", 2, 2, "kernel") \
+    X(SYNTAX_ERROR, "syntax-error", 2, 2, "kernel") \
+    X(LOCAL_EXPAND, "local-expand", 1, 1, "kernel") \
+    X(FREE_IDENTIFIER_EQ, "free-identifier=?", 2, 2, "kernel") \
+    X(BOUND_IDENTIFIER_EQ, "bound-identifier=?", 2, 2, "kernel") \
+    X(BIND_BANG, "bind!", 2, 2, "kernel") \
+    X(SELF, "self", 0, 0, "kernel") \
+    X(SPAWN, "spawn", 1, 1, "kernel") \
+    X(SEND, "send", 2, 2, "kernel") \
+    X(EXIT, "exit", 0, 2, "kernel") \
+    X(LINK, "link", 1, 1, "kernel") \
+    X(UNLINK, "unlink", 1, 1, "kernel") \
+    X(MONITOR, "monitor", 1, 1, "kernel") \
+    X(DEMONITOR, "demonitor", 1, 1, "kernel") \
+    X(TRAP_EXIT, "trap-exit", 1, 1, "kernel") \
+    X(STR, "str", 1, UINT32_MAX, "kernel") \
+    X(CHOMP, "chomp", 1, 1, "string") \
+    X(CAPTURE_STDOUT, "capture-stdout", 1, 1, "kernel") \
+    X(EXEC, "exec", 1, 1, "kernel") \
+    X(AWAIT, "await", 1, 1, "kernel") \
+    X(PRINT, "print", 0, UINT32_MAX, "kernel") \
+    X(PRINTLN, "println", 0, UINT32_MAX, "kernel") \
+    X(CD, "cd", 1, 1, "system") \
+    X(CHDIR, "chdir", 1, 1, "system") \
+    X(PWD, "pwd", 0, 0, "system") \
+    X(WRITE_PROCSUB_TEMP, "write-procsub-temp", 1, 1, "kernel") \
+    X(MAKE_PROCSUB_TEMP, "make-procsub-temp", 0, 0, "kernel") \
+    X(ENV_GET, "env-get", 1, 1, "system") \
+    X(ENV_SET, "env-set", 2, 2, "system") \
+    X(SYNTAX_ADJACENT_PRED, "syntax-adjacent?", 1, 1, "kernel") \
+    X(SYNTAX_STRING_TEXT, "syntax-string-text", 1, 1, "kernel") \
+    X(STR_CONTAINS, "contains?", 2, 2, "string") \
+    X(INTERNAL_REGISTER_MACRO, "internal-register-macro", 2, 2, "") \
+    X(EXPAND_CHECK, "expand-check", 1, 1, "compile") \
+    X(INSPECT, "inspect", 1, 1, "kernel") \
+    X(STR_LEN, "len", 1, 1, "string") \
+    X(STR_SLICE, "slice", 3, 3, "string") \
+    X(STR_FIND, "find", 3, 3, "string") \
+    X(STR_BYTE, "byte", 2, 2, "string") \
+    X(BYTE_STR, "byte-str", 1, 1, "string") \
+    X(REGEX_COMPILE, "raw-compile", 2, 2, "regex") \
+    X(REGEX_PRED, "raw-regex?", 1, 1, "regex") \
+    X(REGEX_SOURCE, "raw-source", 1, 1, "regex") \
+    X(REGEX_OPTIONS, "raw-options", 1, 1, "regex") \
+    X(REGEX_GROUP_COUNT, "raw-group-count", 1, 1, "regex") \
+    X(REGEX_GROUP_NAMES, "raw-group-names", 1, 1, "regex") \
+    X(REGEX_RESULT_PRED, "raw-result?", 1, 1, "regex") \
+    X(REGEX_SCAN_AT, "raw-scan-at", 3, 3, "regex") \
+    X(REGEX_SCAN_FROM, "raw-scan-from", 3, 3, "regex") \
+    X(REGEX_SCAN_FULL, "raw-scan-full", 2, 2, "regex") \
+    X(REGEX_TEST, "raw-test?", 2, 2, "regex") \
+    X(REGEX_RESULT_START, "raw-result-start", 1, 1, "regex") \
+    X(REGEX_RESULT_END, "raw-result-end", 1, 1, "regex") \
+    X(REGEX_RESULT_TEXT, "raw-result-text", 1, 1, "regex") \
+    X(REGEX_CAPTURE, "raw-capture", 2, 2, "regex") \
+    X(REGEX_CAPTURE_RANGE, "raw-capture-range", 2, 2, "regex") \
+    X(REGEX_CAPTURE_NAMED, "raw-capture-named", 2, 2, "regex") \
+    X(REGEX_CAPTURES, "raw-captures", 1, 1, "regex") \
+    X(REGEX_SCAN_ALL, "raw-scan-all", 2, 2, "regex") \
+    X(REGEX_REPLACE, "raw-replace", 3, 3, "regex") \
+    X(REGEX_REPLACE_ALL, "raw-replace-all", 3, 3, "regex") \
+    X(REGEX_SPLIT_ON, "raw-split-on", 2, 2, "regex") \
+    X(REGEX_ESCAPE, "raw-escape", 1, 1, "regex") \
+    X(FILE_READ, "read", 1, 1, "file") \
+    X(FILE_WRITE, "write", 2, 2, "file") \
+    X(FILE_EXISTS, "exists?", 1, 1, "file") \
+    X(FILE_STAT, "stat", 1, 1, "file") \
+    X(FILE_LIST, "list", 1, 1, "file") \
+    X(FILE_REMOVE, "remove", 1, 1, "file") \
+    X(ARGS, "args", 0, 0, "system") \
+    X(TIME_MS, "time-ms", 0, 0, "system") \
+    X(RANDOM, "random", 1, 1, "system") \
+    X(DICT_GET, "dict-get", 3, 3, "kernel") \
+    X(DICT_PUT, "dict-put", 3, 3, "kernel") \
+    X(DICT_DEL, "dict-del", 2, 2, "kernel") \
+    X(DICT_KEYS, "dict-keys", 1, 1, "kernel") \
+    X(DICT_VALS, "dict-vals", 1, 1, "kernel") \
+    X(DICT_HAS, "dict-has?", 2, 2, "kernel") \
+    X(DICT_SIZE, "dict-size", 1, 1, "kernel") \
+    X(ABS, "abs", 1, 1, "math") \
+    X(FLOOR, "floor", 1, 1, "math") \
+    X(ROUND, "round", 1, 1, "math") \
+    X(SQRT, "sqrt", 1, 1, "math") \
+    X(FLOOR_DIV, "floor-div", 2, 2, "kernel") \
+    X(FLOOR_MOD, "floor-mod", 2, 2, "kernel") \
+    X(PARSE_INT, "parse-int", 1, 1, "string") \
+    X(PARSE_FLOAT, "parse-float", 1, 1, "string") \
+    X(FILE_MKDIR, "mkdir", 1, 1, "file") \
+    X(FILE_APPEND, "append", 2, 2, "file") \
+    X(ORD_STR, "ord->str", 1, 1, "string") \
+    X(STR_ORD, "str->ord", 1, 1, "string") \
+    X(FROM_RUNES, "from-runes", 1, 1, "string") \
+    X(REPL_COMPILE, "repl-compile", 1, 1, "kernel") \
+    X(REPL_ABORT, "repl-abort", 1, 1, "kernel") \
+    X(REPL_SPAWN, "repl-spawn", 1, 1, "kernel") \
+    X(REPL_DIAGNOSTIC, "repl-diagnostic", 0, 0, "kernel") \
+    X(ISH_SESSION, "ish-session", 0, 0, "kernel") \
+    X(TTY_PRED, "tty?", 0, 0, "term") \
+    X(TTY_RAW, "tty-raw!", 0, 0, "term") \
+    X(TTY_RESTORE, "tty-restore!", 0, 0, "term") \
+    X(TTY_READ, "tty-read", 1, 1, "term") \
+    X(TTY_READ_LINE, "tty-read-line", 0, 0, "term") \
+    X(TTY_WRITE, "tty-write", 1, 1, "term") \
+    X(TTY_SIZE, "tty-size", 0, 0, "term") \
+    X(EPRINTLN, "eprintln", 0, UINT32_MAX, "kernel") \
+    X(PORT_STATUS, "port-status", 1, 1, "port") \
+    X(JOB_RESUME, "job-resume", 2, 2, "kernel") \
+    X(JOB_SIGNAL, "job-signal", 2, 2, "kernel") \
+    X(ERROR_MESSAGE, "error-message", 1, 1, "kernel") \
+    X(MAKE_ERROR, "make-error", 1, 1, "kernel") \
+    X(SPAWN_LINK, "spawn-link", 1, 1, "kernel") \
+    X(SPAWN_MONITOR, "spawn-monitor", 1, 1, "kernel") \
+    X(PORT_READ, "port-read", 3, 3, "port") \
+    X(PORT_WRITE, "port-write", 2, 2, "port") \
+    X(PORT_CLOSE_INPUT, "port-close-input", 1, 1, "port") \
+    X(RAISE, "raise", 1, 1, "kernel") \
+    X(IS_A_P, "is-a?", 2, 2, "kernel") \
+    X(NIL_P, "nil?", 1, 1, "kernel") \
+    X(ATOM_P, "atom?", 1, 1, "kernel") \
+    X(WORD_P, "word?", 1, 1, "kernel") \
+    X(INT_P, "int?", 1, 1, "kernel") \
+    X(FLOAT_P, "float?", 1, 1, "kernel") \
+    X(STRING_P, "string?", 1, 1, "kernel") \
+    X(PAIR_P, "pair?", 1, 1, "kernel") \
+    X(EMPTY_LIST_P, "empty-list?", 1, 1, "kernel") \
+    X(LIST_P, "list?", 1, 1, "kernel") \
+    X(TUPLE_P, "tuple?", 1, 1, "kernel") \
+    X(VECTOR_P, "vector?", 1, 1, "kernel") \
+    X(DICT_P, "dict?", 1, 1, "kernel") \
+    X(SYNTAX_P, "syntax?", 1, 1, "kernel") \
+    X(CELL_P, "cell?", 1, 1, "kernel") \
+    X(CLOSURE_P, "closure?", 1, 1, "kernel") \
+    X(PID_P, "pid?", 1, 1, "kernel") \
+    X(REF_P, "ref?", 1, 1, "kernel") \
+    X(PORT_P, "port?", 1, 1, "kernel") \
+    X(REGEX_P, "regex?", 1, 1, "kernel") \
+    X(REGEX_RESULT_P, "regex-result?", 1, 1, "kernel") \
+    X(COMPARE, "compare", 2, 2, "kernel") \
+    X(CEIL, "ceil", 1, 1, "math") \
+    X(TRUNCATE, "truncate", 1, 1, "math") \
+    X(SIN, "sin", 1, 1, "math") \
+    X(COS, "cos", 1, 1, "math") \
+    X(TAN, "tan", 1, 1, "math") \
+    X(ASIN, "asin", 1, 1, "math") \
+    X(ACOS, "acos", 1, 1, "math") \
+    X(ATAN, "atan", 1, 1, "math") \
+    X(ATAN2, "atan2", 2, 2, "math") \
+    X(EXP, "exp", 1, 1, "math") \
+    X(LOG, "log", 1, 1, "math") \
+    X(LOG2, "log2", 1, 1, "math") \
+    X(LOG10, "log10", 1, 1, "math") \
+    X(HYPOT, "hypot", 2, 2, "math") \
+    X(NAN_P, "nan?", 1, 1, "math") \
+    X(FINITE_P, "finite?", 1, 1, "math") \
+    X(INFINITE_P, "infinite?", 1, 1, "math") \
+    X(NAN, "nan", 0, 0, "math") \
+    X(INF, "inf", 0, 0, "math") \
+    X(DIVMOD, "divmod", 2, 2, "math") \
+    X(BIT_AND, "bit-and", 2, 2, "math") \
+    X(BIT_OR, "bit-or", 2, 2, "math") \
+    X(BIT_XOR, "bit-xor", 2, 2, "math") \
+    X(BIT_NOT, "bit-not", 1, 1, "math") \
+    X(SHIFT_LEFT, "shift-left", 2, 2, "math") \
+    X(SHIFT_RIGHT, "shift-right", 2, 2, "math") \
+    X(BIT_COUNT, "bit-count", 1, 1, "math") \
+    X(BIT_LENGTH, "bit-length", 1, 1, "math") \
+    X(TO_INT, "to-int", 1, 1, "math") \
+    X(TO_FLOAT, "to-float", 1, 1, "math") \
+    X(FILE_OPEN, "open", 2, 2, "file") \
+    X(SYNTAX_FLOAT_VALUE, "syntax-float-value", 1, 1, "kernel") \
+    X(MAKE_SYNTAX_NIL, "make-syntax-nil", 1, 1, "kernel")
+
 typedef enum {
-    IDM_PRIM_ADD,
-    IDM_PRIM_SUB,
-    IDM_PRIM_MUL,
-    IDM_PRIM_DIV,
-    IDM_PRIM_MOD,
-    IDM_PRIM_POW,
-    IDM_PRIM_NEG,
-    IDM_PRIM_EQ,
-    IDM_PRIM_NEQ,
-    IDM_PRIM_LT,
-    IDM_PRIM_GT,
-    IDM_PRIM_LTE,
-    IDM_PRIM_GTE,
-    IDM_PRIM_COND,
-    IDM_PRIM_OK,
-    IDM_PRIM_CONS,
-    IDM_PRIM_FIRST,
-    IDM_PRIM_REST,
-    IDM_PRIM_LIST,
-    IDM_PRIM_TUPLE,
-    IDM_PRIM_VECTOR,
-    IDM_PRIM_DICT,
-    IDM_PRIM_TUPLE_GET,
-    IDM_PRIM_APPEND,
-    IDM_PRIM_STR_TO_LIST,
-    IDM_PRIM_DICT_TO_LIST,
-    IDM_PRIM_VECTOR_TO_LIST,
-    IDM_PRIM_TUPLE_TO_LIST,
-    IDM_PRIM_APPLY,
-    IDM_PRIM_SYNTAX_KIND,
-    IDM_PRIM_SYNTAX_PROPERTY,
-    IDM_PRIM_SYNTAX_SET_PROPERTY,
-    IDM_PRIM_SYNTAX_ORIGIN,
-    IDM_PRIM_SYNTAX_LIST_PRED,
-    IDM_PRIM_SYNTAX_LENGTH,
-    IDM_PRIM_SYNTAX_NTH,
-    IDM_PRIM_SYNTAX_SLICE,
-    IDM_PRIM_SYNTAX_WORD_PRED,
-    IDM_PRIM_SYNTAX_WORD_TEXT,
-    IDM_PRIM_SYNTAX_ATOM_PRED,
-    IDM_PRIM_SYNTAX_ATOM_TEXT,
-    IDM_PRIM_SYNTAX_INT_PRED,
-    IDM_PRIM_SYNTAX_INT_VALUE,
-    IDM_PRIM_MAKE_SYNTAX_WORD,
-    IDM_PRIM_MAKE_SYNTAX_ATOM,
-    IDM_PRIM_MAKE_SYNTAX_INT,
-    IDM_PRIM_MAKE_SYNTAX_STRING,
-    IDM_PRIM_MAKE_SYNTAX_LIST,
-    IDM_PRIM_MAKE_SYNTAX_VECTOR,
-    IDM_PRIM_MAKE_SYNTAX_TUPLE,
-    IDM_PRIM_MAKE_SYNTAX_DICT,
-    IDM_PRIM_MAKE_SYNTAX_EXPR,
-    IDM_PRIM_MAKE_SYNTAX_BODY,
-    IDM_PRIM_MAKE_SYNTAX_GROUP,
-    IDM_PRIM_SYNTAX_ERROR,
-    IDM_PRIM_LOCAL_EXPAND,
-    IDM_PRIM_FREE_IDENTIFIER_EQ,
-    IDM_PRIM_BOUND_IDENTIFIER_EQ,
-    IDM_PRIM_BIND_BANG,
-    IDM_PRIM_SELF,
-    IDM_PRIM_SPAWN,
-    IDM_PRIM_SEND,
-    IDM_PRIM_EXIT,
-    IDM_PRIM_LINK,
-    IDM_PRIM_UNLINK,
-    IDM_PRIM_MONITOR,
-    IDM_PRIM_DEMONITOR,
-    IDM_PRIM_TRAP_EXIT,
-    IDM_PRIM_STR,
-    IDM_PRIM_CHOMP,
-    IDM_PRIM_CAPTURE_STDOUT,
-    IDM_PRIM_EXEC,
-    IDM_PRIM_AWAIT,
-    IDM_PRIM_PRINT,
-    IDM_PRIM_PRINTLN,
-    IDM_PRIM_CD,
-    IDM_PRIM_CHDIR,
-    IDM_PRIM_PWD,
-    IDM_PRIM_WRITE_PROCSUB_TEMP,
-    IDM_PRIM_MAKE_PROCSUB_TEMP,
-    IDM_PRIM_ENV_GET,
-    IDM_PRIM_ENV_SET,
-    IDM_PRIM_SYNTAX_ADJACENT_PRED,
-    IDM_PRIM_SYNTAX_STRING_TEXT,
-    IDM_PRIM_STR_CONTAINS,
-    IDM_PRIM_INTERNAL_REGISTER_MACRO,
-    IDM_PRIM_EXPAND_CHECK,
-    IDM_PRIM_INSPECT,
-    IDM_PRIM_STR_LEN,
-    IDM_PRIM_STR_SLICE,
-    IDM_PRIM_STR_FIND,
-    IDM_PRIM_STR_BYTE,
-    IDM_PRIM_BYTE_STR,
-    IDM_PRIM_REGEX_COMPILE,
-    IDM_PRIM_REGEX_PRED,
-    IDM_PRIM_REGEX_SOURCE,
-    IDM_PRIM_REGEX_OPTIONS,
-    IDM_PRIM_REGEX_GROUP_COUNT,
-    IDM_PRIM_REGEX_GROUP_NAMES,
-    IDM_PRIM_REGEX_RESULT_PRED,
-    IDM_PRIM_REGEX_SCAN_AT,
-    IDM_PRIM_REGEX_SCAN_FROM,
-    IDM_PRIM_REGEX_SCAN_FULL,
-    IDM_PRIM_REGEX_TEST,
-    IDM_PRIM_REGEX_RESULT_START,
-    IDM_PRIM_REGEX_RESULT_END,
-    IDM_PRIM_REGEX_RESULT_TEXT,
-    IDM_PRIM_REGEX_CAPTURE,
-    IDM_PRIM_REGEX_CAPTURE_RANGE,
-    IDM_PRIM_REGEX_CAPTURE_NAMED,
-    IDM_PRIM_REGEX_CAPTURES,
-    IDM_PRIM_REGEX_SCAN_ALL,
-    IDM_PRIM_REGEX_REPLACE,
-    IDM_PRIM_REGEX_REPLACE_ALL,
-    IDM_PRIM_REGEX_SPLIT_ON,
-    IDM_PRIM_REGEX_ESCAPE,
-    IDM_PRIM_FILE_READ,
-    IDM_PRIM_FILE_WRITE,
-    IDM_PRIM_FILE_EXISTS,
-    IDM_PRIM_FILE_STAT,
-    IDM_PRIM_FILE_LIST,
-    IDM_PRIM_FILE_REMOVE,
-    IDM_PRIM_ARGS,
-    IDM_PRIM_TIME_MS,
-    IDM_PRIM_RANDOM,
-    IDM_PRIM_DICT_GET,
-    IDM_PRIM_DICT_PUT,
-    IDM_PRIM_DICT_DEL,
-    IDM_PRIM_DICT_KEYS,
-    IDM_PRIM_DICT_VALS,
-    IDM_PRIM_DICT_HAS,
-    IDM_PRIM_DICT_SIZE,
-    IDM_PRIM_ABS,
-    IDM_PRIM_FLOOR,
-    IDM_PRIM_ROUND,
-    IDM_PRIM_SQRT,
-    IDM_PRIM_FLOOR_DIV,
-    IDM_PRIM_FLOOR_MOD,
-    IDM_PRIM_PARSE_INT,
-    IDM_PRIM_PARSE_FLOAT,
-    IDM_PRIM_FILE_MKDIR,
-    IDM_PRIM_FILE_APPEND,
-    IDM_PRIM_ORD_STR,
-    IDM_PRIM_STR_ORD,
-    IDM_PRIM_FROM_RUNES,
-    IDM_PRIM_REPL_COMPILE,
-    IDM_PRIM_REPL_ABORT,
-    IDM_PRIM_REPL_SPAWN,
-    IDM_PRIM_REPL_DIAGNOSTIC,
-    IDM_PRIM_ISH_SESSION,
-    IDM_PRIM_TTY_PRED,
-    IDM_PRIM_TTY_RAW,
-    IDM_PRIM_TTY_RESTORE,
-    IDM_PRIM_TTY_READ,
-    IDM_PRIM_TTY_READ_LINE,
-    IDM_PRIM_TTY_WRITE,
-    IDM_PRIM_TTY_SIZE,
-    IDM_PRIM_EPRINTLN,
-    IDM_PRIM_PORT_STATUS,
-    IDM_PRIM_JOB_RESUME,
-    IDM_PRIM_JOB_SIGNAL,
-    IDM_PRIM_ERROR_MESSAGE,
-    IDM_PRIM_MAKE_ERROR,
-    IDM_PRIM_SPAWN_LINK,
-    IDM_PRIM_SPAWN_MONITOR,
-    IDM_PRIM_PORT_READ,
-    IDM_PRIM_PORT_WRITE,
-    IDM_PRIM_PORT_CLOSE_INPUT,
-    IDM_PRIM_RAISE,
-    IDM_PRIM_IS_A_P,
-    IDM_PRIM_NIL_P,
-    IDM_PRIM_ATOM_P,
-    IDM_PRIM_WORD_P,
-    IDM_PRIM_INT_P,
-    IDM_PRIM_FLOAT_P,
-    IDM_PRIM_STRING_P,
-    IDM_PRIM_PAIR_P,
-    IDM_PRIM_EMPTY_LIST_P,
-    IDM_PRIM_LIST_P,
-    IDM_PRIM_TUPLE_P,
-    IDM_PRIM_VECTOR_P,
-    IDM_PRIM_DICT_P,
-    IDM_PRIM_SYNTAX_P,
-    IDM_PRIM_CELL_P,
-    IDM_PRIM_CLOSURE_P,
-    IDM_PRIM_PID_P,
-    IDM_PRIM_REF_P,
-    IDM_PRIM_PORT_P,
-    IDM_PRIM_REGEX_P,
-    IDM_PRIM_REGEX_RESULT_P,
-    IDM_PRIM_COMPARE,
-    IDM_PRIM_CEIL,
-    IDM_PRIM_TRUNCATE,
-    IDM_PRIM_SIN,
-    IDM_PRIM_COS,
-    IDM_PRIM_TAN,
-    IDM_PRIM_ASIN,
-    IDM_PRIM_ACOS,
-    IDM_PRIM_ATAN,
-    IDM_PRIM_ATAN2,
-    IDM_PRIM_EXP,
-    IDM_PRIM_LOG,
-    IDM_PRIM_LOG2,
-    IDM_PRIM_LOG10,
-    IDM_PRIM_HYPOT,
-    IDM_PRIM_NAN_P,
-    IDM_PRIM_FINITE_P,
-    IDM_PRIM_INFINITE_P,
-    IDM_PRIM_NAN,
-    IDM_PRIM_INF,
-    IDM_PRIM_DIVMOD,
-    IDM_PRIM_BIT_AND,
-    IDM_PRIM_BIT_OR,
-    IDM_PRIM_BIT_XOR,
-    IDM_PRIM_BIT_NOT,
-    IDM_PRIM_SHIFT_LEFT,
-    IDM_PRIM_SHIFT_RIGHT,
-    IDM_PRIM_BIT_COUNT,
-    IDM_PRIM_BIT_LENGTH,
-    IDM_PRIM_TO_INT,
-    IDM_PRIM_TO_FLOAT,
-    IDM_PRIM_FILE_OPEN,
-    IDM_PRIM_SYNTAX_FLOAT_VALUE,
-    IDM_PRIM_MAKE_SYNTAX_NIL
+#define IDM_PRIMITIVE_ENUM(id, name, min_arity, max_arity, home) IDM_PRIM_##id,
+    IDM_PRIMITIVE_LIST(IDM_PRIMITIVE_ENUM)
+#undef IDM_PRIMITIVE_ENUM
 } IdmPrimitive;
 
 typedef struct {
@@ -424,22 +429,22 @@ struct IdmCore {
             IdmCore *cont;
         } use_package;
         struct {
-            IdmValue type;
-            IdmValue *field_names;
-            IdmValue *field_contracts;
+            IdmSymbol *type;
+            IdmSymbol **field_names;
+            IdmSymbol **field_contracts;
             IdmCore **field_values;
             size_t count;
             size_t cap;
         } record_construct;
         struct {
             IdmCore *receiver;
-            IdmValue type;
-            IdmValue field;
+            IdmSymbol *type;
+            IdmSymbol *field;
             uint32_t field_index;
         } record_field;
         struct {
             IdmCore *value;
-            IdmValue type;
+            IdmSymbol *type;
         } record_is;
     } as;
 };
@@ -486,16 +491,16 @@ IdmCore *idm_core_package_ref(const char *name, IdmValue env_key, uint32_t slot,
 IdmCore *idm_core_receive(IdmCore *receiver, IdmCore *timeout, IdmCore *timeout_body, IdmSpan span);
 IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, IdmCore *cleanup, uint32_t ensure_slot, IdmSpan span);
 IdmCore *idm_core_use_package(IdmValue env_key, IdmBytecodeModule *module, bool module_owned, uint32_t init_fn, IdmCore *cont, IdmSpan span);
-IdmCore *idm_core_record_construct(IdmValue type, IdmSpan span);
-bool idm_core_record_construct_add(IdmCore *core, IdmValue field, IdmValue contract, IdmCore *value);
-IdmCore *idm_core_record_field(IdmCore *receiver, IdmValue type, IdmValue field, uint32_t field_index, IdmSpan span);
-IdmCore *idm_core_record_is(IdmCore *value, IdmValue type, IdmSpan span);
+IdmCore *idm_core_record_construct(IdmSymbol *type, IdmSpan span);
+bool idm_core_record_construct_add(IdmCore *core, IdmSymbol *field, IdmSymbol *contract, IdmCore *value);
+IdmCore *idm_core_record_field(IdmCore *receiver, IdmSymbol *type, IdmSymbol *field, uint32_t field_index, IdmSpan span);
+IdmCore *idm_core_record_is(IdmCore *value, IdmSymbol *type, IdmSpan span);
 void idm_core_free(IdmCore *core);
 bool idm_core_normalize(IdmRuntime *rt, IdmCore **core, IdmError *err);
-bool idm_core_compile_expression(IdmCore *core, IdmBytecodeModule *module, IdmError *err);
-bool idm_core_compile_function(IdmCore *fn, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
-bool idm_core_compile_function_body(IdmCore *body, const char *name, uint32_t arity, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
-bool idm_core_compile_main(IdmCore *core, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
+bool idm_core_compile_expression(IdmRuntime *rt, IdmCore *core, IdmBytecodeModule *module, IdmError *err);
+bool idm_core_compile_function(IdmRuntime *rt, IdmCore *fn, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
+bool idm_core_compile_function_body(IdmRuntime *rt, IdmCore *body, const char *name, uint32_t arity, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
+bool idm_core_compile_main(IdmRuntime *rt, IdmCore *core, IdmBytecodeModule *module, uint32_t *out_function, IdmError *err);
 bool idm_core_dump(IdmBuffer *buf, const IdmCore *core);
 bool idm_core_dump_pretty(IdmBuffer *buf, const IdmCore *core);
 const char *idm_primitive_name(IdmPrimitive primitive);
@@ -507,5 +512,7 @@ size_t idm_primitive_count(void);
 const IdmPrimitiveInfo *idm_primitive_info(IdmPrimitive primitive);
 IdmArity idm_primitive_arity(IdmPrimitive primitive);
 const char *idm_primitive_home(IdmPrimitive primitive);
+bool idm_primitive_home_exists(const char *home);
+bool idm_primitive_lookup(const char *home, const char *name, IdmPrimitive *out);
 
 #endif

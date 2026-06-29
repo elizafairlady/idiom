@@ -1,5 +1,6 @@
 #include "idiom/value.h"
 
+#include "idiom/bignum.h"
 #include "idiom/bytecode.h"
 #include "idiom/pattern.h"
 #include "idiom/regex.h"
@@ -64,15 +65,25 @@ typedef struct {
 } IdmClosureObj;
 
 typedef struct {
-    char *type;
-    char **field_names;
+    IdmRecordShape *shape;
     IdmValue *field_values;
-    size_t field_count;
 } IdmRecordObj;
+
+struct IdmRecordShape {
+    IdmSymbol *type;
+    IdmSymbol **field_names;
+    size_t field_count;
+};
 
 typedef struct {
     IdmValue value;
 } IdmCellObj;
+
+typedef struct {
+    uint32_t *limbs;
+    uint32_t count;
+    int32_t sign;
+} IdmBignumObj;
 
 struct IdmObject {
     IdmObjectKind kind;
@@ -93,6 +104,7 @@ struct IdmObject {
         IdmRegex *regex;
         IdmRegexResult *regex_result;
         double flonum;
+        IdmBignumObj bignum;
     } as;
 };
 
@@ -106,8 +118,11 @@ struct IdmSymbol {
 
 static pthread_mutex_t g_intern_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_env_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t g_record_shape_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text);
+static IdmSymbol *intern_find_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, uint32_t h);
+static uint32_t intern_hash(IdmSymbolKind kind, const char *text);
 static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, const char *package_key);
 
 static void heap_lock(IdmHeap *heap) {
@@ -180,6 +195,7 @@ static size_t syn_footprint(const IdmSyntax *syn) {
     switch (syn->kind) {
         case IDM_SYN_WORD:
         case IDM_SYN_ATOM:
+        case IDM_SYN_BIGINT:
         case IDM_SYN_STRING:
             total += strlen(syn->as.text) + 1u;
             break;
@@ -207,14 +223,94 @@ static void object_free(IdmObject *obj) {
         free(obj->as.closure.captures);
     }
     if (obj->kind == IDM_OBJ_RECORD) {
-        free(obj->as.record.type);
-        for (size_t i = 0; i < obj->as.record.field_count; i++) free(obj->as.record.field_names[i]);
-        free(obj->as.record.field_names);
         free(obj->as.record.field_values);
     }
     if (obj->kind == IDM_OBJ_REGEX) idm_regex_free(obj->as.regex);
     if (obj->kind == IDM_OBJ_REGEX_RESULT) idm_regex_result_free(obj->as.regex_result);
+    if (obj->kind == IDM_OBJ_BIGNUM) free(obj->as.bignum.limbs);
     free(obj);
+}
+
+static void record_shape_destroy(IdmRecordShape *shape) {
+    if (!shape) return;
+    free(shape->field_names);
+    free(shape);
+}
+
+static const char *record_shape_type_text(const IdmRecordShape *shape) {
+    return idm_symbol_text(shape->type);
+}
+
+static const char *record_shape_field_text(const IdmRecordShape *shape, size_t index) {
+    return idm_symbol_text(shape->field_names[index]);
+}
+
+static bool record_shape_matches(const IdmRecordShape *shape, IdmSymbol *type, IdmSymbol *const *field_names, size_t field_count) {
+    if (shape->type != type || shape->field_count != field_count) return false;
+    for (size_t i = 0; i < field_count; i++) {
+        if (shape->field_names[i] != field_names[i]) return false;
+    }
+    return true;
+}
+
+static IdmRecordShape *record_shape_create(IdmSymbol *type, IdmSymbol *const *field_names, size_t field_count, IdmError *err) {
+    IdmRecordShape *shape = calloc(1u, sizeof(*shape));
+    if (!shape) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
+    shape->type = type;
+    if (field_count != 0) {
+        shape->field_names = calloc(field_count, sizeof(*shape->field_names));
+        if (!shape->field_names) {
+            record_shape_destroy(shape);
+            idm_error_oom(err, idm_span_unknown(NULL));
+            return NULL;
+        }
+        shape->field_count = field_count;
+        for (size_t i = 0; i < field_count; i++) {
+            shape->field_names[i] = field_names[i];
+        }
+    }
+    return shape;
+}
+
+IdmRecordShape *idm_record_shape_intern_symbols(IdmRuntime *rt, IdmSymbol *type, IdmSymbol *const *field_names, size_t field_count, IdmError *err) {
+    if (!rt || !type) {
+        idm_error_set(err, idm_span_unknown(NULL), "record shape requires a type");
+        return NULL;
+    }
+    if (field_count != 0 && !field_names) {
+        idm_error_set(err, idm_span_unknown(NULL), "record shape fields require names");
+        return NULL;
+    }
+    for (size_t i = 0; i < field_count; i++) {
+        if (!field_names[i]) {
+            idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
+            return NULL;
+        }
+    }
+    pthread_mutex_lock(&g_record_shape_mu);
+    for (size_t i = 0; i < rt->record_shape_count; i++) {
+        if (record_shape_matches(rt->record_shapes[i], type, field_names, field_count)) {
+            IdmRecordShape *shape = rt->record_shapes[i];
+            pthread_mutex_unlock(&g_record_shape_mu);
+            return shape;
+        }
+    }
+    IdmRecordShape *shape = record_shape_create(type, field_names, field_count, err);
+    if (!shape) {
+        pthread_mutex_unlock(&g_record_shape_mu);
+        return NULL;
+    }
+    if (rt->record_shape_count == rt->record_shape_cap) {
+        if (!idm_grow((void **)&rt->record_shapes, &rt->record_shape_cap, sizeof(*rt->record_shapes), 8u, rt->record_shape_count + 1u)) {
+            pthread_mutex_unlock(&g_record_shape_mu);
+            record_shape_destroy(shape);
+            idm_error_oom(err, idm_span_unknown(NULL));
+            return NULL;
+        }
+    }
+    rt->record_shapes[rt->record_shape_count++] = shape;
+    pthread_mutex_unlock(&g_record_shape_mu);
+    return shape;
 }
 
 void idm_runtime_init(IdmRuntime *rt) {
@@ -241,6 +337,9 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->expand_cache = NULL;
     rt->expand_cache_free = NULL;
     rt->phase_reads = NULL;
+    rt->record_shapes = NULL;
+    rt->record_shape_count = 0;
+    rt->record_shape_cap = 0;
     rt->owned_temps = NULL;
     rt->owned_temp_count = 0;
     rt->owned_temp_cap = 0;
@@ -250,11 +349,7 @@ void idm_runtime_init(IdmRuntime *rt) {
 
 bool idm_runtime_own_temp(IdmRuntime *rt, const char *path) {
     if (rt->owned_temp_count == rt->owned_temp_cap) {
-        size_t cap = rt->owned_temp_cap ? rt->owned_temp_cap * 2u : 8u;
-        char **grown = realloc(rt->owned_temps, cap * sizeof(*grown));
-        if (!grown) return false;
-        rt->owned_temps = grown;
-        rt->owned_temp_cap = cap;
+        if (!idm_grow((void **)&rt->owned_temps, &rt->owned_temp_cap, sizeof(*rt->owned_temps), 8u, rt->owned_temp_count + 1u)) return false;
     }
     rt->owned_temps[rt->owned_temp_count] = idm_strdup(path);
     if (!rt->owned_temps[rt->owned_temp_count]) return false;
@@ -276,6 +371,13 @@ void idm_runtime_destroy(IdmRuntime *rt) {
     if (rt->expand_cache && rt->expand_cache_free) rt->expand_cache_free(rt->expand_cache);
     rt->expand_cache = NULL;
     rt->expand_cache_free = NULL;
+    pthread_mutex_lock(&g_record_shape_mu);
+    for (size_t i = 0; i < rt->record_shape_count; i++) record_shape_destroy(rt->record_shapes[i]);
+    free(rt->record_shapes);
+    rt->record_shapes = NULL;
+    rt->record_shape_count = 0;
+    rt->record_shape_cap = 0;
+    pthread_mutex_unlock(&g_record_shape_mu);
     for (size_t i = 0; i < rt->owned_temp_count; i++) {
         remove(rt->owned_temps[i]);
         free(rt->owned_temps[i]);
@@ -317,11 +419,7 @@ static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, const char *package_ke
         if (!env->package_key) { free(env); return NULL; }
     }
     if (rt->env_count == rt->env_cap) {
-        size_t cap = rt->env_cap ? rt->env_cap * 2u : 8u;
-        IdmEnv **grown = realloc(rt->envs, cap * sizeof(*grown));
-        if (!grown) { free(env->package_key); free(env); return NULL; }
-        rt->envs = grown;
-        rt->env_cap = cap;
+        if (!idm_grow((void **)&rt->envs, &rt->env_cap, sizeof(*rt->envs), 8u, rt->env_count + 1u)) { free(env->package_key); free(env); return NULL; }
     }
     rt->envs[rt->env_count++] = env;
     return env;
@@ -335,15 +433,10 @@ bool idm_env_slot_ensure(IdmEnv *env, uint32_t id, IdmError *err) {
         return true;
     }
     if (needed > env->slot_cap) {
-        size_t cap = env->slot_cap ? env->slot_cap * 2u : 16u;
-        while (cap < needed) cap *= 2u;
-        IdmValue *grown = realloc(env->slots, cap * sizeof(*grown));
-        if (!grown) {
+        if (!idm_grow((void **)&env->slots, &env->slot_cap, sizeof(*env->slots), 16u, needed)) {
             pthread_mutex_unlock(&g_env_mu);
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
-        env->slots = grown;
-        env->slot_cap = cap;
     }
     for (size_t i = env->slot_count; i < needed; i++) env->slots[i] = idm_nil();
     env->slot_count = needed;
@@ -396,6 +489,15 @@ IdmSymbol *idm_intern(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
     return sym;
 }
 
+IdmSymbol *idm_intern_lookup(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
+    if (!intern || !text) return NULL;
+    uint32_t h = intern_hash(kind, text);
+    pthread_mutex_lock(&g_intern_mu);
+    IdmSymbol *sym = intern_find_unlocked(intern, kind, text, h);
+    pthread_mutex_unlock(&g_intern_mu);
+    return sym;
+}
+
 static uint32_t intern_hash(IdmSymbolKind kind, const char *text) {
     uint32_t h = 2166136261u;
     h ^= (uint32_t)kind;
@@ -424,20 +526,16 @@ static bool intern_rehash(IdmIntern *intern, size_t new_count) {
 
 static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
     uint32_t h = intern_hash(kind, text);
-    if (intern->bucket_count) {
-        for (IdmSymbol *s = intern->buckets[h & (intern->bucket_count - 1u)]; s; s = s->hnext) {
-            if (s->hash == h && s->kind == kind && strcmp(s->text, text) == 0) return s;
-        }
-    }
+    IdmSymbol *found = intern_find_unlocked(intern, kind, text, h);
+    if (found) return found;
     if (intern->count == intern->cap) {
-        size_t cap = intern->cap ? intern->cap * 2u : 32u;
-        IdmSymbol **next = realloc(intern->symbols, cap * sizeof(*next));
-        if (!next) return NULL;
-        intern->symbols = next;
-        intern->cap = cap;
+        if (!idm_grow((void **)&intern->symbols, &intern->cap, sizeof(*intern->symbols), 32u, intern->count + 1u)) return NULL;
     }
     if (intern->bucket_count == 0u || intern->count + 1u > intern->bucket_count - (intern->bucket_count >> 2)) {
-        if (!intern_rehash(intern, intern->bucket_count ? intern->bucket_count * 2u : 64u)) return NULL;
+        size_t bucket_count = 0;
+        if (intern->bucket_count == SIZE_MAX ||
+            !idm_next_capacity(intern->bucket_count, 64u, intern->bucket_count + 1u, &bucket_count) ||
+            !intern_rehash(intern, bucket_count)) return NULL;
     }
     IdmSymbol *sym = malloc(sizeof(*sym));
     if (!sym) return NULL;
@@ -454,6 +552,14 @@ static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, con
     sym->hnext = intern->buckets[b];
     intern->buckets[b] = sym;
     return sym;
+}
+
+static IdmSymbol *intern_find_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, uint32_t h) {
+    if (!intern->bucket_count) return NULL;
+    for (IdmSymbol *s = intern->buckets[h & (intern->bucket_count - 1u)]; s; s = s->hnext) {
+        if (s->hash == h && s->kind == kind && strcmp(s->text, text) == 0) return s;
+    }
+    return NULL;
 }
 
 const char *idm_symbol_text(const IdmSymbol *sym) {
@@ -570,7 +676,7 @@ static void gc_trace_object(IdmHeap *heap, IdmObject *obj) {
     } else if (obj->kind == IDM_OBJ_CLOSURE) {
         for (size_t i = 0; i < obj->as.closure.capture_count; i++) gc_grey_value(heap, obj->as.closure.captures[i]);
     } else if (obj->kind == IDM_OBJ_RECORD) {
-        for (size_t i = 0; i < obj->as.record.field_count; i++) gc_grey_value(heap, obj->as.record.field_values[i]);
+        for (size_t i = 0; i < obj->as.record.shape->field_count; i++) gc_grey_value(heap, obj->as.record.field_values[i]);
     } else if (obj->kind == IDM_OBJ_REGEX_RESULT) {
         gc_grey_value(heap, idm_regex_result_subject_value(obj->as.regex_result));
     }
@@ -635,6 +741,414 @@ IdmValue idm_empty_list(void) {
 
 IdmValue idm_int(int64_t value) {
     return idm_fixnum(value);
+}
+
+typedef struct {
+    uint32_t buf[IDM_BIGNUM_I64_LIMBS];
+    const uint32_t *limbs;
+    size_t count;
+    int sign;
+} IntView;
+
+static bool size_mul(size_t a, size_t b, size_t *out) {
+    if (a != 0u && b > SIZE_MAX / a) return false;
+    *out = a * b;
+    return true;
+}
+
+static bool size_add(size_t a, size_t b, size_t *out) {
+    if (b > SIZE_MAX - a) return false;
+    *out = a + b;
+    return true;
+}
+
+static bool bignum_count_ok(size_t count, IdmError *err) {
+    if (count <= UINT32_MAX) return true;
+    return idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
+}
+
+static bool bignum_limb_bytes(size_t count, size_t *out, IdmError *err) {
+    if (!bignum_count_ok(count, err)) return false;
+    if (size_mul(count, sizeof(uint32_t), out)) return true;
+    return idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
+}
+
+static void int_view(IdmValue v, IntView *iv) {
+    if (idm_value_tag(v) == IDM_VAL_BIGNUM) {
+        const IdmObject *o = idm_boxed_object(v);
+        iv->limbs = o->as.bignum.limbs;
+        iv->count = o->as.bignum.count;
+        iv->sign = (int)o->as.bignum.sign;
+    } else {
+        iv->count = idm_bignum_from_i64(idm_int_value(v), iv->buf, &iv->sign);
+        iv->limbs = iv->buf;
+    }
+}
+
+static IdmValue make_bignum_from_mag(IdmRuntime *rt, const uint32_t *limbs, size_t count, int sign, IdmError *err) {
+    int64_t v = 0;
+    if (idm_bignum_fits_i64(limbs, count, sign, &v) && idm_fixnum_fits(v)) return idm_int(v);
+    size_t bytes = 0;
+    if (!bignum_limb_bytes(count, &bytes, err)) return idm_nil();
+    uint32_t *copy = bytes == 0u ? NULL : malloc(bytes);
+    if (bytes != 0u && !copy) { idm_error_oom(err, idm_span_unknown(NULL)); return idm_nil(); }
+    if (bytes != 0u) memcpy(copy, limbs, bytes);
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_BIGNUM);
+    if (!obj) { free(copy); idm_error_oom(err, idm_span_unknown(NULL)); return idm_nil(); }
+    obj->as.bignum.limbs = copy;
+    obj->as.bignum.count = (uint32_t)count;
+    obj->as.bignum.sign = (int32_t)sign;
+    heap_account(idm_active_heap(rt), obj, bytes);
+    return idm_from_boxed(obj);
+}
+
+static IdmValue make_bignum_adopt(IdmRuntime *rt, uint32_t *limbs, size_t count, int sign, IdmError *err) {
+    int64_t v = 0;
+    if (idm_bignum_fits_i64(limbs, count, sign, &v) && idm_fixnum_fits(v)) { free(limbs); return idm_int(v); }
+    size_t bytes = 0;
+    if (!bignum_limb_bytes(count, &bytes, err)) { free(limbs); return idm_nil(); }
+    IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_BIGNUM);
+    if (!obj) { free(limbs); idm_error_oom(err, idm_span_unknown(NULL)); return idm_nil(); }
+    obj->as.bignum.limbs = limbs;
+    obj->as.bignum.count = (uint32_t)count;
+    obj->as.bignum.sign = (int32_t)sign;
+    heap_account(idm_active_heap(rt), obj, bytes);
+    return idm_from_boxed(obj);
+}
+
+IdmValue idm_int_promote(IdmRuntime *rt, int64_t value, IdmError *err) {
+    if (idm_fixnum_fits(value)) return idm_int(value);
+    uint32_t buf[IDM_BIGNUM_I64_LIMBS];
+    int sign = 0;
+    size_t n = idm_bignum_from_i64(value, buf, &sign);
+    return make_bignum_from_mag(rt, buf, n, sign, err);
+}
+
+bool idm_value_is_int(IdmValue v) {
+    IdmValueTag t = idm_value_tag(v);
+    return t == IDM_VAL_INT || t == IDM_VAL_BIGNUM;
+}
+
+static bool int_binop(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *out, IdmError *err, int kind) {
+    IntView x, y;
+    int_view(a, &x);
+    int_view(b, &y);
+    size_t cap = 0;
+    if (kind == 2) {
+        if (!size_add(x.count, y.count, &cap)) return idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
+    } else if (!size_add(x.count > y.count ? x.count : y.count, 1u, &cap)) {
+        return idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
+    }
+    if (cap == 0u) cap = 1u;
+    size_t bytes = 0;
+    if (!bignum_limb_bytes(cap, &bytes, err)) return false;
+    uint32_t *r = malloc(bytes);
+    if (!r) { idm_error_oom(err, idm_span_unknown(NULL)); return false; }
+    size_t rn = 0u;
+    int rs = 0;
+    if (kind == 0) idm_bignum_add(x.limbs, x.count, x.sign, y.limbs, y.count, y.sign, r, &rn, &rs);
+    else if (kind == 1) idm_bignum_sub(x.limbs, x.count, x.sign, y.limbs, y.count, y.sign, r, &rn, &rs);
+    else idm_bignum_mul(x.limbs, x.count, x.sign, y.limbs, y.count, y.sign, r, &rn, &rs);
+    *out = make_bignum_adopt(rt, r, rn, rs, err);
+    return !(err && err->present);
+}
+
+bool idm_int_add(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *out, IdmError *err) { return int_binop(rt, a, b, out, err, 0); }
+bool idm_int_sub(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *out, IdmError *err) { return int_binop(rt, a, b, out, err, 1); }
+bool idm_int_mul(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *out, IdmError *err) { return int_binop(rt, a, b, out, err, 2); }
+
+bool idm_int_divmod(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *q_out, IdmValue *r_out, IdmError *err) {
+    IntView x, y;
+    int_view(a, &x);
+    int_view(b, &y);
+    size_t qcap = x.count ? x.count : 1u, rcap = 0u;
+    if (!size_add(y.count, 1u, &rcap)) return idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
+    size_t qbytes = 0, rbytes = 0;
+    if (!bignum_limb_bytes(qcap, &qbytes, err) || !bignum_limb_bytes(rcap, &rbytes, err)) return false;
+    uint32_t *q = malloc(qbytes);
+    uint32_t *r = malloc(rbytes);
+    if (!q || !r) { free(q); free(r); idm_error_oom(err, idm_span_unknown(NULL)); return false; }
+    size_t qn = 0u, rn = 0u;
+    int qs = 0, rs = 0;
+    if (!idm_bignum_divmod(x.limbs, x.count, x.sign, y.limbs, y.count, y.sign, q, &qn, &qs, r, &rn, &rs)) {
+        free(q);
+        free(r);
+        return idm_error_set(err, idm_span_unknown(NULL), "division by zero");
+    }
+    if (q_out) *q_out = make_bignum_adopt(rt, q, qn, qs, err); else free(q);
+    if (r_out && !(err && err->present)) *r_out = make_bignum_adopt(rt, r, rn, rs, err); else free(r);
+    return !(err && err->present);
+}
+
+bool idm_int_pow(IdmRuntime *rt, IdmValue base, int64_t exponent, IdmValue *out, IdmError *err) {
+    IdmValue result = idm_int(1);
+    IdmValue b = base;
+    while (exponent > 0) {
+        if (exponent & 1) { if (!idm_int_mul(rt, result, b, &result, err)) return false; }
+        exponent >>= 1;
+        if (exponent > 0) { if (!idm_int_mul(rt, b, b, &b, err)) return false; }
+    }
+    *out = result;
+    return true;
+}
+
+bool idm_int_neg(IdmRuntime *rt, IdmValue v, IdmValue *out, IdmError *err) {
+    IntView x;
+    int_view(v, &x);
+    *out = make_bignum_from_mag(rt, x.limbs, x.count, -x.sign, err);
+    return !(err && err->present);
+}
+
+int idm_int_compare(IdmValue a, IdmValue b) {
+    IntView x, y;
+    int_view(a, &x);
+    int_view(b, &y);
+    return idm_bignum_cmp(x.limbs, x.count, x.sign, y.limbs, y.count, y.sign);
+}
+
+double idm_int_to_double(IdmValue v) {
+    if (idm_value_tag(v) == IDM_VAL_BIGNUM) {
+        const IdmObject *o = idm_boxed_object(v);
+        return idm_bignum_to_double(o->as.bignum.limbs, o->as.bignum.count, (int)o->as.bignum.sign);
+    }
+    return (double)idm_int_value(v);
+}
+
+bool idm_int_to_i64(IdmValue v, int64_t *out) {
+    if (idm_value_tag(v) == IDM_VAL_INT) { *out = idm_int_value(v); return true; }
+    if (idm_value_tag(v) == IDM_VAL_BIGNUM) {
+        const IdmObject *o = idm_boxed_object(v);
+        return idm_bignum_fits_i64(o->as.bignum.limbs, o->as.bignum.count, (int)o->as.bignum.sign, out);
+    }
+    return false;
+}
+
+bool idm_bignum_view(IdmValue value, const uint32_t **limbs, size_t *count, int *sign) {
+    if (idm_value_tag(value) != IDM_VAL_BIGNUM) return false;
+    const IdmObject *o = idm_boxed_object(value);
+    if (limbs) *limbs = o->as.bignum.limbs;
+    if (count) *count = o->as.bignum.count;
+    if (sign) *sign = (int)o->as.bignum.sign;
+    return true;
+}
+
+IdmValue idm_int_shl(IdmRuntime *rt, IdmValue v, int64_t bits, IdmError *err) {
+    if (bits < 0) { idm_error_set(err, idm_span_unknown(NULL), "negative integer shift"); return idm_nil(); }
+    if (bits == 0) return v;
+    IntView x;
+    int_view(v, &x);
+    if (x.count == 0u) return idm_int(0);
+    size_t lshift = (size_t)(bits / 32), bshift = (size_t)(bits % 32);
+    size_t out_count = 0;
+    if (!size_add(x.count, lshift, &out_count) || !size_add(out_count, 1u, &out_count)) {
+        idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
+        return idm_nil();
+    }
+    size_t bytes = 0;
+    if (!bignum_limb_bytes(out_count, &bytes, err)) return idm_nil();
+    uint32_t *out = calloc(out_count, sizeof(uint32_t));
+    if (!out) { idm_error_oom(err, idm_span_unknown(NULL)); return idm_nil(); }
+    for (size_t i = 0u; i < x.count; i++) {
+        uint64_t val = (uint64_t)x.limbs[i] << bshift;
+        out[i + lshift] |= (uint32_t)val;
+        out[i + lshift + 1u] |= (uint32_t)(val >> 32);
+    }
+    while (out_count > 0u && out[out_count - 1u] == 0u) out_count--;
+    return make_bignum_adopt(rt, out, out_count, x.sign, err);
+}
+
+static size_t limb_normalize(const uint32_t *limbs, size_t count) {
+    while (count > 0u && limbs[count - 1u] == 0u) count--;
+    return count;
+}
+
+IdmValue idm_int_from_limbs(IdmRuntime *rt, const uint32_t *limbs, size_t count, int sign, IdmError *err) {
+    if (count != 0u && !limbs) {
+        idm_error_set(err, idm_span_unknown(NULL), "integer limbs are missing");
+        return idm_nil();
+    }
+    if (sign < -1 || sign > 1) {
+        idm_error_set(err, idm_span_unknown(NULL), "invalid integer sign");
+        return idm_nil();
+    }
+    count = limb_normalize(limbs, count);
+    if (count == 0u) return idm_int(0);
+    if (sign == 0) {
+        idm_error_set(err, idm_span_unknown(NULL), "nonzero integer magnitude requires a sign");
+        return idm_nil();
+    }
+    return make_bignum_from_mag(rt, limbs, count, sign, err);
+}
+
+static bool alloc_zero_limbs(size_t count, uint32_t **out, IdmError *err) {
+    size_t bytes = 0;
+    if (!bignum_limb_bytes(count, &bytes, err)) return false;
+    uint32_t *limbs = calloc(count ? count : 1u, sizeof(uint32_t));
+    if (!limbs) { idm_error_oom(err, idm_span_unknown(NULL)); return false; }
+    *out = limbs;
+    return true;
+}
+
+static IdmValue make_bignum_adopt_trim(IdmRuntime *rt, uint32_t *limbs, size_t count, int sign, size_t alloc_count, IdmError *err) {
+    int64_t v = 0;
+    if (idm_bignum_fits_i64(limbs, count, sign, &v) && idm_fixnum_fits(v)) { free(limbs); return idm_int(v); }
+    if (count < alloc_count) {
+        size_t bytes = 0;
+        if (!bignum_limb_bytes(count, &bytes, err)) { free(limbs); return idm_nil(); }
+        uint32_t *copy = malloc(bytes);
+        if (!copy) { free(limbs); idm_error_oom(err, idm_span_unknown(NULL)); return idm_nil(); }
+        memcpy(copy, limbs, bytes);
+        free(limbs);
+        limbs = copy;
+    }
+    return make_bignum_adopt(rt, limbs, count, sign, err);
+}
+
+static void twos_from_int(IdmValue value, uint32_t *out, size_t width) {
+    IntView x;
+    int_view(value, &x);
+    size_t n = x.count < width ? x.count : width;
+    if (n != 0u) memcpy(out, x.limbs, n * sizeof(uint32_t));
+    if (x.sign >= 0) return;
+    for (size_t i = 0u; i < width; i++) out[i] = ~out[i];
+    uint64_t carry = 1u;
+    for (size_t i = 0u; i < width && carry != 0u; i++) {
+        uint64_t v = (uint64_t)out[i] + carry;
+        out[i] = (uint32_t)v;
+        carry = v >> 32;
+    }
+}
+
+static IdmValue int_from_twos(IdmRuntime *rt, uint32_t *limbs, size_t width, IdmError *err) {
+    if (width == 0u) { free(limbs); return idm_int(0); }
+    int sign = (limbs[width - 1u] & 0x80000000u) != 0u ? -1 : 1;
+    if (sign < 0) {
+        for (size_t i = 0u; i < width; i++) limbs[i] = ~limbs[i];
+        uint64_t carry = 1u;
+        for (size_t i = 0u; i < width && carry != 0u; i++) {
+            uint64_t v = (uint64_t)limbs[i] + carry;
+            limbs[i] = (uint32_t)v;
+            carry = v >> 32;
+        }
+    }
+    size_t count = limb_normalize(limbs, width);
+    if (count == 0u) sign = 0;
+    return make_bignum_adopt_trim(rt, limbs, count, sign, width, err);
+}
+
+static bool int_bit_binary(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *out, IdmError *err, int kind) {
+    IntView x, y;
+    int_view(a, &x);
+    int_view(b, &y);
+    size_t max = x.count > y.count ? x.count : y.count;
+    size_t width = 0u;
+    if (!size_add(max, 1u, &width)) return idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
+    uint32_t *xa = NULL, *yb = NULL, *result = NULL;
+    if (!alloc_zero_limbs(width, &xa, err) || !alloc_zero_limbs(width, &yb, err) || !alloc_zero_limbs(width, &result, err)) {
+        free(xa);
+        free(yb);
+        free(result);
+        return false;
+    }
+    twos_from_int(a, xa, width);
+    twos_from_int(b, yb, width);
+    for (size_t i = 0u; i < width; i++) {
+        if (kind == 0) result[i] = xa[i] & yb[i];
+        else if (kind == 1) result[i] = xa[i] | yb[i];
+        else result[i] = xa[i] ^ yb[i];
+    }
+    free(xa);
+    free(yb);
+    *out = int_from_twos(rt, result, width, err);
+    return !(err && err->present);
+}
+
+bool idm_int_bit_and(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *out, IdmError *err) { return int_bit_binary(rt, a, b, out, err, 0); }
+bool idm_int_bit_or(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *out, IdmError *err) { return int_bit_binary(rt, a, b, out, err, 1); }
+bool idm_int_bit_xor(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *out, IdmError *err) { return int_bit_binary(rt, a, b, out, err, 2); }
+
+bool idm_int_bit_not(IdmRuntime *rt, IdmValue v, IdmValue *out, IdmError *err) {
+    IntView x;
+    int_view(v, &x);
+    size_t width = 0u;
+    if (!size_add(x.count, 1u, &width)) return idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
+    uint32_t *bits = NULL;
+    if (!alloc_zero_limbs(width, &bits, err)) return false;
+    twos_from_int(v, bits, width);
+    for (size_t i = 0u; i < width; i++) bits[i] = ~bits[i];
+    *out = int_from_twos(rt, bits, width, err);
+    return !(err && err->present);
+}
+
+static uint32_t popcount_u32(uint32_t value) {
+    uint32_t count = 0u;
+    while (value != 0u) {
+        count += value & 1u;
+        value >>= 1;
+    }
+    return count;
+}
+
+bool idm_int_bit_count_nonnegative(IdmRuntime *rt, IdmValue v, IdmValue *out, IdmError *err) {
+    IntView x;
+    int_view(v, &x);
+    uint64_t count = 0u;
+    for (size_t i = 0u; i < x.count; i++) count += popcount_u32(x.limbs[i]);
+    *out = idm_int_promote(rt, (int64_t)count, err);
+    return !(err && err->present);
+}
+
+bool idm_int_bit_length_nonnegative(IdmRuntime *rt, IdmValue v, IdmValue *out, IdmError *err) {
+    IntView x;
+    int_view(v, &x);
+    if (x.count == 0u) {
+        *out = idm_int(0);
+        return true;
+    }
+    uint32_t hi = x.limbs[x.count - 1u];
+    uint64_t bits = (uint64_t)(x.count - 1u) * 32u;
+    while (hi != 0u) {
+        bits++;
+        hi >>= 1;
+    }
+    *out = idm_int_promote(rt, (int64_t)bits, err);
+    return !(err && err->present);
+}
+
+IdmValue idm_int_from_decimal(IdmRuntime *rt, const char *text, size_t len, bool *ok, IdmError *err) {
+    size_t cap = idm_bignum_decimal_limb_cap(len);
+    size_t bytes = 0;
+    if (!bignum_limb_bytes(cap, &bytes, err)) { if (ok) *ok = false; return idm_nil(); }
+    uint32_t *limbs = malloc(bytes);
+    if (!limbs) { idm_error_oom(err, idm_span_unknown(NULL)); if (ok) *ok = false; return idm_nil(); }
+    size_t count = 0u;
+    int sign = 0;
+    bool parsed = idm_bignum_from_decimal(text, len, limbs, &count, &sign);
+    IdmValue v = idm_nil();
+    if (parsed) v = make_bignum_adopt(rt, limbs, count, sign, err);
+    else free(limbs);
+    if (ok) *ok = parsed;
+    return v;
+}
+
+static bool bignum_write(IdmBuffer *buf, IdmValue value) {
+    const IdmObject *o = idm_boxed_object(value);
+    size_t count = o->as.bignum.count;
+    size_t bytes = 0;
+    if (!size_mul(count, sizeof(uint32_t), &bytes)) return false;
+    uint32_t *scratch = bytes == 0u ? NULL : malloc(bytes);
+    if (bytes != 0u && !scratch) return false;
+    if (bytes != 0u) memcpy(scratch, o->as.bignum.limbs, bytes);
+    size_t digit_cap = idm_bignum_decimal_digit_cap(count);
+    size_t alloc = 0;
+    if (!size_add(digit_cap, 2u, &alloc)) { free(scratch); return false; }
+    char *digits = malloc(alloc);
+    if (!digits) { free(scratch); return false; }
+    size_t len = idm_bignum_to_decimal(scratch, count, (int)o->as.bignum.sign, digits);
+    bool ok = idm_buf_append_n(buf, digits, len);
+    free(scratch);
+    free(digits);
+    return ok;
 }
 
 IdmValue idm_float(IdmRuntime *rt, double value, IdmError *err) {
@@ -795,6 +1309,7 @@ static IdmValue dict_value_with_cap(IdmRuntime *rt, size_t cap, IdmError *err) {
 
 static bool dict_key_equal(IdmValue a, IdmValue b) {
     IdmValueTag ta = idm_value_tag(a), tb = idm_value_tag(b);
+    if (idm_value_is_int(a) && idm_value_is_int(b)) return idm_int_compare(a, b) == 0;
     if (ta != tb) return false;
     switch (ta) {
         case IDM_VAL_NIL:
@@ -929,13 +1444,15 @@ static void syntax_items_free_nodes(IdmSyntax **items, size_t count) {
 }
 
 static IdmSyntax *syntax_sequence_node(IdmSyntaxBuildKind kind, IdmSpan span) {
+    IdmSyntaxKind seq_kind = IDM_SYN_NIL;
     switch (kind) {
-        case IDM_SYNTAX_BUILD_LIST: return idm_syn_list(span);
-        case IDM_SYNTAX_BUILD_VECTOR: return idm_syn_vector(span);
-        case IDM_SYNTAX_BUILD_TUPLE: return idm_syn_tuple(span);
-        case IDM_SYNTAX_BUILD_DICT: return idm_syn_dict(span);
+        case IDM_SYNTAX_BUILD_LIST: seq_kind = IDM_SYN_LIST; break;
+        case IDM_SYNTAX_BUILD_VECTOR: seq_kind = IDM_SYN_VECTOR; break;
+        case IDM_SYNTAX_BUILD_TUPLE: seq_kind = IDM_SYN_TUPLE; break;
+        case IDM_SYNTAX_BUILD_DICT: seq_kind = IDM_SYN_DICT; break;
         default: return NULL;
     }
+    return idm_syn_seq(seq_kind, span);
 }
 
 static const char *syntax_form_head(IdmSyntaxBuildKind kind) {
@@ -1002,8 +1519,17 @@ bool idm_syntax_build(IdmRuntime *rt, IdmSyntaxBuildKind kind, IdmValue ctx_valu
             syn = idm_syn_atom(idm_string_bytes(payload), ctx->span);
             break;
         case IDM_SYNTAX_BUILD_INT:
-            if (idm_value_tag(payload) != IDM_VAL_INT) return idm_error_set(err, ctx->span, "make-syntax-int expects int");
-            syn = idm_syn_int(idm_int_value(payload), ctx->span);
+            if (idm_value_tag(payload) == IDM_VAL_BIGNUM) {
+                IdmBuffer tmp;
+                idm_buf_init(&tmp);
+                if (!idm_value_write(&tmp, payload) || !idm_buf_append_char(&tmp, '\0')) { idm_buf_destroy(&tmp); return idm_error_oom(err, ctx->span); }
+                syn = idm_syn_bigint(tmp.data, ctx->span);
+                idm_buf_destroy(&tmp);
+            } else if (idm_value_tag(payload) == IDM_VAL_INT) {
+                syn = idm_syn_int(idm_int_value(payload), ctx->span);
+            } else {
+                return idm_error_set(err, ctx->span, "make-syntax-int expects int");
+            }
             break;
         case IDM_SYNTAX_BUILD_FLOAT:
             if (idm_value_tag(payload) != IDM_VAL_FLOAT && idm_value_tag(payload) != IDM_VAL_INT) return idm_error_set(err, ctx->span, "make-syntax-float expects number");
@@ -1159,9 +1685,13 @@ IdmValue idm_closure_in_module(IdmRuntime *rt, const IdmBytecodeModule *module, 
     return idm_closure_multi_selectable_in_module(rt, module, &function_index, 1, selector, captures, capture_count, env, err);
 }
 
-IdmValue idm_record(IdmRuntime *rt, const char *type, const char *const *field_names, const IdmValue *field_values, size_t field_count, IdmError *err) {
-    if (!type || !*type) {
-        idm_error_set(err, idm_span_unknown(NULL), "record type must be a non-empty name");
+IdmValue idm_record_from_shape(IdmRuntime *rt, IdmRecordShape *shape, const IdmValue *field_values, IdmError *err) {
+    if (!shape) {
+        idm_error_set(err, idm_span_unknown(NULL), "record shape is required");
+        return idm_nil();
+    }
+    if (shape->field_count != 0 && !field_values) {
+        idm_error_set(err, idm_span_unknown(NULL), "record fields require values");
         return idm_nil();
     }
     IdmObject *obj = heap_alloc(idm_active_heap(rt), IDM_OBJ_RECORD);
@@ -1169,35 +1699,18 @@ IdmValue idm_record(IdmRuntime *rt, const char *type, const char *const *field_n
         idm_error_oom(err, idm_span_unknown(NULL));
         return idm_nil();
     }
-    obj->as.record.type = idm_strdup(type);
-    if (!obj->as.record.type) {
-        idm_error_oom(err, idm_span_unknown(NULL));
-        return idm_nil();
-    }
-    obj->as.record.field_count = field_count;
-    if (field_count != 0) {
-        obj->as.record.field_names = calloc(field_count, sizeof(*obj->as.record.field_names));
-        obj->as.record.field_values = calloc(field_count, sizeof(*obj->as.record.field_values));
-        if (!obj->as.record.field_names || !obj->as.record.field_values) {
+    obj->as.record.shape = shape;
+    if (shape->field_count != 0) {
+        obj->as.record.field_values = calloc(shape->field_count, sizeof(*obj->as.record.field_values));
+        if (!obj->as.record.field_values) {
             idm_error_oom(err, idm_span_unknown(NULL));
             return idm_nil();
         }
-        for (size_t i = 0; i < field_count; i++) {
-            if (!field_names[i] || !*field_names[i]) {
-                idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
-                return idm_nil();
-            }
-            obj->as.record.field_names[i] = idm_strdup(field_names[i]);
-            if (!obj->as.record.field_names[i]) {
-                idm_error_oom(err, idm_span_unknown(NULL));
-                return idm_nil();
-            }
+        for (size_t i = 0; i < shape->field_count; i++) {
             obj->as.record.field_values[i] = field_values[i];
         }
-        heap_account(idm_active_heap(rt), obj, field_count * (sizeof(*obj->as.record.field_names) + sizeof(*obj->as.record.field_values)));
-        for (size_t i = 0; i < field_count; i++) heap_account(idm_active_heap(rt), obj, strlen(obj->as.record.field_names[i]) + 1u);
+        heap_account(idm_active_heap(rt), obj, shape->field_count * sizeof(*obj->as.record.field_values));
     }
-    heap_account(idm_active_heap(rt), obj, strlen(obj->as.record.type) + 1u);
     IdmValue v;
     v = idm_from_boxed(obj);
     return v;
@@ -1251,18 +1764,27 @@ IdmValue idm_port(uint64_t id) {
     return idm_immediate(IDM_IMM_PORT, id);
 }
 
-const char *idm_value_type_name(IdmValueTag tag) {
+static bool value_tag_datum_kind(IdmValueTag tag, IdmDatumKind *out) {
     switch (tag) {
-        case IDM_VAL_NIL: return "nil";
-        case IDM_VAL_ATOM: return "atom";
-        case IDM_VAL_WORD: return "word";
-        case IDM_VAL_INT: return "int";
-        case IDM_VAL_FLOAT: return "float";
-        case IDM_VAL_STRING: return "string";
+        case IDM_VAL_NIL: *out = IDM_DATUM_NIL; return true;
+        case IDM_VAL_ATOM: *out = IDM_DATUM_ATOM; return true;
+        case IDM_VAL_WORD: *out = IDM_DATUM_WORD; return true;
+        case IDM_VAL_INT: *out = IDM_DATUM_INT; return true;
+        case IDM_VAL_FLOAT: *out = IDM_DATUM_FLOAT; return true;
+        case IDM_VAL_STRING: *out = IDM_DATUM_STRING; return true;
+        case IDM_VAL_TUPLE: *out = IDM_DATUM_TUPLE; return true;
+        case IDM_VAL_VECTOR: *out = IDM_DATUM_VECTOR; return true;
+        case IDM_VAL_DICT: *out = IDM_DATUM_DICT; return true;
+        case IDM_VAL_BIGNUM: *out = IDM_DATUM_INT; return true;
+        default: return false;
+    }
+}
+
+const char *idm_value_type_name(IdmValueTag tag) {
+    IdmDatumKind datum_kind;
+    if (value_tag_datum_kind(tag, &datum_kind)) return idm_datum_kind_name(datum_kind);
+    switch (tag) {
         case IDM_VAL_PAIR: return "pair";
-        case IDM_VAL_TUPLE: return "tuple";
-        case IDM_VAL_VECTOR: return "vector";
-        case IDM_VAL_DICT: return "dict";
         case IDM_VAL_SYNTAX: return "syntax";
         case IDM_VAL_CELL: return "cell";
         case IDM_VAL_CLOSURE: return "closure";
@@ -1272,43 +1794,141 @@ const char *idm_value_type_name(IdmValueTag tag) {
         case IDM_VAL_RECORD: return "record";
         case IDM_VAL_REGEX: return "regex";
         case IDM_VAL_REGEX_RESULT: return "regex-result";
-        case IDM_VAL_BIGNUM: return "int";
+        default: break;
     }
     return "<bad-type>";
 }
 
+const char *idm_value_sequence_kind_name(IdmValueSequenceKind kind) {
+    static const IdmDatumKind datum_kinds[] = {
+        [IDM_VALUE_SEQ_VECTOR] = IDM_DATUM_VECTOR,
+        [IDM_VALUE_SEQ_TUPLE] = IDM_DATUM_TUPLE,
+        [IDM_VALUE_SEQ_DICT] = IDM_DATUM_DICT,
+    };
+    return (size_t)kind < sizeof(datum_kinds) / sizeof(datum_kinds[0]) ? idm_datum_kind_name(datum_kinds[kind]) : "unknown";
+}
+
+const char *idm_syntax_build_kind_name(IdmSyntaxBuildKind kind) {
+    static const IdmDatumKind datum_kinds[] = {
+        [IDM_SYNTAX_BUILD_NIL] = IDM_DATUM_NIL,
+        [IDM_SYNTAX_BUILD_WORD] = IDM_DATUM_WORD,
+        [IDM_SYNTAX_BUILD_ATOM] = IDM_DATUM_ATOM,
+        [IDM_SYNTAX_BUILD_INT] = IDM_DATUM_INT,
+        [IDM_SYNTAX_BUILD_FLOAT] = IDM_DATUM_FLOAT,
+        [IDM_SYNTAX_BUILD_STRING] = IDM_DATUM_STRING,
+        [IDM_SYNTAX_BUILD_LIST] = IDM_DATUM_LIST,
+        [IDM_SYNTAX_BUILD_VECTOR] = IDM_DATUM_VECTOR,
+        [IDM_SYNTAX_BUILD_TUPLE] = IDM_DATUM_TUPLE,
+        [IDM_SYNTAX_BUILD_DICT] = IDM_DATUM_DICT,
+    };
+    if ((size_t)kind < sizeof(datum_kinds) / sizeof(datum_kinds[0])) return idm_datum_kind_name(datum_kinds[kind]);
+    switch (kind) {
+        case IDM_SYNTAX_BUILD_EXPR: return "expr";
+        case IDM_SYNTAX_BUILD_BODY: return "body";
+        case IDM_SYNTAX_BUILD_GROUP: return "group";
+        default: return "unknown";
+    }
+}
+
 const char *idm_value_dispatch_type_name(IdmValue value) {
-    if (idm_value_tag(value) == IDM_VAL_RECORD) return idm_boxed_object(value)->as.record.type;
+    if (idm_value_tag(value) == IDM_VAL_RECORD) return record_shape_type_text(idm_boxed_object(value)->as.record.shape);
     return idm_value_type_name(idm_value_tag(value));
 }
 
-bool idm_value_type_from_name(const char *name, IdmValueTag *out) {
-    if (!name) return false;
-    for (int i = (int)IDM_VAL_NIL; i <= (int)IDM_VAL_REGEX_RESULT; i++) {
-        IdmValueTag tag = (IdmValueTag)i;
-        if (tag == IDM_VAL_RECORD) continue;
-        if (strcmp(name, idm_value_type_name(tag)) == 0) {
-            if (out) *out = tag;
-            return true;
-        }
-    }
-    return false;
+typedef enum {
+    IDM_BUILTIN_TYPE_NONE,
+    IDM_BUILTIN_TYPE_NIL,
+    IDM_BUILTIN_TYPE_ATOM,
+    IDM_BUILTIN_TYPE_WORD,
+    IDM_BUILTIN_TYPE_INT,
+    IDM_BUILTIN_TYPE_FIXNUM,
+    IDM_BUILTIN_TYPE_BIGNUM,
+    IDM_BUILTIN_TYPE_FLOAT,
+    IDM_BUILTIN_TYPE_STRING,
+    IDM_BUILTIN_TYPE_PAIR,
+    IDM_BUILTIN_TYPE_EMPTY_LIST,
+    IDM_BUILTIN_TYPE_LIST,
+    IDM_BUILTIN_TYPE_TUPLE,
+    IDM_BUILTIN_TYPE_VECTOR,
+    IDM_BUILTIN_TYPE_DICT,
+    IDM_BUILTIN_TYPE_SYNTAX,
+    IDM_BUILTIN_TYPE_CELL,
+    IDM_BUILTIN_TYPE_CLOSURE,
+    IDM_BUILTIN_TYPE_PID,
+    IDM_BUILTIN_TYPE_REF,
+    IDM_BUILTIN_TYPE_PORT,
+    IDM_BUILTIN_TYPE_RECORD,
+    IDM_BUILTIN_TYPE_REGEX,
+    IDM_BUILTIN_TYPE_REGEX_RESULT
+} IdmBuiltinType;
+
+static IdmBuiltinType builtin_type_kind(IdmSymbol *type) {
+    if (!type) return IDM_BUILTIN_TYPE_NONE;
+    const char *text = idm_symbol_text(type);
+    if (strcmp(text, "nil") == 0) return IDM_BUILTIN_TYPE_NIL;
+    if (strcmp(text, "atom") == 0) return IDM_BUILTIN_TYPE_ATOM;
+    if (strcmp(text, "word") == 0) return IDM_BUILTIN_TYPE_WORD;
+    if (strcmp(text, "int") == 0) return IDM_BUILTIN_TYPE_INT;
+    if (strcmp(text, "fixnum") == 0) return IDM_BUILTIN_TYPE_FIXNUM;
+    if (strcmp(text, "bignum") == 0) return IDM_BUILTIN_TYPE_BIGNUM;
+    if (strcmp(text, "float") == 0) return IDM_BUILTIN_TYPE_FLOAT;
+    if (strcmp(text, "string") == 0) return IDM_BUILTIN_TYPE_STRING;
+    if (strcmp(text, "pair") == 0) return IDM_BUILTIN_TYPE_PAIR;
+    if (strcmp(text, "empty-list") == 0) return IDM_BUILTIN_TYPE_EMPTY_LIST;
+    if (strcmp(text, "list") == 0) return IDM_BUILTIN_TYPE_LIST;
+    if (strcmp(text, "tuple") == 0) return IDM_BUILTIN_TYPE_TUPLE;
+    if (strcmp(text, "vector") == 0) return IDM_BUILTIN_TYPE_VECTOR;
+    if (strcmp(text, "dict") == 0) return IDM_BUILTIN_TYPE_DICT;
+    if (strcmp(text, "syntax") == 0) return IDM_BUILTIN_TYPE_SYNTAX;
+    if (strcmp(text, "cell") == 0) return IDM_BUILTIN_TYPE_CELL;
+    if (strcmp(text, "closure") == 0) return IDM_BUILTIN_TYPE_CLOSURE;
+    if (strcmp(text, "pid") == 0) return IDM_BUILTIN_TYPE_PID;
+    if (strcmp(text, "ref") == 0) return IDM_BUILTIN_TYPE_REF;
+    if (strcmp(text, "port") == 0) return IDM_BUILTIN_TYPE_PORT;
+    if (strcmp(text, "record") == 0) return IDM_BUILTIN_TYPE_RECORD;
+    if (strcmp(text, "regex") == 0) return IDM_BUILTIN_TYPE_REGEX;
+    if (strcmp(text, "regex-result") == 0) return IDM_BUILTIN_TYPE_REGEX_RESULT;
+    return IDM_BUILTIN_TYPE_NONE;
 }
 
-bool idm_value_matches_type_name(IdmValue value, const char *type) {
+bool idm_value_builtin_type_symbol(IdmSymbol *type) {
+    return builtin_type_kind(type) != IDM_BUILTIN_TYPE_NONE;
+}
+
+bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type) {
     if (!type) return false;
     IdmValueTag vt = idm_value_tag(value);
-    if (strcmp(type, "record") == 0) return vt == IDM_VAL_RECORD;
-    if (vt == IDM_VAL_RECORD) return idm_record_is_a(value, type);
-    if (strcmp(type, "int") == 0) return vt == IDM_VAL_INT || vt == IDM_VAL_BIGNUM;
-    if (strcmp(type, "empty-list") == 0) return idm_is_empty_list(value);
-    if (strcmp(type, "list") == 0) {
-        IdmValue cur = value;
-        while (idm_is_pair(cur)) cur = idm_cdr(cur, NULL);
-        return idm_is_empty_list(cur);
+    switch (builtin_type_kind(type)) {
+        case IDM_BUILTIN_TYPE_NIL: return vt == IDM_VAL_NIL;
+        case IDM_BUILTIN_TYPE_ATOM: return vt == IDM_VAL_ATOM;
+        case IDM_BUILTIN_TYPE_WORD: return vt == IDM_VAL_WORD;
+        case IDM_BUILTIN_TYPE_INT: return vt == IDM_VAL_INT || vt == IDM_VAL_BIGNUM;
+        case IDM_BUILTIN_TYPE_FIXNUM: return vt == IDM_VAL_INT;
+        case IDM_BUILTIN_TYPE_BIGNUM: return vt == IDM_VAL_BIGNUM;
+        case IDM_BUILTIN_TYPE_FLOAT: return vt == IDM_VAL_FLOAT;
+        case IDM_BUILTIN_TYPE_STRING: return vt == IDM_VAL_STRING;
+        case IDM_BUILTIN_TYPE_PAIR: return vt == IDM_VAL_PAIR;
+        case IDM_BUILTIN_TYPE_EMPTY_LIST: return idm_is_empty_list(value);
+        case IDM_BUILTIN_TYPE_LIST: {
+            IdmValue cur = value;
+            while (idm_is_pair(cur)) cur = idm_cdr(cur, NULL);
+            return idm_is_empty_list(cur);
+        }
+        case IDM_BUILTIN_TYPE_TUPLE: return vt == IDM_VAL_TUPLE;
+        case IDM_BUILTIN_TYPE_VECTOR: return vt == IDM_VAL_VECTOR;
+        case IDM_BUILTIN_TYPE_DICT: return vt == IDM_VAL_DICT;
+        case IDM_BUILTIN_TYPE_SYNTAX: return vt == IDM_VAL_SYNTAX;
+        case IDM_BUILTIN_TYPE_CELL: return vt == IDM_VAL_CELL;
+        case IDM_BUILTIN_TYPE_CLOSURE: return vt == IDM_VAL_CLOSURE;
+        case IDM_BUILTIN_TYPE_PID: return vt == IDM_VAL_PID;
+        case IDM_BUILTIN_TYPE_REF: return vt == IDM_VAL_REF;
+        case IDM_BUILTIN_TYPE_PORT: return vt == IDM_VAL_PORT;
+        case IDM_BUILTIN_TYPE_RECORD: return vt == IDM_VAL_RECORD;
+        case IDM_BUILTIN_TYPE_REGEX: return vt == IDM_VAL_REGEX;
+        case IDM_BUILTIN_TYPE_REGEX_RESULT: return vt == IDM_VAL_REGEX_RESULT;
+        case IDM_BUILTIN_TYPE_NONE: break;
     }
-    IdmValueTag tag = IDM_VAL_NIL;
-    return idm_value_type_from_name(type, &tag) && vt == tag;
+    return vt == IDM_VAL_RECORD && idm_record_is_symbol(value, type);
 }
 
 bool idm_is_nil(IdmValue value) {
@@ -1450,7 +2070,15 @@ const char *idm_record_type(IdmValue value, IdmError *err) {
         idm_error_set(err, idm_span_unknown(NULL), "expected record");
         return NULL;
     }
-    return idm_boxed_object(value)->as.record.type;
+    return record_shape_type_text(idm_boxed_object(value)->as.record.shape);
+}
+
+IdmSymbol *idm_record_type_symbol(IdmValue value, IdmError *err) {
+    if (idm_value_tag(value) != IDM_VAL_RECORD) {
+        idm_error_set(err, idm_span_unknown(NULL), "expected record");
+        return NULL;
+    }
+    return idm_boxed_object(value)->as.record.shape->type;
 }
 
 size_t idm_record_field_count(IdmValue value, IdmError *err) {
@@ -1458,7 +2086,7 @@ size_t idm_record_field_count(IdmValue value, IdmError *err) {
         idm_error_set(err, idm_span_unknown(NULL), "expected record");
         return 0;
     }
-    return idm_boxed_object(value)->as.record.field_count;
+    return idm_boxed_object(value)->as.record.shape->field_count;
 }
 
 const char *idm_record_field_name(IdmValue value, size_t index, IdmError *err) {
@@ -1466,11 +2094,23 @@ const char *idm_record_field_name(IdmValue value, size_t index, IdmError *err) {
         idm_error_set(err, idm_span_unknown(NULL), "expected record");
         return NULL;
     }
-    if (index >= idm_boxed_object(value)->as.record.field_count) {
+    if (index >= idm_boxed_object(value)->as.record.shape->field_count) {
         idm_error_set(err, idm_span_unknown(NULL), "record field index out of bounds");
         return NULL;
     }
-    return idm_boxed_object(value)->as.record.field_names[index];
+    return record_shape_field_text(idm_boxed_object(value)->as.record.shape, index);
+}
+
+IdmSymbol *idm_record_field_name_symbol(IdmValue value, size_t index, IdmError *err) {
+    if (idm_value_tag(value) != IDM_VAL_RECORD) {
+        idm_error_set(err, idm_span_unknown(NULL), "expected record");
+        return NULL;
+    }
+    if (index >= idm_boxed_object(value)->as.record.shape->field_count) {
+        idm_error_set(err, idm_span_unknown(NULL), "record field index out of bounds");
+        return NULL;
+    }
+    return idm_boxed_object(value)->as.record.shape->field_names[index];
 }
 
 IdmValue idm_record_field_value(IdmValue value, size_t index, IdmError *err) {
@@ -1478,47 +2118,38 @@ IdmValue idm_record_field_value(IdmValue value, size_t index, IdmError *err) {
         idm_error_set(err, idm_span_unknown(NULL), "expected record");
         return idm_nil();
     }
-    if (index >= idm_boxed_object(value)->as.record.field_count) {
+    if (index >= idm_boxed_object(value)->as.record.shape->field_count) {
         idm_error_set(err, idm_span_unknown(NULL), "record field index out of bounds");
         return idm_nil();
     }
     return idm_boxed_object(value)->as.record.field_values[index];
 }
 
-bool idm_record_field_named(IdmValue value, const char *field, IdmValue *out, IdmError *err) {
+bool idm_record_field_project_symbols(IdmValue value, IdmSymbol *type, IdmSymbol *field, uint32_t field_index, IdmValue *out, IdmError *err) {
     if (idm_value_tag(value) != IDM_VAL_RECORD) return idm_error_set(err, idm_span_unknown(NULL), "record field access expects a record");
-    if (!field || !*field) return idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
-    for (size_t i = 0; i < idm_boxed_object(value)->as.record.field_count; i++) {
-        if (strcmp(idm_boxed_object(value)->as.record.field_names[i], field) == 0) {
-            if (out) *out = idm_boxed_object(value)->as.record.field_values[i];
-            return true;
-        }
+    if (!type) return idm_error_set(err, idm_span_unknown(NULL), "record field type must be a non-empty name");
+    if (!field) return idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
+    IdmRecordShape *shape = idm_boxed_object(value)->as.record.shape;
+    const char *field_text = idm_symbol_text(field);
+    const char *type_text = idm_symbol_text(type);
+    if (shape->type != type) {
+        return idm_error_set(err, idm_span_unknown(NULL), "field '%s' expects record type '%s', got '%s'", field_text, type_text, record_shape_type_text(shape));
     }
-    return idm_error_set(err, idm_span_unknown(NULL), "record '%s' has no field '%s'", idm_boxed_object(value)->as.record.type, field);
-}
-
-bool idm_record_field_project(IdmValue value, const char *type, const char *field, uint32_t field_index, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(value) != IDM_VAL_RECORD) return idm_error_set(err, idm_span_unknown(NULL), "record field access expects a record");
-    if (!type || !*type) return idm_error_set(err, idm_span_unknown(NULL), "record field type must be a non-empty name");
-    if (!field || !*field) return idm_error_set(err, idm_span_unknown(NULL), "record field must be a non-empty name");
-    if (strcmp(idm_boxed_object(value)->as.record.type, type) != 0) {
-        return idm_error_set(err, idm_span_unknown(NULL), "field '%s' expects record type '%s', got '%s'", field, type, idm_boxed_object(value)->as.record.type);
+    if ((size_t)field_index >= shape->field_count) {
+        return idm_error_set(err, idm_span_unknown(NULL), "record '%s' has no field slot %u for '%s'", type_text, field_index, field_text);
     }
-    if ((size_t)field_index >= idm_boxed_object(value)->as.record.field_count) {
-        return idm_error_set(err, idm_span_unknown(NULL), "record '%s' has no field slot %u for '%s'", type, field_index, field);
-    }
-    const char *actual = idm_boxed_object(value)->as.record.field_names[field_index];
-    if (strcmp(actual, field) != 0) {
-        return idm_error_set(err, idm_span_unknown(NULL), "record '%s' field slot %u is '%s', not '%s'", type, field_index, actual, field);
+    IdmSymbol *actual = shape->field_names[field_index];
+    if (actual != field) {
+        return idm_error_set(err, idm_span_unknown(NULL), "record '%s' field slot %u is '%s', not '%s'", type_text, field_index, idm_symbol_text(actual), field_text);
     }
     if (out) *out = idm_boxed_object(value)->as.record.field_values[field_index];
     return true;
 }
 
-bool idm_record_is_a(IdmValue value, const char *type) {
+bool idm_record_is_symbol(IdmValue value, IdmSymbol *type) {
     if (!type) return false;
-    if (strcmp(type, "record") == 0) return idm_value_tag(value) == IDM_VAL_RECORD;
-    return idm_value_tag(value) == IDM_VAL_RECORD && strcmp(idm_boxed_object(value)->as.record.type, type) == 0;
+    if (builtin_type_kind(type) == IDM_BUILTIN_TYPE_RECORD) return idm_value_tag(value) == IDM_VAL_RECORD;
+    return idm_value_tag(value) == IDM_VAL_RECORD && idm_boxed_object(value)->as.record.shape->type == type;
 }
 
 IdmRegex *idm_regex_value_get(IdmValue value, IdmError *err) {
@@ -1672,6 +2303,7 @@ size_t idm_string_length(IdmValue value) {
 
 bool idm_value_equal(IdmValue a, IdmValue b) {
     IdmValueTag ta = idm_value_tag(a), tb = idm_value_tag(b);
+    if (idm_value_is_int(a) && idm_value_is_int(b)) return idm_int_compare(a, b) == 0;
     if (ta != tb) return false;
     switch (ta) {
         case IDM_VAL_NIL: return true;
@@ -1707,10 +2339,8 @@ bool idm_value_equal(IdmValue a, IdmValue b) {
         case IDM_VAL_CLOSURE:
             return idm_boxed_object(a) == idm_boxed_object(b);
         case IDM_VAL_RECORD:
-            if (strcmp(idm_boxed_object(a)->as.record.type, idm_boxed_object(b)->as.record.type) != 0) return false;
-            if (idm_boxed_object(a)->as.record.field_count != idm_boxed_object(b)->as.record.field_count) return false;
-            for (size_t i = 0; i < idm_boxed_object(a)->as.record.field_count; i++) {
-                if (strcmp(idm_boxed_object(a)->as.record.field_names[i], idm_boxed_object(b)->as.record.field_names[i]) != 0) return false;
+            if (idm_boxed_object(a)->as.record.shape != idm_boxed_object(b)->as.record.shape) return false;
+            for (size_t i = 0; i < idm_boxed_object(a)->as.record.shape->field_count; i++) {
                 if (!idm_value_equal(idm_boxed_object(a)->as.record.field_values[i], idm_boxed_object(b)->as.record.field_values[i])) return false;
             }
             return true;
@@ -1723,28 +2353,21 @@ bool idm_value_equal(IdmValue a, IdmValue b) {
         case IDM_VAL_PORT:
             return idm_value_id(a) == idm_value_id(b);
         case IDM_VAL_BIGNUM:
-            return false;
+            return idm_int_compare(a, b) == 0;
     }
     return false;
 }
 
-static bool write_escaped(IdmBuffer *buf, const char *text, size_t len) {
-    if (!idm_buf_append_char(buf, '"')) return false;
-    for (size_t i = 0; i < len; i++) {
-        unsigned char ch = (unsigned char)text[i];
-        switch (ch) {
-            case '\\': if (!idm_buf_append(buf, "\\\\")) return false; break;
-            case '"': if (!idm_buf_append(buf, "\\\"")) return false; break;
-            case '\n': if (!idm_buf_append(buf, "\\n")) return false; break;
-            case '\r': if (!idm_buf_append(buf, "\\r")) return false; break;
-            case '\t': if (!idm_buf_append(buf, "\\t")) return false; break;
-            default:
-                if (ch < 32u) {
-                    if (!idm_buf_appendf(buf, "\\x%02x", ch)) return false;
-                } else if (!idm_buf_append_char(buf, (char)ch)) return false;
-        }
-    }
-    return idm_buf_append_char(buf, '"');
+static bool write_sequence_item(IdmBuffer *buf, size_t index, void *user) {
+    IdmObject *obj = user;
+    return idm_value_write(buf, obj->as.sequence.items[index]);
+}
+
+static bool write_dict_item(IdmBuffer *buf, size_t index, void *user) {
+    IdmObject *obj = user;
+    return idm_value_write(buf, obj->as.dict.entries[index].key) &&
+           idm_buf_append_char(buf, ' ') &&
+           idm_value_write(buf, obj->as.dict.entries[index].value);
 }
 
 bool idm_value_write(IdmBuffer *buf, IdmValue value) {
@@ -1758,40 +2381,30 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
             snprintf(text, sizeof(text), "%g", idm_float_value(value));
             return idm_buf_append(buf, text) && (strpbrk(text, ".eEn") != NULL || idm_buf_append(buf, ".0"));
         }
-        case IDM_VAL_STRING: return write_escaped(buf, idm_boxed_object(value)->as.string.bytes, idm_boxed_object(value)->as.string.len);
+        case IDM_VAL_STRING: return idm_surface_write_escaped(buf, idm_boxed_object(value)->as.string.bytes, idm_boxed_object(value)->as.string.len);
         case IDM_VAL_PID: return idm_buf_appendf(buf, "#<pid:%llu>", (unsigned long long)idm_value_id(value));
         case IDM_VAL_REF: return idm_buf_appendf(buf, "#<ref:%llu>", (unsigned long long)idm_value_id(value));
         case IDM_VAL_PORT: return idm_buf_appendf(buf, "#<port:%llu>", (unsigned long long)idm_value_id(value));
-        case IDM_VAL_RECORD: return idm_buf_appendf(buf, "#<record:%s>", idm_boxed_object(value)->as.record.type);
+        case IDM_VAL_RECORD: return idm_buf_appendf(buf, "#<record:%s>", record_shape_type_text(idm_boxed_object(value)->as.record.shape));
         case IDM_VAL_REGEX: {
             size_t len = 0;
             const char *source = idm_regex_source(idm_boxed_object(value)->as.regex, &len);
-            return idm_buf_append_char(buf, 'r') && write_escaped(buf, source, len);
+            return idm_buf_append_char(buf, 'r') && idm_surface_write_escaped(buf, source, len);
         }
         case IDM_VAL_REGEX_RESULT:
             return idm_buf_append(buf, "#<regex-result>");
         case IDM_VAL_BIGNUM:
-            return idm_buf_append(buf, "#<bignum>");
+            return bignum_write(buf, value);
         case IDM_VAL_TUPLE:
         case IDM_VAL_VECTOR: {
             const char *open = idm_value_tag(value) == IDM_VAL_TUPLE ? "{" : "[";
             const char *close = idm_value_tag(value) == IDM_VAL_TUPLE ? "}" : "]";
-            if (!idm_buf_append(buf, open)) return false;
-            for (size_t i = 0; i < idm_boxed_object(value)->as.sequence.count; i++) {
-                if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
-                if (!idm_value_write(buf, idm_boxed_object(value)->as.sequence.items[i])) return false;
-            }
-            return idm_buf_append(buf, close);
+            IdmObject *obj = idm_boxed_object(value);
+            return idm_surface_write_sequence(buf, open, close, obj->as.sequence.count, write_sequence_item, obj);
         }
         case IDM_VAL_DICT: {
-            if (!idm_buf_append(buf, "%{")) return false;
-            for (size_t i = 0; i < idm_boxed_object(value)->as.dict.count; i++) {
-                if (i != 0 && !idm_buf_append_char(buf, ' ')) return false;
-                if (!idm_value_write(buf, idm_boxed_object(value)->as.dict.entries[i].key)) return false;
-                if (!idm_buf_append_char(buf, ' ')) return false;
-                if (!idm_value_write(buf, idm_boxed_object(value)->as.dict.entries[i].value)) return false;
-            }
-            return idm_buf_append_char(buf, '}');
+            IdmObject *obj = idm_boxed_object(value);
+            return idm_surface_write_sequence(buf, "%{", "}", obj->as.dict.count, write_dict_item, obj);
         }
         case IDM_VAL_SYNTAX: return idm_buf_append(buf, "#<syntax>");
         case IDM_VAL_CELL: return idm_buf_append(buf, "#<cell>");
@@ -1836,7 +2449,8 @@ static IdmObject *copymap_find(const CopyMap *m, IdmObject *key) {
 
 static bool copymap_put(CopyMap *m, IdmObject *key, IdmObject *val) {
     if (m->cap == 0 || m->count + 1u > m->cap - (m->cap >> 2)) {
-        size_t ncap = m->cap ? m->cap * 2u : 16u;
+        size_t ncap = 0;
+        if (m->cap == SIZE_MAX || !idm_next_capacity(m->cap, 16u, m->cap + 1u, &ncap)) return false;
         IdmObject **nk = calloc(ncap, sizeof(*nk));
         IdmObject **nv = calloc(ncap, sizeof(*nv));
         if (!nk || !nv) { free(nk); free(nv); return false; }
@@ -1879,11 +2493,7 @@ typedef struct { CopyWork *items; size_t count; size_t cap; } CopyStack;
 
 static bool copystack_push(CopyStack *s, IdmObject *src, IdmObject *dst) {
     if (s->count == s->cap) {
-        size_t ncap = s->cap ? s->cap * 2u : 64u;
-        CopyWork *next = realloc(s->items, ncap * sizeof(*next));
-        if (!next) return false;
-        s->items = next;
-        s->cap = ncap;
+        if (!idm_grow((void **)&s->items, &s->cap, sizeof(*s->items), 64u, s->count + 1u)) return false;
     }
     s->items[s->count].src = src;
     s->items[s->count].dst = dst;
@@ -1977,19 +2587,12 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
             return true;
         }
         case IDM_OBJ_RECORD:
-            dst->as.record.type = idm_strdup(src->as.record.type);
-            if (!dst->as.record.type) return idm_error_oom(err, idm_span_unknown(NULL));
-            heap_account_unlocked(target, dst, strlen(dst->as.record.type) + 1u);
-            dst->as.record.field_count = src->as.record.field_count;
-            if (src->as.record.field_count != 0) {
-                dst->as.record.field_names = calloc(src->as.record.field_count, sizeof(*dst->as.record.field_names));
-                dst->as.record.field_values = calloc(src->as.record.field_count, sizeof(*dst->as.record.field_values));
-                if (!dst->as.record.field_names || !dst->as.record.field_values) return idm_error_oom(err, idm_span_unknown(NULL));
-                heap_account_unlocked(target, dst, src->as.record.field_count * (sizeof(*dst->as.record.field_names) + sizeof(*dst->as.record.field_values)));
-                for (size_t i = 0; i < src->as.record.field_count; i++) {
-                    dst->as.record.field_names[i] = idm_strdup(src->as.record.field_names[i]);
-                    if (!dst->as.record.field_names[i]) return idm_error_oom(err, idm_span_unknown(NULL));
-                    heap_account_unlocked(target, dst, strlen(dst->as.record.field_names[i]) + 1u);
+            dst->as.record.shape = src->as.record.shape;
+            if (src->as.record.shape->field_count != 0) {
+                dst->as.record.field_values = calloc(src->as.record.shape->field_count, sizeof(*dst->as.record.field_values));
+                if (!dst->as.record.field_values) return idm_error_oom(err, idm_span_unknown(NULL));
+                heap_account_unlocked(target, dst, src->as.record.shape->field_count * sizeof(*dst->as.record.field_values));
+                for (size_t i = 0; i < src->as.record.shape->field_count; i++) {
                     if (!copy_intern(rt, target, src->as.record.field_values[i], &dst->as.record.field_values[i], map, stack, err)) return false;
                 }
             }
@@ -2015,8 +2618,18 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
         case IDM_OBJ_FLONUM:
             dst->as.flonum = src->as.flonum;
             return true;
-        case IDM_OBJ_BIGNUM:
+        case IDM_OBJ_BIGNUM: {
+            size_t count = src->as.bignum.count;
+            size_t bytes = 0;
+            if (!bignum_limb_bytes(count, &bytes, err)) return false;
+            dst->as.bignum.limbs = bytes == 0u ? NULL : malloc(bytes);
+            if (bytes != 0u && !dst->as.bignum.limbs) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (bytes != 0u) memcpy(dst->as.bignum.limbs, src->as.bignum.limbs, bytes);
+            dst->as.bignum.count = src->as.bignum.count;
+            dst->as.bignum.sign = src->as.bignum.sign;
+            heap_account_unlocked(target, dst, bytes);
             return true;
+        }
     }
     return idm_error_set(err, idm_span_unknown(NULL), "value copy: unknown object kind");
 }
@@ -2067,6 +2680,14 @@ bool idm_error_reason(IdmRuntime *rt, IdmError *err, const char *kind, size_t co
     *slot = detail;
     err->reason = slot;
     return false;
+}
+
+bool idm_error_reason_is(const IdmError *err, const char *kind) {
+    if (!err || !err->reason || !kind) return false;
+    IdmValue detail = *(const IdmValue *)err->reason;
+    if (!idm_is_tuple(detail) || idm_sequence_count(detail) == 0u) return false;
+    IdmValue head = idm_sequence_item(detail, 0u, NULL);
+    return idm_value_tag(head) == IDM_VAL_ATOM && strcmp(idm_symbol_text(idm_value_symbol(head)), kind) == 0;
 }
 
 bool idm_error_take_reason(IdmError *err, IdmValue *out) {

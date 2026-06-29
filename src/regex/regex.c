@@ -1,5 +1,6 @@
 #include "idiom/regex.h"
-#include "idiom/pattern.h"
+#include "idiom/prims.h"
+#include "idiom/reader.h"
 
 #include <stdio.h>
 
@@ -38,16 +39,11 @@ typedef struct {
     size_t cap;
 } RxNodeVec;
 
-typedef struct {
-    unsigned char bits[32];
-    bool negated;
-} RxClass;
-
 struct RxNode {
     RxNodeKind kind;
     union {
         unsigned char literal;
-        RxClass cls;
+        IdmByteClass cls;
         RxNodeVec seq;
         struct {
             RxNode *child;
@@ -62,12 +58,6 @@ struct RxNode {
         RxNode *child;
     } as;
 };
-
-typedef struct {
-    bool set;
-    size_t start;
-    size_t end;
-} RxCapture;
 
 typedef struct {
     bool any;
@@ -103,7 +93,7 @@ struct IdmRegexResult {
     char *subject;
     size_t subject_len;
     IdmValue subject_value;
-    RxCapture *captures;
+    IdmByteCapture *captures;
     char **group_names;
     size_t capture_count;
     bool inline_storage;
@@ -117,31 +107,14 @@ typedef struct {
     uint32_t flags;
     char **group_names;
     size_t group_count;
+    size_t group_cap;
     IdmError *err;
     size_t depth;
 } RxParser;
 
-typedef struct {
-    bool matched;
-    size_t end;
-    size_t accept_id;
-    RxCapture *captures;
-} RxMatch;
-
-
 static void node_free(RxNode *node);
 static bool parse_alt(RxParser *p, RxNode **out);
 static bool regex_start_candidate(const RxStartInfo *start, uint32_t flags, const char *s, size_t len, size_t pos);
-
-static bool require_string_arg(IdmRuntime *rt, const char *name, IdmValue v, const char **out, size_t *out_len, IdmError *err) {
-    if (idm_value_tag(v) != IDM_VAL_STRING) {
-        idm_error_set(err, idm_span_unknown(NULL), "%s expects a string", name);
-        return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, name), v);
-    }
-    *out = idm_string_bytes(v);
-    if (out_len) *out_len = idm_string_length(v);
-    return true;
-}
 
 static bool parse_flag_atom(const char *text, uint32_t *flags) {
     if (strcmp(text, "caseless") == 0 || strcmp(text, "ignore-case") == 0 || strcmp(text, "i") == 0) {
@@ -235,11 +208,7 @@ static RxNode *node_new(RxNodeKind kind) {
 
 static bool node_vec_push(RxNodeVec *vec, RxNode *node) {
     if (vec->count == vec->cap) {
-        size_t cap = vec->cap ? vec->cap * 2u : 4u;
-        RxNode **items = realloc(vec->items, cap * sizeof(*items));
-        if (!items) return false;
-        vec->items = items;
-        vec->cap = cap;
+        if (!idm_grow((void **)&vec->items, &vec->cap, sizeof(*vec->items), 4u, vec->count + 1u)) return false;
     }
     vec->items[vec->count++] = node;
     return true;
@@ -332,56 +301,24 @@ static bool regex_is_caseless(const RxParser *p) {
     return (p->flags & IDM_REGEX_CASELESS) != 0;
 }
 
-static void cls_set(RxClass *cls, unsigned char c) {
-    cls->bits[c / 8u] |= (unsigned char)(1u << (c % 8u));
-}
-
-static bool cls_has(const RxClass *cls, unsigned char c) {
-    bool in = (cls->bits[c / 8u] & (unsigned char)(1u << (c % 8u))) != 0;
-    return cls->negated ? !in : in;
-}
-
-static void cls_add_char(RxClass *cls, unsigned char c, bool caseless) {
-    cls_set(cls, c);
-    if (caseless && isalpha(c)) {
-        cls_set(cls, (unsigned char)tolower(c));
-        cls_set(cls, (unsigned char)toupper(c));
-    }
-}
-
-static void cls_add_range(RxClass *cls, unsigned char lo, unsigned char hi, bool caseless) {
-    if (lo > hi) {
-        unsigned char tmp = lo;
-        lo = hi;
-        hi = tmp;
-    }
-    for (unsigned i = lo; i <= hi; i++) cls_add_char(cls, (unsigned char)i, caseless);
-}
-
-static void cls_add_pred(RxClass *cls, int (*pred)(int), bool caseless) {
-    for (unsigned i = 0; i < 256u; i++) {
-        if (pred((int)i)) cls_add_char(cls, (unsigned char)i, caseless);
-    }
-}
-
 static int pred_word(int c) {
     return isalnum(c) || c == '_';
 }
 
-static bool cls_add_named(RxClass *cls, const char *name, bool caseless) {
-    if (strcmp(name, "alnum") == 0) cls_add_pred(cls, isalnum, caseless);
-    else if (strcmp(name, "alpha") == 0) cls_add_pred(cls, isalpha, caseless);
-    else if (strcmp(name, "blank") == 0) { cls_add_char(cls, ' ', caseless); cls_add_char(cls, '\t', caseless); }
-    else if (strcmp(name, "cntrl") == 0) cls_add_pred(cls, iscntrl, caseless);
-    else if (strcmp(name, "digit") == 0) cls_add_pred(cls, isdigit, caseless);
-    else if (strcmp(name, "graph") == 0) cls_add_pred(cls, isgraph, caseless);
-    else if (strcmp(name, "lower") == 0) cls_add_pred(cls, islower, caseless);
-    else if (strcmp(name, "print") == 0) cls_add_pred(cls, isprint, caseless);
-    else if (strcmp(name, "punct") == 0) cls_add_pred(cls, ispunct, caseless);
-    else if (strcmp(name, "space") == 0) cls_add_pred(cls, isspace, caseless);
-    else if (strcmp(name, "upper") == 0) cls_add_pred(cls, isupper, caseless);
-    else if (strcmp(name, "word") == 0) cls_add_pred(cls, pred_word, caseless);
-    else if (strcmp(name, "xdigit") == 0) cls_add_pred(cls, isxdigit, caseless);
+static bool cls_add_named(IdmByteClass *cls, const char *name, bool caseless) {
+    if (strcmp(name, "alnum") == 0) idm_byteclass_add_pred(cls, isalnum, caseless);
+    else if (strcmp(name, "alpha") == 0) idm_byteclass_add_pred(cls, isalpha, caseless);
+    else if (strcmp(name, "blank") == 0) { idm_byteclass_add_char(cls, ' ', caseless); idm_byteclass_add_char(cls, '\t', caseless); }
+    else if (strcmp(name, "cntrl") == 0) idm_byteclass_add_pred(cls, iscntrl, caseless);
+    else if (strcmp(name, "digit") == 0) idm_byteclass_add_pred(cls, isdigit, caseless);
+    else if (strcmp(name, "graph") == 0) idm_byteclass_add_pred(cls, isgraph, caseless);
+    else if (strcmp(name, "lower") == 0) idm_byteclass_add_pred(cls, islower, caseless);
+    else if (strcmp(name, "print") == 0) idm_byteclass_add_pred(cls, isprint, caseless);
+    else if (strcmp(name, "punct") == 0) idm_byteclass_add_pred(cls, ispunct, caseless);
+    else if (strcmp(name, "space") == 0) idm_byteclass_add_pred(cls, isspace, caseless);
+    else if (strcmp(name, "upper") == 0) idm_byteclass_add_pred(cls, isupper, caseless);
+    else if (strcmp(name, "word") == 0) idm_byteclass_add_pred(cls, pred_word, caseless);
+    else if (strcmp(name, "xdigit") == 0) idm_byteclass_add_pred(cls, isxdigit, caseless);
     else return false;
     return true;
 }
@@ -419,10 +356,12 @@ static bool parse_escape_atom(RxParser *p, RxNode **out) {
     if (parser_take(p) != '\\') return parser_error(p, "internal escape parser error");
     int c = parser_take(p);
     if (c < 0) return parser_error(p, "trailing backslash");
+    char decoded = 0;
+    if (idm_reader_string_escape((char)c, &decoded)) {
+        *out = literal_node((unsigned char)decoded);
+        return *out != NULL;
+    }
     switch (c) {
-        case 'n': *out = literal_node('\n'); return *out != NULL;
-        case 'r': *out = literal_node('\r'); return *out != NULL;
-        case 't': *out = literal_node('\t'); return *out != NULL;
         case 'd': *out = class_node_named("digit", false, regex_is_caseless(p)); return *out != NULL;
         case 'D': *out = class_node_named("digit", true, regex_is_caseless(p)); return *out != NULL;
         case 's': *out = class_node_named("space", false, regex_is_caseless(p)); return *out != NULL;
@@ -438,22 +377,25 @@ static bool parse_escape_atom(RxParser *p, RxNode **out) {
     }
 }
 
-static bool parse_class_char(RxParser *p, RxClass *cls, bool *out_is_char, unsigned char *out_ch) {
+static bool parse_class_char(RxParser *p, IdmByteClass *cls, bool *out_is_char, unsigned char *out_ch) {
     int c = parser_take(p);
     if (c < 0) return parser_error(p, "unterminated character class");
     if (c == '\\') {
         int e = parser_take(p);
         if (e < 0) return parser_error(p, "trailing class escape");
+        char decoded = 0;
+        if (idm_reader_string_escape((char)e, &decoded)) {
+            *out_is_char = true;
+            *out_ch = (unsigned char)decoded;
+            return true;
+        }
         switch (e) {
-            case 'n': *out_is_char = true; *out_ch = '\n'; return true;
-            case 'r': *out_is_char = true; *out_ch = '\r'; return true;
-            case 't': *out_is_char = true; *out_ch = '\t'; return true;
             case 'd': cls_add_named(cls, "digit", regex_is_caseless(p)); *out_is_char = false; return true;
             case 'D': {
-                RxClass tmp = {0};
+                IdmByteClass tmp = {0};
                 tmp.negated = true;
                 cls_add_named(&tmp, "digit", regex_is_caseless(p));
-                for (unsigned i = 0; i < 256u; i++) if (cls_has(&tmp, (unsigned char)i)) cls_add_char(cls, (unsigned char)i, regex_is_caseless(p));
+                for (unsigned i = 0; i < 256u; i++) if (idm_byteclass_has(&tmp, (unsigned char)i)) idm_byteclass_add_char(cls, (unsigned char)i, regex_is_caseless(p));
                 *out_is_char = false;
                 return true;
             }
@@ -467,7 +409,7 @@ static bool parse_class_char(RxParser *p, RxClass *cls, bool *out_is_char, unsig
     return true;
 }
 
-static bool parse_posix_class(RxParser *p, RxClass *cls, bool *out_done) {
+static bool parse_posix_class(RxParser *p, IdmByteClass *cls, bool *out_done) {
     *out_done = false;
     if (p->pos + 3u > p->len || p->source[p->pos] != '[') return true;
     char opener = p->source[p->pos + 1u];
@@ -484,7 +426,7 @@ static bool parse_posix_class(RxParser *p, RxClass *cls, bool *out_done) {
         if (!ok) return parser_error(p, "unknown POSIX character class");
     } else {
         if (name[0] != '\0') {
-            for (size_t j = 0; name[j] != '\0'; j++) cls_add_char(cls, (unsigned char)name[j], regex_is_caseless(p));
+            for (size_t j = 0; name[j] != '\0'; j++) idm_byteclass_add_char(cls, (unsigned char)name[j], regex_is_caseless(p));
         }
         free(name);
     }
@@ -535,9 +477,9 @@ static bool parse_class(RxParser *p, RxNode **out) {
                 node_free(node);
                 return parser_error(p, "class range endpoint must be a character");
             }
-            cls_add_range(&node->as.cls, lo, hi, regex_is_caseless(p));
+            idm_byteclass_add_range(&node->as.cls, lo, hi, regex_is_caseless(p));
         } else if (is_char) {
-            cls_add_char(&node->as.cls, lo, regex_is_caseless(p));
+            idm_byteclass_add_char(&node->as.cls, lo, regex_is_caseless(p));
         }
         first = false;
     }
@@ -555,9 +497,7 @@ static bool group_name_seen(RxParser *p, const char *name) {
 static bool add_group(RxParser *p, const char *name, size_t *out_index) {
     if (name && group_name_seen(p, name)) return parser_error(p, "duplicate capture group name");
     size_t next = p->group_count + 1u;
-    char **names = realloc(p->group_names, (next + 1u) * sizeof(*names));
-    if (!names) return parser_error(p, "out of memory");
-    p->group_names = names;
+    if (!idm_grow((void **)&p->group_names, &p->group_cap, sizeof(*p->group_names), 4u, next + 1u)) return parser_error(p, "out of memory");
     p->group_names[next] = NULL;
     if (name) {
         p->group_names[next] = idm_strdup(name);
@@ -814,9 +754,9 @@ static void start_info_add_byte(RxStartInfo *info, unsigned char ch, uint32_t fl
     }
 }
 
-static void start_info_add_class(RxStartInfo *info, const RxClass *cls) {
+static void start_info_add_class(RxStartInfo *info, const IdmByteClass *cls) {
     for (unsigned i = 0; i < 256u; i++) {
-        if (cls_has(cls, (unsigned char)i)) info->bytes[i] = true;
+        if (idm_byteclass_has(cls, (unsigned char)i)) info->bytes[i] = true;
     }
 }
 
@@ -894,15 +834,6 @@ static RxStartInfo start_info_node(const RxNode *node, uint32_t flags) {
     return info;
 }
 
-static void bclass_set(unsigned char bits[32], unsigned char c) { bits[c >> 3] |= (unsigned char)(1u << (c & 7u)); }
-static void bclass_char(unsigned char bits[32], unsigned char c, bool caseless) {
-    bclass_set(bits, c);
-    if (caseless && isalpha(c)) {
-        bclass_set(bits, (unsigned char)tolower(c));
-        bclass_set(bits, (unsigned char)toupper(c));
-    }
-}
-
 static bool bcompile_node(SelByteProg *bp, const RxNode *node, uint32_t flags, IdmError *err);
 
 static bool bcompile_subprog(const RxNode *node, uint32_t flags, SelByteProg **out, IdmError *err) {
@@ -935,11 +866,7 @@ static bool bcompile_alt_from(SelByteProg *bp, RxNode **items, size_t index, siz
         uint32_t second = (uint32_t)idm_byteprog_node_count(bp);
         idm_byteprog_set_fork(bp, split, first, second);
         if (jc == jcap) {
-            size_t nc = jcap ? jcap * 2u : 8u;
-            uint32_t *g = realloc(jumps, nc * sizeof(*g));
-            if (!g) { idm_error_oom(err, idm_span_unknown(NULL)); ok = false; break; }
-            jumps = g;
-            jcap = nc;
+            if (!idm_grow((void **)&jumps, &jcap, sizeof(*jumps), 8u, jc + 1u)) { idm_error_oom(err, idm_span_unknown(NULL)); ok = false; break; }
         }
         jumps[jc++] = jump;
     }
@@ -993,21 +920,19 @@ static bool bcompile_node(SelByteProg *bp, const RxNode *node, uint32_t flags, I
         case RX_EMPTY:
             return true;
         case RX_LITERAL: {
-            unsigned char bits[32];
-            memset(bits, 0, sizeof(bits));
-            bclass_char(bits, node->as.literal, (flags & IDM_REGEX_CASELESS) != 0);
-            return idm_byteprog_byte(bp, bits, false, err) != SEL_NO_NODE;
+            IdmByteClass cls = {0};
+            idm_byteclass_add_char(&cls, node->as.literal, (flags & IDM_REGEX_CASELESS) != 0);
+            return idm_byteprog_byte(bp, &cls, err) != SEL_NO_NODE;
         }
         case RX_DOT: {
-            unsigned char bits[32];
-            memset(bits, 0, sizeof(bits));
+            IdmByteClass cls = {0};
             for (unsigned c = 0; c < 256u; c++) {
-                if ((flags & IDM_REGEX_DOTALL) != 0 || c != (unsigned)'\n') bclass_set(bits, (unsigned char)c);
+                if ((flags & IDM_REGEX_DOTALL) != 0 || c != (unsigned)'\n') idm_byteclass_set(&cls, (unsigned char)c);
             }
-            return idm_byteprog_byte(bp, bits, false, err) != SEL_NO_NODE;
+            return idm_byteprog_byte(bp, &cls, err) != SEL_NO_NODE;
         }
         case RX_CLASS:
-            return idm_byteprog_byte(bp, node->as.cls.bits, node->as.cls.negated, err) != SEL_NO_NODE;
+            return idm_byteprog_byte(bp, &node->as.cls, err) != SEL_NO_NODE;
         case RX_ANCHOR_START:
             return idm_byteprog_guard(bp, IDM_BYTE_GUARD_LINE_START, flags, NULL, err) != SEL_NO_NODE;
         case RX_ANCHOR_END:
@@ -1064,11 +989,6 @@ static bool build_byteprog(const RxNode *root, uint32_t flags, size_t capture_co
     }
     idm_byteprog_set_start(*out, 0);
     idm_byteprog_finalize_linear(*out);
-    if (!idm_byteprog_build_test_closures(*out, err)) {
-        idm_byteprog_free(*out);
-        *out = NULL;
-        return false;
-    }
     return true;
 }
 
@@ -1104,7 +1024,6 @@ static bool build_byteprog_set(const IdmRegex *const *items, size_t count, size_
     free(forks);
     if (!ok) { idm_byteprog_free(bp); *out = NULL; return false; }
     idm_byteprog_finalize_linear(bp);
-    if (!idm_byteprog_build_test_closures(bp, err)) { idm_byteprog_free(bp); *out = NULL; return false; }
     return true;
 }
 
@@ -1205,66 +1124,30 @@ static bool at_line_start(const char *s, size_t pos) {
     return pos == 0 || s[pos - 1u] == '\n';
 }
 
-
-static void match_destroy(RxMatch *match) {
-    free(match->captures);
-    match->captures = NULL;
-    match->matched = false;
-    match->end = 0;
-    match->accept_id = 0;
-}
-
-
 static size_t align_up_size(size_t value, size_t align) {
     return (value + align - 1u) & ~(align - 1u);
 }
 
 static IdmRegexResult *result_alloc_inline(size_t capture_count, IdmError *err) {
-    size_t capture_offset = align_up_size(sizeof(IdmRegexResult), _Alignof(RxCapture));
-    if (capture_count > (SIZE_MAX - capture_offset) / sizeof(RxCapture)) {
+    size_t capture_offset = align_up_size(sizeof(IdmRegexResult), _Alignof(IdmByteCapture));
+    if (capture_count > (SIZE_MAX - capture_offset) / sizeof(IdmByteCapture)) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return NULL;
     }
-    size_t total = capture_offset + capture_count * sizeof(RxCapture);
+    size_t total = capture_offset + capture_count * sizeof(IdmByteCapture);
     IdmRegexResult *result = calloc(1u, total);
     if (!result) {
         idm_error_oom(err, idm_span_unknown(NULL));
         return NULL;
     }
     char *base = (char *)result;
-    result->captures = (RxCapture *)(void *)(base + capture_offset);
+    result->captures = (IdmByteCapture *)(void *)(base + capture_offset);
     result->capture_count = capture_count;
     result->inline_storage = true;
     result->subject_value = idm_nil();
     return result;
 }
 
-
-static bool rx_exec(const SelByteProg *bp, size_t capture_count, const char *s, size_t len, size_t offset, bool exact_end, size_t end_pos, bool capture, RxMatch *out, IdmError *err) {
-    memset(out, 0, sizeof(*out));
-    size_t cc = capture ? capture_count : 0u;
-    IdmByteCapture stackcaps[16];
-    IdmByteCapture *caps = NULL;
-    if (cc != 0) {
-        caps = cc <= 16u ? stackcaps : malloc(cc * sizeof(*caps));
-        if (!caps) return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    bool matched = false;
-    size_t mend = 0, accept = 0;
-    bool ok = idm_byteprog_exec(bp, s, len, offset, exact_end, end_pos, capture, &matched, &mend, &accept, caps, cc, err);
-    if (ok && matched) {
-        out->matched = true;
-        out->end = mend;
-        out->accept_id = accept;
-        if (cc != 0) {
-            out->captures = malloc(cc * sizeof(*out->captures));
-            if (!out->captures) { if (caps != stackcaps) free(caps); return idm_error_oom(err, idm_span_unknown(NULL)); }
-            for (size_t i = 0; i < cc; i++) { out->captures[i].set = caps[i].set; out->captures[i].start = caps[i].start; out->captures[i].end = caps[i].end; }
-        }
-    }
-    if (caps && caps != stackcaps) free(caps);
-    return ok;
-}
 
 static bool rx_search_test(const SelByteProg *bp, const RxStartInfo *start, uint32_t flags, const char *s, size_t len, size_t offset, bool *out_matched, IdmError *err) {
     *out_matched = false;
@@ -1293,7 +1176,7 @@ static bool result_set_subject(IdmRegexResult *result, IdmValue subject, const c
     return true;
 }
 
-static IdmRegexResult *result_new(const IdmRegex *rx, IdmValue subject, const char *s, size_t len, size_t start, const RxMatch *match, IdmError *err) {
+static IdmRegexResult *result_new(const IdmRegex *rx, IdmValue subject, const char *s, size_t len, size_t start, const IdmByteMatch *match, IdmError *err) {
     size_t capture_count = rx->group_count + 1u;
     IdmRegexResult *result = result_alloc_inline(capture_count, err);
     if (!result) return NULL;
@@ -1336,11 +1219,11 @@ static IdmRegexResult *result_new(const IdmRegex *rx, IdmValue subject, const ch
 static bool scan_at_raw(const IdmRegex *rx, IdmValue subject, const char *s, size_t len, size_t offset, bool full, IdmRegexResult **out, IdmError *err) {
     *out = NULL;
     if (offset > len) return true;
-    RxMatch match = {0};
-    bool ok = rx_exec(rx->byteprog, rx->capture_count, s, len, offset, full, len, true, &match, err);
+    IdmByteMatch match = {0};
+    bool ok = idm_byteprog_match(rx->byteprog, s, len, offset, full, len, true, &match, err);
     if (!ok) return false;
     if (match.matched) *out = result_new(rx, subject, s, len, offset, &match, err);
-    match_destroy(&match);
+    idm_byte_match_destroy(&match);
     return !(err && err->present);
 }
 
@@ -1374,10 +1257,10 @@ bool idm_regex_test_bytes(const IdmRegex *rx, const char *input, size_t input_le
 bool idm_regex_match_at(const IdmRegex *rx, const char *input, size_t input_len, size_t offset, size_t *out_end, IdmError *err) {
     if (out_end) *out_end = offset;
     if (!rx) return true;
-    RxMatch match = {0};
-    bool ok = rx_exec(rx->byteprog, rx->capture_count, input, input_len, offset, false, 0, false, &match, err);
+    IdmByteMatch match = {0};
+    bool ok = idm_byteprog_match(rx->byteprog, input, input_len, offset, false, 0, false, &match, err);
     if (ok && match.matched && out_end) *out_end = match.end;
-    match_destroy(&match);
+    idm_byte_match_destroy(&match);
     return ok;
 }
 
@@ -1386,22 +1269,22 @@ bool idm_regex_set_match_at(const IdmRegexSet *set, const char *input, size_t in
     if (out_end) *out_end = offset;
     if (out_matched) *out_matched = false;
     if (!set || !set->byteprog) return true;
-    RxMatch match = {0};
-    bool ok = rx_exec(set->byteprog, set->capture_count, input, input_len, offset, false, 0, false, &match, err);
+    IdmByteMatch match = {0};
+    bool ok = idm_byteprog_match(set->byteprog, input, input_len, offset, false, 0, false, &match, err);
     if (ok && match.matched) {
-        if (match.accept_id >= set->count) {
-            match_destroy(&match);
+        if (match.index >= set->count) {
+            idm_byte_match_destroy(&match);
             return idm_error_set(err, idm_span_unknown(NULL), "regex set accept id out of bounds");
         }
-        if (out_index) *out_index = match.accept_id;
+        if (out_index) *out_index = match.index;
         if (out_end) *out_end = match.end;
         if (out_matched) *out_matched = true;
     }
-    match_destroy(&match);
+    idm_byte_match_destroy(&match);
     return ok;
 }
 
-bool idm_regex_set_exec_at(const IdmRegexSet *set, const char *input, size_t input_len, size_t offset, IdmRegexSetResult *out, IdmError *err) {
+bool idm_regex_set_exec_at(const IdmRegexSet *set, const char *input, size_t input_len, size_t offset, IdmByteMatch *out, IdmError *err) {
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "regex.set_exec_at");
     if (!out) {
@@ -1414,19 +1297,19 @@ bool idm_regex_set_exec_at(const IdmRegexSet *set, const char *input, size_t inp
         idm_profile_scope_end(&prof);
         return true;
     }
-    RxMatch match = {0};
-    bool ok = rx_exec(set->byteprog, set->capture_count, input, input_len, offset, false, 0, true, &match, err);
+    IdmByteMatch match = {0};
+    bool ok = idm_byteprog_match(set->byteprog, input, input_len, offset, false, 0, true, &match, err);
     if (ok && match.matched) {
-        if (match.accept_id >= set->count) {
-            match_destroy(&match);
+        if (match.index >= set->count) {
+            idm_byte_match_destroy(&match);
             idm_profile_scope_end(&prof);
             return idm_error_set(err, idm_span_unknown(NULL), "regex set accept id out of bounds");
         }
-        size_t group_count = idm_regex_set_group_count(set, match.accept_id);
+        size_t group_count = idm_regex_set_group_count(set, match.index);
         size_t capture_count = group_count + 1u;
-        IdmRegexCaptureRange *captures = calloc(capture_count, sizeof(*captures));
+        IdmByteCapture *captures = calloc(capture_count, sizeof(*captures));
         if (!captures) {
-            match_destroy(&match);
+            idm_byte_match_destroy(&match);
             idm_profile_scope_end(&prof);
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
@@ -1434,18 +1317,16 @@ bool idm_regex_set_exec_at(const IdmRegexSet *set, const char *input, size_t inp
         captures[0].start = offset;
         captures[0].end = match.end;
         for (size_t i = 1; i < capture_count; i++) {
-            if (!match.captures || i >= set->capture_count || !match.captures[i].set) continue;
-            captures[i].set = true;
-            captures[i].start = match.captures[i].start;
-            captures[i].end = match.captures[i].end;
+            if (!match.captures || i >= match.capture_count || !match.captures[i].set) continue;
+            captures[i] = match.captures[i];
         }
         out->matched = true;
-        out->index = match.accept_id;
+        out->index = match.index;
         out->end = match.end;
         out->captures = captures;
         out->capture_count = capture_count;
     }
-    match_destroy(&match);
+    idm_byte_match_destroy(&match);
     idm_profile_count("regex.set_exec_at.items", set ? (uint64_t)set->count : 0u);
     idm_profile_count("regex.set_exec_at.bytes_remaining", offset <= input_len ? (uint64_t)(input_len - offset) : 0u);
     idm_profile_scope_end(&prof);
@@ -1459,10 +1340,10 @@ size_t idm_regex_set_count(const IdmRegexSet *set) {
 bool idm_regex_set_matches_empty(const IdmRegexSet *set, bool *out, IdmError *err) {
     if (out) *out = false;
     if (!set || !set->byteprog) return true;
-    RxMatch match = {0};
-    bool ok = rx_exec(set->byteprog, set->capture_count, "", 0, 0, false, 0, false, &match, err);
+    IdmByteMatch match = {0};
+    bool ok = idm_byteprog_match(set->byteprog, "", 0, 0, false, 0, false, &match, err);
     if (ok && out) *out = match.matched && match.end == 0;
-    match_destroy(&match);
+    idm_byte_match_destroy(&match);
     return ok;
 }
 
@@ -1534,7 +1415,7 @@ static bool regex_and_input(IdmRuntime *rt, const char *name, IdmValue regex, Id
     (void)rt;
     *out_rx = idm_regex_value_get(regex, err);
     if (!*out_rx) return false;
-    return require_string_arg(rt, name, input, out_s, out_len, err);
+    return idm_primitive_require_string_arg(rt, input, out_s, out_len, name, err);
 }
 
 bool idm_regex_compile(const char *source, size_t source_len, uint32_t flags, IdmRegex **out, IdmError *err) {
@@ -1548,7 +1429,7 @@ bool idm_regex_compile(const char *source, size_t source_len, uint32_t flags, Id
     rx->source_len = source_len;
     rx->flags = flags;
 
-    RxParser p = { source, source_len, 0, flags, NULL, 0, err, 0 };
+    RxParser p = { .source = source, .len = source_len, .pos = 0, .flags = flags, .group_names = NULL, .group_count = 0, .group_cap = 1u, .err = err, .depth = 0 };
     p.group_names = calloc(1u, sizeof(*p.group_names));
     if (!p.group_names) {
         idm_regex_free(rx);
@@ -1630,12 +1511,6 @@ const char *idm_regex_set_group_name(const IdmRegexSet *set, size_t item_index, 
     return set->group_names[item_index] ? set->group_names[item_index][group_index] : NULL;
 }
 
-void idm_regex_set_result_destroy(IdmRegexSetResult *result) {
-    if (!result) return;
-    free(result->captures);
-    memset(result, 0, sizeof(*result));
-}
-
 void idm_regex_result_free(IdmRegexResult *result) {
     if (!result) return;
     if (result->owns_subject) free(result->subject);
@@ -1704,7 +1579,7 @@ IdmValue idm_regex_result_subject_value(const IdmRegexResult *result) {
 bool idm_regex_compile_value(IdmRuntime *rt, IdmValue source, IdmValue options, IdmValue *out, IdmError *err) {
     const char *s = NULL;
     size_t len = 0;
-    if (!require_string_arg(rt, "raw-compile", source, &s, &len, err)) return false;
+    if (!idm_primitive_require_string_arg(rt, source, &s, &len, "raw-compile", err)) return false;
     uint32_t flags = 0;
     if (!parse_options(rt, options, &flags, err)) return false;
     IdmError inner;
@@ -1851,16 +1726,17 @@ bool idm_regex_result_end_value(IdmRuntime *rt, IdmValue result, IdmValue *out, 
 bool idm_regex_result_text_value(IdmRuntime *rt, IdmValue result, IdmValue *out, IdmError *err) {
     IdmRegexResult *r = require_result(result, err);
     if (!r) return false;
-    RxCapture c = r->captures[0];
+    IdmByteCapture c = r->captures[0];
     *out = idm_string_n(rt, r->subject + c.start, c.end - c.start, err);
     return !(err && err->present);
 }
 
 static bool capture_index(IdmValue index, size_t max, size_t *out, IdmError *err) {
-    if (idm_value_tag(index) != IDM_VAL_INT || idm_int_value(index) < 0 || (uint64_t)idm_int_value(index) >= max) {
+    int64_t i = 0;
+    if (!idm_value_is_int(index) || !idm_int_to_i64(index, &i) || i < 0 || (uint64_t)i >= max) {
         return idm_error_set(err, idm_span_unknown(NULL), "capture index out of range");
     }
-    *out = (size_t)idm_int_value(index);
+    *out = (size_t)i;
     return true;
 }
 
@@ -1884,7 +1760,7 @@ static bool capture_text(IdmRuntime *rt, IdmRegexResult *r, size_t index, IdmVal
         *out = idm_nil();
         return true;
     }
-    RxCapture c = r->captures[index];
+    IdmByteCapture c = r->captures[index];
     *out = idm_string_n(rt, r->subject + c.start, c.end - c.start, err);
     return !(err && err->present);
 }
@@ -1935,7 +1811,7 @@ bool idm_regex_captures_value(IdmRuntime *rt, IdmValue result, IdmValue *out, Id
 
 static bool append_capture(IdmBuffer *buf, IdmRegexResult *r, size_t index) {
     if (index >= r->capture_count || !r->captures[index].set) return true;
-    RxCapture c = r->captures[index];
+    IdmByteCapture c = r->captures[index];
     return idm_buf_append_n(buf, r->subject + c.start, c.end - c.start);
 }
 
@@ -2001,7 +1877,7 @@ bool idm_regex_replace(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue 
     if (!regex_and_input(rt, "raw-replace", regex, input, &rx, &s, &len, err)) return false;
     const char *repl = NULL;
     size_t repl_len = 0;
-    if (!require_string_arg(rt, "raw-replace", replacement, &repl, &repl_len, err)) return false;
+    if (!idm_primitive_require_string_arg(rt, replacement, &repl, &repl_len, "raw-replace", err)) return false;
     IdmBuffer buf;
     idm_buf_init(&buf);
     size_t pos = 0;
@@ -2016,7 +1892,7 @@ bool idm_regex_replace(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue 
             if (changed && !idm_buf_append_n(&buf, s + pos, len - pos)) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
             break;
         }
-        RxCapture whole = result->captures[0];
+        IdmByteCapture whole = result->captures[0];
         if (!idm_buf_append_n(&buf, s + pos, whole.start - pos) || !append_replacement(&buf, result, repl, repl_len)) {
             idm_regex_result_free(result);
             idm_buf_destroy(&buf);
@@ -2065,7 +1941,7 @@ bool idm_regex_split_on(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue
             if (err && err->present) return false;
             break;
         }
-        RxCapture whole = result->captures[0];
+        IdmByteCapture whole = result->captures[0];
         IdmValue part = idm_string_n(rt, s + segment_start, whole.start - segment_start, err);
         if (err && err->present) { idm_regex_result_free(result); return false; }
         acc = idm_cons(rt, part, acc, err);
@@ -2092,7 +1968,7 @@ bool idm_regex_split_on(IdmRuntime *rt, IdmValue regex, IdmValue input, IdmValue
 bool idm_regex_escape(IdmRuntime *rt, IdmValue input, IdmValue *out, IdmError *err) {
     const char *s = NULL;
     size_t len = 0;
-    if (!require_string_arg(rt, "raw-escape", input, &s, &len, err)) return false;
+    if (!idm_primitive_require_string_arg(rt, input, &s, &len, "raw-escape", err)) return false;
     IdmBuffer buf;
     idm_buf_init(&buf);
     for (size_t i = 0; i < len; i++) {

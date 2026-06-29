@@ -24,14 +24,18 @@
 #include <string.h>
 #include <unistd.h>
 
-static bool type_error(IdmRuntime *rt, IdmError *err, const char *name, IdmValue got, const char *what) {
+bool idm_primitive_type_error(IdmRuntime *rt, IdmError *err, const char *name, IdmValue got, const char *what) {
     idm_error_set(err, idm_span_unknown(NULL), "%s expects %s", name, what);
     return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, name), got);
 }
 
+static bool value_to_i64(IdmValue value, int64_t *out) {
+    return idm_value_is_int(value) && idm_int_to_i64(value, out);
+}
+
 static IdmScheduler *job_sched(const char *name, IdmError *err);
 
-static bool require_arity(IdmRuntime *rt, IdmPrimitive prim, uint32_t argc, IdmError *err) {
+bool idm_primitive_require_arity(IdmRuntime *rt, IdmPrimitive prim, uint32_t argc, IdmError *err) {
     const IdmPrimitiveInfo *info = idm_primitive_info(prim);
     if (!info) return idm_error_set(err, idm_span_unknown(NULL), "unknown primitive %u", (unsigned)prim);
     if (argc < info->min_arity || argc > info->max_arity) {
@@ -50,21 +54,19 @@ static IdmSyntax *require_syntax(IdmValue value, IdmError *err) {
     return syn;
 }
 
-static const char *require_string(IdmValue v, size_t *out_len, IdmError *err);
-
 static bool prim_cons(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     *out = idm_cons(rt, args[0], args[1], err);
     return !(err && err->present);
 }
 
 static bool prim_first(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (!idm_is_pair(args[0])) return type_error(rt, err, "first", args[0], "a pair");
+    if (!idm_is_pair(args[0])) return idm_primitive_type_error(rt, err, "first", args[0], "a pair");
     *out = idm_car(args[0], err);
     return !(err && err->present);
 }
 
 static bool prim_rest(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (!idm_is_pair(args[0])) return type_error(rt, err, "rest", args[0], "a pair");
+    if (!idm_is_pair(args[0])) return idm_primitive_type_error(rt, err, "rest", args[0], "a pair");
     *out = idm_cdr(args[0], err);
     return !(err && err->present);
 }
@@ -83,7 +85,7 @@ static bool prim_append(IdmRuntime *rt, const IdmValue *args, IdmValue *out, Idm
     IdmValue head = args[0];
     IdmValue tail = args[1];
     if (idm_is_empty_list(head)) { *out = tail; return true; }
-    if (!idm_is_pair(head)) return type_error(rt, err, "append", head, "a list as first argument");
+    if (!idm_is_pair(head)) return idm_primitive_type_error(rt, err, "append", head, "a list as first argument");
     size_t count = 0;
     IdmValue cur = head;
     while (idm_is_pair(cur)) {
@@ -175,9 +177,10 @@ static bool prim_capture_stdout(IdmRuntime *rt, const IdmValue *args, IdmValue *
 }
 
 static bool prim_tuple_get(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (!idm_is_tuple(args[0])) return type_error(rt, err, "tuple-get", args[0], "a tuple");
-    if (idm_value_tag(args[1]) != IDM_VAL_INT || idm_int_value(args[1]) < 0) return type_error(rt, err, "tuple-get", args[1], "a non-negative integer index");
-    size_t index = (size_t)idm_int_value(args[1]);
+    if (!idm_is_tuple(args[0])) return idm_primitive_type_error(rt, err, "tuple-get", args[0], "a tuple");
+    int64_t idx = 0;
+    if (!value_to_i64(args[1], &idx) || idx < 0) return idm_primitive_type_error(rt, err, "tuple-get", args[1], "a non-negative integer index");
+    size_t index = (size_t)idx;
     if (index >= idm_sequence_count(args[0])) {
         idm_error_set(err, idm_span_unknown(NULL), "tuple-get index out of range");
         return idm_error_reason(rt, err, "index-out-of-range", 1, args[1]);
@@ -227,7 +230,7 @@ static size_t utf8_encode(int64_t cp, char buf[4]) {
 }
 
 static bool sequence_to_list(IdmRuntime *rt, IdmValue v, const char *name, IdmValue *out, IdmError *err) {
-    if (!idm_is_vector(v) && !idm_is_tuple(v)) return type_error(rt, err, name, v, "a vector or tuple");
+    if (!idm_is_vector(v) && !idm_is_tuple(v)) return idm_primitive_type_error(rt, err, name, v, "a vector or tuple");
     size_t count = idm_sequence_count(v);
     IdmValue result = idm_empty_list();
     for (size_t i = count; i > 0; i--) {
@@ -242,19 +245,19 @@ static bool sequence_to_list(IdmRuntime *rt, IdmValue v, const char *name, IdmVa
 
 static bool prim_vector_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
-    if (!idm_is_vector(v)) return type_error(rt, err, "vector-to-list", v, "a vector");
+    if (!idm_is_vector(v)) return idm_primitive_type_error(rt, err, "vector-to-list", v, "a vector");
     return sequence_to_list(rt, v, "vector-to-list", out, err);
 }
 
 static bool prim_tuple_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
-    if (!idm_is_tuple(v)) return type_error(rt, err, "tuple-to-list", v, "a tuple");
+    if (!idm_is_tuple(v)) return idm_primitive_type_error(rt, err, "tuple-to-list", v, "a tuple");
     return sequence_to_list(rt, v, "tuple-to-list", out, err);
 }
 
 static bool prim_dict_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
-    if (!idm_is_dict(v)) return type_error(rt, err, "dict-to-list", v, "a dict");
+    if (!idm_is_dict(v)) return idm_primitive_type_error(rt, err, "dict-to-list", v, "a dict");
     size_t count = idm_dict_count(v);
     IdmValue result = idm_empty_list();
     for (size_t i = count; i > 0; i--) {
@@ -273,7 +276,7 @@ static bool prim_dict_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *ou
 
 static bool prim_str_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
-    if (!idm_is_string(v)) return type_error(rt, err, "str-to-list", v, "a string");
+    if (!idm_is_string(v)) return idm_primitive_type_error(rt, err, "str-to-list", v, "a string");
     const unsigned char *bytes = (const unsigned char *)idm_string_bytes(v);
     size_t len = idm_string_length(v);
     IdmValue runes = idm_empty_list();
@@ -314,8 +317,8 @@ static bool expand_home_path(IdmExec *exec, char **path_io, IdmError *err) {
 
 static bool prim_cd(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     size_t len = 0;
-    const char *bytes = require_string(args[0], &len, err);
-    if (!bytes) return false;
+    const char *bytes = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[0], &bytes, &len, "cd", err)) return false;
     IdmExec *exec = idm_current_exec();
     if (!exec) return idm_error_set(err, idm_span_unknown(NULL), "cd requires an actor context");
     char *path = idm_strndup(bytes, len);
@@ -373,8 +376,8 @@ static bool prim_pwd(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmErr
 
 static bool prim_env_get(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     size_t len = 0;
-    const char *bytes = require_string(args[0], &len, err);
-    if (!bytes) return false;
+    const char *bytes = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[0], &bytes, &len, "env-get", err)) return false;
     char *name = idm_strndup(bytes, len);
     if (!name) return idm_error_oom(err, idm_span_unknown(NULL));
     const char *value = idm_exec_env_get(idm_current_exec(), name);
@@ -390,11 +393,11 @@ static bool prim_env_get(IdmRuntime *rt, const IdmValue *args, IdmValue *out, Id
 
 static bool prim_env_set(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     size_t name_len = 0;
-    const char *name_bytes = require_string(args[0], &name_len, err);
-    if (!name_bytes) return false;
+    const char *name_bytes = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[0], &name_bytes, &name_len, "env-set", err)) return false;
     size_t value_len = 0;
-    const char *value_bytes = require_string(args[1], &value_len, err);
-    if (!value_bytes) return false;
+    const char *value_bytes = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[1], &value_bytes, &value_len, "env-set", err)) return false;
     if (!idm_current_exec()) return idm_error_set(err, idm_span_unknown(NULL), "env-set requires an actor context");
     char *name = idm_strndup(name_bytes, name_len);
     char *value = idm_strndup(value_bytes, value_len);
@@ -527,7 +530,7 @@ bool idm_checked_pow(int64_t base, int64_t exponent, int64_t *out) {
 }
 
 static bool num_as_double(IdmValue v, double *out) {
-    if (idm_value_tag(v) == IDM_VAL_INT) { *out = (double)idm_int_value(v); return true; }
+    if (idm_value_is_int(v)) { *out = idm_int_to_double(v); return true; }
     if (idm_value_tag(v) == IDM_VAL_FLOAT) { *out = idm_float_value(v); return true; }
     return false;
 }
@@ -538,30 +541,11 @@ static IdmValue float_result(IdmRuntime *rt, double value, IdmError *err) {
     return idm_float(rt, value, err);
 }
 
-static bool num_pair(IdmRuntime *rt, const char *name, const IdmValue *args, bool *ints, int64_t *ia, int64_t *ib, double *fa, double *fb, IdmError *err) {
-    if (idm_value_tag(args[0]) == IDM_VAL_INT && idm_value_tag(args[1]) == IDM_VAL_INT) {
-        *ints = true;
-        *ia = idm_int_value(args[0]);
-        *ib = idm_int_value(args[1]);
-        return true;
-    }
-    if (!num_as_double(args[0], fa) || !num_as_double(args[1], fb)) {
-        idm_error_set(err, idm_span_unknown(NULL), "%s expects numeric operands", name);
-        return idm_error_reason(rt, err, "type-error", 3, idm_atom(rt, name), args[0], args[1]);
-    }
-    *ints = false;
-    return true;
-}
-
-static bool overflow_error(IdmRuntime *rt, const char *name, IdmError *err) {
-    idm_error_set(err, idm_span_unknown(NULL), "integer overflow in %s", name);
-    return idm_error_reason(rt, err, "overflow", 1, idm_atom(rt, name));
-}
-
 static bool int_result(IdmRuntime *rt, int64_t v, const char *name, IdmValue *out, IdmError *err) {
-    if (!idm_fixnum_fits(v)) return overflow_error(rt, name, err);
-    *out = idm_int(v);
-    return true;
+    (void)name;
+    if (idm_fixnum_fits(v)) { *out = idm_int(v); return true; }
+    *out = idm_int_promote(rt, v, err);
+    return !(err && err->present);
 }
 
 static bool div_zero_error(IdmRuntime *rt, const char *name, IdmError *err) {
@@ -569,74 +553,142 @@ static bool div_zero_error(IdmRuntime *rt, const char *name, IdmError *err) {
     return idm_error_reason(rt, err, "div-by-zero", 1, idm_atom(rt, name));
 }
 
-static bool prim_arith(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, IdmValue *out, IdmError *err) {
-    const char *name = idm_primitive_name(prim);
-    bool ints = false;
-    int64_t a = 0, b = 0, r = 0;
-    double x = 0.0, y = 0.0;
-    if (!num_pair(rt, name, args, &ints, &a, &b, &x, &y, err)) return false;
-    if (!ints) {
-        double f = 0.0;
-        switch (prim) {
-            case IDM_PRIM_ADD: f = x + y; break;
-            case IDM_PRIM_SUB: f = x - y; break;
-            case IDM_PRIM_MUL: f = x * y; break;
-            case IDM_PRIM_DIV:
-                if (y == 0.0) return div_zero_error(rt, name, err);
-                f = x / y;
-                break;
-            case IDM_PRIM_MOD:
-                if (y == 0.0) return div_zero_error(rt, name, err);
-                f = fmod(x, y);
-                break;
-            case IDM_PRIM_POW: f = pow(x, y); break;
-            default: return idm_error_set(err, idm_span_unknown(NULL), "invalid numeric primitive");
-        }
-        *out = float_result(rt, f, err);
-        return !(err && err->present);
-    }
-    bool ok = true;
+static bool is_int_zero(IdmValue v) {
+    return idm_value_is_int(v) && idm_int_compare(v, idm_int(0)) == 0;
+}
+
+static bool prim_arith_big(IdmRuntime *rt, IdmPrimitive prim, const char *name, IdmValue a, IdmValue b, IdmValue *out, IdmError *err) {
     switch (prim) {
-        case IDM_PRIM_ADD: ok = idm_checked_add(a, b, &r); break;
-        case IDM_PRIM_SUB: ok = idm_checked_sub(a, b, &r); break;
-        case IDM_PRIM_MUL: ok = idm_checked_mul(a, b, &r); break;
+        case IDM_PRIM_ADD: return idm_int_add(rt, a, b, out, err);
+        case IDM_PRIM_SUB: return idm_int_sub(rt, a, b, out, err);
+        case IDM_PRIM_MUL: return idm_int_mul(rt, a, b, out, err);
         case IDM_PRIM_DIV:
-        case IDM_PRIM_MOD:
-            if (b == 0) return div_zero_error(rt, name, err);
-            if (a == INT64_MIN && b == -1) return overflow_error(rt, name, err);
-            r = prim == IDM_PRIM_DIV ? a / b : a % b;
-            break;
-        case IDM_PRIM_POW:
-            if (b < 0) {
-                idm_error_set(err, idm_span_unknown(NULL), "pow exponent must be non-negative");
-                return idm_error_reason(rt, err, "bad-arg", 2, idm_atom(rt, name), args[1]);
+        case IDM_PRIM_MOD: {
+            if (is_int_zero(b)) return div_zero_error(rt, name, err);
+            IdmValue q = idm_nil(), r = idm_nil();
+            if (!idm_int_divmod(rt, a, b, &q, &r, err)) return false;
+            *out = prim == IDM_PRIM_DIV ? q : r;
+            return true;
+        }
+        case IDM_PRIM_POW: {
+            int64_t e = 0;
+            if (!idm_int_to_i64(b, &e) || e < 0) {
+                idm_error_set(err, idm_span_unknown(NULL), "pow exponent must be a non-negative machine integer");
+                return idm_error_reason(rt, err, "bad-arg", 2, idm_atom(rt, name), b);
             }
-            ok = idm_checked_pow(a, b, &r);
-            break;
+            return idm_int_pow(rt, a, e, out, err);
+        }
         default: return idm_error_set(err, idm_span_unknown(NULL), "invalid integer primitive");
     }
-    if (!ok) return overflow_error(rt, name, err);
-    return int_result(rt, r, name, out, err);
+}
+
+static bool int_floor_divmod(IdmRuntime *rt, const char *name, IdmValue a, IdmValue b, IdmValue *q_out, IdmValue *r_out, IdmError *err) {
+    if (is_int_zero(b)) return div_zero_error(rt, name, err);
+    if (idm_value_tag(a) == IDM_VAL_INT && idm_value_tag(b) == IDM_VAL_INT) {
+        int64_t ai = idm_int_value(a), bi = idm_int_value(b);
+        int64_t q = ai / bi, r = ai % bi;
+        if (r != 0 && ((r < 0) != (bi < 0))) { q -= 1; r += bi; }
+        *q_out = idm_int_promote(rt, q, err);
+        *r_out = idm_int_promote(rt, r, err);
+        return !(err && err->present);
+    }
+    IdmValue q = idm_nil(), r = idm_nil();
+    if (!idm_int_divmod(rt, a, b, &q, &r, err)) return false;
+    bool r_neg = idm_int_compare(r, idm_int(0)) < 0;
+    bool b_neg = idm_int_compare(b, idm_int(0)) < 0;
+    if (!is_int_zero(r) && r_neg != b_neg) {
+        if (!idm_int_sub(rt, q, idm_int(1), &q, err)) return false;
+        if (!idm_int_add(rt, r, b, &r, err)) return false;
+    }
+    *q_out = q;
+    *r_out = r;
+    return true;
+}
+
+static bool prim_arith(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *name = idm_primitive_name(prim);
+    IdmValueTag t0 = idm_value_tag(args[0]), t1 = idm_value_tag(args[1]);
+    if (t0 == IDM_VAL_INT && t1 == IDM_VAL_INT) {
+        int64_t a = idm_int_value(args[0]), b = idm_int_value(args[1]), r = 0;
+        bool ok = true;
+        switch (prim) {
+            case IDM_PRIM_ADD: ok = idm_checked_add(a, b, &r); break;
+            case IDM_PRIM_SUB: ok = idm_checked_sub(a, b, &r); break;
+            case IDM_PRIM_MUL: ok = idm_checked_mul(a, b, &r); break;
+            case IDM_PRIM_DIV:
+            case IDM_PRIM_MOD:
+                if (b == 0) return div_zero_error(rt, name, err);
+                r = prim == IDM_PRIM_DIV ? a / b : a % b;
+                return int_result(rt, r, name, out, err);
+            case IDM_PRIM_POW:
+                if (b < 0) {
+                    idm_error_set(err, idm_span_unknown(NULL), "pow exponent must be non-negative");
+                    return idm_error_reason(rt, err, "bad-arg", 2, idm_atom(rt, name), args[1]);
+                }
+                ok = idm_checked_pow(a, b, &r);
+                break;
+            default: return idm_error_set(err, idm_span_unknown(NULL), "invalid integer primitive");
+        }
+        if (ok) return int_result(rt, r, name, out, err);
+        return prim_arith_big(rt, prim, name, args[0], args[1], out, err);
+    }
+    if ((t0 == IDM_VAL_INT || t0 == IDM_VAL_BIGNUM) && (t1 == IDM_VAL_INT || t1 == IDM_VAL_BIGNUM)) {
+        return prim_arith_big(rt, prim, name, args[0], args[1], out, err);
+    }
+    double x = 0.0, y = 0.0;
+    if (!num_as_double(args[0], &x) || !num_as_double(args[1], &y)) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s expects numeric operands", name);
+        return idm_error_reason(rt, err, "type-error", 3, idm_atom(rt, name), args[0], args[1]);
+    }
+    double f = 0.0;
+    switch (prim) {
+        case IDM_PRIM_ADD: f = x + y; break;
+        case IDM_PRIM_SUB: f = x - y; break;
+        case IDM_PRIM_MUL: f = x * y; break;
+        case IDM_PRIM_DIV:
+            if (y == 0.0) return div_zero_error(rt, name, err);
+            f = x / y;
+            break;
+        case IDM_PRIM_MOD:
+            if (y == 0.0) return div_zero_error(rt, name, err);
+            f = fmod(x, y);
+            break;
+        case IDM_PRIM_POW: f = pow(x, y); break;
+        default: return idm_error_set(err, idm_span_unknown(NULL), "invalid numeric primitive");
+    }
+    *out = float_result(rt, f, err);
+    return !(err && err->present);
 }
 
 static bool prim_neg(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (idm_value_tag(args[0]) == IDM_VAL_FLOAT) { *out = float_result(rt, -idm_float_value(args[0]), err); return !(err && err->present); }
-    if (idm_value_tag(args[0]) != IDM_VAL_INT) return type_error(rt, err, "neg", args[0], "a number");
-    return int_result(rt, -idm_int_value(args[0]), "neg", out, err);
+    if (!idm_value_is_int(args[0])) return idm_primitive_type_error(rt, err, "neg", args[0], "a number");
+    return idm_int_neg(rt, args[0], out, err);
 }
 
 static bool prim_num_compare(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *name = idm_primitive_name(prim);
-    bool ints = false;
-    int64_t a = 0, b = 0;
-    double x = 0.0, y = 0.0;
-    if (!num_pair(rt, name, args, &ints, &a, &b, &x, &y, err)) return false;
+    IdmValueTag t0 = idm_value_tag(args[0]), t1 = idm_value_tag(args[1]);
+    int c = 0;
+    if (t0 == IDM_VAL_INT && t1 == IDM_VAL_INT) {
+        int64_t a = idm_int_value(args[0]), b = idm_int_value(args[1]);
+        c = a < b ? -1 : (a > b ? 1 : 0);
+    } else if ((t0 == IDM_VAL_INT || t0 == IDM_VAL_BIGNUM) && (t1 == IDM_VAL_INT || t1 == IDM_VAL_BIGNUM)) {
+        c = idm_int_compare(args[0], args[1]);
+    } else {
+        double x = 0.0, y = 0.0;
+        if (!num_as_double(args[0], &x) || !num_as_double(args[1], &y)) {
+            idm_error_set(err, idm_span_unknown(NULL), "%s expects numeric operands", name);
+            return idm_error_reason(rt, err, "type-error", 3, idm_atom(rt, name), args[0], args[1]);
+        }
+        c = x < y ? -1 : (x > y ? 1 : 0);
+    }
     bool r = false;
     switch (prim) {
-        case IDM_PRIM_LT: r = ints ? a < b : x < y; break;
-        case IDM_PRIM_GT: r = ints ? a > b : x > y; break;
-        case IDM_PRIM_LTE: r = ints ? a <= b : x <= y; break;
-        case IDM_PRIM_GTE: r = ints ? a >= b : x >= y; break;
+        case IDM_PRIM_LT: r = c < 0; break;
+        case IDM_PRIM_GT: r = c > 0; break;
+        case IDM_PRIM_LTE: r = c <= 0; break;
+        case IDM_PRIM_GTE: r = c >= 0; break;
         default: return idm_error_set(err, idm_span_unknown(NULL), "invalid comparison primitive");
     }
     *out = idm_bool(rt, r);
@@ -746,17 +798,17 @@ static int cmp_sequence_total(IdmValue a, IdmValue b) {
 }
 
 static int cmp_record_total(IdmValue a, IdmValue b) {
-    const char *at = idm_record_type(a, NULL);
-    const char *bt = idm_record_type(b, NULL);
-    int r = strcmp(at ? at : "", bt ? bt : "");
+    IdmSymbol *at = idm_record_type_symbol(a, NULL);
+    IdmSymbol *bt = idm_record_type_symbol(b, NULL);
+    int r = cmp_size(at ? idm_symbol_id(at) : 0u, bt ? idm_symbol_id(bt) : 0u);
     if (r != 0) return r;
     size_t ac = idm_record_field_count(a, NULL);
     size_t bc = idm_record_field_count(b, NULL);
     size_t n = ac < bc ? ac : bc;
     for (size_t i = 0; i < n; i++) {
-        const char *an = idm_record_field_name(a, i, NULL);
-        const char *bn = idm_record_field_name(b, i, NULL);
-        r = strcmp(an ? an : "", bn ? bn : "");
+        IdmSymbol *an = idm_record_field_name_symbol(a, i, NULL);
+        IdmSymbol *bn = idm_record_field_name_symbol(b, i, NULL);
+        r = cmp_size(an ? idm_symbol_id(an) : 0u, bn ? idm_symbol_id(bn) : 0u);
         if (r != 0) return r;
         r = cmp_value_total(idm_record_field_value(a, i, NULL), idm_record_field_value(b, i, NULL));
         if (r != 0) return r;
@@ -769,8 +821,9 @@ static int cmp_value_total(IdmValue a, IdmValue b) {
     if (ta != tb) return (int)ta < (int)tb ? -1 : 1;
     switch (ta) {
         case IDM_VAL_NIL:
-        case IDM_VAL_BIGNUM:
             return 0;
+        case IDM_VAL_BIGNUM:
+            return idm_int_compare(a, b);
         case IDM_VAL_ATOM:
         case IDM_VAL_WORD:
             return strcmp(idm_symbol_text(idm_value_symbol(a)), idm_symbol_text(idm_value_symbol(b)));
@@ -822,63 +875,53 @@ static bool prim_ok(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmErro
     return true;
 }
 
-static const char *type_name_text(IdmValue value) {
-    if (idm_value_tag(value) == IDM_VAL_ATOM || idm_value_tag(value) == IDM_VAL_WORD) return idm_symbol_text(idm_value_symbol(value));
-    if (idm_value_tag(value) == IDM_VAL_STRING) return idm_string_bytes(value);
-    return NULL;
-}
-
-static bool value_is_proper_list(IdmValue value) {
-    while (idm_is_pair(value)) value = idm_cdr(value, NULL);
-    return idm_is_empty_list(value);
-}
-
-static bool value_is_a_name(IdmValue value, const char *name) {
-    if (!name) return false;
-    if (idm_value_tag(value) == IDM_VAL_RECORD) {
-        const char *type = idm_record_type(value, NULL);
-        return (type && strcmp(type, name) == 0) || strcmp(name, "record") == 0;
-    }
-    if (strcmp(name, "list") == 0) return value_is_proper_list(value);
-    if (strcmp(name, "record") == 0) return false;
-    IdmValueTag tag = IDM_VAL_NIL;
-    return idm_value_type_from_name(name, &tag) && idm_value_tag(value) == tag;
+static IdmSymbol *type_name_symbol(IdmRuntime *rt, IdmValue value) {
+    const char *text = NULL;
+    if (idm_value_tag(value) == IDM_VAL_ATOM) return idm_value_symbol(value);
+    if (idm_value_tag(value) == IDM_VAL_WORD) text = idm_symbol_text(idm_value_symbol(value));
+    else if (idm_value_tag(value) == IDM_VAL_STRING) text = idm_string_bytes(value);
+    return text && *text ? idm_intern(&rt->intern, IDM_SYMBOL_ATOM, text) : NULL;
 }
 
 static bool prim_is_a(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    const char *name = type_name_text(args[1]);
-    if (!name) return type_error(rt, err, "is-a?", args[1], "a type name atom, word, or string");
-    bool result = value_is_a_name(args[0], name);
+    IdmSymbol *type = type_name_symbol(rt, args[1]);
+    if (!type) return idm_primitive_type_error(rt, err, "is-a?", args[1], "a non-empty type name atom, word, or string");
+    bool result = idm_value_matches_type_symbol(args[0], type);
     *out = idm_bool(rt, result);
     return true;
 }
 
-static bool prim_type_pred(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)err;
-    bool result = false;
+static const char *type_pred_type_name(IdmPrimitive prim) {
     switch (prim) {
-        case IDM_PRIM_NIL_P: result = idm_value_tag(args[0]) == IDM_VAL_NIL; break;
-        case IDM_PRIM_ATOM_P: result = idm_value_tag(args[0]) == IDM_VAL_ATOM; break;
-        case IDM_PRIM_WORD_P: result = idm_value_tag(args[0]) == IDM_VAL_WORD; break;
-        case IDM_PRIM_INT_P: result = idm_value_tag(args[0]) == IDM_VAL_INT; break;
-        case IDM_PRIM_FLOAT_P: result = idm_value_tag(args[0]) == IDM_VAL_FLOAT; break;
-        case IDM_PRIM_STRING_P: result = idm_value_tag(args[0]) == IDM_VAL_STRING; break;
-        case IDM_PRIM_PAIR_P: result = idm_value_tag(args[0]) == IDM_VAL_PAIR; break;
-        case IDM_PRIM_EMPTY_LIST_P: result = idm_is_empty_list(args[0]); break;
-        case IDM_PRIM_LIST_P: result = value_is_proper_list(args[0]); break;
-        case IDM_PRIM_TUPLE_P: result = idm_value_tag(args[0]) == IDM_VAL_TUPLE; break;
-        case IDM_PRIM_VECTOR_P: result = idm_value_tag(args[0]) == IDM_VAL_VECTOR; break;
-        case IDM_PRIM_DICT_P: result = idm_value_tag(args[0]) == IDM_VAL_DICT; break;
-        case IDM_PRIM_SYNTAX_P: result = idm_value_tag(args[0]) == IDM_VAL_SYNTAX; break;
-        case IDM_PRIM_CELL_P: result = idm_value_tag(args[0]) == IDM_VAL_CELL; break;
-        case IDM_PRIM_CLOSURE_P: result = idm_value_tag(args[0]) == IDM_VAL_CLOSURE; break;
-        case IDM_PRIM_PID_P: result = idm_value_tag(args[0]) == IDM_VAL_PID; break;
-        case IDM_PRIM_REF_P: result = idm_value_tag(args[0]) == IDM_VAL_REF; break;
-        case IDM_PRIM_PORT_P: result = idm_value_tag(args[0]) == IDM_VAL_PORT; break;
-        case IDM_PRIM_REGEX_P: result = idm_value_tag(args[0]) == IDM_VAL_REGEX; break;
-        case IDM_PRIM_REGEX_RESULT_P: result = idm_value_tag(args[0]) == IDM_VAL_REGEX_RESULT; break;
-        default: break;
+        case IDM_PRIM_NIL_P: return "nil";
+        case IDM_PRIM_ATOM_P: return "atom";
+        case IDM_PRIM_WORD_P: return "word";
+        case IDM_PRIM_INT_P: return "int";
+        case IDM_PRIM_FLOAT_P: return "float";
+        case IDM_PRIM_STRING_P: return "string";
+        case IDM_PRIM_PAIR_P: return "pair";
+        case IDM_PRIM_EMPTY_LIST_P: return "empty-list";
+        case IDM_PRIM_LIST_P: return "list";
+        case IDM_PRIM_TUPLE_P: return "tuple";
+        case IDM_PRIM_VECTOR_P: return "vector";
+        case IDM_PRIM_DICT_P: return "dict";
+        case IDM_PRIM_SYNTAX_P: return "syntax";
+        case IDM_PRIM_CELL_P: return "cell";
+        case IDM_PRIM_CLOSURE_P: return "closure";
+        case IDM_PRIM_PID_P: return "pid";
+        case IDM_PRIM_REF_P: return "ref";
+        case IDM_PRIM_PORT_P: return "port";
+        case IDM_PRIM_REGEX_P: return "regex";
+        case IDM_PRIM_REGEX_RESULT_P: return "regex-result";
+        default: return NULL;
     }
+}
+
+static bool prim_type_pred(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, IdmValue *out, IdmError *err) {
+    const char *type = type_pred_type_name(prim);
+    IdmSymbol *symbol = type ? idm_intern(&rt->intern, IDM_SYMBOL_ATOM, type) : NULL;
+    if (type && !symbol) return idm_error_oom(err, idm_span_unknown(NULL));
+    bool result = symbol && idm_value_matches_type_symbol(args[0], symbol);
     *out = idm_bool(rt, result);
     return true;
 }
@@ -905,26 +948,10 @@ static bool prim_make_error(IdmRuntime *rt, const IdmValue *args, IdmValue *out,
     return idm_value_tag(*out) == IDM_VAL_TUPLE;
 }
 
-static const char *kind_atom_text(IdmSyntaxKind kind) {
-    switch (kind) {
-        case IDM_SYN_NIL: return "nil";
-        case IDM_SYN_WORD: return "word";
-        case IDM_SYN_ATOM: return "atom";
-        case IDM_SYN_INT: return "int";
-        case IDM_SYN_FLOAT: return "float";
-        case IDM_SYN_STRING: return "string";
-        case IDM_SYN_LIST: return "list";
-        case IDM_SYN_VECTOR: return "vector";
-        case IDM_SYN_TUPLE: return "tuple";
-        case IDM_SYN_DICT: return "dict";
-    }
-    return "unknown";
-}
-
 static bool prim_syntax_kind(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    *out = idm_atom(rt, kind_atom_text(syn->kind));
+    *out = idm_atom(rt, idm_syn_kind_name(syn->kind));
     return true;
 }
 
@@ -949,8 +976,8 @@ static bool copy_scopes_from(IdmSyntax *dst, const IdmSyntax *src) {
 static bool prim_syntax_property(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    const char *key = require_string(args[1], NULL, err);
-    if (!key) return false;
+    const char *key = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[1], &key, NULL, "syntax-property", err)) return false;
     const char *value = idm_syn_property_get(syn, key);
     if (!value) { *out = idm_nil(); return true; }
     *out = idm_string(rt, value, err);
@@ -960,10 +987,10 @@ static bool prim_syntax_property(IdmRuntime *rt, const IdmValue *args, IdmValue 
 static bool prim_syntax_set_property(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    const char *key = require_string(args[1], NULL, err);
-    if (!key) return false;
-    const char *value = require_string(args[2], NULL, err);
-    if (!value) return false;
+    const char *key = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[1], &key, NULL, "syntax-set-property", err)) return false;
+    const char *value = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[2], &value, NULL, "syntax-set-property", err)) return false;
     IdmSyntax *copy = idm_syn_clone(syn);
     if (!copy) return idm_error_oom(err, syn->span);
     if (!idm_syn_property_set(copy, key, value)) { idm_syn_free(copy); return idm_error_oom(err, syn->span); }
@@ -1017,8 +1044,8 @@ static bool prim_syntax_length(IdmRuntime *rt, const IdmValue *args, IdmValue *o
 static bool prim_syntax_nth(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    if (idm_value_tag(args[1]) != IDM_VAL_INT) return idm_error_set(err, syn->span, "syntax-nth index must be int");
-    int64_t idx = idm_int_value(args[1]);
+    int64_t idx = 0;
+    if (!value_to_i64(args[1], &idx)) return idm_error_set(err, syn->span, "syntax-nth index must be int");
     if (idx < 0) return idm_error_set(err, syn->span, "syntax-nth index must be non-negative");
     switch (syn->kind) {
         case IDM_SYN_LIST:
@@ -1036,9 +1063,9 @@ static bool prim_syntax_nth(IdmRuntime *rt, const IdmValue *args, IdmValue *out,
 static bool prim_syntax_slice(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    if (idm_value_tag(args[1]) != IDM_VAL_INT || idm_value_tag(args[2]) != IDM_VAL_INT) return idm_error_set(err, syn->span, "syntax-slice indexes must be ints");
-    int64_t start_i = idm_int_value(args[1]);
-    int64_t end_i = idm_int_value(args[2]);
+    int64_t start_i = 0;
+    int64_t end_i = 0;
+    if (!value_to_i64(args[1], &start_i) || !value_to_i64(args[2], &end_i)) return idm_error_set(err, syn->span, "syntax-slice indexes must be ints");
     if (start_i < 0 || end_i < start_i) return idm_error_set(err, syn->span, "invalid syntax-slice range");
     if (syn->kind != IDM_SYN_LIST && syn->kind != IDM_SYN_VECTOR && syn->kind != IDM_SYN_TUPLE && syn->kind != IDM_SYN_DICT) return idm_error_set(err, syn->span, "syntax-slice expects sequence syntax");
     size_t start = (size_t)start_i;
@@ -1123,8 +1150,8 @@ static bool prim_inspect(IdmRuntime *rt, const IdmValue *args, IdmValue *out, Id
 }
 
 static bool prim_expand_check(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    const char *source = require_string(args[0], NULL, err);
-    if (!source) return false;
+    const char *source = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[0], &source, NULL, "expand-check", err)) return false;
     IdmError inner;
     idm_error_init(&inner);
     IdmCore *core = NULL;
@@ -1134,7 +1161,7 @@ static bool prim_expand_check(IdmRuntime *rt, const IdmValue *args, IdmValue *ou
         IdmBytecodeModule module;
         idm_bc_init(&module);
         uint32_t main_fn = 0;
-        compiled = idm_core_compile_main(core, &module, &main_fn, &inner);
+        compiled = idm_core_compile_main(rt, core, &module, &main_fn, &inner);
         idm_bc_destroy(&module);
     }
     idm_core_free(core);
@@ -1143,21 +1170,27 @@ static bool prim_expand_check(IdmRuntime *rt, const IdmValue *args, IdmValue *ou
         idm_error_clear(&inner);
         return true;
     }
-    IdmValue detail[2];
+    IdmValue reason = idm_nil();
+    (void)idm_error_take_reason(&inner, &reason);
+    IdmValue detail[6];
     detail[0] = idm_atom(rt, "expand");
     detail[1] = idm_string(rt, inner.message ? inner.message : "compile failed", err);
+    detail[2] = idm_int((int64_t)inner.span.line);
+    detail[3] = idm_int((int64_t)inner.span.column);
+    detail[4] = idm_string(rt, inner.span.file ? inner.span.file : "", err);
+    detail[5] = reason;
     idm_error_clear(&inner);
     if (err && err->present) return false;
-    IdmValue error_detail = idm_tuple(rt, detail, 2u, err);
+    IdmValue error_detail = idm_tuple(rt, detail, 6u, err);
     if (err && err->present) return false;
     *out = idm_error_value(rt, error_detail);
     return !(err && err->present);
 }
 
-static bool require_string_arg(IdmRuntime *rt, IdmValue v, const char **out_s, size_t *out_len, const char *what, IdmError *err) {
-    if (idm_value_tag(v) != IDM_VAL_STRING) return type_error(rt, err, what, v, "a string");
+bool idm_primitive_require_string_arg(IdmRuntime *rt, IdmValue v, const char **out_s, size_t *out_len, const char *what, IdmError *err) {
+    if (idm_value_tag(v) != IDM_VAL_STRING) return idm_primitive_type_error(rt, err, what, v, "a string");
     *out_s = idm_string_bytes(v);
-    *out_len = idm_string_length(v);
+    if (out_len) *out_len = idm_string_length(v);
     return true;
 }
 
@@ -1170,18 +1203,18 @@ static int64_t clamp_index(int64_t i, size_t len) {
 static bool prim_str_len(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     (void)rt;
     const char *s; size_t len;
-    if (!require_string_arg(rt, args[0], &s, &len, "len", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &s, &len, "len", err)) return false;
     *out = idm_int((int64_t)len);
     return true;
 }
 
 static bool prim_str_slice(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *s; size_t len;
-    if (!require_string_arg(rt, args[0], &s, &len, "slice", err)) return false;
-    if (idm_value_tag(args[1]) != IDM_VAL_INT) return type_error(rt, err, "slice", args[1], "integer bounds");
-    if (idm_value_tag(args[2]) != IDM_VAL_INT) return type_error(rt, err, "slice", args[2], "integer bounds");
-    int64_t a = idm_int_value(args[1]);
-    int64_t b = idm_int_value(args[2]);
+    if (!idm_primitive_require_string_arg(rt, args[0], &s, &len, "slice", err)) return false;
+    int64_t a = 0;
+    int64_t b = 0;
+    if (!value_to_i64(args[1], &a)) return idm_primitive_type_error(rt, err, "slice", args[1], "integer bounds");
+    if (!value_to_i64(args[2], &b)) return idm_primitive_type_error(rt, err, "slice", args[2], "integer bounds");
     if (a < 0 || b < a || (uint64_t)b > len) {
         idm_error_set(err, idm_span_unknown(NULL), "slice range %lld..%lld out of bounds for length %zu", (long long)a, (long long)b, len);
         return idm_error_reason(rt, err, "slice-out-of-range", 3, args[1], args[2], idm_int((int64_t)len));
@@ -1194,10 +1227,11 @@ static bool prim_str_find(IdmRuntime *rt, const IdmValue *args, IdmValue *out, I
     (void)rt;
     const char *s; size_t len;
     const char *needle; size_t nlen;
-    if (!require_string_arg(rt, args[0], &s, &len, "find", err)) return false;
-    if (!require_string_arg(rt, args[1], &needle, &nlen, "find", err)) return false;
-    if (idm_value_tag(args[2]) != IDM_VAL_INT) return type_error(rt, err, "find", args[2], "an integer start");
-    size_t from = (size_t)clamp_index(idm_int_value(args[2]), len);
+    if (!idm_primitive_require_string_arg(rt, args[0], &s, &len, "find", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[1], &needle, &nlen, "find", err)) return false;
+    int64_t start = 0;
+    if (!value_to_i64(args[2], &start)) return idm_primitive_type_error(rt, err, "find", args[2], "an integer start");
+    size_t from = (size_t)clamp_index(start, len);
     if (nlen == 0) { *out = idm_int((int64_t)from); return true; }
     for (size_t i = from; i + nlen <= len; i++) {
         if (memcmp(s + i, needle, nlen) == 0) {
@@ -1212,17 +1246,18 @@ static bool prim_str_find(IdmRuntime *rt, const IdmValue *args, IdmValue *out, I
 static bool prim_str_byte(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     (void)rt;
     const char *s; size_t len;
-    if (!require_string_arg(rt, args[0], &s, &len, "byte", err)) return false;
-    if (idm_value_tag(args[1]) != IDM_VAL_INT) return type_error(rt, err, "byte", args[1], "an integer index");
-    int64_t i = idm_int_value(args[1]);
+    if (!idm_primitive_require_string_arg(rt, args[0], &s, &len, "byte", err)) return false;
+    int64_t i = 0;
+    if (!value_to_i64(args[1], &i)) return idm_primitive_type_error(rt, err, "byte", args[1], "an integer index");
     if (i < 0 || (size_t)i >= len) { *out = idm_nil(); return true; }
     *out = idm_int((int64_t)(unsigned char)s[i]);
     return true;
 }
 
 static bool prim_byte_str(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) != IDM_VAL_INT || idm_int_value(args[0]) < 0 || idm_int_value(args[0]) > 255) return type_error(rt, err, "byte-str", args[0], "an integer 0..255");
-    char c = (char)idm_int_value(args[0]);
+    int64_t byte = 0;
+    if (!value_to_i64(args[0], &byte) || byte < 0 || byte > 255) return idm_primitive_type_error(rt, err, "byte-str", args[0], "an integer 0..255");
+    char c = (char)byte;
     *out = idm_string_n(rt, &c, 1u, err);
     return !(err && err->present);
 }
@@ -1269,8 +1304,9 @@ static bool prim_regex_result_pred(IdmRuntime *rt, const IdmValue *args, IdmValu
 }
 
 static bool regex_offset_arg(IdmRuntime *rt, const char *name, IdmValue value, size_t *out, IdmError *err) {
-    if (idm_value_tag(value) != IDM_VAL_INT || idm_int_value(value) < 0) return type_error(rt, err, name, value, "a non-negative integer offset");
-    *out = (size_t)idm_int_value(value);
+    int64_t offset = 0;
+    if (!value_to_i64(value, &offset) || offset < 0) return idm_primitive_type_error(rt, err, name, value, "a non-negative integer offset");
+    *out = (size_t)offset;
     return true;
 }
 
@@ -1340,7 +1376,7 @@ static const char *resolve_cwd_record(IdmRuntime *rt, const char *path, char *bu
 
 static bool prim_file_read(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "read", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "read", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd_record(rt, path, pb, sizeof(pb)))) return result_error(rt, out, err);
     char *data = NULL;
@@ -1360,8 +1396,8 @@ static bool prim_file_read(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
 static bool prim_file_write(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     const char *data; size_t dlen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "write", err)) return false;
-    if (!require_string_arg(rt, args[1], &data, &dlen, "write", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "write", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[1], &data, &dlen, "write", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     FILE *f = fopen(path, "wb");
@@ -1408,8 +1444,8 @@ static bool prim_file_open(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
     const char *mode = NULL;
     bool readable = false;
     bool writable = false;
-    if (!require_string_arg(rt, args[0], &path, &plen, "open", err)) return false;
-    if (!file_port_mode(args[1], &mode, &readable, &writable)) return type_error(rt, err, "open", args[1], ":read, :write, :append, or :read-write");
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "open", err)) return false;
+    if (!file_port_mode(args[1], &mode, &readable, &writable)) return idm_primitive_type_error(rt, err, "open", args[1], ":read, :write, :append, or :read-write");
     char pb[PATH_MAX];
     const char *resolved = readable ? resolve_cwd_record(rt, path, pb, sizeof(pb)) : resolve_cwd(path, pb, sizeof(pb));
     if (!resolved) return result_error(rt, out, err);
@@ -1433,7 +1469,7 @@ static bool prim_file_open(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
 
 static bool prim_file_exists(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "exists?", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "exists?", err)) return false;
     char pb[PATH_MAX];
     path = resolve_cwd_record(rt, path, pb, sizeof(pb));
     *out = idm_bool(rt, path && access(path, F_OK) == 0);
@@ -1442,7 +1478,7 @@ static bool prim_file_exists(IdmRuntime *rt, const IdmValue *args, IdmValue *out
 
 static bool prim_file_stat(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "stat", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "stat", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd_record(rt, path, pb, sizeof(pb)))) return result_error(rt, out, err);
     struct stat st;
@@ -1459,7 +1495,7 @@ static bool prim_file_stat(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
 
 static bool prim_file_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "list", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "list", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     DIR *dir = opendir(path);
@@ -1479,7 +1515,7 @@ static bool prim_file_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
 
 static bool prim_file_remove(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "remove", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "remove", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     if (remove(path) != 0) return result_error(rt, out, err);
@@ -1509,14 +1545,15 @@ static bool prim_time_ms(IdmRuntime *rt, const IdmValue *args, IdmValue *out, Id
 }
 
 static bool prim_random(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) != IDM_VAL_INT || idm_int_value(args[0]) <= 0) return type_error(rt, err, "random", args[0], "a positive integer bound");
-    *out = idm_int((int64_t)(random() % idm_int_value(args[0])));
+    int64_t bound = 0;
+    if (!value_to_i64(args[0], &bound) || bound <= 0) return idm_primitive_type_error(rt, err, "random", args[0], "a positive integer bound");
+    *out = idm_int((int64_t)(random() % bound));
     return true;
 }
 
 static bool require_dict(IdmRuntime *rt, const char *name, IdmValue v, IdmError *err) {
     if (idm_value_tag(v) == IDM_VAL_DICT) return true;
-    return type_error(rt, err, name, v, "a dict");
+    return idm_primitive_type_error(rt, err, name, v, "a dict");
 }
 
 static bool prim_dict_get(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
@@ -1579,11 +1616,11 @@ static bool prim_dict_size(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
 
 static bool prim_str_contains(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     size_t hay_len = 0;
-    const char *hay = require_string(args[0], &hay_len, err);
-    if (!hay) return false;
+    const char *hay = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[0], &hay, &hay_len, "contains?", err)) return false;
     size_t needle_len = 0;
-    const char *needle = require_string(args[1], &needle_len, err);
-    if (!needle) return false;
+    const char *needle = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[1], &needle, &needle_len, "contains?", err)) return false;
     bool found = needle_len == 0;
     for (size_t i = 0; !found && needle_len <= hay_len && i <= hay_len - needle_len; i++) {
         if (memcmp(hay + i, needle, needle_len) == 0) found = true;
@@ -1595,18 +1632,22 @@ static bool prim_str_contains(IdmRuntime *rt, const IdmValue *args, IdmValue *ou
 static bool prim_syntax_int_pred(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    *out = truth(rt, syn->kind == IDM_SYN_INT);
+    *out = truth(rt, syn->kind == IDM_SYN_INT || syn->kind == IDM_SYN_BIGINT);
     return true;
 }
 
 static bool prim_syntax_int_value(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    if (syn->kind != IDM_SYN_INT) return idm_error_set(err, syn->span, "syntax-int-value expects int syntax");
-    if (!idm_fixnum_fits(syn->as.integer)) return idm_error_set(err, syn->span, "integer literal exceeds 62-bit fixnum range");
-    *out = idm_int(syn->as.integer);
-    return true;
+    if (syn->kind == IDM_SYN_INT) { *out = idm_int_promote(rt, syn->as.integer, err); return !(err && err->present); }
+    if (syn->kind == IDM_SYN_BIGINT) {
+        bool ok = false;
+        *out = idm_int_from_decimal(rt, syn->as.text, strlen(syn->as.text), &ok, err);
+        if (err && err->present) return false;
+        if (!ok) return idm_error_set(err, syn->span, "invalid integer literal");
+        return true;
+    }
+    return idm_error_set(err, syn->span, "syntax-int-value expects int syntax");
 }
 
 static bool prim_syntax_float_value(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
@@ -1617,15 +1658,6 @@ static bool prim_syntax_float_value(IdmRuntime *rt, const IdmValue *args, IdmVal
     return !(err && err->present);
 }
 
-static const char *require_string(IdmValue v, size_t *out_len, IdmError *err) {
-    if (!idm_is_string(v)) {
-        idm_error_set(err, idm_span_unknown(NULL), "expected string");
-        return NULL;
-    }
-    if (out_len) *out_len = idm_string_length(v);
-    return idm_string_bytes(v);
-}
-
 static IdmSyntax *make_word_syntax_from(IdmSyntax *ctx, const char *text, IdmError *err) {
     IdmSyntax *out = idm_syn_word(text, ctx ? ctx->span : idm_span_unknown(NULL));
     if (!out) { idm_error_oom(err, idm_span_unknown(NULL)); return NULL; }
@@ -1634,12 +1666,11 @@ static IdmSyntax *make_word_syntax_from(IdmSyntax *ctx, const char *text, IdmErr
 }
 
 static bool prim_syntax_error(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)rt;
     (void)out;
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
-    const char *msg = require_string(args[1], NULL, err);
-    if (!msg) return false;
+    const char *msg = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[1], &msg, NULL, "syntax-error", err)) return false;
     return idm_error_set(err, syn->span, "%s", msg);
 }
 
@@ -1705,8 +1736,8 @@ static bool prim_free_identifier_eq(IdmRuntime *rt, const IdmValue *args, IdmVal
 static bool prim_bind_bang(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *ctx = require_syntax(args[0], err);
     if (!ctx) return false;
-    const char *text = require_string(args[1], NULL, err);
-    if (!text) return false;
+    const char *text = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[1], &text, NULL, "bind!", err)) return false;
     IdmSyntax *syn = make_word_syntax_from(ctx, text, err);
     if (!syn) return false;
     if (rt->macro_intro_active && !idm_syn_scope_add(syn, 0, rt->macro_intro_scope)) {
@@ -1718,20 +1749,22 @@ static bool prim_bind_bang(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
 
 static bool prim_abs(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (idm_value_tag(args[0]) == IDM_VAL_FLOAT) { *out = float_result(rt, fabs(idm_float_value(args[0])), err); return !(err && err->present); }
-    if (idm_value_tag(args[0]) != IDM_VAL_INT) return type_error(rt, err, "abs", args[0], "a number");
-    return int_result(rt, idm_int_value(args[0]) < 0 ? -idm_int_value(args[0]) : idm_int_value(args[0]), "abs", out, err);
+    if (!idm_value_is_int(args[0])) return idm_primitive_type_error(rt, err, "abs", args[0], "a number");
+    if (idm_int_compare(args[0], idm_int(0)) < 0) return idm_int_neg(rt, args[0], out, err);
+    *out = args[0];
+    return true;
 }
 
 static bool prim_float_unary(IdmRuntime *rt, const char *name, double (*fn)(double), const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) == IDM_VAL_INT) { *out = args[0]; return true; }
-    if (idm_value_tag(args[0]) != IDM_VAL_FLOAT) return type_error(rt, err, name, args[0], "a number");
+    if (idm_value_is_int(args[0])) { *out = args[0]; return true; }
+    if (idm_value_tag(args[0]) != IDM_VAL_FLOAT) return idm_primitive_type_error(rt, err, name, args[0], "a number");
     *out = float_result(rt, fn(idm_float_value(args[0])), err);
     return !(err && err->present);
 }
 
 static bool prim_sqrt(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     double x = 0.0;
-    if (!num_as_double(args[0], &x)) return type_error(rt, err, "sqrt", args[0], "a number");
+    if (!num_as_double(args[0], &x)) return idm_primitive_type_error(rt, err, "sqrt", args[0], "a number");
     if (x < 0.0) {
         idm_error_set(err, idm_span_unknown(NULL), "sqrt of a negative number");
         return idm_error_reason(rt, err, "type-error", 2, idm_atom(rt, "sqrt"), args[0]);
@@ -1742,50 +1775,39 @@ static bool prim_sqrt(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmEr
 
 static bool prim_floor_divmod(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *name = idm_primitive_name(prim);
-    bool ints = false;
-    int64_t a = 0, b = 0;
-    double x = 0.0, y = 0.0;
-    if (!num_pair(rt, name, args, &ints, &a, &b, &x, &y, err)) return false;
-    if (!ints) {
-        if (y == 0.0) return div_zero_error(rt, name, err);
-        if (prim == IDM_PRIM_FLOOR_DIV) { *out = float_result(rt, floor(x / y), err); return !(err && err->present); }
-        double r = fmod(x, y);
-        if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
-        *out = float_result(rt, r, err);
-        return !(err && err->present);
+    if (idm_value_is_int(args[0]) && idm_value_is_int(args[1])) {
+        IdmValue q = idm_nil(), r = idm_nil();
+        if (!int_floor_divmod(rt, name, args[0], args[1], &q, &r, err)) return false;
+        *out = prim == IDM_PRIM_FLOOR_DIV ? q : r;
+        return true;
     }
-    if (b == 0) return div_zero_error(rt, name, err);
-    if (a == INT64_MIN && b == -1) return overflow_error(rt, name, err);
-    int64_t q = a / b;
-    int64_t r = a % b;
-    if (r != 0 && ((r < 0) != (b < 0))) { q -= 1; r += b; }
-    return int_result(rt, prim == IDM_PRIM_FLOOR_DIV ? q : r, name, out, err);
+    double x = 0.0, y = 0.0;
+    if (!num_as_double(args[0], &x) || !num_as_double(args[1], &y)) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s expects numeric operands", name);
+        return idm_error_reason(rt, err, "type-error", 3, idm_atom(rt, name), args[0], args[1]);
+    }
+    if (y == 0.0) return div_zero_error(rt, name, err);
+    if (prim == IDM_PRIM_FLOOR_DIV) { *out = float_result(rt, floor(x / y), err); return !(err && err->present); }
+    double r = fmod(x, y);
+    if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
+    *out = float_result(rt, r, err);
+    return !(err && err->present);
 }
 
 static bool floor_divmod_values(IdmRuntime *rt, const char *name, IdmValue a0, IdmValue a1, IdmValue *q_out, IdmValue *r_out, IdmError *err) {
-    bool ints = false;
-    int64_t a = 0, b = 0;
+    if (idm_value_is_int(a0) && idm_value_is_int(a1)) return int_floor_divmod(rt, name, a0, a1, q_out, r_out, err);
     double x = 0.0, y = 0.0;
-    IdmValue pair_args[2] = {a0, a1};
-    if (!num_pair(rt, name, pair_args, &ints, &a, &b, &x, &y, err)) return false;
-    if (!ints) {
-        if (y == 0.0) return div_zero_error(rt, name, err);
-        double q = floor(x / y);
-        double r = fmod(x, y);
-        if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
-        *q_out = float_result(rt, q, err);
-        *r_out = float_result(rt, r, err);
-        return !(err && err->present);
+    if (!num_as_double(a0, &x) || !num_as_double(a1, &y)) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s expects numeric operands", name);
+        return idm_error_reason(rt, err, "type-error", 3, idm_atom(rt, name), a0, a1);
     }
-    if (b == 0) return div_zero_error(rt, name, err);
-    if (a == INT64_MIN && b == -1) return overflow_error(rt, name, err);
-    int64_t q = a / b;
-    int64_t r = a % b;
-    if (r != 0 && ((r < 0) != (b < 0))) { q -= 1; r += b; }
-    if (!idm_fixnum_fits(q)) return overflow_error(rt, name, err);
-    *q_out = idm_int(q);
-    *r_out = idm_int(r);
-    return true;
+    if (y == 0.0) return div_zero_error(rt, name, err);
+    double q = floor(x / y);
+    double r = fmod(x, y);
+    if (r != 0.0 && ((r < 0.0) != (y < 0.0))) r += y;
+    *q_out = float_result(rt, q, err);
+    *r_out = float_result(rt, r, err);
+    return !(err && err->present);
 }
 
 static bool prim_divmod(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
@@ -1797,20 +1819,14 @@ static bool prim_divmod(IdmRuntime *rt, const IdmValue *args, IdmValue *out, Idm
 
 static bool prim_math_unary(IdmRuntime *rt, const char *name, double (*fn)(double), const IdmValue *args, IdmValue *out, IdmError *err) {
     double x = 0.0;
-    if (!num_as_double(args[0], &x)) return type_error(rt, err, name, args[0], "a number");
+    if (!num_as_double(args[0], &x)) return idm_primitive_type_error(rt, err, name, args[0], "a number");
     *out = float_result(rt, fn(x), err);
     return !(err && err->present);
 }
 
 static bool prim_math_binary(IdmRuntime *rt, const char *name, double (*fn)(double, double), const IdmValue *args, IdmValue *out, IdmError *err) {
-    bool ints = false;
-    int64_t ia = 0, ib = 0;
     double x = 0.0, y = 0.0;
-    if (!num_pair(rt, name, args, &ints, &ia, &ib, &x, &y, err)) return false;
-    if (ints) {
-        x = (double)ia;
-        y = (double)ib;
-    }
+    if (!num_as_double(args[0], &x) || !num_as_double(args[1], &y)) return idm_primitive_type_error(rt, err, name, args[0], "a number");
     *out = float_result(rt, fn(x, y), err);
     return !(err && err->present);
 }
@@ -1830,7 +1846,7 @@ static bool prim_number_classify(IdmRuntime *rt, IdmPrimitive prim, const IdmVal
         return true;
     }
     double x = 0.0;
-    if (!num_as_double(args[0], &x)) return type_error(rt, err, name, args[0], "a number");
+    if (!num_as_double(args[0], &x)) return idm_primitive_type_error(rt, err, name, args[0], "a number");
     bool result = false;
     switch (prim) {
         case IDM_PRIM_NAN_P: result = isnan(x); break;
@@ -1842,104 +1858,83 @@ static bool prim_number_classify(IdmRuntime *rt, IdmPrimitive prim, const IdmVal
     return true;
 }
 
-static bool require_int_arg(IdmRuntime *rt, IdmError *err, const char *name, IdmValue value, int64_t *out) {
-    if (idm_value_tag(value) != IDM_VAL_INT) return type_error(rt, err, name, value, "an integer");
-    *out = idm_int_value(value);
-    return true;
-}
-
 static bool require_nonnegative_int_arg(IdmRuntime *rt, IdmError *err, const char *name, IdmValue value, int64_t *out) {
-    if (idm_value_tag(value) != IDM_VAL_INT || idm_int_value(value) < 0) return type_error(rt, err, name, value, "a non-negative integer");
-    *out = idm_int_value(value);
+    if (!idm_value_is_int(value) || !idm_int_to_i64(value, out) || *out < 0) return idm_primitive_type_error(rt, err, name, value, "a non-negative integer");
     return true;
 }
 
 static bool prim_bit_binary(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *name = idm_primitive_name(prim);
-    int64_t a = 0, b = 0;
-    if (!require_int_arg(rt, err, name, args[0], &a) || !require_int_arg(rt, err, name, args[1], &b)) return false;
+    if (!idm_value_is_int(args[0])) return idm_primitive_type_error(rt, err, name, args[0], "an integer");
+    if (!idm_value_is_int(args[1])) return idm_primitive_type_error(rt, err, name, args[1], "an integer");
     switch (prim) {
-        case IDM_PRIM_BIT_AND: *out = idm_int(a & b); return true;
-        case IDM_PRIM_BIT_OR: *out = idm_int(a | b); return true;
-        case IDM_PRIM_BIT_XOR: *out = idm_int(a ^ b); return true;
+        case IDM_PRIM_BIT_AND: return idm_int_bit_and(rt, args[0], args[1], out, err);
+        case IDM_PRIM_BIT_OR: return idm_int_bit_or(rt, args[0], args[1], out, err);
+        case IDM_PRIM_BIT_XOR: return idm_int_bit_xor(rt, args[0], args[1], out, err);
         default: return idm_error_set(err, idm_span_unknown(NULL), "invalid bit primitive");
     }
 }
 
 static bool prim_bit_not(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t a = 0;
-    if (!require_int_arg(rt, err, "bit-not", args[0], &a)) return false;
-    *out = idm_int(~a);
-    return true;
+    if (!idm_value_is_int(args[0])) return idm_primitive_type_error(rt, err, "bit-not", args[0], "an integer");
+    return idm_int_bit_not(rt, args[0], out, err);
 }
 
 static bool prim_shift_left(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t value = 0, count = 0;
-    if (!require_int_arg(rt, err, "shift-left", args[0], &value) || !require_nonnegative_int_arg(rt, err, "shift-left", args[1], &count)) return false;
-    if (count > 62) {
-        if (value == 0) { *out = idm_int(0); return true; }
-        return overflow_error(rt, "shift-left", err);
-    }
-    int64_t result = value;
-    for (int64_t i = 0; i < count; i++) {
-        if (!idm_checked_mul(result, 2, &result)) return overflow_error(rt, "shift-left", err);
-    }
-    return int_result(rt, result, "shift-left", out, err);
+    int64_t count = 0;
+    if (!idm_value_is_int(args[0])) return idm_primitive_type_error(rt, err, "shift-left", args[0], "an integer");
+    if (!require_nonnegative_int_arg(rt, err, "shift-left", args[1], &count)) return false;
+    *out = idm_int_shl(rt, args[0], count, err);
+    return !(err && err->present);
 }
 
 static bool prim_shift_right(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t value = 0, count = 0;
-    if (!require_int_arg(rt, err, "shift-right", args[0], &value) || !require_nonnegative_int_arg(rt, err, "shift-right", args[1], &count)) return false;
-    if (count >= 63) {
-        *out = idm_int(value < 0 ? -1 : 0);
+    int64_t count = 0;
+    if (!idm_value_is_int(args[0])) return idm_primitive_type_error(rt, err, "shift-right", args[0], "an integer");
+    if (!require_nonnegative_int_arg(rt, err, "shift-right", args[1], &count)) return false;
+    if (idm_value_tag(args[0]) == IDM_VAL_INT) {
+        int64_t v = idm_int_value(args[0]);
+        *out = idm_int(count >= 63 ? (v < 0 ? -1 : 0) : (v >> count));
         return true;
     }
-    *out = idm_int(value >> count);
+    IdmValue divisor = idm_int_shl(rt, idm_int(1), count, err);
+    if (err && err->present) return false;
+    IdmValue q = idm_nil(), r = idm_nil();
+    if (!int_floor_divmod(rt, "shift-right", args[0], divisor, &q, &r, err)) return false;
+    *out = q;
     return true;
-}
-
-static uint64_t bit_count_u64(uint64_t value) {
-    uint64_t count = 0;
-    while (value != 0) {
-        count += value & 1u;
-        value >>= 1;
-    }
-    return count;
 }
 
 static bool prim_bit_count(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t value = 0;
-    if (!require_nonnegative_int_arg(rt, err, "bit-count", args[0], &value)) return false;
-    *out = idm_int((int64_t)bit_count_u64((uint64_t)value));
-    return true;
+    if (!idm_value_is_int(args[0]) || idm_int_compare(args[0], idm_int(0)) < 0) return idm_primitive_type_error(rt, err, "bit-count", args[0], "a non-negative integer");
+    return idm_int_bit_count_nonnegative(rt, args[0], out, err);
 }
 
 static bool prim_bit_length(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    int64_t value = 0;
-    if (!require_nonnegative_int_arg(rt, err, "bit-length", args[0], &value)) return false;
-    uint64_t x = (uint64_t)value;
-    int64_t len = 0;
-    while (x != 0) {
-        len++;
-        x >>= 1;
-    }
-    *out = idm_int(len);
-    return true;
+    if (!idm_value_is_int(args[0]) || idm_int_compare(args[0], idm_int(0)) < 0) return idm_primitive_type_error(rt, err, "bit-length", args[0], "a non-negative integer");
+    return idm_int_bit_length_nonnegative(rt, args[0], out, err);
 }
 
 static bool prim_to_int(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) == IDM_VAL_INT) { *out = args[0]; return true; }
-    if (idm_value_tag(args[0]) != IDM_VAL_FLOAT) return type_error(rt, err, "to-int", args[0], "a number");
+    if (idm_value_is_int(args[0])) { *out = args[0]; return true; }
+    if (idm_value_tag(args[0]) != IDM_VAL_FLOAT) return idm_primitive_type_error(rt, err, "to-int", args[0], "a number");
     double x = idm_float_value(args[0]);
-    if (!isfinite(x)) return type_error(rt, err, "to-int", args[0], "a finite number");
-    if (x < -9223372036854775808.0 || x >= 9223372036854775808.0) return overflow_error(rt, "to-int", err);
-    return int_result(rt, (int64_t)trunc(x), "to-int", out, err);
+    if (!isfinite(x)) return idm_primitive_type_error(rt, err, "to-int", args[0], "a finite number");
+    double t = trunc(x);
+    if (t >= -9223372036854775808.0 && t < 9223372036854775808.0) return int_result(rt, (int64_t)t, "to-int", out, err);
+    int e = 0;
+    double m = frexp(t, &e);
+    int64_t mant = (int64_t)ldexp(m, 53);
+    IdmValue base = idm_int_promote(rt, mant, err);
+    if (err && err->present) return false;
+    *out = idm_int_shl(rt, base, (int64_t)e - 53, err);
+    return !(err && err->present);
 }
 
 static bool prim_to_float(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (idm_value_tag(args[0]) == IDM_VAL_FLOAT) { *out = args[0]; return true; }
-    if (idm_value_tag(args[0]) == IDM_VAL_INT) { *out = idm_float(rt, (double)idm_int_value(args[0]), err); return !(err && err->present); }
-    return type_error(rt, err, "to-float", args[0], "a number");
+    if (idm_value_is_int(args[0])) { *out = idm_float(rt, idm_int_to_double(args[0]), err); return !(err && err->present); }
+    return idm_primitive_type_error(rt, err, "to-float", args[0], "a number");
 }
 
 static bool parse_result_error(IdmRuntime *rt, const char *what, IdmValue input, IdmValue *out, IdmError *err) {
@@ -1951,8 +1946,9 @@ static bool parse_result_error(IdmRuntime *rt, const char *what, IdmValue input,
 }
 
 static bool parse_prelude(IdmRuntime *rt, const char *name, IdmValue arg, char **out_buf, IdmError *err) {
-    const char *s; size_t len;
-    if (!require_string_arg(rt, arg, &s, &len, name, err)) return false;
+    const char *s = NULL;
+    size_t len = 0;
+    if (!idm_primitive_require_string_arg(rt, arg, &s, &len, name, err)) return false;
     if (len == 0 || isspace((unsigned char)s[0])) { *out_buf = NULL; return true; }
     char *buf = idm_strndup(s, len);
     if (!buf) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1964,14 +1960,12 @@ static bool prim_parse_int(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
     char *buf = NULL;
     if (!parse_prelude(rt, "parse-int", args[0], &buf, err)) return false;
     if (!buf) return parse_result_error(rt, "int", args[0], out, err);
-    errno = 0;
-    char *end = NULL;
-    long long v = strtoll(buf, &end, 10);
-    bool ok = end == buf + idm_string_length(args[0]) && errno == 0;
+    bool parsed = false;
+    IdmValue value = idm_int_from_decimal(rt, buf, idm_string_length(args[0]), &parsed, err);
     free(buf);
-    if (!ok) return parse_result_error(rt, "int", args[0], out, err);
-    if (!idm_fixnum_fits((int64_t)v)) return parse_result_error(rt, "int", args[0], out, err);
-    return result_ok(rt, idm_int((int64_t)v), out, err);
+    if (err && err->present) return false;
+    if (!parsed) return parse_result_error(rt, "int", args[0], out, err);
+    return result_ok(rt, value, out, err);
 }
 
 static bool prim_parse_float(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
@@ -1988,7 +1982,7 @@ static bool prim_parse_float(IdmRuntime *rt, const IdmValue *args, IdmValue *out
 
 static bool prim_file_mkdir(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "mkdir", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "mkdir", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     if (mkdir(path, 0777) != 0) return result_error(rt, out, err);
@@ -1999,8 +1993,8 @@ static bool prim_file_mkdir(IdmRuntime *rt, const IdmValue *args, IdmValue *out,
 static bool prim_file_append(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *path; size_t plen;
     const char *data; size_t dlen;
-    if (!require_string_arg(rt, args[0], &path, &plen, "append", err)) return false;
-    if (!require_string_arg(rt, args[1], &data, &dlen, "append", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &path, &plen, "append", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[1], &data, &dlen, "append", err)) return false;
     char pb[PATH_MAX];
     if (!(path = resolve_cwd(path, pb, sizeof(pb)))) return result_error(rt, out, err);
     FILE *f = fopen(path, "ab");
@@ -2014,15 +2008,16 @@ static bool prim_file_append(IdmRuntime *rt, const IdmValue *args, IdmValue *out
 
 static bool prim_ord_str(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     char buf[4];
-    size_t n = idm_value_tag(args[0]) == IDM_VAL_INT ? utf8_encode(idm_int_value(args[0]), buf) : 0u;
-    if (n == 0u) return type_error(rt, err, "ord->str", args[0], "a Unicode codepoint");
+    int64_t cp = 0;
+    size_t n = value_to_i64(args[0], &cp) ? utf8_encode(cp, buf) : 0u;
+    if (n == 0u) return idm_primitive_type_error(rt, err, "ord->str", args[0], "a Unicode codepoint");
     *out = idm_string_n(rt, buf, n, err);
     return !(err && err->present);
 }
 
 static bool prim_str_ord(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     const char *s; size_t len;
-    if (!require_string_arg(rt, args[0], &s, &len, "str->ord", err)) return false;
+    if (!idm_primitive_require_string_arg(rt, args[0], &s, &len, "str->ord", err)) return false;
     if (len == 0) { *out = idm_nil(); return true; }
     int32_t cp;
     utf8_decode((const unsigned char *)s, len, &cp);
@@ -2038,11 +2033,12 @@ static bool prim_from_runes(IdmRuntime *rt, const IdmValue *args, IdmValue *out,
         IdmValue item = idm_car(v, err);
         if (err && err->present) { idm_buf_destroy(&buf); return false; }
         char enc[4];
-        size_t n = idm_value_tag(item) == IDM_VAL_INT ? utf8_encode(idm_int_value(item), enc) : 0u;
-        if (n == 0u) { idm_buf_destroy(&buf); return type_error(rt, err, "from-runes", item, "a Unicode codepoint"); }
+        int64_t cp = 0;
+        size_t n = value_to_i64(item, &cp) ? utf8_encode(cp, enc) : 0u;
+        if (n == 0u) { idm_buf_destroy(&buf); return idm_primitive_type_error(rt, err, "from-runes", item, "a Unicode codepoint"); }
         if (!idm_buf_append_n(&buf, enc, n)) { idm_buf_destroy(&buf); return idm_error_oom(err, idm_span_unknown(NULL)); }
     }
-    if (!idm_is_empty_list(v)) { idm_buf_destroy(&buf); return type_error(rt, err, "from-runes", v, "a list of codepoints"); }
+    if (!idm_is_empty_list(v)) { idm_buf_destroy(&buf); return idm_primitive_type_error(rt, err, "from-runes", v, "a list of codepoints"); }
     *out = idm_string_n(rt, buf.data ? buf.data : "", buf.len, err);
     idm_buf_destroy(&buf);
     return !(err && err->present);
@@ -2056,8 +2052,8 @@ static bool require_session(IdmRuntime *rt, const char *name, IdmError *err) {
 static bool prim_repl_compile(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_session(rt, "repl-compile", err)) return false;
     size_t len = 0;
-    const char *source = require_string(args[0], &len, err);
-    if (!source) return false;
+    const char *source = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[0], &source, &len, "repl-compile", err)) return false;
     IdmValue thunk = idm_nil();
     uint64_t token = 0;
     IdmReplStatus status = idm_repl_compile(rt->repl, source, &thunk, &token, err);
@@ -2086,15 +2082,16 @@ static bool prim_repl_compile(IdmRuntime *rt, const IdmValue *args, IdmValue *ou
 
 static bool prim_repl_abort(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_session(rt, "repl-abort", err)) return false;
-    if (idm_value_tag(args[0]) != IDM_VAL_INT) return type_error(rt, err, "repl-abort", args[0], "a compile token");
-    idm_repl_abort(rt->repl, (uint64_t)idm_int_value(args[0]));
+    int64_t token = 0;
+    if (!value_to_i64(args[0], &token) || token < 0) return idm_primitive_type_error(rt, err, "repl-abort", args[0], "a compile token");
+    idm_repl_abort(rt->repl, (uint64_t)token);
     *out = idm_atom(rt, "ok");
     return true;
 }
 
 static bool prim_repl_spawn(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_session(rt, "repl-spawn", err)) return false;
-    if (!idm_is_closure(args[0])) return type_error(rt, err, "repl-spawn", args[0], "a function value");
+    if (!idm_is_closure(args[0])) return idm_primitive_type_error(rt, err, "repl-spawn", args[0], "a function value");
     IdmScheduler *sched = idm_repl_scheduler(rt->repl);
     IdmValue pid = idm_nil();
     if (!idm_sched_spawn(sched, args[0], idm_current_exec(), &pid, err)) return false;
@@ -2132,11 +2129,11 @@ static bool job_arg_atom(IdmValue v, const char *name) {
 }
 
 static bool prim_port_status(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return type_error(rt, err, "port-status", args[0], "a port");
+    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return idm_primitive_type_error(rt, err, "port-status", args[0], "a port");
     IdmScheduler *sched = job_sched("port-status", err);
     if (!sched) return false;
     int state = 0;
-    if (!idm_sched_port_status(sched, idm_value_id(args[0]), &state)) return type_error(rt, err, "port-status", args[0], "a live port");
+    if (!idm_sched_port_status(sched, idm_value_id(args[0]), &state)) return idm_primitive_type_error(rt, err, "port-status", args[0], "a live port");
     *out = idm_atom(rt, state == 2 ? "done" : state == 1 ? "stopped" : "running");
     return true;
 }
@@ -2154,70 +2151,71 @@ static bool port_stream_arg(IdmValue v, const char **out_stream) {
 }
 
 static bool prim_port_read(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return type_error(rt, err, "port-read", args[0], "a port");
+    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return idm_primitive_type_error(rt, err, "port-read", args[0], "a port");
     const char *stream = NULL;
-    if (!port_stream_arg(args[1], &stream)) return type_error(rt, err, "port-read", args[1], ":stdout or :stderr");
-    if (idm_value_tag(args[2]) != IDM_VAL_INT || idm_int_value(args[2]) <= 0) return type_error(rt, err, "port-read", args[2], "a positive byte count");
+    if (!port_stream_arg(args[1], &stream)) return idm_primitive_type_error(rt, err, "port-read", args[1], ":stdout or :stderr");
+    int64_t max = 0;
+    if (!value_to_i64(args[2], &max) || max <= 0) return idm_primitive_type_error(rt, err, "port-read", args[2], "a positive byte count");
     IdmScheduler *sched = job_sched("port-read", err);
     if (!sched) return false;
     bool found = false;
-    if (!idm_sched_port_read(sched, idm_value_id(args[0]), stream, (size_t)idm_int_value(args[2]), out, &found, err)) return false;
-    if (!found) return type_error(rt, err, "port-read", args[0], "a live port");
+    if (!idm_sched_port_read(sched, idm_value_id(args[0]), stream, (size_t)max, out, &found, err)) return false;
+    if (!found) return idm_primitive_type_error(rt, err, "port-read", args[0], "a live port");
     return true;
 }
 
 static bool prim_port_write(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return type_error(rt, err, "port-write", args[0], "a port");
+    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return idm_primitive_type_error(rt, err, "port-write", args[0], "a port");
     size_t len = 0;
-    const char *data = require_string(args[1], &len, err);
-    if (!data) return false;
+    const char *data = NULL;
+    if (!idm_primitive_require_string_arg(rt, args[1], &data, &len, "port-write", err)) return false;
     IdmScheduler *sched = job_sched("port-write", err);
     if (!sched) return false;
     bool found = false;
     if (!idm_sched_port_write(sched, idm_value_id(args[0]), data, len, out, &found, err)) return false;
-    if (!found) return type_error(rt, err, "port-write", args[0], "a live port");
+    if (!found) return idm_primitive_type_error(rt, err, "port-write", args[0], "a live port");
     return true;
 }
 
 static bool prim_port_close_input(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return type_error(rt, err, "port-close-input", args[0], "a port");
+    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return idm_primitive_type_error(rt, err, "port-close-input", args[0], "a port");
     IdmScheduler *sched = job_sched("port-close-input", err);
     if (!sched) return false;
     bool found = false;
     if (!idm_sched_port_close_input(sched, idm_value_id(args[0]), out, &found, err)) return false;
-    if (!found) return type_error(rt, err, "port-close-input", args[0], "a live port");
+    if (!found) return idm_primitive_type_error(rt, err, "port-close-input", args[0], "a live port");
     return true;
 }
 
 static bool prim_job_resume(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return type_error(rt, err, "job-resume", args[0], "a port");
+    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return idm_primitive_type_error(rt, err, "job-resume", args[0], "a port");
     bool fg = job_arg_atom(args[1], "fg");
-    if (!fg && !job_arg_atom(args[1], "bg")) return type_error(rt, err, "job-resume", args[1], ":fg or :bg");
+    if (!fg && !job_arg_atom(args[1], "bg")) return idm_primitive_type_error(rt, err, "job-resume", args[1], ":fg or :bg");
     IdmScheduler *sched = job_sched("job-resume", err);
     if (!sched) return false;
-    if (!idm_sched_job_resume(sched, idm_value_id(args[0]), fg)) return type_error(rt, err, "job-resume", args[0], "a live port");
+    if (!idm_sched_job_resume(sched, idm_value_id(args[0]), fg)) return idm_primitive_type_error(rt, err, "job-resume", args[0], "a live port");
     *out = idm_atom(rt, "ok");
     return true;
 }
 
 static bool prim_job_signal(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return type_error(rt, err, "job-signal", args[0], "a port");
+    if (idm_value_tag(args[0]) != IDM_VAL_PORT) return idm_primitive_type_error(rt, err, "job-signal", args[0], "a port");
     int signo = job_arg_atom(args[1], "hup") ? SIGHUP
               : job_arg_atom(args[1], "cont") ? SIGCONT
               : job_arg_atom(args[1], "term") ? SIGTERM
               : job_arg_atom(args[1], "kill") ? SIGKILL
               : job_arg_atom(args[1], "int") ? SIGINT
               : 0;
-    if (signo == 0) return type_error(rt, err, "job-signal", args[1], ":hup, :cont, :term, :kill, or :int");
+    if (signo == 0) return idm_primitive_type_error(rt, err, "job-signal", args[1], ":hup, :cont, :term, :kill, or :int");
     IdmScheduler *sched = job_sched("job-signal", err);
     if (!sched) return false;
-    if (!idm_sched_job_signal(sched, idm_value_id(args[0]), signo)) return type_error(rt, err, "job-signal", args[0], "a live port");
+    if (!idm_sched_job_signal(sched, idm_value_id(args[0]), signo)) return idm_primitive_type_error(rt, err, "job-signal", args[0], "a live port");
     *out = idm_atom(rt, "ok");
     return true;
 }
 
 bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, uint32_t argc, IdmValue *out, IdmError *err) {
-    if (!require_arity(rt, prim, argc, err)) return false;
+    if (!idm_primitive_require_arity(rt, prim, argc, err)) return false;
     switch (prim) {
         case IDM_PRIM_COND:
             *out = idm_value_ok(args[0]) ? args[1] : (argc == 3u ? args[2] : idm_nil());

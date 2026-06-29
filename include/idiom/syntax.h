@@ -16,7 +16,8 @@ typedef enum {
     IDM_SYN_LIST,
     IDM_SYN_VECTOR,
     IDM_SYN_TUPLE,
-    IDM_SYN_DICT
+    IDM_SYN_DICT,
+    IDM_SYN_BIGINT
 } IdmSyntaxKind;
 
 typedef struct {
@@ -68,13 +69,16 @@ IdmSyntax *idm_syn_nil(IdmSpan span);
 IdmSyntax *idm_syn_word(const char *text, IdmSpan span);
 IdmSyntax *idm_syn_atom(const char *text, IdmSpan span);
 IdmSyntax *idm_syn_int(int64_t value, IdmSpan span);
+IdmSyntax *idm_syn_bigint(const char *text, IdmSpan span);
 IdmSyntax *idm_syn_float(double value, IdmSpan span);
 IdmSyntax *idm_syn_string(const char *text, IdmSpan span);
 IdmSyntax *idm_syn_string_n(const char *text, size_t len, IdmSpan span);
+IdmSyntax *idm_syn_seq(IdmSyntaxKind kind, IdmSpan span);
 IdmSyntax *idm_syn_list(IdmSpan span);
 IdmSyntax *idm_syn_vector(IdmSpan span);
 IdmSyntax *idm_syn_tuple(IdmSpan span);
 IdmSyntax *idm_syn_dict(IdmSpan span);
+const char *idm_syn_kind_name(IdmSyntaxKind kind);
 bool idm_syn_append(IdmSyntax *seq, IdmSyntax *item);
 bool idm_syn_prepend_word(IdmSyntax *seq, const char *word);
 void idm_syn_set_token(IdmSyntax *syn, const char *raw, bool leading_space, bool adjacent_previous);
@@ -91,6 +95,7 @@ bool idm_syn_origin_push_tree(IdmSyntax *syn, const char *origin);
 IdmSyntax *idm_syn_program_prepend_program(const IdmSyntax *program, const IdmSyntax *prelude, const char *file);
 IdmSyntax *idm_syn_clone(const IdmSyntax *syn);
 void idm_syn_free(IdmSyntax *syn);
+bool idm_syn_equal(const IdmSyntax *a, const IdmSyntax *b);
 bool idm_syn_dump(IdmBuffer *buf, const IdmSyntax *syn);
 bool idm_syn_dump_pretty(IdmBuffer *buf, const IdmSyntax *syn);
 

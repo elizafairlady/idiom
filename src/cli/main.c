@@ -133,7 +133,7 @@ static int dump_core(const char *path) {
 static bool compile_input(const char *path, IdmRuntime *rt, IdmBytecodeModule *module, uint32_t *main_fn, IdmError *err) {
     IdmCore *core = NULL;
     if (!expand_input(path, rt, &core, err)) return false;
-    bool ok = idm_core_compile_main(core, module, main_fn, err);
+    bool ok = idm_core_compile_main(rt, core, module, main_fn, err);
     idm_core_free(core);
     return ok;
 }
@@ -201,7 +201,7 @@ static int run_source(const char *file, const char *source, bool print_result) {
     IdmScheduler *sched = NULL;
     if (!idm_expand_source_string(&rt, file, source, &core, &err)) goto done;
     uint32_t main_fn = 0;
-    if (!idm_core_compile_main(core, &module, &main_fn, &err)) goto done;
+    if (!idm_core_compile_main(&rt, core, &module, &main_fn, &err)) goto done;
     if (!idm_bc_intern_literals(&rt, &module, &err)) goto done;
     sched = idm_sched_create(&rt, &module, &err);
     if (!sched) goto done;
@@ -295,11 +295,7 @@ static int collect_test_files(const char *dir_path, char ***out_files, size_t *o
         size_t len = strlen(entry->d_name);
         if (len < 4 || strcmp(entry->d_name + len - 3, ".id") != 0) continue;
         if (*out_count == *out_cap) {
-            size_t cap = *out_cap ? *out_cap * 2u : 16u;
-            char **grown = realloc(*out_files, cap * sizeof(*grown));
-            if (!grown) { closedir(dir); return -1; }
-            *out_files = grown;
-            *out_cap = cap;
+            if (!idm_grow((void **)out_files, out_cap, sizeof(**out_files), 16u, *out_count + 1u)) { closedir(dir); return -1; }
         }
         size_t full_len = strlen(dir_path) + 1u + len + 1u;
         char *full = malloc(full_len);
@@ -328,11 +324,7 @@ static int run_tests(int argc, char **argv) {
         for (int i = 0; i < argc; i++) {
             if (collect_test_files(argv[i], &files, &count, &cap) == 0) continue;
             if (count == cap) {
-                size_t next = cap ? cap * 2u : 16u;
-                char **grown = realloc(files, next * sizeof(*grown));
-                if (!grown) return 1;
-                files = grown;
-                cap = next;
+                if (!idm_grow((void **)&files, &cap, sizeof(*files), 16u, count + 1u)) return 1;
             }
             files[count] = idm_strdup(argv[i]);
             if (!files[count]) return 1;
@@ -529,7 +521,7 @@ static int build_sealed(const char *src_path, const char *out_path) {
     }
     if (!idm_expand_syntax(&rt, wrapped ? wrapped : program, &core, &err)) goto done;
     uint32_t main_fn = 0;
-    if (!idm_core_compile_main(core, &module, &main_fn, &err)) goto done;
+    if (!idm_core_compile_main(&rt, core, &module, &main_fn, &err)) goto done;
     if (!idm_ic_serialize(&module, &blob, &err)) goto done;
     if (package_entry && !idm_expand_package_artifact_serialize(&rt, src_path, &artifact_blob, &err)) goto done;
     uint32_t sealed_version = package_entry ? 2u : 1u;

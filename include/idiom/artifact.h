@@ -111,15 +111,6 @@ typedef struct {
     uint32_t flags;
 } IdmGrammarTerminal;
 
-typedef struct IdmReaderLiteral {
-    uint8_t kind;
-    char *text;
-    int64_t integer;
-    double real;
-    struct IdmReaderLiteral *items;
-    size_t count;
-} IdmReaderLiteral;
-
 typedef enum {
     IDM_READER_PATTERN_EMPTY,
     IDM_READER_PATTERN_REF,
@@ -145,21 +136,22 @@ typedef enum {
 
 typedef struct {
     uint8_t op;
-    char *name;
+    char *text;
+    int64_t integer;
     bool has_literal;
     size_t literal_index;
-    IdmReaderLiteral literal;
+    IdmSyntax *literal;
     size_t child_count;
     uint8_t target_kind;
     size_t target_index;
     size_t capture_slot;
-} IdmReaderPatternInst;
+} IdmReaderInst;
 
 typedef struct {
-    IdmReaderPatternInst *items;
+    IdmReaderInst *items;
     size_t count;
     size_t cap;
-} IdmReaderPatternProgram;
+} IdmReaderProgram;
 
 typedef enum {
     IDM_READER_CTOR_CAPTURE,
@@ -180,29 +172,17 @@ typedef enum {
     IDM_READER_CTOR_DICT
 } IdmReaderCtorOp;
 
-typedef struct {
-    uint8_t op;
-    char *text;
-    int64_t integer;
-    bool has_literal;
-    size_t literal_index;
-    IdmReaderLiteral literal;
-    size_t child_count;
-    size_t capture_slot;
-} IdmReaderCtorInst;
-
-typedef struct {
-    IdmReaderCtorInst *items;
-    size_t count;
-    size_t cap;
-} IdmReaderCtorProgram;
+typedef enum {
+    IDM_READER_PROGRAM_PATTERN,
+    IDM_READER_PROGRAM_CTOR
+} IdmReaderProgramKind;
 
 typedef struct {
     char *name;
     uint8_t kind;
     IdmGrammarTerminal terminal;
-    IdmReaderPatternProgram pattern;
-    IdmReaderCtorProgram constructor;
+    IdmReaderProgram pattern;
+    IdmReaderProgram constructor;
 } IdmGrammarRule;
 
 typedef struct IdmPkgGrammar {
@@ -219,13 +199,9 @@ typedef struct {
     uint32_t slot;
     IdmScopeSet scopes;
     IdmArity arity;
+    bool exported;
 } IdmPkgSlot;
 
-typedef struct {
-    char *name;
-    uint32_t slot;
-    IdmArity arity;
-} IdmPkgExport;
 
 typedef enum {
     IDM_DEP_PACKAGE,
@@ -285,12 +261,32 @@ typedef struct {
     IdmArtifact *art;
 } IdmPkgProtocol;
 
+typedef enum {
+    IDM_TYPED_ENTITY_PROTOCOL,
+    IDM_TYPED_ENTITY_TRAIT,
+    IDM_TYPED_ENTITY_TYPE
+} IdmTypedEntityKind;
+
+typedef struct {
+    IdmTypedEntityKind kind;
+    union {
+        IdmPkgProtocol protocol;
+        IdmPkgTrait trait;
+        IdmPkgType type;
+    } as;
+} IdmPkgTypedEntity;
+
+typedef struct {
+    IdmPkgTypedEntity *entities;
+    size_t entity_count;
+    IdmPkgMethodImpl *method_impls;
+    size_t method_impl_count;
+} IdmArtifactTypedRegistry;
+
 struct IdmArtifact {
     IdmBytecodeModule *module;
     uint32_t init_fn;
     char *name;
-    IdmPkgExport *exports;
-    size_t export_count;
     IdmPkgSlot *slots;
     size_t slot_count;
     IdmPkgMacro *macros;
@@ -302,14 +298,7 @@ struct IdmArtifact {
     IdmPkgGrammar *grammars;
     size_t grammar_count;
     char *source_reader;
-    IdmPkgType *types;
-    size_t type_count;
-    IdmPkgTrait *traits;
-    size_t trait_count;
-    IdmPkgMethodImpl *method_impls;
-    size_t method_impl_count;
-    IdmPkgProtocol *protocols;
-    size_t protocol_count;
+    IdmArtifactTypedRegistry typed;
     IdmScopeId scope_base;
     IdmScopeId scope_end;
     IdmPhaseEnv *phase_env;
@@ -336,28 +325,15 @@ void idm_pkg_macro_destroy(IdmPkgMacro *macro);
 void idm_pkg_core_syntax_destroy(IdmPkgCoreSyntax *core_syntax);
 void idm_pkg_method_impl_destroy(IdmPkgMethodImpl *impl);
 void idm_grammar_terminal_destroy(IdmGrammarTerminal *terminal);
-void idm_reader_pattern_program_destroy(IdmReaderPatternProgram *program);
-void idm_reader_ctor_program_destroy(IdmReaderCtorProgram *program);
-void idm_reader_literal_destroy(IdmReaderLiteral *literal);
-bool idm_reader_literal_copy(IdmReaderLiteral *dst, const IdmReaderLiteral *src, IdmError *err, IdmSpan span);
-bool idm_reader_literal_from_syntax(IdmReaderLiteral *dst, const IdmSyntax *src, IdmError *err);
-IdmSyntax *idm_reader_literal_to_syntax(const IdmReaderLiteral *literal, IdmSpan span, IdmError *err);
-bool idm_reader_literal_equal_syntax(const IdmReaderLiteral *literal, const IdmSyntax *syntax);
-bool idm_reader_literal_serialize(IdmBuffer *out, const IdmReaderLiteral *literal, IdmError *err);
-bool idm_reader_literal_deserialize(IdmByteReader *r, IdmReaderLiteral *literal, IdmError *err);
-bool idm_reader_pattern_program_copy(IdmReaderPatternProgram *dst, const IdmReaderPatternProgram *src, IdmError *err, IdmSpan span);
-bool idm_reader_ctor_program_copy(IdmReaderCtorProgram *dst, const IdmReaderCtorProgram *src, IdmError *err, IdmSpan span);
-void idm_reader_pattern_program_relocate(IdmReaderPatternProgram *program, IdmScopeId min_id, int64_t delta);
-void idm_reader_ctor_program_relocate(IdmReaderCtorProgram *program, IdmScopeId min_id, int64_t delta);
-bool idm_reader_pattern_program_validate(const IdmReaderPatternProgram *program, IdmError *err, IdmSpan span);
-bool idm_reader_ctor_program_validate(const IdmReaderCtorProgram *program, IdmError *err, IdmSpan span);
-bool idm_reader_pattern_program_serialize(IdmBuffer *out, const IdmReaderPatternProgram *program, IdmError *err);
-bool idm_reader_pattern_program_deserialize(IdmByteReader *r, IdmReaderPatternProgram *program, IdmError *err);
-bool idm_reader_ctor_program_serialize(IdmBuffer *out, const IdmReaderCtorProgram *program, IdmError *err);
-bool idm_reader_ctor_program_deserialize(IdmByteReader *r, IdmReaderCtorProgram *program, IdmError *err);
+void idm_reader_program_destroy(IdmReaderProgram *program);
+bool idm_reader_program_copy(IdmReaderProgram *dst, const IdmReaderProgram *src, IdmError *err, IdmSpan span);
+void idm_reader_program_relocate(IdmReaderProgram *program, IdmScopeId min_id, int64_t delta);
+bool idm_reader_program_validate(const IdmReaderProgram *program, IdmReaderProgramKind kind, IdmError *err, IdmSpan span);
+bool idm_reader_program_serialize(IdmBuffer *out, const IdmReaderProgram *program, IdmReaderProgramKind kind, IdmError *err);
+bool idm_reader_program_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmReaderProgram *program, IdmReaderProgramKind kind, IdmError *err);
 bool idm_grammar_terminal_from_ir(const IdmSyntax *pattern, IdmGrammarTerminal *out, IdmError *err);
-bool idm_reader_pattern_compile_ir(const IdmSyntax *src, IdmReaderPatternProgram *out, IdmError *err);
-bool idm_reader_ctor_compile_ir(const IdmSyntax *src, IdmReaderCtorProgram *out, IdmError *err);
+bool idm_reader_pattern_compile_ir(const IdmSyntax *src, IdmReaderProgram *out, IdmError *err);
+bool idm_reader_ctor_compile_ir(const IdmSyntax *src, IdmReaderProgram *out, IdmError *err);
 bool idm_pkg_grammar_from_ir(const IdmSyntax *form, IdmPkgGrammar *out, IdmError *err);
 bool idm_pkg_source_reader_from_ir(const IdmSyntax *form, char **out, IdmError *err);
 void idm_grammar_rule_destroy(IdmGrammarRule *rule);
@@ -367,6 +343,7 @@ bool idm_grammar_rule_validate(const IdmGrammarRule *rule, IdmError *err, IdmSpa
 void idm_pkg_trait_destroy(IdmPkgTrait *trait);
 void idm_pkg_type_destroy(IdmPkgType *type);
 void idm_pkg_protocol_destroy(IdmPkgProtocol *protocol);
+void idm_pkg_typed_entity_destroy(IdmPkgTypedEntity *entity);
 bool idm_trait_method_defs_copy(const IdmTraitMethodDef *src, size_t count, IdmTraitMethodDef **out);
 bool idm_trait_requirement_defs_copy(const IdmTraitRequirementDef *src, size_t count, IdmTraitRequirementDef **out);
 void idm_artifact_destroy(IdmArtifact *art);

@@ -10,7 +10,7 @@ bool run_phase_core(ExpandContext *ctx, IdmCore *core, IdmError *err) {
     if (!module) return idm_error_oom(err, idm_span_unknown(NULL));
     idm_bc_init(module);
     uint32_t main_fn = 0;
-    if (!idm_core_compile_main(core, module, &main_fn, err) ||
+    if (!idm_core_compile_main(ctx->rt, core, module, &main_fn, err) ||
         !idm_bc_intern_literals(ctx->rt, module, err)) {
         idm_bc_destroy(module); free(module); return false;
     }
@@ -65,11 +65,7 @@ static void core_syntax_def_clear_local(CoreSyntaxDef *def) {
 static bool core_syntax_def_append(ExpandContext *ctx, CoreSyntaxDef **items, size_t *count, size_t *cap, const char *name, const IdmScopeSet *scopes, const PhaseSyntaxFn *fn, IdmError *err) {
     (void)ctx;
     if (*count == *cap) {
-        size_t next_cap = *cap ? *cap * 2u : 4u;
-        CoreSyntaxDef *next = realloc(*items, next_cap * sizeof(*next));
-        if (!next) return idm_error_oom(err, idm_span_unknown(NULL));
-        *items = next;
-        *cap = next_cap;
+        if (!idm_grow((void **)items, cap, sizeof(**items), 4u, *count + 1u)) return idm_error_oom(err, idm_span_unknown(NULL));
     }
     CoreSyntaxDef *def = &(*items)[*count];
     memset(def, 0, sizeof(*def));
@@ -131,6 +127,10 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
     if (!idm_syn_scope_add_tree(use_copy, 0, use_scope)) {
         idm_syn_free(use_copy); return idm_error_oom(err, use_syntax->span);
     }
+    if ((!idm_syn_property_set(use_copy, "value-context", ctx->value_context ? "true" : "false") ||
+         !idm_syn_property_set(use_copy, "command-sub", ctx->command_sub_context ? "true" : "false"))) {
+        idm_syn_free(use_copy); return idm_error_oom(err, use_syntax->span);
+    }
     IdmSyntax *expanded_syntax = NULL;
     bool old_intro_active = ctx->rt->macro_intro_active;
     IdmScopeId old_intro_scope = ctx->rt->macro_intro_scope;
@@ -165,7 +165,9 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
     return true;
 }
 
-bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, (const void *)(uintptr_t)payload, "macro expansion depth exceeded while expanding", "in expansion of", invoke_macro_payload, out_syntax, err); }
+static bool invoke_macro_to_syntax_mode(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, (const void *)(uintptr_t)payload, "macro expansion depth exceeded while expanding", "in expansion of", invoke_macro_payload, out_syntax, err); }
+
+bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err) { return invoke_macro_to_syntax_mode(ctx, use_syntax, head, payload, out_syntax, err); }
 
 static bool invoke_core_syntax_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, const PhaseSyntaxFn *fn, IdmSyntax **out_syntax, IdmError *err) { return invoke_scoped_syntax_surface_to_syntax(ctx, use_syntax, head, fn, "core syntax expansion depth exceeded while expanding", "in core syntax expansion of", invoke_core_syntax_payload, out_syntax, err); }
 
@@ -178,23 +180,45 @@ IdmCore *expand_macro_use(ExpandContext *ctx, const IdmSyntax *use_syntax, const
     return expanded;
 }
 
+static bool expand_macro_form_to_syntax_mode(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax **out_syntax, IdmError *err) {
+    *out_syntax = NULL;
+    if (!syn_is_form(form, "%-expr") || form->as.seq.count < 2u || form->as.seq.items[1]->kind != IDM_SYN_WORD) return true;
+    if (surface_parts_have_operator_boundary(ctx, form->as.seq.items, 1u, form->as.seq.count, err)) return true;
+    if (err && err->present) return false;
+
+    uint32_t payload = 0;
+    const IdmSyntax *head = form->as.seq.items[1];
+    if (syn_is_word(head, "export") && form->as.seq.count >= 3u && form->as.seq.items[2]->kind == IDM_SYN_WORD) {
+        if (resolve_transformer(ctx, form->as.seq.items[2], &payload, err)) {
+            return invoke_macro_to_syntax_mode(ctx, form, form->as.seq.items[2], payload, out_syntax, err);
+        }
+        return !(err && err->present);
+    }
+    if (!resolve_transformer(ctx, head, &payload, err)) return !(err && err->present);
+    return invoke_macro_to_syntax_mode(ctx, form, head, payload, out_syntax, err);
+}
+
+bool expand_body_macro_form_to_syntax(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax **out_syntax, IdmError *err) {
+    return expand_macro_form_to_syntax_mode(ctx, form, out_syntax, err);
+}
+
+bool expand_surface_macro_form_to_syntax(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax **out_syntax, IdmError *err) {
+    return expand_macro_form_to_syntax_mode(ctx, form, out_syntax, err);
+}
+
 static bool expand_macro_syntax_only(ExpandContext *ctx, const IdmSyntax *syntax, IdmSyntax **out_syntax, IdmError *err) {
     if (syn_is_form(syntax, "%-group")) {
         if (syntax->as.seq.count != 2) return idm_error_set(err, syntax->span, "%-group expects one child");
         return expand_macro_syntax_only(ctx, syntax->as.seq.items[1], out_syntax, err);
     }
-    if (syn_is_form(syntax, "%-expr") && syntax->as.seq.count >= 2 && syntax->as.seq.items[1]->kind == IDM_SYN_WORD) {
-        uint32_t payload = 0;
-        if (resolve_transformer(ctx, syntax->as.seq.items[1], &payload, err)) {
-            IdmSyntax *expanded = NULL;
-            if (!invoke_macro_to_syntax(ctx, syntax, syntax->as.seq.items[1], payload, &expanded, err)) return false;
-            ctx->surface_depth++;
-            bool ok = expand_macro_syntax_only(ctx, expanded, out_syntax, err);
-            ctx->surface_depth--;
-            idm_syn_free(expanded);
-            return ok;
-        }
-        if (err && err->present) return false;
+    IdmSyntax *expanded = NULL;
+    if (!expand_surface_macro_form_to_syntax(ctx, syntax, &expanded, err)) return false;
+    if (expanded) {
+        ctx->surface_depth++;
+        bool ok = expand_macro_syntax_only(ctx, expanded, out_syntax, err);
+        ctx->surface_depth--;
+        idm_syn_free(expanded);
+        return ok;
     }
     *out_syntax = idm_syn_clone(syntax);
     return *out_syntax ? true : idm_error_oom(err, syntax ? syntax->span : idm_span_unknown(NULL));
@@ -320,7 +344,7 @@ static bool phase_syntax_fn_compile(ExpandContext *ctx, PhaseSyntaxFn *out, IdmC
     out->module = idm_module_ref_create(ctx->rt);
     if (!out->module) return idm_error_oom(err, span);
     (void)debug_name;
-    if (!idm_core_compile_function(fn, &out->module->module, &out->function_index, err) ||
+    if (!idm_core_compile_function(ctx->rt, fn, &out->module->module, &out->function_index, err) ||
         !idm_bc_intern_literals(ctx->rt, &out->module->module, err)) {
         phase_syntax_fn_destroy(out);
         return false;
@@ -336,11 +360,7 @@ static void phase_syntax_fn_import(ExpandContext *ctx, PhaseSyntaxFn *out, IdmMo
 
 static MacroDef *macro_slot(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err) {
     if (ctx->macro_count == ctx->macro_cap) {
-        size_t cap = ctx->macro_cap ? ctx->macro_cap * 2u : 4u;
-        MacroDef *macros = realloc(ctx->macros, cap * sizeof(*macros));
-        if (!macros) { idm_error_oom(err, span); return NULL; }
-        ctx->macros = macros;
-        ctx->macro_cap = cap;
+        if (!idm_grow((void **)&ctx->macros, &ctx->macro_cap, sizeof(*ctx->macros), 4u, ctx->macro_count + 1u)) { idm_error_oom(err, span); return NULL; }
     }
     MacroDef *macro = &ctx->macros[ctx->macro_count];
     memset(macro, 0, sizeof(*macro));
@@ -504,8 +524,8 @@ static bool grammar_rule_copy_relocated(IdmGrammarRule *dst, const IdmGrammarRul
         idm_grammar_rule_destroy(dst);
         return false;
     }
-    if (!idm_reader_pattern_program_copy(&dst->pattern, &src->pattern, err, span) ||
-        !idm_reader_ctor_program_copy(&dst->constructor, &src->constructor, err, span)) {
+    if (!idm_reader_program_copy(&dst->pattern, &src->pattern, err, span) ||
+        !idm_reader_program_copy(&dst->constructor, &src->constructor, err, span)) {
         idm_grammar_rule_destroy(dst);
         return false;
     }
@@ -513,8 +533,8 @@ static bool grammar_rule_copy_relocated(IdmGrammarRule *dst, const IdmGrammarRul
         idm_grammar_rule_destroy(dst);
         return idm_error_oom(err, span);
     }
-    idm_reader_pattern_program_relocate(&dst->pattern, min_id, delta);
-    idm_reader_ctor_program_relocate(&dst->constructor, min_id, delta);
+    idm_reader_program_relocate(&dst->pattern, min_id, delta);
+    idm_reader_program_relocate(&dst->constructor, min_id, delta);
     return true;
 }
 
@@ -560,14 +580,10 @@ static int grammar_install_check(ExpandContext *ctx, const char *name, const Idm
 
 static GrammarDef *grammar_slot(ExpandContext *ctx, IdmSpan span, IdmError *err) {
     if (ctx->grammar_count == ctx->grammar_cap) {
-        size_t cap = ctx->grammar_cap ? ctx->grammar_cap * 2u : 4u;
-        GrammarDef *grammars = realloc(ctx->grammars, cap * sizeof(*grammars));
-        if (!grammars) {
+        if (!idm_grow((void **)&ctx->grammars, &ctx->grammar_cap, sizeof(*ctx->grammars), 4u, ctx->grammar_count + 1u)) {
             idm_error_oom(err, span);
             return NULL;
         }
-        ctx->grammars = grammars;
-        ctx->grammar_cap = cap;
     }
     GrammarDef *grammar = &ctx->grammars[ctx->grammar_count];
     memset(grammar, 0, sizeof(*grammar));
@@ -637,14 +653,13 @@ bool register_grammar(ExpandContext *ctx, const IdmSyntax *name_syntax, uint8_t 
                 }
             }
         }
-        IdmGrammarRule *merged = realloc(existing->rules, (existing->rule_count + rule_count) * sizeof(*merged));
-        if (!merged) {
+        size_t rule_cap = existing->rule_count;
+        if (!idm_grow((void **)&existing->rules, &rule_cap, sizeof(*existing->rules), existing->rule_count + rule_count, existing->rule_count + rule_count)) {
             idm_scope_set_destroy(&decl_scopes);
             for (size_t k = 0; k < rule_count; k++) idm_grammar_rule_destroy(&rules[k]);
             free(rules);
             return idm_error_oom(err, name_syntax->span);
         }
-        existing->rules = merged;
         memcpy(existing->rules + existing->rule_count, rules, rule_count * sizeof(*rules));
         existing->rule_count += rule_count;
         existing->exported = existing->exported || exported;
@@ -653,16 +668,12 @@ bool register_grammar(ExpandContext *ctx, const IdmSyntax *name_syntax, uint8_t 
         return true;
     }
     if (ctx->decl_grammar_count == ctx->decl_grammar_cap) {
-        size_t cap = ctx->decl_grammar_cap ? ctx->decl_grammar_cap * 2u : 4u;
-        IdmPkgGrammar *grammars = realloc(ctx->decl_grammars, cap * sizeof(*grammars));
-        if (!grammars) {
+        if (!idm_grow((void **)&ctx->decl_grammars, &ctx->decl_grammar_cap, sizeof(*ctx->decl_grammars), 4u, ctx->decl_grammar_count + 1u)) {
             idm_scope_set_destroy(&decl_scopes);
             for (size_t i = 0; i < rule_count; i++) idm_grammar_rule_destroy(&rules[i]);
             free(rules);
             return idm_error_oom(err, name_syntax->span);
         }
-        ctx->decl_grammars = grammars;
-        ctx->decl_grammar_cap = cap;
     }
     IdmPkgGrammar *dst = &ctx->decl_grammars[ctx->decl_grammar_count];
     memset(dst, 0, sizeof(*dst));
@@ -714,23 +725,10 @@ bool install_imported_grammar(ExpandContext *ctx, const IdmPkgGrammar *grammar, 
     return true;
 }
 
-bool install_artifact_grammars(ExpandContext *ctx, const IdmPkgGrammar *grammars, size_t grammar_count, const IdmScopeSet *scopes, const char *qualifier, IdmScopeId min_id, int64_t delta, const char *provider, const char *provider_key, IdmError *err) {
+bool install_artifact_grammars(ExpandContext *ctx, const IdmPkgGrammar *grammars, size_t grammar_count, const IdmScopeSet *scopes, IdmScopeId min_id, int64_t delta, const char *provider, const char *provider_key, IdmError *err) {
     for (size_t i = 0; i < grammar_count; i++) {
         const IdmPkgGrammar *entry = &grammars[i];
-        char *qualified = NULL;
-        const char *bind_name = entry->name;
-        if (qualifier) {
-            IdmBuffer qb;
-            idm_buf_init(&qb);
-            if (!idm_buf_append(&qb, qualifier) || !idm_buf_append_char(&qb, '.') || !idm_buf_append(&qb, entry->name)) {
-                idm_buf_destroy(&qb);
-                return idm_error_oom(err, idm_span_unknown(NULL));
-            }
-            qualified = idm_buf_take(&qb);
-            bind_name = qualified;
-        }
-        bool ok = install_imported_grammar(ctx, entry, scopes, bind_name, provider, provider_key, min_id, delta, err);
-        free(qualified);
+        bool ok = install_imported_grammar(ctx, entry, scopes, entry->name, provider, provider_key, min_id, delta, err);
         if (!ok) return false;
     }
     return true;
