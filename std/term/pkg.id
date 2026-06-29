@@ -19,12 +19,7 @@ export defn plain-byte? do
   b -> cond (word-byte? b) :false :true
 end
 
-export defn space-byte? do
-  32 -> :true
-  9 -> :true
-  10 -> :true
-  _ -> :false
-end
+export defn space-byte? b -> space? &b
 
 export defn filled-byte? do
   :nil -> :false

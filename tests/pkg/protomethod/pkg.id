@@ -1,8 +1,0 @@
-package protomethod
-
-defn private-prefix x -> str "pkg:" x
-
-export trait ProtoMethod do
-  method describe x -> private-prefix x
-  method tag x
-end

@@ -1,0 +1,153 @@
+package repl
+
+import std/tea as Tea
+use std/string with [trim]
+use std/term with [tty-read-line tty-write tty?]
+
+record State do
+  field source
+  field status
+end
+
+defn initial-state -> State "" :nil
+
+defn prompt do
+  state when (eq? state.source "") -> "idiom> "
+  _state -> "...> "
+end
+
+defn append-source do
+  "" line -> line
+  source line -> "#{source}\n#{line}"
+end
+
+defn quit-line? line do
+  clean = trim line
+  or (eq? clean ":quit") (eq? clean ":q")
+end
+
+implement Tea.Model on State do
+  method init _state -> Tea.none
+  method update state msg -> match msg do
+    {:append line} -> {(State (append-source state.source line) state.status) (Tea.none)}
+    {:status status} -> {(State "" status) (Tea.none)}
+    {:quit} -> {state (Tea.quit)}
+    _ -> {state (Tea.none)}
+  end
+  method view state -> prompt state
+end
+
+defn step-state state msg -> match (Tea.step state msg) do
+  {next _cmd} -> next
+end
+
+defn read-input state do
+  if (eq? (tty?) :true) do
+    tty-write (prompt state)
+  else do
+    :ok
+  end
+  match tty-read-line do
+    :eof -> :eof
+    {:signal :interrupt} -> :interrupt
+    {:signal _} -> read-input state
+    {:line line} -> {:line line}
+  end
+end
+
+defn drain-normal pid -> receive do
+  {:exit p _reason} when (eq? p pid) -> :ok
+  after 0 -> :ok
+end
+
+defn print-value value ->
+  if (neq? value :nil) do
+    value |> inspect |> println
+  else do
+    :ok
+  end
+
+defn print-diag fallback -> match repl-diagnostic do
+  :nil -> fallback |> inspect |> eprintln
+  diag -> diag |> eprintln
+end
+
+defn eval-down reason token do
+  repl-abort token
+  match reason do
+    :interrupt -> do
+      eprintln "^C"
+      :error
+    end
+    :killed -> do
+      eprintln "^C"
+      :error
+    end
+    other -> do
+      print-diag other
+      :error
+    end
+  end
+end
+
+defn observe pid token -> receive do
+  {:repl-value p value} when (eq? p pid) -> do
+    drain-normal pid
+    print-value value
+    0
+  end
+  {:exit p reason} when (and (eq? p pid) (neq? reason :normal)) -> eval-down reason token
+end
+
+defn dispatch result -> match result do
+  {:error diag} -> do
+    eprintln diag
+    :error
+  end
+  {:ok thunk token} -> do
+    session = self
+    pid = repl-spawn (fn do
+      value = '() |> apply &thunk
+      send session {:repl-value (self) &value}
+    end)
+    link pid
+    observe pid token
+  end
+end
+
+defn eval-source source -> match (repl-compile source) do
+  :incomplete -> :incomplete
+  result -> dispatch result
+end
+
+defn loop state do
+  input = read-input state
+  match input do
+    :eof -> 0
+    :interrupt -> do
+      eprintln "^C"
+      loop (step-state state {:status :error})
+    end
+    {:line line} -> do
+      if (and (eq? state.source "") (quit-line? line)) do
+        0
+      else do
+        next = step-state state {:append line}
+        match (eval-source next.source) do
+          :incomplete -> loop next
+          status -> loop (step-state next {:status status})
+        end
+      end
+    end
+  end
+end
+
+export defn main do
+  trap-exit :true
+  if (eq? (tty?) :true) do
+    println "idiom repl"
+  else do
+    :ok
+  end
+  loop initial-state
+end

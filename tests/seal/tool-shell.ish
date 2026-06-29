@@ -1,2 +1,0 @@
-x = printf sealed-shell-ok
-println x

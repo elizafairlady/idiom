@@ -47,8 +47,8 @@ core-grammar Idiom :exclusive [
   {:token word_colon_text {:regex "(?<word_body>[A-Za-z_][A-Za-z0-9_?!/<>-]*(=\\?)?:[^ \t\r\n()\\[\\]{};\"'`,<>|=]+)"} {:emit-form "%-word" [{:capture-string word_body}]}}
   {:token keyword {:regex "(?<keyword_name>[A-Za-z_][A-Za-z0-9_?!/<>-]*(=\\?)?):"} {:capture-atom keyword_name}}
   {:token atom {:regex ":(?<atom_name>[A-Za-z_][A-Za-z0-9_?!/<>-]*(=\\?)?)"} {:capture-atom atom_name}}
-  {:token float {:regex "[+-]?[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?"} {:capture float}}
-  {:token integer {:regex "[+-]?[0-9]+([eE][+-]?[0-9]+)?"} {:capture integer}}
+  {:token float {:regex "[+-]?([0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)"} {:capture float}}
+  {:token integer {:regex "[+-]?[0-9]+"} {:capture integer}}
   {:token arrow {:literal "->"} {:emit-word "->"}}
   {:token colon {:literal ":"} {:emit-word ":"}}
   {:token op {:regex "[-><=|+*/%!&@?]+"} {:capture-word op}}

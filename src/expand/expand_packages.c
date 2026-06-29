@@ -317,6 +317,7 @@ static void expand_cache_destroy(void *p) {
     }
     free(cache->pkgs);
     idm_reader_artifact_destroy(cache->source_reader);
+    free(cache->source_reader_path);
     free(cache->kernel_path);
     free(cache->compiling);
     free(cache);
@@ -458,13 +459,22 @@ static bool source_reader_get(IdmRuntime *rt, const IdmReaderArtifact **out, Idm
     if (!cache->source_reader) {
         IdmBuffer path;
         if (!bootstrap_path(&path, err)) return false;
+        cache->source_reader_path = idm_buf_take(&path);
+        if (!cache->source_reader_path) return idm_error_oom(err, idm_span_unknown(NULL));
         IdmSyntax *terms = NULL;
-        bool read = idm_reader_read_terms_file(path.data, &terms, err);
-        idm_buf_destroy(&path);
-        if (!read) return false;
+        bool read = idm_reader_read_terms_file(cache->source_reader_path, &terms, err);
+        if (!read) {
+            free(cache->source_reader_path);
+            cache->source_reader_path = NULL;
+            return false;
+        }
         bool ok = bootstrap_source_reader_artifact(terms, &cache->source_reader, err);
         idm_syn_free(terms);
-        if (!ok) return false;
+        if (!ok) {
+            free(cache->source_reader_path);
+            cache->source_reader_path = NULL;
+            return false;
+        }
     }
     *out = cache->source_reader;
     return true;

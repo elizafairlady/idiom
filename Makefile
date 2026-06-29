@@ -1,30 +1,31 @@
-.DEFAULT_GOAL := all
+.DEFAULT_GOAL := build
 
 CC ?= cc
-PYTHON ?= python3
 VERSION := 0.47.0-dev
+BUILD := build
 
 CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -DIDM_VERSION=\"$(VERSION)\" -Iinclude
-CFLAGS ?= -std=c11 -Wall -Wextra -Werror -pedantic -g
-DEPFLAGS ?= -MMD -MP
-LDFLAGS ?= -lpthread -lm
-
-RELEASE_LTO ?= -flto=auto
-RELEASE_CFLAGS ?= -std=c11 -O2 $(RELEASE_LTO) -DNDEBUG
-SAN_FLAGS ?= -fsanitize=address,undefined -fno-omit-frame-pointer
-TSAN_FLAGS ?= -std=c11 -g -O1 -fsanitize=thread
-
-IDIOMC := build/idiomc
-ISH := build/ish
-NANI := build/nani
-UNIT_TESTS := build/unit_tests
-PTY_DRIVER := build/pty_driver
-RELEASE_IDIOMC := build/release/idiomc
-RELEASE_ISH := build/release/ish
-RELEASE_NANI := build/release/nani
+WARNINGS := -Wall -Wextra -Werror -pedantic
+BASE_CFLAGS := -std=c11 $(WARNINGS)
+DEBUG_CFLAGS := $(BASE_CFLAGS) -g
+RELEASE_CFLAGS := $(BASE_CFLAGS) -O2 -g -DNDEBUG
+ASAN_CFLAGS := $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fsanitize=address
+UBSAN_CFLAGS := $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fsanitize=undefined
+TSAN_CFLAGS := $(BASE_CFLAGS) -O1 -g -fno-omit-frame-pointer -fsanitize=thread
+DEPFLAGS := -MMD -MP
+LDLIBS := -lpthread -lm
+ASAN_LDFLAGS := -fsanitize=address
+UBSAN_LDFLAGS := -fsanitize=undefined
+TSAN_LDFLAGS := -fsanitize=thread
+ASAN_ENV := ASAN_OPTIONS=detect_leaks=0 LSAN_OPTIONS=detect_leaks=0
+VALGRIND ?= valgrind
+BENCH_COUNT ?= 1000
+PROFILE_COUNT ?= 10
+PROFILE_DIR := $(BUILD)/profile
 
 LIB_SRCS := \
 	src/common/common.c \
+	src/bignum/bignum.c \
 	src/value/value.c \
 	src/regex/regex.c \
 	src/syntax/syntax.c \
@@ -39,224 +40,208 @@ LIB_SRCS := \
 	src/ports/ports.c \
 	src/tty/tty.c \
 	src/artifact/artifact.c \
-	$(wildcard src/expand/*.c)
+	src/expand/expand.c \
+	src/expand/expand_body.c \
+	src/expand/expand_context.c \
+	src/expand/expand_declarations.c \
+	src/expand/expand_packages.c \
+	src/expand/expand_quote.c \
+	src/expand/expand_surfaces.c
 
 CLI_SRCS := src/cli/main.c
-TEST_SRCS := $(wildcard tests/unit/*.c)
 
-LIB_OBJS := $(LIB_SRCS:%.c=build/%.o)
-CLI_OBJS := $(CLI_SRCS:%.c=build/%.o)
-TEST_OBJS := $(TEST_SRCS:%.c=build/%.o)
-DEPS := $(LIB_OBJS:.o=.d) $(CLI_OBJS:.o=.d) $(TEST_OBJS:.o=.d)
+UNIT_CASE_SRCS := \
+	tests/unit/bytecode_record.c \
+	tests/unit/byteprog.c \
+	tests/unit/cli.c \
+	tests/unit/grow.c \
+	tests/unit/intern.c \
+	tests/unit/pattern_selector.c \
+	tests/unit/primitive_registry.c \
+	tests/unit/reader_escape.c \
+	tests/unit/repl.c \
+	tests/unit/regex_set.c \
+	tests/unit/syntax_equal.c \
+	tests/unit/wire_helpers.c
 
-VALGRIND ?= valgrind
-MEMCHECK_FLAGS ?= --leak-check=full --show-leak-kinds=all --error-exitcode=99
-MEMCHECK_LOGS := \
-	build/valgrind-unit-tests.log \
-	build/valgrind-startup.log \
-	build/valgrind-protocols.log \
-	build/valgrind-editor-buffer.log
+UNIT_SRCS := $(UNIT_CASE_SRCS) tests/unit/runner.c
 
-PERF_RUNS ?= 5
-PERF_WARMUPS ?= 1
-PERF_BASE_REF ?= 9dbab72
-PERF_CASES ?=
-PERF_RUNTIMES ?=
-PERF_MODES ?= source
-PERF_CACHE ?= hot
-PERF_ARGS ?=
+LANG_TESTS := tests/lang
+PKG_TESTS := tests/pkg/bytecode_shape tests/pkg/reader_constructor_artifact tests/pkg/surface_macros
+TEST_PATHS := $(LANG_TESTS) $(PKG_TESTS)
+REAL_PROG := tests/real/actor_regex_port.id
+BOOT_PKG := tests/pkg/reader_constructor_artifact
 
-RUNS ?= $(PERF_RUNS)
-WARMUPS ?= $(PERF_WARMUPS)
-BASE ?= $(PERF_BASE_REF)
-CASES ?= $(PERF_CASES)
-RUNTIMES ?= $(PERF_RUNTIMES)
-MODES ?= $(PERF_MODES)
-CACHE ?= $(PERF_CACHE)
+IDIOMC := $(BUILD)/idiomc
+RELEASE_IDIOMC := $(BUILD)/release/idiomc
+ASAN_IDIOMC := $(BUILD)/asan/idiomc
+UBSAN_IDIOMC := $(BUILD)/ubsan/idiomc
+TSAN_IDIOMC := $(BUILD)/tsan/idiomc
 
-PERF_ENV := IDIOMROOT=$(CURDIR)/std
-PERF_CASE_ARGS = $(if $(strip $(CASES)),--cases $(CASES))
-PERF_RUNTIME_ARGS = $(if $(strip $(RUNTIMES)),--runtimes $(RUNTIMES))
-PERF_COMMON_ARGS = --idiom-current ./$(RELEASE_IDIOMC) --runs $(RUNS) --warmups $(WARMUPS) --modes $(MODES) --cache $(CACHE) $(PERF_CASE_ARGS) $(PERF_RUNTIME_ARGS)
-PERF_PROFILE_CASES ?= startup,arith_idiomatic,list_sum_idiomatic,range_size,pattern_matrix,regex_scan,regex_capture,actor_spawn
-PERF_EDITOR_CASES ?= editor_keys,editor_line,editor_buffer,editor_markers,editor_syntax,editor_render
+UNIT := $(BUILD)/unit
+ASAN_UNIT := $(BUILD)/asan/unit
+UBSAN_UNIT := $(BUILD)/ubsan/unit
+TSAN_UNIT := $(BUILD)/tsan/unit
 
-.PHONY: all build help clean
-.PHONY: unit harness test check snapshots
-.PHONY: asan sanitize memcheck tsan
-.PHONY: release
-.PHONY: perf perf-quick perf-list perf-history perf-compare perf-build perf-cache perf-sealed perf-profile perf-editor
+DEBUG_LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD)/obj/debug/%.o)
+DEBUG_CLI_OBJS := $(CLI_SRCS:%.c=$(BUILD)/obj/debug/%.o)
+DEBUG_UNIT_OBJS := $(UNIT_SRCS:%.c=$(BUILD)/obj/debug/%.o)
+RELEASE_LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD)/obj/release/%.o)
+RELEASE_CLI_OBJS := $(CLI_SRCS:%.c=$(BUILD)/obj/release/%.o)
+ASAN_LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD)/obj/asan/%.o)
+ASAN_CLI_OBJS := $(CLI_SRCS:%.c=$(BUILD)/obj/asan/%.o)
+ASAN_UNIT_OBJS := $(UNIT_SRCS:%.c=$(BUILD)/obj/asan/%.o)
+UBSAN_LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD)/obj/ubsan/%.o)
+UBSAN_CLI_OBJS := $(CLI_SRCS:%.c=$(BUILD)/obj/ubsan/%.o)
+UBSAN_UNIT_OBJS := $(UNIT_SRCS:%.c=$(BUILD)/obj/ubsan/%.o)
+TSAN_LIB_OBJS := $(LIB_SRCS:%.c=$(BUILD)/obj/tsan/%.o)
+TSAN_CLI_OBJS := $(CLI_SRCS:%.c=$(BUILD)/obj/tsan/%.o)
+TSAN_UNIT_OBJS := $(UNIT_SRCS:%.c=$(BUILD)/obj/tsan/%.o)
 
-all: $(IDIOMC) $(ISH) $(NANI)
+DEPS := \
+	$(DEBUG_LIB_OBJS:.o=.d) $(DEBUG_CLI_OBJS:.o=.d) $(DEBUG_UNIT_OBJS:.o=.d) \
+	$(RELEASE_LIB_OBJS:.o=.d) $(RELEASE_CLI_OBJS:.o=.d) \
+	$(ASAN_LIB_OBJS:.o=.d) $(ASAN_CLI_OBJS:.o=.d) $(ASAN_UNIT_OBJS:.o=.d) \
+	$(UBSAN_LIB_OBJS:.o=.d) $(UBSAN_CLI_OBJS:.o=.d) $(UBSAN_UNIT_OBJS:.o=.d) \
+	$(TSAN_LIB_OBJS:.o=.d) $(TSAN_CLI_OBJS:.o=.d) $(TSAN_UNIT_OBJS:.o=.d)
 
-build: all
+.PHONY: all build release test check bench profile sanitize clean help
+.PHONY: .real .roundtrip .bootstrap .profile-memcheck .profile-callgrind .profile-helgrind .asan .ubsan .tsan .ic-clean .assert-no-ic
+.NOTPARALLEL: test check profile sanitize .profile-memcheck .profile-callgrind .profile-helgrind .asan .ubsan .tsan .roundtrip .bootstrap
+
+all: build
+
+build: $(IDIOMC)
+
+release: $(RELEASE_IDIOMC)
+
+test: $(IDIOMC) $(UNIT)
+	IDIOMC_UNDER_TEST=$(abspath $(IDIOMC)) $(UNIT)
+	$(IDIOMC) test $(TEST_PATHS)
+
+check: $(IDIOMC) $(RELEASE_IDIOMC) $(UNIT) test .real .roundtrip .bootstrap bench sanitize
+	$(MAKE) .ic-clean
+	$(RELEASE_IDIOMC) test $(TEST_PATHS)
+	$(MAKE) .ic-clean
+	$(MAKE) .assert-no-ic
+
+bench: $(RELEASE_IDIOMC)
+	$(RELEASE_IDIOMC) test -bench . -count $(BENCH_COUNT) tests/bench
+
+profile: .profile-memcheck .profile-callgrind .profile-helgrind
+
+.profile-memcheck: $(RELEASE_IDIOMC)
+	mkdir -p $(PROFILE_DIR)
+	$(VALGRIND) --error-exitcode=99 --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=definite,possible --errors-for-leak-kinds=definite,possible --log-file=$(PROFILE_DIR)/memcheck.log $(RELEASE_IDIOMC) test -bench . -count $(PROFILE_COUNT) -json tests/bench > $(PROFILE_DIR)/memcheck.json
+
+.profile-callgrind: $(RELEASE_IDIOMC)
+	mkdir -p $(PROFILE_DIR)
+	$(VALGRIND) --error-exitcode=99 --tool=callgrind --collect-jumps=yes --cache-sim=yes --callgrind-out-file=$(PROFILE_DIR)/callgrind.out --log-file=$(PROFILE_DIR)/callgrind.log $(RELEASE_IDIOMC) test -bench . -count $(PROFILE_COUNT) -json tests/bench > $(PROFILE_DIR)/callgrind.json
+
+.profile-helgrind: $(RELEASE_IDIOMC)
+	mkdir -p $(PROFILE_DIR)
+	$(VALGRIND) --error-exitcode=99 --tool=helgrind --history-level=approx --log-file=$(PROFILE_DIR)/helgrind.log $(RELEASE_IDIOMC) test -bench . -count $(PROFILE_COUNT) -json tests/bench > $(PROFILE_DIR)/helgrind.json
+
+.real: $(IDIOMC)
+	$(IDIOMC) run $(REAL_PROG)
+
+.roundtrip: $(IDIOMC)
+	$(IDIOMC) build $(REAL_PROG) -o $(BUILD)/roundtrip_actor_regex_port.ic
+	$(IDIOMC) run $(BUILD)/roundtrip_actor_regex_port.ic
+	$(IDIOMC) build $(BOOT_PKG) -o $(BUILD)/roundtrip_reader_constructor_artifact.ic
+	$(IDIOMC) run $(BUILD)/roundtrip_reader_constructor_artifact.ic
+
+.bootstrap: $(IDIOMC) $(RELEASE_IDIOMC)
+	$(IDIOMC) build $(BOOT_PKG) -o $(BUILD)/bootstrap_debug_reader_constructor_artifact.ic
+	$(RELEASE_IDIOMC) build $(BOOT_PKG) -o $(BUILD)/bootstrap_release_reader_constructor_artifact.ic
+	$(IDIOMC) run $(BUILD)/bootstrap_debug_reader_constructor_artifact.ic > $(BUILD)/bootstrap_debug.out
+	$(RELEASE_IDIOMC) run $(BUILD)/bootstrap_release_reader_constructor_artifact.ic > $(BUILD)/bootstrap_release.out
+	cmp $(BUILD)/bootstrap_debug.out $(BUILD)/bootstrap_release.out
+
+sanitize: .asan .ubsan .tsan
+
+.asan: $(ASAN_IDIOMC) $(ASAN_UNIT)
+	IDIOMC_UNDER_TEST=$(abspath $(ASAN_IDIOMC)) $(ASAN_ENV) $(ASAN_UNIT)
+	$(ASAN_ENV) $(ASAN_IDIOMC) test $(TEST_PATHS)
+
+.ubsan: $(UBSAN_IDIOMC) $(UBSAN_UNIT)
+	IDIOMC_UNDER_TEST=$(abspath $(UBSAN_IDIOMC)) $(UBSAN_UNIT)
+	$(UBSAN_IDIOMC) test $(TEST_PATHS)
+
+.tsan: $(TSAN_IDIOMC) $(TSAN_UNIT)
+	IDIOMC_UNDER_TEST=$(abspath $(TSAN_IDIOMC)) $(TSAN_UNIT)
+	$(TSAN_IDIOMC) test $(TEST_PATHS)
+
+.ic-clean:
+	find . -type f -iname '*.ic' -delete
+
+.assert-no-ic:
+	@found="$$(find . -type f -iname '*.ic' -print -quit)"; \
+	if [ -n "$$found" ]; then \
+		find . -type f -iname '*.ic' -print; \
+		exit 1; \
+	fi
 
 help:
-	@printf '%s\n' \
-		'Build:' \
-		'  make              build idiomc, ish, and nani' \
-		'  make release      build optimized binaries in build/release' \
-		'  make clean        remove build products and cached .ic files' \
-		'' \
-		'Tests:' \
-		'  make unit         run C unit tests only' \
-		'  make harness      run language, shell, golden, REPL, and dump checks' \
-		'  make test         run unit + harness' \
-		'  make snapshots    update checked-in golden output after intentional changes' \
-		'  make asan         run the address/undefined sanitizer lane' \
-		'  make tsan         run the thread sanitizer smoke lane' \
-		'  make memcheck     run selected tests under valgrind' \
-		'' \
-		'Performance:' \
-		'  make perf         sealed runtime, plus source/hot tax, vs installed runtimes' \
-		'  make perf-quick   same suite, shorter run' \
-		'  make perf-list    list benchmark cases' \
-		'  make perf-history compare current Idiom with BASE=<git-ref> using matching modes' \
-		'  make perf-build   measure idiomc build time with hot and cold caches' \
-		'  make perf-cache   compare hot, cold, and disabled source cache' \
-		'  make perf-sealed  measure sealed artifact startup/runtime only' \
-		'  make perf-profile profile source/hot current Idiom runs' \
-		'  make perf-editor  editor benchmarks against elisp' \
-		'' \
-		'Perf knobs: CASES=a,b RUNTIMES=idiom,python MODES=source,build CACHE=hot,cold,off RUNS=5 WARMUPS=1 BASE=9dbab72'
+	@printf '%s\n' 'build release test check bench profile sanitize clean'
 
-$(IDIOMC): $(LIB_OBJS) $(CLI_OBJS)
-	$(CC) -o $@ $^ $(LDFLAGS)
-
-$(ISH): $(IDIOMC) $(wildcard app/ish/*.id)
-	./$(IDIOMC) build app/ish -o $@
-
-$(NANI): $(IDIOMC) app/nani/pkg.id
-	./$(IDIOMC) build app/nani -o $@
-
-$(UNIT_TESTS): $(LIB_OBJS) $(TEST_OBJS)
-	$(CC) -o $@ $^ $(LDFLAGS)
-
-$(PTY_DRIVER): tools/pty_driver.c
+$(IDIOMC): $(DEBUG_LIB_OBJS) $(DEBUG_CLI_OBJS)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -o $@ $<
+	$(CC) -o $@ $^ $(LDLIBS)
 
-build/%.o: %.c
+$(UNIT): $(DEBUG_LIB_OBJS) $(DEBUG_UNIT_OBJS)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c -o $@ $<
+	$(CC) -o $@ $^ $(LDLIBS)
 
-unit: $(UNIT_TESTS)
-	@printf '%s\n' '== unit =='
-	./$(UNIT_TESTS)
-
-harness: $(IDIOMC) $(ISH) $(PTY_DRIVER)
-	@printf '%s\n' '== harness =='
-	sh tools/run_tests.sh ./$(IDIOMC) ./$(ISH) output
-
-test check: unit harness
-
-snapshots: $(IDIOMC) $(ISH) $(PTY_DRIVER)
-	sh tools/run_tests.sh ./$(IDIOMC) ./$(ISH) update
-
-build/san/unit_tests: $(LIB_SRCS) $(TEST_SRCS)
+$(RELEASE_IDIOMC): $(RELEASE_LIB_OBJS) $(RELEASE_CLI_OBJS)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN_FLAGS) -o $@ $(LIB_SRCS) $(TEST_SRCS) $(LDFLAGS)
+	$(CC) -o $@ $^ $(LDLIBS)
 
-build/san/idiomc: $(LIB_SRCS) $(CLI_SRCS)
+$(ASAN_IDIOMC): $(ASAN_LIB_OBJS) $(ASAN_CLI_OBJS)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(SAN_FLAGS) -o $@ $(LIB_SRCS) $(CLI_SRCS) $(LDFLAGS)
+	$(CC) $(ASAN_LDFLAGS) -o $@ $^ $(LDLIBS)
 
-build/san/ish: build/san/idiomc $(wildcard app/ish/*.id)
-	./build/san/idiomc build app/ish -o $@
-
-asan: build/san/unit_tests build/san/idiomc build/san/ish $(PTY_DRIVER)
-	@printf '%s\n' '== asan/ubsan =='
-	ASAN_OPTIONS=detect_leaks=1 ./build/san/unit_tests
-	ASAN_OPTIONS=detect_leaks=1 sh tools/run_tests.sh ./build/san/idiomc ./build/san/ish san
-
-sanitize: asan
-
-memcheck: $(UNIT_TESTS) $(IDIOMC)
-	$(VALGRIND) $(MEMCHECK_FLAGS) --log-file=build/valgrind-unit-tests.log ./$(UNIT_TESTS)
-	$(VALGRIND) $(MEMCHECK_FLAGS) --log-file=build/valgrind-startup.log ./$(IDIOMC) tests/perf/idiom/startup.id
-	$(VALGRIND) $(MEMCHECK_FLAGS) --log-file=build/valgrind-protocols.log ./$(IDIOMC) test tests/lang/provider_surface.id tests/lang/golden_package.id tests/lang/activation.id tests/lang/syntax_patterns.id
-	$(VALGRIND) $(MEMCHECK_FLAGS) --log-file=build/valgrind-editor-buffer.log ./$(IDIOMC) tests/perf/idiom/editor_buffer.id
-	@grep -E "in use at exit|ERROR SUMMARY" $(MEMCHECK_LOGS)
-
-build/tsan/idiomc: $(LIB_SRCS) $(CLI_SRCS)
+$(ASAN_UNIT): $(ASAN_LIB_OBJS) $(ASAN_UNIT_OBJS)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(TSAN_FLAGS) -o $@ $(LIB_SRCS) $(CLI_SRCS) $(LDFLAGS)
+	$(CC) $(ASAN_LDFLAGS) -o $@ $^ $(LDLIBS)
 
-tsan: build/tsan/idiomc
-	./build/tsan/idiomc test tests/lang
-	./build/tsan/idiomc test tests/app
-	./build/tsan/idiomc repl < tests/repl/session.in >/dev/null
-
-release: $(RELEASE_IDIOMC) $(RELEASE_ISH) $(RELEASE_NANI)
-
-$(RELEASE_IDIOMC): $(LIB_SRCS) $(CLI_SRCS)
+$(UBSAN_IDIOMC): $(UBSAN_LIB_OBJS) $(UBSAN_CLI_OBJS)
 	mkdir -p $(dir $@)
-	$(CC) $(CPPFLAGS) $(RELEASE_CFLAGS) -o $@ $(LIB_SRCS) $(CLI_SRCS) $(LDFLAGS)
-	strip $@
+	$(CC) $(UBSAN_LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(RELEASE_ISH): $(RELEASE_IDIOMC) $(wildcard app/ish/*.id)
-	./$(RELEASE_IDIOMC) build app/ish -o $@
+$(UBSAN_UNIT): $(UBSAN_LIB_OBJS) $(UBSAN_UNIT_OBJS)
+	mkdir -p $(dir $@)
+	$(CC) $(UBSAN_LDFLAGS) -o $@ $^ $(LDLIBS)
 
-$(RELEASE_NANI): $(RELEASE_IDIOMC) app/nani/pkg.id
-	./$(RELEASE_IDIOMC) build app/nani -o $@
+$(TSAN_IDIOMC): $(TSAN_LIB_OBJS) $(TSAN_CLI_OBJS)
+	mkdir -p $(dir $@)
+	$(CC) $(TSAN_LDFLAGS) -o $@ $^ $(LDLIBS)
 
-perf: MODES = sealed,source
-perf: CACHE = hot
-perf: release
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_COMMON_ARGS) $(PERF_ARGS)
+$(TSAN_UNIT): $(TSAN_LIB_OBJS) $(TSAN_UNIT_OBJS)
+	mkdir -p $(dir $@)
+	$(CC) $(TSAN_LDFLAGS) -o $@ $^ $(LDLIBS)
 
-perf-quick: RUNS = 3
-perf-quick: WARMUPS = 0
-perf-quick: MODES = sealed,source
-perf-quick: CACHE = hot
-perf-quick: release
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_COMMON_ARGS) $(PERF_ARGS)
+$(BUILD)/obj/debug/%.o: %.c
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(DEBUG_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-perf-list:
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_CASE_ARGS) --list $(PERF_ARGS)
+$(BUILD)/obj/release/%.o: %.c
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(RELEASE_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-perf-history: RUNTIMES = idiom,base
-perf-history: MODES = sealed,source
-perf-history: CACHE = hot
-perf-history: release
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_COMMON_ARGS) --base-ref $(BASE) $(PERF_ARGS)
+$(BUILD)/obj/asan/%.o: %.c
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(ASAN_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-perf-compare: perf-history
+$(BUILD)/obj/ubsan/%.o: %.c
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(UBSAN_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
-perf-build: MODES = build
-perf-build: CACHE = hot,cold
-perf-build: RUNTIMES = idiom
-perf-build: release
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_COMMON_ARGS) $(PERF_ARGS)
-
-perf-cache: CACHE = hot,cold,off
-perf-cache: MODES = source
-perf-cache: RUNTIMES = idiom
-perf-cache: release
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_COMMON_ARGS) $(PERF_ARGS)
-
-perf-sealed: MODES = sealed
-perf-sealed: CACHE = hot
-perf-sealed: RUNTIMES = idiom
-perf-sealed: release
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_COMMON_ARGS) $(PERF_ARGS)
-
-perf-profile: CASES = $(PERF_PROFILE_CASES)
-perf-profile: RUNTIMES = idiom
-perf-profile: MODES = source
-perf-profile: CACHE = hot
-perf-profile: release
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_COMMON_ARGS) --dump-dir build/perf-dumps --callgrind-dir build/perf-callgrind --json-out build/perf-profile.json $(PERF_ARGS)
-
-perf-editor: CASES = $(PERF_EDITOR_CASES)
-perf-editor: RUNTIMES = idiom,elisp
-perf-editor: MODES = sealed
-perf-editor: CACHE = hot
-perf-editor: release
-	$(PERF_ENV) $(PYTHON) tools/perf_suite.py $(PERF_COMMON_ARGS) $(PERF_ARGS)
+$(BUILD)/obj/tsan/%.o: %.c
+	mkdir -p $(dir $@)
+	$(CC) $(CPPFLAGS) $(TSAN_CFLAGS) $(DEPFLAGS) -c -o $@ $<
 
 clean:
-	rm -rf build
-	find . -iname "*.ic" -delete
+	rm -rf $(BUILD)
 
 -include $(DEPS)

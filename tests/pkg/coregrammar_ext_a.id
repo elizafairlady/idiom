@@ -1,8 +1,0 @@
-package coregrammar_ext_a
-
-export protocol GrammarExtA do
-  core-grammar ReaderSurface :extend [
-    {:token ident {:regex "[A-Za-z_][A-Za-z0-9_]*"} {:capture ident}}
-    {:form word {:capture ident {:ref ident}} {:emit-form "%-expr" [{:capture ident}]}}
-  ]
-end

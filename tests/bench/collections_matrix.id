@@ -1,0 +1,35 @@
+use std/enum
+use std/string
+use std/test
+import std/list as L
+import std/map as Map
+import std/range as Range
+activate Test
+
+xs = Range.exclusive 0 400 |> Range.to-list
+
+suite "collections" do
+  bench "range/reduce" expect: 19900 do
+    Range.exclusive 0 200 |> Range.reduce 0 &add
+  end
+
+  bench "list/map-filter-fold" expect: 26733 do
+    xs |> L.map (fn x -> x + 1) |> L.filter (fn x -> eq? (x %% 3) 0) |> L.foldl 0 &add
+  end
+
+  bench "vector/map-length" expect: 10 do
+    ([1 2 3 4 5 6 7 8 9 10].map (fn x -> x * 2)).length
+  end
+
+  bench "map/put-get" expect: 2 do
+    %{} |> Map.put 1 2 |> Map.get-or 1 0
+  end
+
+  bench "string/trim-split-join-reverse" expect: 44 do
+    s = " alpha,beta,gamma,delta "
+    parts = s |> trim |> split ","
+    out = parts |> join "|"
+    (len out) + (len (reverse out))
+  end
+end
+:ok

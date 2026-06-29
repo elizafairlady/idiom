@@ -1,4 +1,0 @@
-operator <+> precedence: 50 assoc: left capture: :infix -> sub
-use tests/pkg/exporter
-activate Exporter
-3 <+> 4

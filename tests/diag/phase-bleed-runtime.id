@@ -1,4 +1,0 @@
-for-syntax do
-  defn helper x -> add x 1
-end
-helper 1

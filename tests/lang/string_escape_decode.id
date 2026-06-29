@@ -1,0 +1,38 @@
+use std/test
+use std/regex
+use std/string with [byte-str]
+activate Test
+
+suite do
+  test "source string escapes decode through one helper" do
+    "a\nb" |> assert-eq "a#{byte-str 10}b"
+    "a\rb" |> assert-eq "a#{byte-str 13}b"
+    "a\tb" |> assert-eq "a#{byte-str 9}b"
+    "\\" |> assert-eq "\\"
+    "\"" |> assert-eq "\""
+  end
+
+  test "regex escape atoms share source string escapes" do
+    (compile! "a\\nb") |> scan-full "a#{byte-str 10}b" |> result? |> assert
+    (compile! "a\\rb") |> scan-full "a#{byte-str 13}b" |> result? |> assert
+    (compile! "a\\tb") |> scan-full "a#{byte-str 9}b" |> result? |> assert
+    (compile! "\\\\") |> scan-full "\\" |> result? |> assert
+    (compile! "\\\"") |> scan-full "\"" |> result? |> assert
+  end
+
+  test "regex class escapes share source string escapes" do
+    (compile! "[\\n]") |> scan-full "#{byte-str 10}" |> result? |> assert
+    (compile! "[\\r]") |> scan-full "#{byte-str 13}" |> result? |> assert
+    (compile! "[\\t]") |> scan-full "#{byte-str 9}" |> result? |> assert
+    (compile! "[\\\\]") |> scan-full "\\" |> result? |> assert
+    (compile! "[\\\"]") |> scan-full "\"" |> result? |> assert
+  end
+
+  test "artifact reader rejects unknown string escapes" do
+    assert-expand-error "bad = \"x\\q\"\n" "invalid artifact string token"
+  end
+
+  test "inspect escapes through shared surface writer" do
+    "a#{byte-str 10}#{byte-str 9}\\\"" |> assert-inspect "\"a\\n\\t\\\\\\\"\""
+  end
+end

@@ -1,0 +1,87 @@
+use std/test
+activate Test
+
+defn value-shape do
+  '(h . t) -> {:list h t}
+  [a b . rest] -> {:vector a b rest}
+  {a b . rest} -> {:tuple a b rest}
+  %{:kind :ok :value v . rest} -> {:dict v rest}
+  _ -> :miss
+end
+
+defn same-pair do
+  {x x} -> :same
+  {_ _} -> :diff
+end
+
+defn pin-pair do
+  {x ^x} -> :pin
+  {_ _} -> :miss
+end
+
+defn guard-value do
+  {a b} when (eq? a b) -> :guard
+  {a b} -> {:pair a b}
+end
+
+defn match-guard value do
+  match value do
+    {a b} when (eq? a b) -> {:direct a}
+    {a b} -> {:direct a b}
+    _ -> :miss
+  end
+end
+
+defn retry-dict-rest do
+  %{:a a . rest} when (eq? a :never) -> {:bad rest}
+  %{:a a . rest} -> {:ok a rest}
+  _ -> :miss
+end
+
+defn syntax-shape do
+  %`%{:a %,a . %,rest} -> {:syntax-dict (syntax-int-value a) (syntax-kind rest) (syntax-length rest)}
+  %`[%,head %,@tail] -> {:syntax-vector (syntax-int-value head) (inspect tail)}
+  %`(pair %,a %,b) -> {:syntax-list (syntax-int-value a) (syntax-int-value b)}
+  _ -> :miss
+end
+
+suite do
+  test "compiled selector covers value structural residuals" do
+    value-shape '(1 2 3) |> assert-eq {:list 1 '(2 3)}
+    value-shape [1 2 3 4] |> assert-eq {:vector 1 2 [3 4]}
+    value-shape {1 2 3 4} |> assert-eq {:tuple 1 2 {3 4}}
+    value-shape %{:kind :ok :value 7 :extra 9} |> assert-eq {:dict 7 %{:extra 9}}
+    value-shape :none |> assert-eq :miss
+  end
+
+  test "compiled selector covers nonlinear pin and guard actions" do
+    same-pair {4 4} |> assert-eq :same
+    same-pair {4 5} |> assert-eq :diff
+    pin-pair {9 9} |> assert-eq :pin
+    pin-pair {9 8} |> assert-eq :miss
+    guard-value {5 5} |> assert-eq :guard
+    guard-value {5 6} |> assert-eq {:pair 5 6}
+  end
+
+  test "compiled selector uses one guard path for direct match and closures" do
+    match-guard {7 7} |> assert-eq {:direct 7}
+    match-guard {7 8} |> assert-eq {:direct 7 8}
+    closure-guard = fn do
+      {a b} when (eq? a b) -> {:closure a}
+      {a b} -> {:closure a b}
+    end
+    closure-guard {9 9} |> assert-eq {:closure 9}
+    closure-guard {9 10} |> assert-eq {:closure 9 10}
+  end
+
+  test "compiled selector retries guarded dict rest through shared access" do
+    retry-dict-rest %{:a 11 :b 22} |> assert-eq {:ok 11 %{:b 22}}
+  end
+
+  test "compiled selector covers syntax structural residuals" do
+    syntax-shape %'%{:a 1 :b 2} |> assert-eq {:syntax-dict 1 :dict 2}
+    syntax-shape %'[1 2 3] |> assert-eq {:syntax-vector 1 "(#<syntax> #<syntax>)"}
+    syntax-shape %'(pair 20 22) |> assert-eq {:syntax-list 20 22}
+    syntax-shape %'other |> assert-eq :miss
+  end
+end

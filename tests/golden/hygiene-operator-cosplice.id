@@ -1,7 +1,0 @@
-defmacro defop %`(defop %,name) -> %`(do
-  operator %,name precedence: 50 assoc: left capture: :infix do
-    a b -> mul a b
-  end
-end)
-defop <*+>
-println (inspect (6 <*+> 7))

@@ -1,8 +1,0 @@
-package exporter2
-
-export protocol Exporter2 do
-  operator <+> precedence: 6 assoc: left capture: :infix -> sub
-  export defmacro answer %`(answer %,where) -> (make-syntax-int where 7)
-end
-
-export defn who x -> :second

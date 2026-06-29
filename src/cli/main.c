@@ -7,6 +7,7 @@
 #include "idiom/vm.h"
 
 #include <dirent.h>
+#include <inttypes.h>
 #include <sys/stat.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,9 +17,9 @@ static void usage(FILE *out) {
     fputs("usage:\n", out);
     fputs("  idiomc run <file|package|-> [--] [args...]\n", out);
     fputs("  idiomc <file|package|-> [args...]          run shorthand\n", out);
-    fputs("  idiomc eval <source> [--] [args...]        evaluate source and print its value\n", out);
+    fputs("  idiomc eval <source|-> [--] [args...]      evaluate source and print its value\n", out);
     fputs("  idiomc build <file|package|-> [-o OUT]\n", out);
-    fputs("  idiomc test [path...]\n", out);
+    fputs("  idiomc test [-run PATTERN] [-bench PATTERN] [-count N] [-json] [path...]\n", out);
     fputs("  idiomc repl\n", out);
     fputs("  idiomc dump reader|core|bytecode <file|package|->\n", out);
     fputs("  idiomc dump surface [prelude]\n", out);
@@ -176,6 +177,22 @@ static size_t g_cli_arg_count = 0;
 
 static int run_sealed(const char *file, const unsigned char *data, size_t len);
 
+typedef struct {
+    uint64_t expand_ns;
+    uint64_t compile_ns;
+    uint64_t intern_ns;
+    uint64_t run_ns;
+} RunTimings;
+
+static uint64_t run_timing_total(const RunTimings *timing) {
+    return timing->expand_ns + timing->compile_ns + timing->intern_ns + timing->run_ns;
+}
+
+static uint64_t ns_since(uint64_t start) {
+    uint64_t end = idm_profile_now_ns();
+    return end >= start ? end - start : 0u;
+}
+
 static void set_cli_args(int argc, char **argv, int first) {
     if (first < argc && strcmp(argv[first], "--") == 0) first++;
     if (first < argc) {
@@ -187,7 +204,8 @@ static void set_cli_args(int argc, char **argv, int first) {
     }
 }
 
-static int run_source(const char *file, const char *source, bool print_result) {
+static int run_source_timed(const char *file, const char *source, bool print_result, RunTimings *timing) {
+    if (timing) memset(timing, 0, sizeof(*timing));
     IdmRuntime rt;
     idm_runtime_init(&rt);
     rt.cli_args = g_cli_args;
@@ -199,25 +217,49 @@ static int run_source(const char *file, const char *source, bool print_result) {
     IdmBytecodeModule module;
     idm_bc_init(&module);
     IdmScheduler *sched = NULL;
-    if (!idm_expand_source_string(&rt, file, source, &core, &err)) goto done;
+    uint64_t start = idm_profile_now_ns();
+    if (!idm_expand_source_string(&rt, file, source, &core, &err)) {
+        if (timing) timing->expand_ns = ns_since(start);
+        goto done;
+    }
+    if (timing) timing->expand_ns = ns_since(start);
     uint32_t main_fn = 0;
-    if (!idm_core_compile_main(&rt, core, &module, &main_fn, &err)) goto done;
-    if (!idm_bc_intern_literals(&rt, &module, &err)) goto done;
+    start = idm_profile_now_ns();
+    if (!idm_core_compile_main(&rt, core, &module, &main_fn, &err)) {
+        if (timing) timing->compile_ns = ns_since(start);
+        goto done;
+    }
+    if (timing) timing->compile_ns = ns_since(start);
+    start = idm_profile_now_ns();
+    if (!idm_bc_intern_literals(&rt, &module, &err)) {
+        if (timing) timing->intern_ns = ns_since(start);
+        goto done;
+    }
+    if (timing) timing->intern_ns = ns_since(start);
+    start = idm_profile_now_ns();
     sched = idm_sched_create(&rt, &module, &err);
-    if (!sched) goto done;
+    if (!sched) {
+        if (timing) timing->run_ns = ns_since(start);
+        goto done;
+    }
     IdmValue out = idm_nil();
-    if (!idm_sched_run_main(sched, main_fn, &out, &err)) goto done;
+    if (!idm_sched_run_main(sched, main_fn, &out, &err)) {
+        if (timing) timing->run_ns = ns_since(start);
+        goto done;
+    }
     if (print_result) {
         IdmBuffer buf;
         idm_buf_init(&buf);
         if (!idm_value_write(&buf, out) || !idm_buf_append_char(&buf, '\n')) {
             idm_buf_destroy(&buf);
             idm_error_set(&err, idm_span_unknown(NULL), "out of memory while printing result");
+            if (timing) timing->run_ns = ns_since(start);
             goto done;
         }
         fputs(buf.data, stdout);
         idm_buf_destroy(&buf);
     }
+    if (timing) timing->run_ns = ns_since(start);
     status = 0;
 done:
     if (err.present) idm_error_fprint(stderr, &err);
@@ -227,6 +269,10 @@ done:
     idm_bc_destroy(&module);
     idm_runtime_destroy(&rt);
     return status;
+}
+
+static int run_source(const char *file, const char *source, bool print_result) {
+    return run_source_timed(file, source, print_result, NULL);
 }
 
 static int run_source_arg(const char *path) {
@@ -287,6 +333,207 @@ static int run_file(const char *path) {
     return status;
 }
 
+typedef struct {
+    const char *run;
+    const char *bench;
+    const char *count;
+    bool json;
+} TestOptions;
+
+static bool test_filter_match(const char *text, const char *pattern) {
+    if (!pattern || pattern[0] == '\0' || strcmp(pattern, ".") == 0) return true;
+    return strstr(text, pattern) != NULL;
+}
+
+static bool positive_decimal(const char *s) {
+    if (!s || s[0] == '\0') return false;
+    bool nonzero = false;
+    for (const char *p = s; *p; p++) {
+        if (*p < '0' || *p > '9') return false;
+        if (*p != '0') nonzero = true;
+    }
+    return nonzero;
+}
+
+static int run_source_capture(const char *file, const char *source, bool print_result, char **out, size_t *out_len, RunTimings *timing) {
+    *out = NULL;
+    *out_len = 0;
+    FILE *tmp = tmpfile();
+    if (!tmp) {
+        fprintf(stderr, "idiomc test: cannot create stdout capture\n");
+        return 1;
+    }
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    if (saved < 0) {
+        fclose(tmp);
+        fprintf(stderr, "idiomc test: cannot capture stdout\n");
+        return 1;
+    }
+    if (dup2(fileno(tmp), STDOUT_FILENO) < 0) {
+        close(saved);
+        fclose(tmp);
+        fprintf(stderr, "idiomc test: cannot redirect stdout\n");
+        return 1;
+    }
+    int status = run_source_timed(file, source, print_result, timing);
+    fflush(stdout);
+    if (dup2(saved, STDOUT_FILENO) < 0) {
+        close(saved);
+        fclose(tmp);
+        fprintf(stderr, "idiomc test: cannot restore stdout\n");
+        return 1;
+    }
+    close(saved);
+    rewind(tmp);
+    IdmError err;
+    idm_error_init(&err);
+    if (!idm_read_stream(tmp, file, out, out_len, &err)) {
+        idm_error_fprint(stderr, &err);
+        idm_error_clear(&err);
+        fclose(tmp);
+        return 1;
+    }
+    idm_error_clear(&err);
+    fclose(tmp);
+    return status;
+}
+
+static void json_string(FILE *out, const char *s) {
+    fputc('"', out);
+    if (s) {
+        for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+            switch (*p) {
+                case '"': fputs("\\\"", out); break;
+                case '\\': fputs("\\\\", out); break;
+                case '\n': fputs("\\n", out); break;
+                case '\r': fputs("\\r", out); break;
+                case '\t': fputs("\\t", out); break;
+                default:
+                    if (*p < 32u) fprintf(out, "\\u%04x", *p);
+                    else fputc((int)*p, out);
+                    break;
+            }
+        }
+    }
+    fputc('"', out);
+}
+
+static void json_file_event(const char *action, const char *file) {
+    fputs("{\"action\":", stdout);
+    json_string(stdout, action);
+    fputs(",\"file\":", stdout);
+    json_string(stdout, file);
+    fputs("}\n", stdout);
+}
+
+static void json_output_event(const char *file, const char *output) {
+    if (!output || output[0] == '\0') return;
+    fputs("{\"action\":\"output\",\"file\":", stdout);
+    json_string(stdout, file);
+    fputs(",\"output\":", stdout);
+    json_string(stdout, output);
+    fputs("}\n", stdout);
+}
+
+static void json_bench_file_event(const char *file, const RunTimings *timing) {
+    fprintf(stdout,
+            "{\"action\":\"benchfile\",\"file\":");
+    json_string(stdout, file);
+    fprintf(stdout,
+            ",\"expand_ns\":%" PRIu64 ",\"compile_ns\":%" PRIu64 ",\"intern_ns\":%" PRIu64 ",\"run_ns\":%" PRIu64 ",\"total_ns\":%" PRIu64 "}\n",
+            timing->expand_ns,
+            timing->compile_ns,
+            timing->intern_ns,
+            timing->run_ns,
+            run_timing_total(timing));
+}
+
+static void plain_bench_file_event(const char *file, const RunTimings *timing) {
+    printf("benchfile file=%s expand_ns=%" PRIu64 " compile_ns=%" PRIu64 " intern_ns=%" PRIu64 " run_ns=%" PRIu64 " total_ns=%" PRIu64 "\n",
+           file,
+           timing->expand_ns,
+           timing->compile_ns,
+           timing->intern_ns,
+           timing->run_ns,
+           run_timing_total(timing));
+}
+
+static void bench_field_copy(const char *line, const char *key, char *out, size_t out_cap) {
+    if (out_cap == 0) return;
+    out[0] = '\0';
+    size_t key_len = strlen(key);
+    const char *p = line;
+    while (*p) {
+        while (*p == ' ') p++;
+        const char *tok = p;
+        while (*p && *p != ' ') p++;
+        if (strncmp(tok, key, key_len) == 0 && tok[key_len] == '=') {
+            const char *value = tok + key_len + 1u;
+            size_t len = (size_t)(p - value);
+            if (len >= out_cap) len = out_cap - 1u;
+            memcpy(out, value, len);
+            out[len] = '\0';
+            return;
+        }
+    }
+}
+
+static bool json_bench_event(const char *file, char *line) {
+    if (strncmp(line, "bench ", 6u) != 0) return false;
+    const char *fields = line + 6u;
+    char name[256], suite[128], n[32], ms[32], result[128], expect[128];
+    bench_field_copy(fields, "name", name, sizeof(name));
+    bench_field_copy(fields, "suite", suite, sizeof(suite));
+    bench_field_copy(fields, "n", n, sizeof(n));
+    bench_field_copy(fields, "ms", ms, sizeof(ms));
+    bench_field_copy(fields, "result", result, sizeof(result));
+    bench_field_copy(fields, "expect", expect, sizeof(expect));
+    fputs("{\"action\":\"bench\",\"file\":", stdout);
+    json_string(stdout, file);
+    fputs(",\"name\":", stdout);
+    json_string(stdout, name);
+    fputs(",\"suite\":", stdout);
+    json_string(stdout, suite);
+    fprintf(stdout, ",\"n\":%s,\"ms\":%s,\"result\":", n[0] ? n : "0", ms[0] ? ms : "0");
+    json_string(stdout, result);
+    fputs(",\"expect\":", stdout);
+    json_string(stdout, expect);
+    fputs("}\n", stdout);
+    return true;
+}
+
+static size_t emit_bench_output(const char *file, char *output, bool json) {
+    size_t count = 0;
+    char *cursor = output;
+    while (cursor && *cursor) {
+        char *line = cursor;
+        char *nl = strchr(cursor, '\n');
+        if (nl) {
+            *nl = '\0';
+            cursor = nl + 1;
+        } else {
+            cursor = NULL;
+        }
+        if (strncmp(line, "bench ", 6u) == 0) {
+            count++;
+            if (json) {
+                json_bench_event(file, line);
+            } else {
+                fputs(line, stdout);
+                fputc('\n', stdout);
+            }
+        } else if (line[0] != '\0') {
+            if (json) json_output_event(file, line);
+            else {
+                fputs(line, stdout);
+                fputc('\n', stdout);
+            }
+        }
+    }
+    return count;
+}
+
 static int collect_test_files(const char *dir_path, char ***out_files, size_t *out_count, size_t *out_cap) {
     DIR *dir = opendir(dir_path);
     if (!dir) return -1;
@@ -311,56 +558,172 @@ static int name_cmp(const void *a, const void *b) {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+static bool test_add_path(char ***paths, size_t *count, size_t *cap, char *path) {
+    if (*count == *cap && !idm_grow((void **)paths, cap, sizeof(**paths), 8u, *count + 1u)) return false;
+    (*paths)[(*count)++] = path;
+    return true;
+}
+
+static int test_collect_path(const char *path, char ***files, size_t *count, size_t *cap, const char *file_filter) {
+    size_t before = *count;
+    if (collect_test_files(path, files, count, cap) == 0) {
+        size_t write = before;
+        for (size_t i = before; i < *count; i++) {
+            if (test_filter_match((*files)[i], file_filter)) {
+                (*files)[write++] = (*files)[i];
+            } else {
+                free((*files)[i]);
+            }
+        }
+        *count = write;
+        return 0;
+    }
+    if (!test_filter_match(path, file_filter)) return 0;
+    char *copy = idm_strdup(path);
+    if (!copy) return -1;
+    if (!test_add_path(files, count, cap, copy)) {
+        free(copy);
+        return -1;
+    }
+    return 0;
+}
+
 static int run_tests(int argc, char **argv) {
+    TestOptions opt = {0};
+    char **paths = NULL;
+    size_t path_count = 0;
+    size_t path_cap = 0;
+    bool parse_options = true;
+    for (int i = 0; i < argc; i++) {
+        if (parse_options && strcmp(argv[i], "--") == 0) {
+            parse_options = false;
+            continue;
+        }
+        if (parse_options && strcmp(argv[i], "-run") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "usage: idiomc test [-run PATTERN] [-bench PATTERN] [-count N] [-json] [path...]\n");
+                free(paths);
+                return 64;
+            }
+            opt.run = argv[++i];
+            continue;
+        }
+        if (parse_options && strcmp(argv[i], "-bench") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "usage: idiomc test [-run PATTERN] [-bench PATTERN] [-count N] [-json] [path...]\n");
+                free(paths);
+                return 64;
+            }
+            opt.bench = argv[++i];
+            continue;
+        }
+        if (parse_options && strcmp(argv[i], "-count") == 0) {
+            if (i + 1 >= argc || !positive_decimal(argv[i + 1])) {
+                fprintf(stderr, "usage: idiomc test [-run PATTERN] [-bench PATTERN] [-count N] [-json] [path...]\n");
+                free(paths);
+                return 64;
+            }
+            opt.count = argv[++i];
+            continue;
+        }
+        if (parse_options && strcmp(argv[i], "-json") == 0) {
+            opt.json = true;
+            continue;
+        }
+        if (parse_options && argv[i][0] == '-') {
+            fprintf(stderr, "idiomc test: unknown option '%s'\n", argv[i]);
+            free(paths);
+            return 64;
+        }
+        if (!test_add_path(&paths, &path_count, &path_cap, argv[i])) {
+            free(paths);
+            return 1;
+        }
+    }
     char **files = NULL;
     size_t count = 0;
     size_t cap = 0;
-    if (argc == 0) {
-        if (collect_test_files("tests/lang", &files, &count, &cap) != 0) {
-            fprintf(stderr, "idiomc test: cannot read tests/lang\n");
+    const char *default_path = opt.bench ? "tests/bench" : "tests/lang";
+    if (path_count == 0) {
+        if (test_collect_path(default_path, &files, &count, &cap, NULL) != 0) {
+            fprintf(stderr, "idiomc test: cannot read %s\n", default_path);
+            free(paths);
             return 1;
         }
     } else {
-        for (int i = 0; i < argc; i++) {
-            if (collect_test_files(argv[i], &files, &count, &cap) == 0) continue;
-            if (count == cap) {
-                if (!idm_grow((void **)&files, &cap, sizeof(*files), 16u, count + 1u)) return 1;
+        for (size_t i = 0; i < path_count; i++) {
+            if (test_collect_path(paths[i], &files, &count, &cap, NULL) != 0) {
+                fprintf(stderr, "idiomc test: cannot read %s\n", paths[i]);
+                for (size_t j = 0; j < count; j++) free(files[j]);
+                free(files);
+                free(paths);
+                return 1;
             }
-            files[count] = idm_strdup(argv[i]);
-            if (!files[count]) return 1;
-            count++;
         }
     }
+    free(paths);
     if (count == 0) {
         fprintf(stderr, "idiomc test: no test files found\n");
+        free(files);
         return 1;
     }
     qsort(files, count, sizeof(*files), name_cmp);
+
+    const char *mode_value = opt.bench ? "bench" : "test";
+    const char *run_value = opt.run ? opt.run : "";
+    const char *bench_value = opt.bench ? opt.bench : "";
+    const char *count_value = opt.count ? opt.count : (opt.bench ? "1000" : "1");
+    (void)setenv("IDIOM_TEST_MODE", mode_value, 1);
+    (void)setenv("IDIOM_TEST_RUN", run_value, 1);
+    (void)setenv("IDIOM_TEST_BENCH", bench_value, 1);
+    (void)setenv("IDIOM_TEST_COUNT", count_value, 1);
+
     size_t failed = 0;
+    size_t benches = 0;
     for (size_t i = 0; i < count; i++) {
         IdmError err;
         idm_error_init(&err);
         char *source = NULL;
+        char *output = NULL;
         size_t len = 0;
+        size_t output_len = 0;
+        RunTimings timing = {0};
         int status = 1;
         if (idm_read_file(files[i], &source, &len, &err)) {
-            status = run_source(files[i], source, false);
-            free(source);
+            status = run_source_capture(files[i], source, false, &output, &output_len, &timing);
         } else {
             idm_error_fprint(stderr, &err);
         }
-        idm_error_clear(&err);
-        if (status != 0) {
-            fprintf(stderr, "FAIL %s\n", files[i]);
-            failed++;
-        } else {
-            printf("pass %s\n", files[i]);
+        if (opt.bench) {
+            benches += emit_bench_output(files[i], output ? output : "", opt.json);
+            if (opt.json) json_bench_file_event(files[i], &timing);
+            else plain_bench_file_event(files[i], &timing);
+        } else if (opt.json) {
+            json_output_event(files[i], output ? output : "");
+        } else if (output && output_len != 0) {
+            fputs(output, stdout);
         }
+        if (status != 0) {
+            if (opt.json) json_file_event("fail", files[i]);
+            else fprintf(stderr, "FAIL %s\n", files[i]);
+            failed++;
+        } else if (!opt.bench) {
+            if (opt.json) json_file_event("pass", files[i]);
+            else printf("pass %s\n", files[i]);
+        }
+        free(output);
+        free(source);
+        idm_error_clear(&err);
     }
-    if (failed == 0) {
-        printf("idiomc test: %zu file%s passed\n", count, count == 1 ? "" : "s");
-    } else {
-        printf("idiomc test: %zu of %zu file%s FAILED\n", failed, count, count == 1 ? "" : "s");
+
+    if (!opt.json) {
+        if (failed == 0 && opt.bench) {
+            printf("idiomc test: %zu benchmark%s passed in %zu file%s\n", benches, benches == 1 ? "" : "s", count, count == 1 ? "" : "s");
+        } else if (failed == 0) {
+            printf("idiomc test: %zu file%s passed\n", count, count == 1 ? "" : "s");
+        } else {
+            printf("idiomc test: %zu of %zu file%s FAILED\n", failed, count, count == 1 ? "" : "s");
+        }
     }
     for (size_t i = 0; i < count; i++) free(files[i]);
     free(files);
@@ -495,8 +858,6 @@ static int build_sealed(const char *src_path, const char *out_path) {
     int status = 1;
     IdmCore *core = NULL;
     IdmSyntax *program = NULL;
-    IdmSyntax *prelude = NULL;
-    IdmSyntax *wrapped = NULL;
     IdmRuntime rt;
     idm_runtime_init(&rt);
     IdmBytecodeModule module;
@@ -513,13 +874,7 @@ static int build_sealed(const char *src_path, const char *out_path) {
         if (!build_package_entry_source(src_path, &source, &err)) goto done;
     } else if (!read_source_arg(src_path, &rt, &source, &file, &err)) goto done;
     if (!idm_expand_read_source_string(&rt, file, source, &program, &err)) goto done;
-    size_t src_len = strlen(src_path);
-    if (src_len >= 4 && strcmp(src_path + src_len - 4, ".ish") == 0) {
-        if (!idm_expand_read_source_string(&rt, "<ish-prelude>", "use app/ish\nactivate Shell\n", &prelude, &err)) goto done;
-        wrapped = idm_syn_program_prepend_program(program, prelude, file);
-        if (!wrapped) { idm_error_oom(&err, idm_span_unknown(file)); goto done; }
-    }
-    if (!idm_expand_syntax(&rt, wrapped ? wrapped : program, &core, &err)) goto done;
+    if (!idm_expand_syntax(&rt, program, &core, &err)) goto done;
     uint32_t main_fn = 0;
     if (!idm_core_compile_main(&rt, core, &module, &main_fn, &err)) goto done;
     if (!idm_ic_serialize(&module, &blob, &err)) goto done;
@@ -567,8 +922,6 @@ done:
     idm_buf_destroy(&blob);
     idm_bc_destroy(&module);
     idm_core_free(core);
-    idm_syn_free(wrapped);
-    idm_syn_free(prelude);
     idm_syn_free(program);
     free(source);
     idm_runtime_destroy(&rt);
@@ -607,16 +960,17 @@ static int run_repl(void) {
     idm_error_init(&err);
     int status = 1;
     IdmRepl *repl = idm_repl_create(&rt, &err);
+    if (!repl) goto done;
     IdmValue thunk = idm_nil();
-    if (repl && idm_repl_loop_thunk(repl, "use app/ish\nmain :plain", &thunk, &err)) {
-        if (rt.interactive) printf("idiom %s — :quit or ^D to exit\n", IDM_VERSION);
+    if (idm_repl_loop_thunk(repl, "use std/repl\nmain\n", &thunk, &err)) {
         IdmValue value = idm_nil();
         IdmValue reason = idm_nil();
         IdmScheduler *sched = idm_repl_scheduler(repl);
-        if (idm_sched_run_session(sched, thunk, false, &value, &reason, &err)) {
+        if (idm_sched_run_session(sched, thunk, rt.interactive, &value, &reason, &err)) {
             status = idm_sched_session_status(sched, value, reason);
         }
     }
+done:
     if (err.present) idm_error_fprint(stderr, &err);
     idm_error_clear(&err);
     idm_repl_destroy(repl);
@@ -639,10 +993,25 @@ static int command_eval(int argc, char **argv) {
     int source_index = 0;
     if (argc > 0 && strcmp(argv[0], "--") == 0) source_index = 1;
     if (source_index >= argc) {
-        fprintf(stderr, "usage: idiomc eval <source> [--] [args...]\n");
+        fprintf(stderr, "usage: idiomc eval <source|-> [--] [args...]\n");
         return 64;
     }
     set_cli_args(argc, argv, source_index + 1);
+    if (strcmp(argv[source_index], "-") == 0) {
+        IdmError err;
+        idm_error_init(&err);
+        char *source = NULL;
+        size_t len = 0;
+        if (!idm_read_stream(stdin, "<stdin>", &source, &len, &err)) {
+            idm_error_fprint(stderr, &err);
+            idm_error_clear(&err);
+            return 1;
+        }
+        int status = run_source("<stdin>", source, true);
+        free(source);
+        idm_error_clear(&err);
+        return status;
+    }
     return run_source("<eval>", argv[source_index], true);
 }
 

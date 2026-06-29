@@ -1,0 +1,54 @@
+use std/test
+activate Test
+
+core-operator $> 10 "left" "infix" add
+
+protocol LocalPrimarySurface do
+  core-operator <++> 10 "left" "infix" add
+end
+
+protocol LocalRuntimeSurface do
+  export defn local-protocol-value -> 42
+  export defmacro local-runtime-macro %`(local-runtime-macro) -> %`(local-protocol-value)
+end
+
+suite do
+  test "body-primary-pipes-after-match" do
+    match 1 do
+      1 -> 41
+      _ -> 0
+    end |> assert-eq 41
+  end
+
+  test "body-primary-keeps-condition-operators-inside-if" do
+    if 2 > 1 do
+      :ok
+    else do
+      :bad
+    end |> assert-eq :ok
+  end
+
+  test "expression-call-primary-pipes-as-one-left-operand" do
+    not? :false |> assert-eq :true
+  end
+
+  test "escaped-word-operator-token-resolves" do
+    19 $> 23 |> assert-eq 42
+  end
+
+  test "local protocol activation owns operator surface" do
+    got = do
+      activate LocalPrimarySurface
+      20 <++> 22
+    end
+    got |> assert-eq 42
+  end
+
+  test "local protocol activation owns runtime surface" do
+    got = do
+      activate LocalRuntimeSurface
+      local-runtime-macro
+    end
+    got |> assert-eq 42
+  end
+end

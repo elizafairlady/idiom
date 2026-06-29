@@ -1,9 +1,0 @@
-use std/system with [env-set]
-use app/ish
-activate Shell
-env-set "SG" "mid"
-r = echo pre$SG.post --flag=$SG $SG/leaf
-println r
-x = echo "lit*"$SG
-println x
-println :done

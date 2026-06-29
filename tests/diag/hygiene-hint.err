@@ -1,2 +1,0 @@
-tests/diag/hygiene-hint.id:5:1: error: unbound identifier 'hidden-fn'
-  1 binding named 'hidden-fn' exists but is not visible here (hygiene scopes differ)

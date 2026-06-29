@@ -1,3 +1,0 @@
-defn helper x -> add x 1
-defmacro m stx -> helper stx
-m 5

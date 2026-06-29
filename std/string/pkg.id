@@ -1,6 +1,7 @@
 package string
 
 use std/enum
+import std/list as List
 
 export defn length s -> s |> len
 
@@ -21,7 +22,7 @@ export defn ends-with? s suffix -> do
   and (n |> lte? len) (s |> slice (len - n) len |> eq? suffix)
 end
 
-defn space? do
+export defn space? do
   32 -> :true
   9 -> :true
   10 -> :true
@@ -62,54 +63,32 @@ defn split-from do
   end
 end
 
-defn rev do
-  '() acc -> acc
-  '(h . t) acc -> rev t (cons h acc)
-end
-
-defn take-runes do
-  _ n when (lte? n 0) -> '()
-  '() _ -> '()
-  '(h . t) n -> cons h (take-runes t (sub n 1))
-end
-
-defn drop-runes do
-  xs n when (lte? n 0) -> xs
-  '() _ -> '()
-  '(_ . t) n -> drop-runes t (sub n 1)
-end
-
-defn last-rune-from do
-  x '() -> x
-  _ '(h . t) -> last-rune-from h t
-end
-
 export defn split do
   s sep when (sep |> len |> eq? 0) -> error {:split :empty-separator}
-  s sep -> s |> split-from sep 0 '() |> rev '()
+  s sep -> List.reverse (split-from s sep 0 '())
 end
 
 export defn split-lines s -> s |> split "\n"
 export defn lines s -> s |> split-lines
 
-export defn join xs sep -> xs.to-list |> join-list sep
-
-defn join-list do
-  '() _sep -> ""
-  '(h . t) sep -> join-from t sep h
+defn str-parts do
+  '() -> ""
+  parts -> apply parts &str
 end
 
-defn join-from do
-  '() _sep acc -> acc
-  '(h . t) sep acc -> join-from t sep "${acc}${sep}${h}"
-end
+export defn join xs sep -> str-parts (List.intersperse (xs.to-list) sep)
 
 export defn replace s old new ->
   s |> split old |> join new
 
+defn repeat-parts do
+  _s n acc when (lte? n 0) -> acc
+  s n acc -> repeat-parts s (sub n 1) (cons s acc)
+end
+
 export defn repeat do
   _s n when (lte? n 0) -> ""
-  s n -> "${s}#{repeat s (sub n 1)}"
+  s n -> repeat-parts s n '() |> str-parts
 end
 
 defn pad do
@@ -127,16 +106,16 @@ end
 export defn pad-left s n ch -> s |> pad n ch :true
 export defn pad-right s n ch -> s |> pad n ch :false
 
-defn map-bytes do
-  s i n f acc when (eq? i n) -> acc
-  s i n f acc -> map-bytes s (i + 1) n f "${acc}#{byte-str (f (s |> byte i))}"
+defn map-byte-parts do
+  s i n f acc when (eq? i n) -> str-parts (List.reverse acc)
+  s i n f acc -> map-byte-parts s (i + 1) n f (cons (byte-str (f (s |> byte i))) acc)
 end
 
 defn upbyte b -> cond (and (gte? b 97) (lte? b 122)) (sub b 32) b
 defn downbyte b -> cond (and (gte? b 65) (lte? b 90)) (add b 32) b
 
-export defn upcase s -> s |> map-bytes 0 (s |> len) &upbyte ""
-export defn downcase s -> s |> map-bytes 0 (s |> len) &downbyte ""
+export defn upcase s -> s |> map-byte-parts 0 (s |> len) &upbyte '()
+export defn downcase s -> s |> map-byte-parts 0 (s |> len) &downbyte '()
 
 export defn capitalize do
   "" -> ""
@@ -149,7 +128,7 @@ end
 export defn chars s -> s |> str-to-list
 export defn runes s -> s |> str-to-list
 
-export defn reverse s -> s |> str-to-list |> rev '() |> from-runes
+export defn reverse s -> from-runes (List.reverse (str-to-list s))
 
 export defn first do
   "" -> :nil
@@ -163,22 +142,17 @@ end
 
 export defn last do
   "" -> :nil
-  s -> match (s |> str-to-list) do
-    '() -> :nil
-    '(h . t) -> last-rune-from h t
-  end
+  s -> List.last (str-to-list s)
 end
 
 export defn last! do
   "" -> error {:empty-string}
-  s -> match (s |> str-to-list) do
-    '(h . t) -> last-rune-from h t
-  end
+  s -> List.last! (str-to-list s)
 end
 
-export defn take s n -> s |> str-to-list |> take-runes n |> from-runes
+export defn take s n -> from-runes (List.take (str-to-list s) n)
 
-export defn drop s n -> s |> str-to-list |> drop-runes n |> from-runes
+export defn drop s n -> from-runes (List.drop (str-to-list s) n)
 
 export defn slice-runes s a b -> s |> drop a |> take (sub b a)
 

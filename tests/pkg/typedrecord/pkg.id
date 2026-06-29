@@ -1,6 +1,0 @@
-package typedrecord
-
-export record TypedExport do
-  field x : int
-  field label : string
-end

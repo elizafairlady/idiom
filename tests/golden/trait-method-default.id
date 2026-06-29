@@ -1,7 +1,0 @@
-trait Show do
-  method show x -> str "default:" x
-end
-
-implement Show on int
-
-println (show 42)

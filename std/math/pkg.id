@@ -57,10 +57,15 @@ export defn square n -> mul n n
 
 export defn cube n -> n |> mul n |> mul n
 
+defn pow-int-loop do
+  _ 0 acc -> acc
+  base exponent acc when ((exponent |> floor-mod 2) |> eq? 0) -> pow-int-loop (base * base) (exponent // 2) acc
+  base exponent acc -> pow-int-loop (base * base) (exponent // 2) (acc * base)
+end
+
 export defn pow-int do
   _ n when (n |> lt? 0) -> error {:negative-exponent n}
-  _ 0 -> 1
-  x n -> x |> mul (pow-int x (n - 1))
+  x n -> pow-int-loop x n 1
 end
 
 export defn factorial do

@@ -1,7 +1,0 @@
-defmacro twin-a %`(twin-a %,e) -> %`(add %,e 1)
-defmacro twin-b %`(twin-b %,e) -> %`(add %,e 1)
-shadowed = do
-  defn add a b -> :shadow
-  {(twin-a 1) (twin-b 1)}
-end
-println {(twin-a 20) (twin-b 20) shadowed}

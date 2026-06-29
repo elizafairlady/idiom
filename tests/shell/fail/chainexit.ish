@@ -1,2 +1,0 @@
-false || exit 5
-echo unreached

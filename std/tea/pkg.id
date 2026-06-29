@@ -1,5 +1,7 @@
 package tea
 
+import std/list as List
+
 export defn none -> :tea-none
 
 export defn key msg -> {:tea-key msg}
@@ -41,18 +43,9 @@ end
 
 export defn emit msg -> Emit msg
 
-defn reverse-list do
-  '() acc -> acc
-  '(h . t) acc -> reverse-list t (cons &h acc)
-end
+defn command-list commands -> commands |> List.filter (fn cmd -> neq? cmd none)
 
-defn command-list do
-  '() acc -> reverse-list acc '()
-  '(h . t) acc when (eq? h none) -> command-list t acc
-  '(h . t) acc -> command-list t (cons &h acc)
-end
-
-defn compact-command commands ctor -> match (command-list commands '()) do
+defn compact-command commands ctor -> match (command-list commands) do
   '() -> none
   '(only) -> &only
   many -> ctor many
@@ -79,17 +72,17 @@ implement Command on Sequence do
 end
 
 implement Command on closure do
-  method run-command cmd -> cmd
+  method run-command cmd -> '() |> apply cmd
 end
 
 defn messages-rev-from-list do
   '() acc -> acc
-  '(h . t) acc -> messages-rev-from-list t (reverse-list (command-messages h) acc)
+  '(h . t) acc -> messages-rev-from-list t (List.foldl (command-messages h) acc &cons)
 end
 
 defn command-result-messages do
-  {:tea-batch commands} -> reverse-list (messages-rev-from-list commands '()) '()
-  {:tea-sequence commands} -> reverse-list (messages-rev-from-list commands '()) '()
+  {:tea-batch commands} -> messages-rev-from-list commands '() |> List.reverse
+  {:tea-sequence commands} -> messages-rev-from-list commands '() |> List.reverse
   msg -> list msg
 end
 
@@ -129,7 +122,7 @@ defn run-pending-list do
   program '() -> program
   program '(msg . rest) -> do
     next = advance program &msg
-    all = reverse-list (reverse-list next.pending '()) rest
+    all = List.concat next.pending rest
     run-pending-list (Program next.model next.status '()) all
   end
 end

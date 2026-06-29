@@ -1,9 +1,0 @@
-package exporter
-
-export protocol Exporter do
-  operator <+> precedence: 6 assoc: left capture: :infix -> add
-  export defmacro answer %`(answer %,where) -> (make-syntax-int where 99)
-end
-
-export defn dbl x -> add x x
-export defn who x -> :first

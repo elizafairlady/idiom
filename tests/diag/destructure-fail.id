@@ -1,3 +1,0 @@
-defn mk n -> {1 2 n}
-{a b} = mk 3
-a

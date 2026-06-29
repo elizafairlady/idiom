@@ -1,5 +1,0 @@
-package sizea
-
-export trait Size do
-  method size x -> 111
-end

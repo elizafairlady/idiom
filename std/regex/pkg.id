@@ -52,24 +52,6 @@ implement Pattern on regex do
   method split-on rx s -> rx |> raw-split-on s
 end
 
-implement Pattern on string do
-  method source-of source -> source |> compile! |> raw-source
-  method options-of source -> source |> compile! |> raw-options
-  method group-count source -> source |> compile! |> raw-group-count
-  method group-names source -> source |> compile! |> raw-group-names
-
-  method scan source s -> source |> compile! |> raw-scan-from s 0
-  method scan-at source s offset -> source |> compile! |> raw-scan-at s offset
-  method scan-from source s offset -> source |> compile! |> raw-scan-from s offset
-  method scan-full source s -> source |> compile! |> raw-scan-full s
-  method test? source s -> source |> compile! |> raw-test? s
-  method scan-all source s -> source |> compile! |> raw-scan-all s
-
-  method sub source s replacement -> source |> compile! |> raw-replace s replacement
-  method sub-all source s replacement -> source |> compile! |> raw-replace-all s replacement
-  method split-on source s -> source |> compile! |> raw-split-on s
-end
-
 export trait MatchResult do
   method start-of result -> raw-result-start result
   method end-of result -> raw-result-end result

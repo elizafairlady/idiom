@@ -3,6 +3,11 @@ package map
 export defn get m k -> m |> dict-get &k :nil
 export defn get-or m k default -> m |> dict-get &k &default
 
+export defn fetch do
+  m k when (m |> dict-has? &k) -> {:ok (m |> dict-get &k :nil)}
+  _m k -> {:error {:key-not-found &k}}
+end
+
 export defn get! do
   m k when (m |> dict-has? &k) -> m |> dict-get &k :nil
   _ k -> error {:key-not-found &k}
@@ -17,13 +22,6 @@ export defn empty? m -> m |> dict-size |> eq? 0
 
 export defn update m k default f -> m |> dict-put &k (f (m |> dict-get k &default))
 
-export defn merge a b -> b |> dict-keys |> merge-pairs a b
-
-defn merge-pairs do
-  '() m _other -> &m
-  '(k . t) m other -> t |> merge-pairs (m |> dict-put &k (other |> dict-get &k :nil)) other
-end
-
 export defn put-new m k v -> cond (m |> dict-has? &k) &m (m |> dict-put &k &v)
 
 export defn replace m k v -> cond (m |> dict-has? &k) (m |> dict-put &k &v) &m
@@ -34,61 +32,7 @@ export defn pop m k -> {(m |> dict-get &k :nil) (m |> dict-del &k)}
 
 export defn pop-or m k default -> {(m |> dict-get &k &default) (m |> dict-del &k)}
 
-export defn take m ks -> ks |> take-keys %{} m
-
-defn take-keys do
-  '() acc _ -> &acc
-  '(k . rest) acc m ->
-    rest |> take-keys (cond (m |> dict-has? &k) (acc |> dict-put &k (m |> dict-get &k :nil)) &acc) m
+export defn pop-result do
+  m k when (m |> dict-has? &k) -> {:ok {(m |> dict-get &k :nil) (m |> dict-del &k)}}
+  _m k -> {:error {:key-not-found &k}}
 end
-
-export defn drop m ks -> ks |> drop-keys m
-
-defn drop-keys do
-  '() acc -> &acc
-  '(k . rest) acc -> rest |> drop-keys (acc |> dict-del &k)
-end
-
-export defn filter m f -> m |> dict-to-list |> filter-pairs %{} f
-
-defn filter-pairs do
-  '() acc _ -> &acc
-  '({k v} . rest) acc f -> rest |> filter-pairs (cond (f &k &v) (acc |> dict-put &k &v) &acc) f
-end
-
-export defn reject m f -> m |> filter (fn k v -> cond (f &k &v) :false :true)
-
-export defn map-values m f -> m |> dict-to-list |> map-values-pairs %{} f
-
-defn map-values-pairs do
-  '() acc _ -> &acc
-  '({k v} . rest) acc f -> rest |> map-values-pairs (acc |> dict-put &k (f &k &v)) f
-end
-
-export defn map-keys m f -> m |> dict-to-list |> map-keys-pairs %{} f
-
-defn map-keys-pairs do
-  '() acc _ -> &acc
-  '({k v} . rest) acc f -> rest |> map-keys-pairs (acc |> dict-put (f &k &v) &v) f
-end
-
-export defn merge-with m other f -> other |> dict-keys |> merge-with-keys m other f
-
-defn merge-with-keys do
-  '() acc _ _ -> &acc
-  '(k . rest) acc other f -> do
-    next = cond (acc |> dict-has? &k) (acc |> dict-put &k (f &k (acc |> dict-get &k :nil) (other |> dict-get &k :nil))) (acc |> dict-put &k (other |> dict-get &k :nil))
-    rest |> merge-with-keys next other f
-  end
-end
-
-export defn from-list pairs -> pairs |> from-list-into %{}
-
-defn from-list-into do
-  '() acc -> &acc
-  '({k v} . rest) acc -> rest |> from-list-into (acc |> dict-put &k &v)
-end
-
-export defn to-list m -> m |> dict-to-list
-
-export defn equal? a b -> a |> eq? b

@@ -1,2 +1,0 @@
-package mathx
-export defn trip x -> mul x 3

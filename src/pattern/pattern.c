@@ -1180,13 +1180,67 @@ static bool sel_row_add_syn_dict_has(SelRow *row, uint32_t access, const IdmSynt
     return sel_row_add_action(row, action, err, span);
 }
 
+static bool sel_dict_rest_keys_equal(const SelPat *a, const SelPat *b) {
+    if (a == b) return true;
+    if (!a || !b || a->kind != SEL_PAT_DICT || b->kind != SEL_PAT_DICT || a->as.dict.count != b->as.dict.count) return false;
+    for (size_t i = 0; i < a->as.dict.count; i++) {
+        bool found = false;
+        for (size_t j = 0; j < b->as.dict.count; j++) {
+            if (idm_value_equal(a->as.dict.entries[i].key, b->as.dict.entries[j].key)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool sel_syn_dict_rest_keys_equal(const SelPat *a, const SelPat *b) {
+    if (a == b) return true;
+    if (!a || !b || a->kind != SEL_PAT_SYNTAX || b->kind != SEL_PAT_SYNTAX ||
+        !a->as.syn.keyed_dict || !b->as.syn.keyed_dict || a->as.syn.count != b->as.syn.count) return false;
+    for (size_t i = 0; i < a->as.syn.count; i++) {
+        bool found = false;
+        for (size_t j = 0; j < b->as.syn.count; j++) {
+            if (idm_syn_equal(a->as.syn.keys[i], b->as.syn.keys[j])) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool selector_access_equal(const SelAccess *a, const SelAccess *b) {
+    if (a->kind != b->kind || a->parent != b->parent || a->index != b->index || a->index2 != b->index2 || a->seq_tag != b->seq_tag) return false;
+    switch (a->kind) {
+        case SEL_ACCESS_DICT_VALUE:
+            return idm_value_equal(a->u.key, b->u.key);
+        case SEL_ACCESS_SYN_DICT_VALUE:
+            return idm_syn_equal(a->u.syn_key, b->u.syn_key);
+        case SEL_ACCESS_DICT_REST:
+            return sel_dict_rest_keys_equal(a->u.dict_pat, b->u.dict_pat);
+        case SEL_ACCESS_SYN_DICT_REST:
+            return sel_syn_dict_rest_keys_equal(a->u.dict_pat, b->u.dict_pat);
+        case SEL_ACCESS_ARG:
+        case SEL_ACCESS_CAR:
+        case SEL_ACCESS_CDR:
+        case SEL_ACCESS_SEQ_ITEM:
+        case SEL_ACCESS_SEQ_REST:
+        case SEL_ACCESS_SYN_ITEM:
+        case SEL_ACCESS_SYN_ITEM_REV:
+        case SEL_ACCESS_SYN_REST:
+        case SEL_ACCESS_SYN_UNWRAP_EXPR:
+            return true;
+    }
+    return false;
+}
+
 static bool selector_add_access(IdmPatternSelector *selector, SelAccess access, uint32_t *out, IdmError *err, IdmSpan span) {
     for (size_t i = 0; i < selector->access_count; i++) {
-        SelAccess *cur = &selector->accesses[i];
-        if (cur->kind != access.kind || cur->parent != access.parent || cur->index != access.index || cur->index2 != access.index2 || cur->seq_tag != access.seq_tag) continue;
-        if (access.kind == SEL_ACCESS_DICT_VALUE && !idm_value_equal(cur->u.key, access.u.key)) continue;
-        if (access.kind == SEL_ACCESS_SYN_DICT_VALUE && !idm_syn_equal(cur->u.syn_key, access.u.syn_key)) continue;
-        if ((access.kind == SEL_ACCESS_DICT_REST || access.kind == SEL_ACCESS_SYN_DICT_REST) && cur->u.dict_pat != access.u.dict_pat) continue;
+        if (!selector_access_equal(&selector->accesses[i], &access)) continue;
         *out = (uint32_t)i;
         return true;
     }
@@ -1337,12 +1391,71 @@ static bool sel_ctor_equal(SelCtor a, SelCtor b) {
     return a.kind != SEL_CTOR_LITERAL || idm_value_equal(a.literal, b.literal);
 }
 
+static bool sel_builtin_types_overlap(IdmBuiltinType a, IdmBuiltinType b) {
+    if (a == b) return true;
+    if (a == IDM_BUILTIN_TYPE_NONE || b == IDM_BUILTIN_TYPE_NONE) {
+        return (a == IDM_BUILTIN_TYPE_RECORD && b == IDM_BUILTIN_TYPE_NONE) ||
+               (b == IDM_BUILTIN_TYPE_RECORD && a == IDM_BUILTIN_TYPE_NONE);
+    }
+    if (a == IDM_BUILTIN_TYPE_INT) return b == IDM_BUILTIN_TYPE_FIXNUM || b == IDM_BUILTIN_TYPE_BIGNUM;
+    if (b == IDM_BUILTIN_TYPE_INT) return a == IDM_BUILTIN_TYPE_FIXNUM || a == IDM_BUILTIN_TYPE_BIGNUM;
+    if (a == IDM_BUILTIN_TYPE_LIST) return b == IDM_BUILTIN_TYPE_PAIR || b == IDM_BUILTIN_TYPE_EMPTY_LIST;
+    if (b == IDM_BUILTIN_TYPE_LIST) return a == IDM_BUILTIN_TYPE_PAIR || a == IDM_BUILTIN_TYPE_EMPTY_LIST;
+    return false;
+}
+
+static bool sel_type_symbols_overlap(IdmSymbol *a, IdmSymbol *b) {
+    if (a == b) return true;
+    return sel_builtin_types_overlap(idm_value_builtin_type_kind(a), idm_value_builtin_type_kind(b));
+}
+
+static bool sel_type_overlaps_ctor(IdmSymbol *type, SelCtor ctor) {
+    IdmBuiltinType kind = idm_value_builtin_type_kind(type);
+    switch (ctor.kind) {
+        case SEL_CTOR_LITERAL:
+            return idm_value_matches_type_symbol(ctor.literal, type);
+        case SEL_CTOR_PAIR:
+            return kind == IDM_BUILTIN_TYPE_PAIR || kind == IDM_BUILTIN_TYPE_LIST;
+        case SEL_CTOR_VECTOR_EXACT:
+        case SEL_CTOR_VECTOR_REST:
+            return kind == IDM_BUILTIN_TYPE_VECTOR;
+        case SEL_CTOR_TUPLE_EXACT:
+        case SEL_CTOR_TUPLE_REST:
+            return kind == IDM_BUILTIN_TYPE_TUPLE;
+        case SEL_CTOR_DICT:
+            return kind == IDM_BUILTIN_TYPE_DICT;
+        case SEL_CTOR_TYPE:
+            return sel_type_symbols_overlap(type, ctor.type);
+        case SEL_CTOR_SYN_KIND:
+        case SEL_CTOR_SYN_LITERAL:
+            return kind == IDM_BUILTIN_TYPE_SYNTAX;
+    }
+    return false;
+}
+
+static bool sel_syn_literal_overlaps_kind(const IdmSyntax *syn, SelCtor ctor) {
+    if (!syn || ctor.kind != SEL_CTOR_SYN_KIND || syn->kind != ctor.syn_kind) return false;
+    if (syn->kind == IDM_SYN_DICT && (syn->as.seq.count % 2u) != 0) return false;
+    if (syn->kind < IDM_SYN_LIST) return true;
+    return ctor.syn_rest ? syn->as.seq.count >= ctor.count : syn->as.seq.count == ctor.count;
+}
+
+static bool sel_ctor_native_syntax(SelCtor ctor) {
+    return ctor.kind == SEL_CTOR_SYN_KIND || ctor.kind == SEL_CTOR_SYN_LITERAL;
+}
+
 static bool sel_ctor_overlaps(SelCtor a, SelCtor b) {
     if (sel_ctor_equal(a, b)) return true;
+    if (a.kind == SEL_CTOR_TYPE) return sel_type_overlaps_ctor(a.type, b);
+    if (b.kind == SEL_CTOR_TYPE) return sel_type_overlaps_ctor(b.type, a);
+    if (a.kind == SEL_CTOR_SYN_LITERAL && b.kind == SEL_CTOR_SYN_KIND) return sel_syn_literal_overlaps_kind(a.syn_literal, b);
+    if (b.kind == SEL_CTOR_SYN_LITERAL && a.kind == SEL_CTOR_SYN_KIND) return sel_syn_literal_overlaps_kind(b.syn_literal, a);
     if (a.kind == SEL_CTOR_VECTOR_EXACT && b.kind == SEL_CTOR_VECTOR_REST) return a.count >= b.count;
     if (a.kind == SEL_CTOR_VECTOR_REST && b.kind == SEL_CTOR_VECTOR_EXACT) return b.count >= a.count;
+    if (a.kind == SEL_CTOR_VECTOR_REST && b.kind == SEL_CTOR_VECTOR_REST) return true;
     if (a.kind == SEL_CTOR_TUPLE_EXACT && b.kind == SEL_CTOR_TUPLE_REST) return a.count >= b.count;
     if (a.kind == SEL_CTOR_TUPLE_REST && b.kind == SEL_CTOR_TUPLE_EXACT) return b.count >= a.count;
+    if (a.kind == SEL_CTOR_TUPLE_REST && b.kind == SEL_CTOR_TUPLE_REST) return true;
     if (a.kind == SEL_CTOR_SYN_KIND && b.kind == SEL_CTOR_SYN_KIND && a.syn_kind == b.syn_kind) {
         if (a.syn_rest && !b.syn_rest) return b.count >= a.count;
         if (!a.syn_rest && b.syn_rest) return a.count >= b.count;
@@ -1721,14 +1834,43 @@ static void rows_destroy(SelRow *rows, size_t count) {
 static bool choose_access(const SelRow *rows, size_t row_count, uint32_t *out_access) {
     if (row_count == 0) return false;
     const SelRow *first = &rows[0];
+    bool found = false;
+    size_t best_distinct = 0;
+    size_t best_ctor_rows = 0;
     for (size_t i = 0; i < first->cell_count; i++) {
         SelCtor ignored;
-        if (sel_pat_ctor(first->cells[i].pattern, &ignored)) {
+        if (!sel_pat_ctor(first->cells[i].pattern, &ignored)) continue;
+        bool duplicate = false;
+        for (size_t j = 0; j < i; j++) {
+            if (first->cells[j].access == first->cells[i].access) { duplicate = true; break; }
+        }
+        if (duplicate) continue;
+        size_t ctor_rows = 0;
+        size_t distinct = 0;
+        for (size_t r = 0; r < row_count; r++) {
+            ssize_t idx = sel_row_find_cell(&rows[r], first->cells[i].access);
+            if (idx < 0) continue;
+            SelCtor ctor;
+            if (!sel_pat_ctor(rows[r].cells[idx].pattern, &ctor)) continue;
+            ctor_rows++;
+            bool seen = false;
+            for (size_t p = 0; p < r; p++) {
+                ssize_t prev = sel_row_find_cell(&rows[p], first->cells[i].access);
+                if (prev < 0) continue;
+                SelCtor prev_ctor;
+                if (!sel_pat_ctor(rows[p].cells[prev].pattern, &prev_ctor)) continue;
+                if (sel_ctor_equal(prev_ctor, ctor)) { seen = true; break; }
+            }
+            if (!seen) distinct++;
+        }
+        if (!found || distinct > best_distinct || (distinct == best_distinct && ctor_rows > best_ctor_rows)) {
+            found = true;
+            best_distinct = distinct;
+            best_ctor_rows = ctor_rows;
             *out_access = first->cells[i].access;
-            return true;
         }
     }
-    return false;
+    return found;
 }
 
 static bool collect_ctors(const SelRow *rows, size_t row_count, uint32_t access, SelCtor **out_ctors, size_t *out_count, IdmError *err) {
@@ -1815,7 +1957,13 @@ static uint32_t compile_rows(IdmPatternSelector *selector, const SelRow *rows, s
             return SEL_NO_NODE;
         }
         node->as.sw.case_count = ctor_count;
-        node->as.sw.syn = ctors[0].kind == SEL_CTOR_SYN_KIND || ctors[0].kind == SEL_CTOR_SYN_LITERAL;
+        node->as.sw.syn = true;
+        for (size_t c = 0; c < ctor_count; c++) {
+            if (!sel_ctor_native_syntax(ctors[c])) {
+                node->as.sw.syn = false;
+                break;
+            }
+        }
     }
 
     for (size_t c = 0; c < ctor_count; c++) {
@@ -1873,6 +2021,252 @@ static uint32_t compile_rows(IdmPatternSelector *selector, const SelRow *rows, s
     return idx;
 }
 
+static bool sel_action_equal(const SelAction *a, const SelAction *b) {
+    if (a->kind != b->kind || a->access != b->access || a->slot != b->slot) return false;
+    switch (a->kind) {
+        case SEL_ACTION_BIND:
+        case SEL_ACTION_PIN:
+        case SEL_ACTION_SYN_BIND:
+            if ((a->name == NULL) != (b->name == NULL)) return false;
+            return !a->name || strcmp(a->name, b->name) == 0;
+        case SEL_ACTION_CTOR_MATCH:
+            return sel_ctor_equal(a->ctor, b->ctor);
+        case SEL_ACTION_VALUE_EQUAL:
+            return idm_value_equal(a->value, b->value);
+        case SEL_ACTION_DICT_HAS:
+            return idm_value_equal(a->key, b->key);
+        case SEL_ACTION_SYN_DICT_HAS:
+            return idm_syn_equal(a->syn_key, b->syn_key);
+    }
+    return false;
+}
+
+static bool sel_node_equal(const SelNode *a, const SelNode *b) {
+    if (a->kind != b->kind) return false;
+    switch (a->kind) {
+        case SEL_NODE_FAIL:
+            return true;
+        case SEL_NODE_TRY:
+            if (a->as.try_row.function_index != b->as.try_row.function_index ||
+                a->as.try_row.has_guard != b->as.try_row.has_guard ||
+                a->as.try_row.next != b->as.try_row.next ||
+                a->as.try_row.action_count != b->as.try_row.action_count) return false;
+            for (size_t i = 0; i < a->as.try_row.action_count; i++) {
+                if (!sel_action_equal(&a->as.try_row.actions[i], &b->as.try_row.actions[i])) return false;
+            }
+            return true;
+        case SEL_NODE_SWITCH:
+            if (a->as.sw.access != b->as.sw.access ||
+                a->as.sw.default_node != b->as.sw.default_node ||
+                a->as.sw.syn != b->as.sw.syn ||
+                a->as.sw.case_count != b->as.sw.case_count) return false;
+            for (size_t i = 0; i < a->as.sw.case_count; i++) {
+                if (!sel_ctor_equal(a->as.sw.cases[i].ctor, b->as.sw.cases[i].ctor) ||
+                    a->as.sw.cases[i].node != b->as.sw.cases[i].node) return false;
+            }
+            return true;
+        case SEL_NODE_FORK:
+            return a->as.fork.first == b->as.fork.first && a->as.fork.second == b->as.fork.second;
+        case SEL_NODE_BYTE:
+            return a->as.byte.next == b->as.byte.next &&
+                   a->as.byte.cls.negated == b->as.byte.cls.negated &&
+                   memcmp(a->as.byte.cls.bits, b->as.byte.cls.bits, sizeof(a->as.byte.cls.bits)) == 0;
+        case SEL_NODE_SAVE:
+            return a->as.save.slot == b->as.save.slot && a->as.save.next == b->as.save.next;
+        case SEL_NODE_GUARD:
+            return a->as.guard.kind == b->as.guard.kind &&
+                   a->as.guard.flags == b->as.guard.flags &&
+                   a->as.guard.sub == b->as.guard.sub &&
+                   a->as.guard.next == b->as.guard.next;
+        case SEL_NODE_ACCEPT:
+            return a->as.accept_id == b->as.accept_id;
+    }
+    return false;
+}
+
+static uint32_t selector_canon_node(IdmPatternSelector *selector, uint32_t node_idx, uint32_t *map, unsigned char *state, IdmError *err) {
+    if (node_idx == SEL_NO_NODE) return SEL_NO_NODE;
+    if (node_idx >= selector->pool.count) {
+        idm_error_set(err, idm_span_unknown(NULL), "pattern selector node out of bounds");
+        return SEL_NO_NODE;
+    }
+    if (state[node_idx] == 2u) return map[node_idx];
+    if (state[node_idx] == 1u) {
+        idm_error_set(err, idm_span_unknown(NULL), "pattern selector cycle");
+        return SEL_NO_NODE;
+    }
+    state[node_idx] = 1u;
+    SelNode *node = &selector->pool.nodes[node_idx];
+    switch (node->kind) {
+        case SEL_NODE_TRY:
+            node->as.try_row.next = selector_canon_node(selector, node->as.try_row.next, map, state, err);
+            if (err && err->present) return SEL_NO_NODE;
+            break;
+        case SEL_NODE_SWITCH:
+            node->as.sw.default_node = selector_canon_node(selector, node->as.sw.default_node, map, state, err);
+            if (err && err->present) return SEL_NO_NODE;
+            for (size_t i = 0; i < node->as.sw.case_count; i++) {
+                node->as.sw.cases[i].node = selector_canon_node(selector, node->as.sw.cases[i].node, map, state, err);
+                if (err && err->present) return SEL_NO_NODE;
+            }
+            break;
+        case SEL_NODE_FORK:
+            node->as.fork.first = selector_canon_node(selector, node->as.fork.first, map, state, err);
+            if (err && err->present) return SEL_NO_NODE;
+            node->as.fork.second = selector_canon_node(selector, node->as.fork.second, map, state, err);
+            if (err && err->present) return SEL_NO_NODE;
+            break;
+        case SEL_NODE_BYTE:
+            node->as.byte.next = selector_canon_node(selector, node->as.byte.next, map, state, err);
+            if (err && err->present) return SEL_NO_NODE;
+            break;
+        case SEL_NODE_SAVE:
+            node->as.save.next = selector_canon_node(selector, node->as.save.next, map, state, err);
+            if (err && err->present) return SEL_NO_NODE;
+            break;
+        case SEL_NODE_GUARD:
+            node->as.guard.next = selector_canon_node(selector, node->as.guard.next, map, state, err);
+            if (err && err->present) return SEL_NO_NODE;
+            break;
+        case SEL_NODE_FAIL:
+        case SEL_NODE_ACCEPT:
+            break;
+    }
+    for (size_t i = 0; i < selector->pool.count; i++) {
+        if (i == node_idx || state[i] != 2u || map[i] != i) continue;
+        if (sel_node_equal(node, &selector->pool.nodes[i])) {
+            map[node_idx] = (uint32_t)i;
+            state[node_idx] = 2u;
+            return map[node_idx];
+        }
+    }
+    map[node_idx] = node_idx;
+    state[node_idx] = 2u;
+    return node_idx;
+}
+
+static void selector_mark_node(const IdmPatternSelector *selector, uint32_t node_idx, bool *mark) {
+    if (node_idx == SEL_NO_NODE || node_idx >= selector->pool.count || mark[node_idx]) return;
+    mark[node_idx] = true;
+    const SelNode *node = &selector->pool.nodes[node_idx];
+    switch (node->kind) {
+        case SEL_NODE_TRY:
+            selector_mark_node(selector, node->as.try_row.next, mark);
+            break;
+        case SEL_NODE_SWITCH:
+            selector_mark_node(selector, node->as.sw.default_node, mark);
+            for (size_t i = 0; i < node->as.sw.case_count; i++) selector_mark_node(selector, node->as.sw.cases[i].node, mark);
+            break;
+        case SEL_NODE_FORK:
+            selector_mark_node(selector, node->as.fork.first, mark);
+            selector_mark_node(selector, node->as.fork.second, mark);
+            break;
+        case SEL_NODE_BYTE:
+            selector_mark_node(selector, node->as.byte.next, mark);
+            break;
+        case SEL_NODE_SAVE:
+            selector_mark_node(selector, node->as.save.next, mark);
+            break;
+        case SEL_NODE_GUARD:
+            selector_mark_node(selector, node->as.guard.next, mark);
+            break;
+        case SEL_NODE_FAIL:
+        case SEL_NODE_ACCEPT:
+            break;
+    }
+}
+
+static void selector_remap_node(SelNode *node, const uint32_t *remap) {
+    switch (node->kind) {
+        case SEL_NODE_TRY:
+            node->as.try_row.next = remap[node->as.try_row.next];
+            break;
+        case SEL_NODE_SWITCH:
+            node->as.sw.default_node = remap[node->as.sw.default_node];
+            for (size_t i = 0; i < node->as.sw.case_count; i++) node->as.sw.cases[i].node = remap[node->as.sw.cases[i].node];
+            break;
+        case SEL_NODE_FORK:
+            node->as.fork.first = remap[node->as.fork.first];
+            node->as.fork.second = remap[node->as.fork.second];
+            break;
+        case SEL_NODE_BYTE:
+            node->as.byte.next = remap[node->as.byte.next];
+            break;
+        case SEL_NODE_SAVE:
+            node->as.save.next = remap[node->as.save.next];
+            break;
+        case SEL_NODE_GUARD:
+            node->as.guard.next = remap[node->as.guard.next];
+            break;
+        case SEL_NODE_FAIL:
+        case SEL_NODE_ACCEPT:
+            break;
+    }
+}
+
+static bool selector_compact_nodes(IdmPatternSelector *selector, IdmError *err) {
+    size_t old_count = selector->pool.count;
+    bool *mark = old_count == 0 ? NULL : calloc(old_count, sizeof(*mark));
+    uint32_t *remap = old_count == 0 ? NULL : malloc(old_count * sizeof(*remap));
+    if ((old_count != 0 && (!mark || !remap))) {
+        free(mark);
+        free(remap);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    for (size_t i = 0; i < selector->arity_count; i++) selector_mark_node(selector, selector->arities[i].node, mark);
+    size_t new_count = 0;
+    for (size_t i = 0; i < old_count; i++) {
+        if (mark[i]) remap[i] = (uint32_t)new_count++;
+        else remap[i] = SEL_NO_NODE;
+    }
+    SelNode *nodes = new_count == 0 ? NULL : calloc(new_count, sizeof(*nodes));
+    if (new_count != 0 && !nodes) {
+        free(mark);
+        free(remap);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    for (size_t i = 0; i < old_count; i++) {
+        if (mark[i]) {
+            nodes[remap[i]] = selector->pool.nodes[i];
+            nodes[remap[i]].index = remap[i];
+            selector_remap_node(&nodes[remap[i]], remap);
+        } else {
+            sel_node_destroy_contents(&selector->pool.nodes[i]);
+        }
+    }
+    for (size_t i = 0; i < selector->arity_count; i++) selector->arities[i].node = remap[selector->arities[i].node];
+    free(selector->pool.nodes);
+    selector->pool.nodes = nodes;
+    selector->pool.count = new_count;
+    selector->pool.cap = new_count;
+    free(mark);
+    free(remap);
+    return true;
+}
+
+static bool selector_merge_dag(IdmPatternSelector *selector, IdmError *err) {
+    size_t n = selector->pool.count;
+    uint32_t *map = n == 0 ? NULL : malloc(n * sizeof(*map));
+    unsigned char *state = n == 0 ? NULL : calloc(n, sizeof(*state));
+    if (n != 0 && (!map || !state)) {
+        free(map);
+        free(state);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    for (size_t i = 0; i < n; i++) map[i] = SEL_NO_NODE;
+    for (size_t i = 0; i < selector->arity_count; i++) {
+        selector->arities[i].node = selector_canon_node(selector, selector->arities[i].node, map, state, err);
+        if (err && err->present) {
+            free(map);
+            free(state);
+            return false;
+        }
+    }
+    free(map);
+    free(state);
+    return selector_compact_nodes(selector, err);
+}
+
 static bool sel_node_unconditional(const IdmPatternSelector *selector, uint32_t node_idx, uint32_t *out_function_index) {
     if (node_idx == SEL_NO_NODE) return false;
     const SelNode *node = &selector->pool.nodes[node_idx];
@@ -1882,53 +2276,96 @@ static bool sel_node_unconditional(const IdmPatternSelector *selector, uint32_t 
     return true;
 }
 
-static bool selector_eval_access(IdmRuntime *rt, const IdmPatternSelector *selector, const IdmValue *args, uint32_t argc, uint32_t access_id, IdmValue *out, bool *out_available, IdmError *err) {
+typedef struct {
+    bool value_ready;
+    bool value_available;
+    IdmValue value;
+    bool syn_ready;
+    bool syn_available;
+    const IdmSyntax *syn;
+} SelAccessCache;
+
+typedef struct {
+    IdmRuntime *rt;
+    const IdmPatternSelector *selector;
+    const IdmValue *args;
+    uint32_t argc;
+    SelAccessCache *accesses;
+} SelRun;
+
+static bool sel_run_init(SelRun *run, IdmRuntime *rt, const IdmPatternSelector *selector, const IdmValue *args, uint32_t argc, IdmError *err) {
+    memset(run, 0, sizeof(*run));
+    run->rt = rt;
+    run->selector = selector;
+    run->args = args;
+    run->argc = argc;
+    if (selector->access_count != 0) {
+        run->accesses = calloc(selector->access_count, sizeof(*run->accesses));
+        if (!run->accesses) return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
+}
+
+static void sel_run_destroy(SelRun *run) {
+    free(run->accesses);
+    memset(run, 0, sizeof(*run));
+}
+
+static bool selector_eval_access(SelRun *run, uint32_t access_id, IdmValue *out, bool *out_available, IdmError *err) {
     *out_available = false;
+    const IdmPatternSelector *selector = run->selector;
     if (access_id >= selector->access_count) return idm_error_set(err, idm_span_unknown(NULL), "pattern access out of bounds");
+    SelAccessCache *cache = &run->accesses[access_id];
+    if (cache->value_ready) {
+        *out_available = cache->value_available;
+        if (cache->value_available) *out = cache->value;
+        return true;
+    }
     const SelAccess *access = &selector->accesses[access_id];
+    bool ok = true;
     switch (access->kind) {
         case SEL_ACCESS_ARG:
-            if (access->index >= argc) return true;
-            *out = args[access->index];
+            if (access->index >= run->argc) break;
+            *out = run->args[access->index];
             *out_available = true;
-            return true;
+            break;
         case SEL_ACCESS_CAR: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || !idm_is_pair(parent)) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || !idm_is_pair(parent)) break;
             *out = idm_car(parent, err);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_CDR: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || !idm_is_pair(parent)) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || !idm_is_pair(parent)) break;
             *out = idm_cdr(parent, err);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_SEQ_ITEM: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || (idm_value_tag(parent) != IDM_VAL_VECTOR && idm_value_tag(parent) != IDM_VAL_TUPLE) || access->index >= idm_sequence_count(parent)) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || (idm_value_tag(parent) != IDM_VAL_VECTOR && idm_value_tag(parent) != IDM_VAL_TUPLE) || access->index >= idm_sequence_count(parent)) break;
             *out = idm_sequence_item(parent, access->index, err);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_SEQ_REST: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || idm_value_tag(parent) != access->seq_tag) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || idm_value_tag(parent) != access->seq_tag) break;
             size_t n = idm_sequence_count(parent);
-            if (access->index > n) return true;
+            if (access->index > n) break;
             size_t rest_count = n - access->index;
             IdmValue *items = rest_count == 0 ? NULL : calloc(rest_count, sizeof(*items));
             if (rest_count != 0 && !items) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1936,97 +2373,97 @@ static bool selector_eval_access(IdmRuntime *rt, const IdmPatternSelector *selec
                 items[i] = idm_sequence_item(parent, access->index + i, err);
                 if (err && err->present) { free(items); return false; }
             }
-            *out = access->seq_tag == IDM_VAL_VECTOR ? idm_vector(rt, items, rest_count, err) : idm_tuple(rt, items, rest_count, err);
+            *out = access->seq_tag == IDM_VAL_VECTOR ? idm_vector(run->rt, items, rest_count, err) : idm_tuple(run->rt, items, rest_count, err);
             free(items);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_DICT_VALUE: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || !idm_is_dict(parent)) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || !idm_is_dict(parent)) break;
             IdmValue value = idm_nil();
-            if (!idm_dict_get(parent, access->u.key, &value)) return true;
+            if (!idm_dict_get(parent, access->u.key, &value)) break;
             *out = value;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_DICT_REST: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || !idm_is_dict(parent) || !access->u.dict_pat) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || !idm_is_dict(parent) || !access->u.dict_pat) break;
             const SelPat *pat = access->u.dict_pat;
             IdmValue rest = idm_nil();
-            if (!sel_dict_rest_value(rt, parent, pat->as.dict.entries, pat->as.dict.count, &rest, err, pat->span)) return false;
+            if (!sel_dict_rest_value(run->rt, parent, pat->as.dict.entries, pat->as.dict.count, &rest, err, pat->span)) return false;
             *out = rest;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_SYN_ITEM: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || idm_value_tag(parent) != IDM_VAL_SYNTAX) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || idm_value_tag(parent) != IDM_VAL_SYNTAX) break;
             const IdmSyntax *syn = idm_syntax_value_get(parent);
-            if (!syn || syn->kind < IDM_SYN_LIST || access->index >= syn->as.seq.count) return true;
-            *out = idm_syntax_value(rt, syn->as.seq.items[access->index], err);
+            if (!syn || syn->kind < IDM_SYN_LIST || access->index >= syn->as.seq.count) break;
+            *out = idm_syntax_value(run->rt, syn->as.seq.items[access->index], err);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_SYN_ITEM_REV: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || idm_value_tag(parent) != IDM_VAL_SYNTAX) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || idm_value_tag(parent) != IDM_VAL_SYNTAX) break;
             const IdmSyntax *syn = idm_syntax_value_get(parent);
-            if (!syn || syn->kind < IDM_SYN_LIST || access->index >= syn->as.seq.count) return true;
-            *out = idm_syntax_value(rt, syn->as.seq.items[syn->as.seq.count - 1u - access->index], err);
+            if (!syn || syn->kind < IDM_SYN_LIST || access->index >= syn->as.seq.count) break;
+            *out = idm_syntax_value(run->rt, syn->as.seq.items[syn->as.seq.count - 1u - access->index], err);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_SYN_REST: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || idm_value_tag(parent) != IDM_VAL_SYNTAX) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || idm_value_tag(parent) != IDM_VAL_SYNTAX) break;
             const IdmSyntax *syn = idm_syntax_value_get(parent);
-            if (!syn || syn->kind < IDM_SYN_LIST || (size_t)access->index + (size_t)access->index2 > syn->as.seq.count) return true;
+            if (!syn || syn->kind < IDM_SYN_LIST || (size_t)access->index + (size_t)access->index2 > syn->as.seq.count) break;
             size_t stop = syn->as.seq.count - access->index2;
             IdmValue list = idm_empty_list();
             for (size_t i = stop; i > access->index; i--) {
-                IdmValue item = idm_syntax_value(rt, syn->as.seq.items[i - 1u], err);
+                IdmValue item = idm_syntax_value(run->rt, syn->as.seq.items[i - 1u], err);
                 if (err && err->present) return false;
-                list = idm_cons(rt, item, list, err);
+                list = idm_cons(run->rt, item, list, err);
                 if (err && err->present) return false;
             }
             *out = list;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_SYN_DICT_VALUE: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || idm_value_tag(parent) != IDM_VAL_SYNTAX) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || idm_value_tag(parent) != IDM_VAL_SYNTAX) break;
             const IdmSyntax *value = syntax_dict_value_for_key(idm_syntax_value_get(parent), access->u.syn_key);
-            if (!value) return true;
-            *out = idm_syntax_value(rt, value, err);
+            if (!value) break;
+            *out = idm_syntax_value(run->rt, value, err);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_SYN_DICT_REST: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || idm_value_tag(parent) != IDM_VAL_SYNTAX) return true;
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || idm_value_tag(parent) != IDM_VAL_SYNTAX) break;
             const IdmSyntax *syn = idm_syntax_value_get(parent);
-            if (!syn || syn->kind != IDM_SYN_DICT || (syn->as.seq.count % 2u) != 0) return true;
+            if (!syn || syn->kind != IDM_SYN_DICT || (syn->as.seq.count % 2u) != 0) break;
             const SelPat *dp = access->u.dict_pat;
             IdmSyntax *rest = idm_syn_dict(syn->span);
             if (!rest) return idm_error_oom(err, syn->span);
@@ -2043,52 +2480,75 @@ static bool selector_eval_access(IdmRuntime *rt, const IdmPatternSelector *selec
                     return idm_error_oom(err, syn->span);
                 }
             }
-            *out = idm_syntax_value(rt, rest, err);
+            *out = idm_syntax_value(run->rt, rest, err);
             idm_syn_free(rest);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
         case SEL_ACCESS_SYN_UNWRAP_EXPR: {
             IdmValue parent = idm_nil();
-            bool ok = false;
-            if (!selector_eval_access(rt, selector, args, argc, access->parent, &parent, &ok, err)) return false;
-            if (!ok || idm_value_tag(parent) != IDM_VAL_SYNTAX) return true;
-            *out = idm_syntax_value(rt, syn_subject_unwrap_expr(idm_syntax_value_get(parent)), err);
+            bool parent_available = false;
+            if (!selector_eval_access(run, access->parent, &parent, &parent_available, err)) return false;
+            if (!parent_available || idm_value_tag(parent) != IDM_VAL_SYNTAX) break;
+            *out = idm_syntax_value(run->rt, syn_subject_unwrap_expr(idm_syntax_value_get(parent)), err);
             if (err && err->present) return false;
             *out_available = true;
-            return true;
+            break;
         }
+        default:
+            ok = idm_error_set(err, idm_span_unknown(NULL), "unknown pattern access kind");
+            break;
     }
-    return idm_error_set(err, idm_span_unknown(NULL), "unknown pattern access kind");
+    if (!ok) return false;
+    cache->value_ready = true;
+    cache->value_available = *out_available;
+    if (*out_available) cache->value = *out;
+    return true;
 }
 
-static bool selector_eval_syn(IdmRuntime *rt, const IdmPatternSelector *selector, const IdmValue *args, uint32_t argc, uint32_t access_id, const IdmSyntax **out, bool *out_available, IdmError *err) {
+static bool selector_eval_syn(SelRun *run, uint32_t access_id, const IdmSyntax **out, bool *out_available, IdmError *err) {
     *out_available = false;
+    const IdmPatternSelector *selector = run->selector;
     if (access_id >= selector->access_count) return idm_error_set(err, idm_span_unknown(NULL), "pattern access out of bounds");
+    SelAccessCache *cache = &run->accesses[access_id];
+    if (cache->syn_ready) {
+        *out_available = cache->syn_available;
+        if (cache->syn_available) *out = cache->syn;
+        return true;
+    }
     const SelAccess *a = &selector->accesses[access_id];
     if (a->kind == SEL_ACCESS_ARG) {
-        if (a->index >= argc || idm_value_tag(args[a->index]) != IDM_VAL_SYNTAX) return true;
-        *out = idm_syntax_value_get(args[a->index]);
+        if (a->index >= run->argc || idm_value_tag(run->args[a->index]) != IDM_VAL_SYNTAX) {
+            cache->syn_ready = true;
+            return true;
+        }
+        *out = idm_syntax_value_get(run->args[a->index]);
         *out_available = *out != NULL;
+        cache->syn_ready = true;
+        cache->syn_available = *out_available;
+        cache->syn = *out_available ? *out : NULL;
         return true;
     }
     const IdmSyntax *parent = NULL;
     bool ok = false;
-    if (!selector_eval_syn(rt, selector, args, argc, a->parent, &parent, &ok, err)) return false;
-    if (!ok || !parent) return true;
+    if (!selector_eval_syn(run, a->parent, &parent, &ok, err)) return false;
+    if (!ok || !parent) {
+        cache->syn_ready = true;
+        return true;
+    }
     switch (a->kind) {
         case SEL_ACCESS_SYN_ITEM:
-            if (parent->kind < IDM_SYN_LIST || a->index >= parent->as.seq.count) return true;
+            if (parent->kind < IDM_SYN_LIST || a->index >= parent->as.seq.count) break;
             *out = parent->as.seq.items[a->index];
             break;
         case SEL_ACCESS_SYN_ITEM_REV:
-            if (parent->kind < IDM_SYN_LIST || a->index >= parent->as.seq.count) return true;
+            if (parent->kind < IDM_SYN_LIST || a->index >= parent->as.seq.count) break;
             *out = parent->as.seq.items[parent->as.seq.count - 1u - a->index];
             break;
         case SEL_ACCESS_SYN_DICT_VALUE: {
             const IdmSyntax *v = syntax_dict_value_for_key(parent, a->u.syn_key);
-            if (!v) return true;
+            if (!v) break;
             *out = v;
             break;
         }
@@ -2099,6 +2559,9 @@ static bool selector_eval_syn(IdmRuntime *rt, const IdmPatternSelector *selector
             return idm_error_set(err, idm_span_unknown(NULL), "non-structural access in native syntax eval");
     }
     *out_available = *out != NULL;
+    cache->syn_ready = true;
+    cache->syn_available = *out_available;
+    cache->syn = *out_available ? *out : NULL;
     return true;
 }
 
@@ -2113,16 +2576,16 @@ static bool sel_ctor_matches_syn(SelCtor ctor, const IdmSyntax *syn) {
     return false;
 }
 
-static bool selector_apply_action(IdmRuntime *rt, const IdmPatternSelector *selector, const IdmValue *args, uint32_t argc, const SelAction *action, IdmPatternBindings *bindings, IdmError *err) {
+static bool selector_apply_action(SelRun *run, const SelAction *action, IdmPatternBindings *bindings, IdmError *err) {
     if (action->kind == SEL_ACTION_SYN_DICT_HAS) {
         const IdmSyntax *syn = NULL;
         bool avail = false;
-        if (!selector_eval_syn(rt, selector, args, argc, action->access, &syn, &avail, err)) return false;
+        if (!selector_eval_syn(run, action->access, &syn, &avail, err)) return false;
         return avail && syntax_dict_value_for_key(syn, action->syn_key) != NULL;
     }
     IdmValue value = idm_nil();
     bool available = false;
-    if (!selector_eval_access(rt, selector, args, argc, action->access, &value, &available, err)) return false;
+    if (!selector_eval_access(run, action->access, &value, &available, err)) return false;
     if (!available) return false;
     switch (action->kind) {
         case SEL_ACTION_BIND:
@@ -2145,7 +2608,6 @@ static bool selector_apply_action(IdmRuntime *rt, const IdmPatternSelector *sele
         case SEL_ACTION_VALUE_EQUAL:
             return idm_value_equal(action->value, value);
         case SEL_ACTION_DICT_HAS:
-            (void)rt;
             {
                 IdmValue ignored = idm_nil();
                 return idm_is_dict(value) && idm_dict_get(value, action->key, &ignored);
@@ -2164,11 +2626,12 @@ static bool selector_apply_action(IdmRuntime *rt, const IdmPatternSelector *sele
     return false;
 }
 
-static bool selector_exec_node(IdmRuntime *rt, const IdmPatternSelector *selector, uint32_t node_idx, const IdmValue *args, uint32_t argc, IdmPatternGuardFn guard, void *guard_user, uint32_t *out_function_index, IdmPatternBindings *bindings, bool *out_matched, IdmError *err) {
+static bool selector_exec_node(SelRun *run, uint32_t node_idx, IdmPatternGuardFn guard, void *guard_user, uint32_t *out_function_index, IdmPatternBindings *bindings, bool *out_matched, IdmError *err) {
     if (node_idx == SEL_NO_NODE) {
         *out_matched = false;
         return true;
     }
+    const IdmPatternSelector *selector = run->selector;
     const SelNode *node = &selector->pool.nodes[node_idx];
     switch (node->kind) {
         case SEL_NODE_FAIL:
@@ -2183,7 +2646,7 @@ static bool selector_exec_node(IdmRuntime *rt, const IdmPatternSelector *selecto
             size_t checkpoint = bindings->count;
             bool ok = true;
             for (size_t i = 0; ok && i < node->as.try_row.action_count; i++) {
-                ok = selector_apply_action(rt, selector, args, argc, &node->as.try_row.actions[i], bindings, err);
+                ok = selector_apply_action(run, &node->as.try_row.actions[i], bindings, err);
                 if (err && err->present) return false;
             }
             if (ok && node->as.try_row.has_guard) {
@@ -2198,33 +2661,31 @@ static bool selector_exec_node(IdmRuntime *rt, const IdmPatternSelector *selecto
                 return true;
             }
             bindings_truncate(bindings, checkpoint);
-            return selector_exec_node(rt, selector, node->as.try_row.next, args, argc, guard, guard_user, out_function_index, bindings, out_matched, err);
+            return selector_exec_node(run, node->as.try_row.next, guard, guard_user, out_function_index, bindings, out_matched, err);
         }
         case SEL_NODE_SWITCH: {
             if (node->as.sw.syn) {
                 const IdmSyntax *syn = NULL;
                 bool available = false;
-                if (!selector_eval_syn(rt, selector, args, argc, node->as.sw.access, &syn, &available, err)) return false;
+                if (!selector_eval_syn(run, node->as.sw.access, &syn, &available, err)) return false;
                 if (available) {
                     for (size_t i = 0; i < node->as.sw.case_count; i++) {
                         if (!sel_ctor_matches_syn(node->as.sw.cases[i].ctor, syn)) continue;
-                        if (!selector_exec_node(rt, selector, node->as.sw.cases[i].node, args, argc, guard, guard_user, out_function_index, bindings, out_matched, err)) return false;
-                        if (*out_matched) return true;
+                        return selector_exec_node(run, node->as.sw.cases[i].node, guard, guard_user, out_function_index, bindings, out_matched, err);
                     }
                 }
-                return selector_exec_node(rt, selector, node->as.sw.default_node, args, argc, guard, guard_user, out_function_index, bindings, out_matched, err);
+                return selector_exec_node(run, node->as.sw.default_node, guard, guard_user, out_function_index, bindings, out_matched, err);
             }
             IdmValue value = idm_nil();
             bool available = false;
-            if (!selector_eval_access(rt, selector, args, argc, node->as.sw.access, &value, &available, err)) return false;
+            if (!selector_eval_access(run, node->as.sw.access, &value, &available, err)) return false;
             if (available) {
                 for (size_t i = 0; i < node->as.sw.case_count; i++) {
                     if (!sel_ctor_matches_value(node->as.sw.cases[i].ctor, value)) continue;
-                    if (!selector_exec_node(rt, selector, node->as.sw.cases[i].node, args, argc, guard, guard_user, out_function_index, bindings, out_matched, err)) return false;
-                    if (*out_matched) return true;
+                    return selector_exec_node(run, node->as.sw.cases[i].node, guard, guard_user, out_function_index, bindings, out_matched, err);
                 }
             }
-            return selector_exec_node(rt, selector, node->as.sw.default_node, args, argc, guard, guard_user, out_function_index, bindings, out_matched, err);
+            return selector_exec_node(run, node->as.sw.default_node, guard, guard_user, out_function_index, bindings, out_matched, err);
         }
         case SEL_NODE_FORK:
         case SEL_NODE_BYTE:
@@ -2344,6 +2805,15 @@ bool idm_pattern_selector_build(IdmRuntime *rt, const IdmPatternSelectorClause *
             idm_pattern_selector_free(selector);
             return false;
         }
+    }
+
+    if (!selector_merge_dag(selector, err)) {
+        free(arities);
+        idm_pattern_selector_free(selector);
+        return false;
+    }
+    selector->has_unconditional = false;
+    for (size_t a = 0; a < arity_count; a++) {
         selector->arities[a].unconditional = sel_node_unconditional(selector, selector->arities[a].node, &selector->arities[a].function_index);
         if (selector->arities[a].unconditional) selector->has_unconditional = true;
     }
@@ -2368,6 +2838,10 @@ void idm_pattern_selector_free(IdmPatternSelector *selector) {
     free(selector);
 }
 
+size_t idm_pattern_selector_node_count(const IdmPatternSelector *selector) {
+    return selector ? selector->pool.count : 0u;
+}
+
 bool idm_pattern_selector_select(IdmRuntime *rt, const IdmPatternSelector *selector, const IdmValue *args, uint32_t argc, IdmPatternGuardFn guard, void *guard_user, uint32_t *out_function_index, IdmPatternBindings *out_bindings, bool *out_has_bindings, bool *out_matched, IdmError *err) {
     *out_function_index = UINT32_MAX;
     *out_has_bindings = false;
@@ -2386,11 +2860,15 @@ bool idm_pattern_selector_select(IdmRuntime *rt, const IdmPatternSelector *selec
         *out_matched = true;
         return true;
     }
+    SelRun run;
+    if (!sel_run_init(&run, rt, selector, args, argc, err)) return false;
     size_t checkpoint = out_bindings->count;
-    if (!selector_exec_node(rt, selector, arity_case->node, args, argc, guard, guard_user, out_function_index, out_bindings, out_matched, err)) {
+    if (!selector_exec_node(&run, arity_case->node, guard, guard_user, out_function_index, out_bindings, out_matched, err)) {
+        sel_run_destroy(&run);
         bindings_truncate(out_bindings, checkpoint);
         return false;
     }
+    sel_run_destroy(&run);
     if (!*out_matched) {
         bindings_truncate(out_bindings, checkpoint);
         return true;

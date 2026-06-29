@@ -1,0 +1,8 @@
+use std/test
+activate Test
+
+suite do
+  test "quote scalar literals use ordinary literal projection" do
+    '(:nil :atom 42 3.5 "x" [1 :a] {2 "b"} %{:a 1}) |> assert-eq '(:nil :atom 42 3.5 "x" [1 :a] {2 "b"} %{:a 1})
+  end
+end

@@ -17,11 +17,11 @@ operator ** precedence: 70 assoc: right capture: :infix -> pow
 operator - precedence: 80 capture: :prefix -> neg
 
 operator |> precedence: 10 assoc: left capture: {:infix :expression} macro do
-  %`(_ %,left (%,head %,@args)) -> %`(%,head %,left %,@args)
-  %`(_ %,left %,right) -> %`(%,right %,left)
+  %`(_ (%,head %,@args) %,left) -> %`(%,head %,left %,@args)
+  %`(_ %,right %,left) -> %`(%,right %,left)
 end
 
 operator |>> precedence: 10 assoc: left capture: {:infix :expression} macro do
-  %`(_ %,left (%,head %,@args)) -> %`(%,head %,@args %,left)
-  %`(_ %,left %,right) -> %`(%,right %,left)
+  %`(_ (%,head %,@args) %,left) -> %`(%,head %,@args %,left)
+  %`(_ %,right %,left) -> %`(%,right %,left)
 end

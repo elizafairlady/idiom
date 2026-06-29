@@ -1,6 +1,0 @@
-use app/ish
-activate Shell
-echo 2 > /tmp/idiom_gold_spaced
-printf "got:"
-cat /tmp/idiom_gold_spaced
-rm /tmp/idiom_gold_spaced

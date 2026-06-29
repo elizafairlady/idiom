@@ -1,5 +1,0 @@
-defmacro m stx -> %`(do
-    defn hidden-fn v -> v
-  end)
-m x
-hidden-fn 1

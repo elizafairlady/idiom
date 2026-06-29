@@ -1,1 +1,4 @@
 package system
+
+# Primitive export home. The exported system bindings are registered by the
+# core primitive metadata for package "system".

@@ -329,6 +329,7 @@ typedef struct {
     IdmScopeId kernel_scope_end;
     bool kernel_ready;
     IdmReaderArtifact *source_reader;
+    char *source_reader_path;
     unsigned char source_reader_hash[32];
     bool source_reader_hash_ready;
     CachedPackage **pkgs;

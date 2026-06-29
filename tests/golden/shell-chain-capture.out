@@ -1,4 +1,0 @@
-{:ok 0 "one\ntwo\n" ""}
-{:ok 0 "rescue\n" ""}
-{:error 1 "" ""}
-done

@@ -1,7 +1,0 @@
-use app/ish
-activate Shell
-echo one > /tmp/idiom_gold_append
-echo two >> /tmp/idiom_gold_append
-printf "got:"
-cat /tmp/idiom_gold_append
-rm /tmp/idiom_gold_append

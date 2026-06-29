@@ -1,4 +1,0 @@
-use app/ish
-activate Shell
-p = echo hi &
-println (await p)

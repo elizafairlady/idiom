@@ -1,5 +1,0 @@
-package labelproto
-
-export trait Label do
-  method point-label x
-end

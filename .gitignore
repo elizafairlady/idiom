@@ -45,6 +45,7 @@ build/
 
 # Debug files
 *.dSYM/
+callgrind.out.*
 *.su
 *.idb
 *.pdb

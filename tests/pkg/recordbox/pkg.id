@@ -1,6 +1,0 @@
-package recordbox
-
-export record Box do
-  field value
-  field label
-end

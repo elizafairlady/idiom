@@ -1,0 +1,63 @@
+use std/test
+use std/regex
+activate Test
+
+suite do
+  test "regex literal captures named and numeric groups" do
+    rx = r"(?<word>[a-z]+)-([0-9]+)"
+    rx |> regex? |> assert
+    rx |> group-count |> assert-eq 2
+    m = rx |> scan-full "abc-42"
+    m |> result? |> assert
+    m |> text-of |> assert-eq "abc-42"
+    m |> capture 1 |> assert-eq "abc"
+    m |> capture 2 |> assert-eq "42"
+    m |> capture-named :word |> assert-eq "abc"
+    m |> capture-range 2 |> assert-eq {4 6}
+    m |> captures |> assert-eq '("abc" "42")
+  end
+
+  test "regex replacement expands captures" do
+    rx = compile! "(?<name>[a-z]+)=([0-9]+)"
+    rx.sub "foo=7" "$1:$2" |> assert-eq "foo:7"
+  end
+
+  test "regex byte classes use shared byte class" do
+    (compile! "[a-c]+") |> scan-full "abc" |> result? |> assert
+    (compile! "[^0-9]+") |> scan-full "abc" |> result? |> assert
+    (compile! "\\d\\w\\s") |> scan-full "7a " |> result? |> assert
+    (compile! "[[:alpha:]][[:xdigit:]]") |> scan-full "fA" |> result? |> assert
+    (compile! "[a-c]+" :i) |> scan-full "ABC" |> result? |> assert
+    (compile! ".") |> scan-full "\n" |> result? |> assert-eq :false
+    (compile! "." :s) |> scan-full "\n" |> result? |> assert
+  end
+
+  test "byte automaton guard path is shared by test and capture scan" do
+    (compile! "^a" :m) |> test? "x\na" |> assert
+    (compile! "a$" :m) |> test? "a\nx" |> assert
+    (compile! "\\Aa") |> test? "a" |> assert
+    (compile! "a\\z") |> test? "a" |> assert
+    (compile! "a\\Z") |> test? "a" |> assert
+    (compile! "\\ba") |> test? "a" |> assert
+    (compile! "b\\Ba") |> test? "ba" |> assert
+    (compile! "a(?=b)b") |> test? "ab" |> assert
+    (compile! "a(?!c)b") |> test? "ab" |> assert
+    (compile! "a(?<=a)b") |> test? "ab" |> assert
+    (compile! "a(?<!c)b") |> test? "ab" |> assert
+    (compile! "^a" :m) |> scan-full "a" |> result? |> assert
+    (compile! "a$" :m) |> scan-full "a" |> result? |> assert
+    (compile! "\\Aa") |> scan-full "a" |> result? |> assert
+    (compile! "a\\z") |> scan-full "a" |> result? |> assert
+    (compile! "a\\Z") |> scan-full "a" |> result? |> assert
+    (compile! "\\ba") |> scan-full "a" |> result? |> assert
+    (compile! "b\\Ba") |> scan-full "ba" |> result? |> assert
+    (compile! "a(?=b)b") |> scan-full "ab" |> result? |> assert
+    (compile! "a(?!c)b") |> scan-full "ab" |> result? |> assert
+    (compile! "a(?<=a)b") |> scan-full "ab" |> result? |> assert
+    (compile! "a(?<!c)b") |> scan-full "ab" |> result? |> assert
+    guarded = (compile! "^(?<cap>a)(?=b)b" :m) |> scan-full "ab"
+    guarded |> result? |> assert
+    guarded |> capture-named :cap |> assert-eq "a"
+    guarded |> capture-range 1 |> assert-eq {0 1}
+  end
+end

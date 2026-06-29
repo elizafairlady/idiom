@@ -1,0 +1,47 @@
+use std/regex
+use std/enum
+use std/string
+use std/port with [port-close-input port-read port-write]
+use std/system with [time-ms]
+use tests/pkg/bytecode_shape with [syntax-wire-ok]
+import std/range as Range
+
+start = time-ms
+
+rx = r"(?<name>[a-z]+)=([0-9]+)"
+line = "count=41"
+regex_match = rx |> scan-full line
+name = regex_match |> capture-named :name
+value = regex_match |> capture 2 |> parse-int!
+
+parent = self
+spawn (fn do
+  send parent {:parsed name (value + 1)}
+end)
+
+parsed = receive do
+  {:parsed key n} -> {key n}
+  after 1000 -> {:timeout 0}
+end
+
+p = exec {:exec {:stage '({:lit "cat"}) '() '()} {:stdio :pipe :pipe :pipe}}
+port-write p "ok" |> eq? {:ok 2}
+port-close-input p
+echo = port-read p :stdout 2
+
+sum = (Range.inclusive 1 5).sum
+big = 9223372036854775808 + 1
+syntax_big = syntax-int-value %'9223372036854775808
+syntax_pair = match %`(pair 20 22) do
+  %`(pair %,a %,b) -> (syntax-int-value a) + (syntax-int-value b)
+  _ -> 0
+end
+syntax_wire = syntax-wire-ok
+if syntax_wire do
+  :ok
+else do
+  raise :syntax-wire
+end
+elapsed = time-ms - start
+println "#{inspect {:parsed parsed :echo echo :sum sum :big big :syntax-big syntax_big :syntax-pattern syntax_pair :syntax-wire syntax_wire :elapsed-ms elapsed}}"
+:ok

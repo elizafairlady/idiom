@@ -1,0 +1,175 @@
+use std/test
+use std/enum
+use std/string
+activate Test
+
+defn boom -> raise {:custom :failure}
+
+iter-list? = implements? Iter '(1 2)
+iter-int? = implements? Iter 5
+
+trait DispatchProbeTrait do
+  method dispatch-probe do
+    x -> {:default-one x}
+    x y -> {:default-two x y}
+  end
+end
+
+implement DispatchProbeTrait on int do
+  method dispatch-probe do
+    x -> {:int-one x}
+    x y -> {:int-two x y}
+  end
+end
+
+trait ScopedOuterTrait do
+  method scoped-probe x -> {:outer x}
+end
+
+implement ScopedOuterTrait on int do
+  method scoped-probe x -> {:outer-int x}
+end
+
+trait RequirementBase do
+  method requirement-base x -> {:base-default x}
+end
+
+trait RequirementDerived do
+  require RequirementBase
+  method requirement-derived x -> {:derived-default x}
+end
+
+implement RequirementBase on int do
+  method requirement-base x -> {:base-int x}
+end
+
+implement RequirementDerived on int do
+  method requirement-derived x -> {:derived-int x}
+end
+
+suite do
+  test "raise propagates a value" do
+    assert-raises (fn -> boom) |> assert-eq {:custom :failure}
+  end
+
+  test "error wraps in error tuple" do
+    assert-raises (fn -> error :negative) |> assert-eq {:error :negative}
+  end
+
+  test "try rescue binds the raised value" do
+    result = try do
+      boom
+    rescue e -> e
+    end
+    result |> assert-eq {:custom :failure}
+  end
+
+  test "try ensure runs and value passes through" do
+    result = try do
+      41
+    ensure :ok
+    end
+    result |> assert-eq 41
+  end
+
+  test "fn value, single and multi clause" do
+    double = fn x -> mul x 2
+    double 21 |> assert-eq 42
+    classify = fn do
+      0 -> :zero
+      _ -> :nonzero
+    end
+    classify 0 |> assert-eq :zero
+    classify 9 |> assert-eq :nonzero
+  end
+
+  test "receive selects a matching message" do
+    send self {:ping 7}
+    got = receive do
+      {:ping n} -> n
+      after 100 -> :timeout
+    end
+    got |> assert-eq 7
+  end
+
+  test "implements? reflects trait membership" do
+    iter-list? |> assert
+    iter-int? |> not? |> assert
+  end
+
+  test "trait dispatcher emits shared arity clauses" do
+    dispatch-probe 5 |> assert-eq {:int-one 5}
+    dispatch-probe 5 9 |> assert-eq {:int-two 5 9}
+    {:error one} = assert-raises (fn -> dispatch-probe :missing)
+    {:error two} = assert-raises (fn -> dispatch-probe :missing :again)
+    contains? one "method 'dispatch-probe' does not implement trait 'DispatchProbeTrait" |> assert
+    contains? two "method 'dispatch-probe' does not implement trait 'DispatchProbeTrait" |> assert
+  end
+
+  test "method surfaces use scoped binding resolution" do
+    inner = do
+      trait ScopedInnerTrait do
+        method scoped-probe x -> {:inner x}
+      end
+
+      implement ScopedInnerTrait on int do
+        method scoped-probe x -> {:inner-int x}
+      end
+
+      scoped-probe 1
+    end
+    inner |> assert-eq {:inner-int 1}
+    scoped-probe 2 |> assert-eq {:outer-int 2}
+  end
+
+  test "required trait implementation uses canonical method identity" do
+    requirement-base 7 |> assert-eq {:base-int 7}
+    requirement-derived 7 |> assert-eq {:derived-int 7}
+    implements? RequirementBase 7 |> assert
+    implements? RequirementDerived 7 |> assert
+    assert-expand-error "trait NeedBase do\n  method need-base x -> x\nend\ntrait NeedDerived do\n  require NeedBase\n  method need-derived x -> x\nend\nimplement NeedDerived on int do\n  method need-derived x -> x\nend\n" "is not implemented on type 'int'"
+    assert-compiles "package package_order_require_probe\ntrait OrderDerived do\n  require OrderBase\n  method order-derived x -> x\nend\nimplement OrderDerived on int do\n  method order-derived x -> x\nend\ntrait OrderBase do\n  method order-base x -> x\nend\nimplement OrderBase on int do\n  method order-base x -> x\nend\n"
+  end
+
+  test "method surfaces report same-scope ambiguity" do
+    ambiguity = assert-raises (fn -> do
+      trait AmbA do
+        method same x -> {:a x}
+      end
+      trait AmbB do
+        method same x -> {:b x}
+      end
+      implement AmbA on int do
+        method same x -> {:a-int x}
+      end
+      implement AmbB on int do
+        method same x -> {:b-int x}
+      end
+      same 1
+    end)
+    ambiguity |> assert-eq {:error "ambiguous method 'same' on type 'int'"}
+  end
+
+  test "record fields resolve through type metadata not method surface table" do
+    record FieldOne do
+      field shared
+    end
+    record FieldTwo do
+      field shared
+    end
+    one = FieldOne 11
+    two = FieldTwo 22
+    one.shared |> assert-eq 11
+    two.shared |> assert-eq 22
+    shared one |> assert-eq 11
+    shared two |> assert-eq 22
+    assert-expand-error "record FieldConflict do\n  field collide\nend\ntrait FieldConflictTrait do\n  method collide x -> x\nend\n" "record field and a trait method"
+  end
+
+  test "declaration duplicate checks share name lookup" do
+    assert-expand-error "trait ReqBase do\n  method base x -> x\nend\ntrait ReqDup do\n  require ReqBase\n  require ReqBase\n  method m x -> x\nend\n" "requires trait"
+    assert-expand-error "trait DupTrait do\n  method dup x -> x\n  method dup x -> x\nend\n" "declares method"
+    assert-expand-error "trait ImplDup do\n  method impldup x -> x\nend\nimplement ImplDup on int do\n  method impldup x -> x\n  method impldup x -> x\nend\n" "provides method"
+    assert-expand-error "record DupField do\n  field x\n  field x\nend\n" "declared more than once"
+  end
+end

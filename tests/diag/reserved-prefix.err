@@ -1,1 +1,0 @@
-tests/diag/reserved-prefix.id:1:5: error: reserved prefixed string literal 'b"…"' (bitstrings and bytestrings arrive post-1.0)

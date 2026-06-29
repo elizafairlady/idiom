@@ -1,23 +1,0 @@
-[J~ % [4C[J~ % a[5C[J~ % ad[6C[J~ % add[7C[J~ % add [8C[J~ % add 1[9C[J~ % add 1 [10C[J~ % add 1 1[11C
-2
-[J~ % [4C[J~ % a[5C[J~ % ad[6C[J~ % add[7C[J~ % add [8C[J~ % add 1[9C[J~ % add 1 [10C[J~ % add 1 1[11C
-2
-[J~ % [4C[J~ %  [5C[J~ %  a[6C[J~ %  ad[7C[J~ %  add[8C[J~ %  add [9C[J~ %  add 2[10C[J~ %  add 2 [11C[J~ %  add 2 2[12C
-4
-[J~ % [4C[J~ % d[5C[J~ % do[6C[J~ % do
-...> [5C[1A[J~ % do
-...>  [6C[1A[J~ % do
-...>   [7C[1A[J~ % do
-...>   3[8C[1A[J~ % do
-...>   3
-...> [5C[2A[J~ % do
-...>   3
-...> e[6C[2A[J~ % do
-...>   3
-...> en[7C[2A[J~ % do
-...>   3
-...> end[8C
-3
-[J~ % [4C[J~ %  [5C[J~ %  F[6C[J~ %  Fi[7C[J~ %  Fil[8C[J~ %  File[9C[J~ %  File.[10C[J~ %  File.r[11C[J~ %  File.re[12C[J~ %  File.rea[13C[J~ %  File.read[14C[J~ %  File.read [15C[J~ %  File.read "[16C[J~ %  File.read "h[17C[J~ %  File.read "hi[18C[J~ %  File.read "his[19C[J~ %  File.read "hist[20C[J~ %  File.read "hist"[21C
-{:ok "add 1 1\ndo\\n  3\\nend\n"}
-[J~ % [4C

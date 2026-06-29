@@ -1,0 +1,43 @@
+use std/regex
+use std/string
+use std/test
+import std/list as L
+activate Test
+
+capture-rx = compile! "^(?<word>[a-z]+)-([0-9]+)$"
+guard-rx = compile! "\\ba(?=b)b\\z"
+scan-rx = compile! "[a-z]+([0-9]+)"
+split-rx = compile! ","
+
+suite "regex" do
+  bench "compile/literal-captures" expect: 2 do
+    rx = compile! "^(?<word>[a-z]+)-([0-9]+)$"
+    group-count rx
+  end
+
+  bench "match/test-full" expect: 1 do
+    cond (capture-rx |> test? "abc-123") 1 0
+  end
+
+  bench "capture/numeric-named" expect: 123 do
+    m = capture-rx |> scan-full "abc-123"
+    capture m 2 |> parse-int!
+  end
+
+  bench "replace/capture-expand" expect: 7 do
+    len (capture-rx.sub "abc-123" "$1:$2")
+  end
+
+  bench "split/separator" expect: 4 do
+    L.length (split-rx.split-on "a,b,c,d")
+  end
+
+  bench "assertion/boundary-lookahead" expect: 1 do
+    cond (guard-rx |> test? "ab") 1 0
+  end
+
+  bench "scan/scan-all" expect: 4 do
+    L.length (scan-rx.scan-all "a1 b22 c333 d4444")
+  end
+end
+:ok

@@ -1,9 +1,0 @@
-package phx
-
-use tests/pkg/labelproto
-
-implement Label on int do
-  method point-label n -> :int-label
-end
-
-export defn tagit n -> point-label n

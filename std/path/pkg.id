@@ -3,6 +3,8 @@ package path
 use std/string
 use std/system with [pwd]
 
+# Lexical path helpers. These do not normalize dot segments or query the filesystem.
+
 export defn join do
   a b when (eq? a "") -> b
   a b when (ends-with? a "/") -> "${a}${b}"
@@ -10,6 +12,11 @@ export defn join do
 end
 
 defn last-slash p -> scan-slash p (len p)
+
+defn basename-start p -> match (last-slash p) do
+  :nil -> 0
+  i -> add i 1
+end
 
 defn scan-slash do
   _p 0 -> :nil
@@ -46,10 +53,13 @@ defn last-dot do
 end
 
 export defn extname do
-  p -> match (last-dot p (len p)) do
-    :nil -> ""
-    0 -> ""
-    i -> slice p i (len p)
+  p -> do
+    start = basename-start p
+    match (last-dot p (len p)) do
+      :nil -> ""
+      i when (lte? i start) -> ""
+      i -> slice p i (len p)
+    end
   end
 end
 

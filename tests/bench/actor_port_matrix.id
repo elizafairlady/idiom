@@ -1,0 +1,44 @@
+use std/port with [port-close-input port-read port-write]
+use std/string
+use std/test
+activate Test
+
+suite "actor-port" do
+  bench "actor/spawn-send-receive" expect: 1 do
+    parent = self
+    spawn (fn do
+      send parent {:bench 1}
+    end)
+    receive do
+      {:bench value} -> value
+      after 1000 -> 0
+    end
+  end
+
+  bench "actor/spawn-monitor-down" expect: 1 do
+    {_pid ref} = spawn-monitor (fn -> 1)
+    receive do
+      {:down r _p :normal} when (eq? r ref) -> 1
+      after 1000 -> 0
+    end
+  end
+
+  bench "port/exec-await" expect: 1 do
+    p = exec {:exec {:stage '({:lit "printf"} {:lit "ok"}) '() '()} {:stdio :null :pipe :pipe}}
+    match (await p) do
+      {:ok 0 "ok" ""} -> 1
+      _ -> 0
+    end
+  end
+
+  bench "port/pipe-write-read" expect: 1 do
+    p = exec {:exec {:stage '({:lit "cat"}) '() '()} {:stdio :pipe :pipe :pipe}}
+    port-write p "ok"
+    port-close-input p
+    match (port-read p :stdout 2) do
+      {:data "ok"} -> 1
+      _ -> 0
+    end
+  end
+end
+:ok

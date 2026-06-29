@@ -1835,34 +1835,7 @@ const char *idm_value_dispatch_type_name(IdmValue value) {
     return idm_value_type_name(idm_value_tag(value));
 }
 
-typedef enum {
-    IDM_BUILTIN_TYPE_NONE,
-    IDM_BUILTIN_TYPE_NIL,
-    IDM_BUILTIN_TYPE_ATOM,
-    IDM_BUILTIN_TYPE_WORD,
-    IDM_BUILTIN_TYPE_INT,
-    IDM_BUILTIN_TYPE_FIXNUM,
-    IDM_BUILTIN_TYPE_BIGNUM,
-    IDM_BUILTIN_TYPE_FLOAT,
-    IDM_BUILTIN_TYPE_STRING,
-    IDM_BUILTIN_TYPE_PAIR,
-    IDM_BUILTIN_TYPE_EMPTY_LIST,
-    IDM_BUILTIN_TYPE_LIST,
-    IDM_BUILTIN_TYPE_TUPLE,
-    IDM_BUILTIN_TYPE_VECTOR,
-    IDM_BUILTIN_TYPE_DICT,
-    IDM_BUILTIN_TYPE_SYNTAX,
-    IDM_BUILTIN_TYPE_CELL,
-    IDM_BUILTIN_TYPE_CLOSURE,
-    IDM_BUILTIN_TYPE_PID,
-    IDM_BUILTIN_TYPE_REF,
-    IDM_BUILTIN_TYPE_PORT,
-    IDM_BUILTIN_TYPE_RECORD,
-    IDM_BUILTIN_TYPE_REGEX,
-    IDM_BUILTIN_TYPE_REGEX_RESULT
-} IdmBuiltinType;
-
-static IdmBuiltinType builtin_type_kind(IdmSymbol *type) {
+IdmBuiltinType idm_value_builtin_type_kind(IdmSymbol *type) {
     if (!type) return IDM_BUILTIN_TYPE_NONE;
     const char *text = idm_symbol_text(type);
     if (strcmp(text, "nil") == 0) return IDM_BUILTIN_TYPE_NIL;
@@ -1892,13 +1865,13 @@ static IdmBuiltinType builtin_type_kind(IdmSymbol *type) {
 }
 
 bool idm_value_builtin_type_symbol(IdmSymbol *type) {
-    return builtin_type_kind(type) != IDM_BUILTIN_TYPE_NONE;
+    return idm_value_builtin_type_kind(type) != IDM_BUILTIN_TYPE_NONE;
 }
 
 bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type) {
     if (!type) return false;
     IdmValueTag vt = idm_value_tag(value);
-    switch (builtin_type_kind(type)) {
+    switch (idm_value_builtin_type_kind(type)) {
         case IDM_BUILTIN_TYPE_NIL: return vt == IDM_VAL_NIL;
         case IDM_BUILTIN_TYPE_ATOM: return vt == IDM_VAL_ATOM;
         case IDM_BUILTIN_TYPE_WORD: return vt == IDM_VAL_WORD;
@@ -2148,7 +2121,7 @@ bool idm_record_field_project_symbols(IdmValue value, IdmSymbol *type, IdmSymbol
 
 bool idm_record_is_symbol(IdmValue value, IdmSymbol *type) {
     if (!type) return false;
-    if (builtin_type_kind(type) == IDM_BUILTIN_TYPE_RECORD) return idm_value_tag(value) == IDM_VAL_RECORD;
+    if (idm_value_builtin_type_kind(type) == IDM_BUILTIN_TYPE_RECORD) return idm_value_tag(value) == IDM_VAL_RECORD;
     return idm_value_tag(value) == IDM_VAL_RECORD && idm_boxed_object(value)->as.record.shape->type == type;
 }
 

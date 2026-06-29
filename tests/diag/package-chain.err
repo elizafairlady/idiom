@@ -1,2 +1,0 @@
-tests/diag/package-chain.id:1:1: error: package 'tests/pkg/nope-not-real' not found (searched cwd)
-  while loading package 'tests/pkg/nope-not-real' (tests/diag/package-chain.id:1:1)

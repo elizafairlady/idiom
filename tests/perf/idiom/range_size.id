@@ -1,7 +1,0 @@
-use std/enum with [Enum]
-import std/range as Range
-
-up = Range.inclusive 0 1000000000 3
-down = Range.exclusive 1000000000 0 -7
-
-println {(Range.size up) (Range.last up) up.length (Range.size down) (Range.last down) down.count (Range.contains? down 999999993) (Range.contains? down 999999992)}

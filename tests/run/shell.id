@@ -1,4 +1,0 @@
-use app/ish
-activate Shell
-out = echo runner-shell | tr a-z A-Z
-match out do {t c so se} -> print so end

@@ -1,9 +1,0 @@
-trait Show do
-  method show x
-end
-
-implement Show on int do
-  method show x -> str "int:" x
-end
-
-println 42.show

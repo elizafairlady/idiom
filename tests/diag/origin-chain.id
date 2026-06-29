@@ -1,3 +1,0 @@
-defmacro outer stx -> %`(inner 1)
-defmacro inner stx -> %`(no-such-fn 1)
-outer x

@@ -1,0 +1,42 @@
+use std/test
+use std/regex
+activate Test
+
+suite do
+  test "syntax-kind names come from one datum vocabulary" do
+    syntax-kind %'nil |> assert-eq :word
+    syntax-kind %':atom |> assert-eq :atom
+    syntax-kind %'42 |> assert-eq :int
+    syntax-kind %'3.5 |> assert-eq :float
+    syntax-kind %'"x" |> assert-eq :string
+    syntax-kind %'(a b) |> assert-eq :list
+    syntax-kind %'[a b] |> assert-eq :vector
+    syntax-kind %'{a b} |> assert-eq :tuple
+    syntax-kind %'%{:a 1} |> assert-eq :dict
+  end
+
+  test "value predicates route through type-name membership" do
+    nil? :nil |> assert
+    atom? :atom |> assert
+    word? 'word |> assert
+    int? 42 |> assert
+    float? 3.5 |> assert
+    string? "x" |> assert
+    pair? '(1 2) |> assert
+    empty-list? '() |> assert
+    list? '(1 2) |> assert
+    tuple? {1 2} |> assert
+    vector? [1 2] |> assert
+    dict? %{:a 1} |> assert
+    syntax? %'word |> assert
+    closure? (fn x -> x) |> assert
+    pid? self |> assert
+    rx = r"x"
+    rx |> regex? |> assert
+    rx.scan-full "x" |> regex-result? |> assert
+    is-a? '(1 2) :list |> assert
+    is-a? '(1 2) "list" |> assert
+    is-a? '() :empty-list |> assert
+    is-a? 42 :int |> assert
+  end
+end

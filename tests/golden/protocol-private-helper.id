@@ -1,8 +1,0 @@
-defn helper x -> :outer-helper
-protocol Helped do
-  defn helper x -> mul x 2
-  export defmacro twice-h %`(twice-h %,e) -> %`(helper %,e)
-end
-activate Helped
-println (twice-h 21)
-println (helper 5)

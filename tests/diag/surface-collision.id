@@ -1,5 +1,0 @@
-use tests/pkg/exporter
-use tests/pkg/exporter2
-activate Exporter
-activate Exporter2
-answer x

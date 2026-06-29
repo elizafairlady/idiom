@@ -2,7 +2,7 @@ package set
 
 use std/enum
 
-export record Set do
+record Set do
   field dict
 end
 

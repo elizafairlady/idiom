@@ -1,7 +1,0 @@
-defn myadd a b -> add a b
-operator <+> precedence: 50 assoc: left capture: :infix -> myadd
-r = do
-  defn myadd a b -> 0
-  1 <+> 2
-end
-println (inspect r)

@@ -1,3 +1,0 @@
-implement Prompt on dict do
-  method prompt _s -> error :prompt-boom
-end

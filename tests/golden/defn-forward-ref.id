@@ -1,4 +1,0 @@
-defn a x -> b x
-y = 1
-defn b x -> add x y
-println (a 41)

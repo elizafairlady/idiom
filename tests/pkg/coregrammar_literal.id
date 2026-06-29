@@ -1,7 +1,0 @@
-package coregrammar_literal
-
-export protocol GrammarLiteral do
-  core-grammar ReaderLiteral :exclusive [
-    {:token arrow {:literal "=>"} {:emit-atom arrow}}
-  ]
-end

@@ -28,19 +28,31 @@ end
 
 export defn concat xs ys -> xs |> append ys
 
+defn concat-all-rev do
+  '() acc -> &acc
+  '(h . t) acc -> concat-all-rev t (rev-into &h acc)
+end
+
 export defn concat-all do
-  '() -> '()
-  '(h . t) -> append &h (concat-all t)
+  xs -> concat-all-rev xs '() |> rev-into '()
+end
+
+defn map-acc do
+  '() _ acc -> rev-into acc '()
+  '(h . t) f acc -> map-acc t f (cons (f &h) acc)
 end
 
 export defn map do
-  '() _ -> '()
-  '(h . t) f -> cons (f &h) (map t f)
+  xs f -> map-acc xs f '()
+end
+
+defn filter-acc do
+  '() _ acc -> rev-into acc '()
+  '(h . t) f acc -> filter-acc t f (cond (f &h) (cons &h acc) &acc)
 end
 
 export defn filter do
-  '() _ -> '()
-  '(h . t) f -> cond (f &h) (cons &h (filter t f)) (filter t f)
+  xs f -> filter-acc xs f '()
 end
 
 export defn reject xs f -> xs |> filter (fn x -> cond (f &x) :false :true)
@@ -107,11 +119,13 @@ end
 
 export defn nth! xs i -> cond (lt? i 0) (error {:index-out-of-range i}) (xs |> nth-bang-from i i)
 
-export defn take do
-  _ n when (lte? n 0) -> '()
-  '() _ -> '()
-  '(h . t) n -> cons &h (take t (sub n 1))
+defn take-acc do
+  _ n acc when (lte? n 0) -> rev-into acc '()
+  '() _ acc -> rev-into acc '()
+  '(h . t) n acc -> take-acc t (sub n 1) (cons &h acc)
 end
+
+export defn take xs n -> take-acc xs n '()
 
 export defn drop do
   xs n when (lte? n 0) -> &xs
@@ -119,10 +133,12 @@ export defn drop do
   '(_ . t) n -> drop t (sub n 1)
 end
 
-export defn take-while do
-  '() _ -> '()
-  '(h . t) f -> cond (f &h) (cons &h (take-while t f)) '()
+defn take-while-acc do
+  '() _ acc -> rev-into acc '()
+  '(h . t) f acc -> cond (f &h) (take-while-acc t f (cons &h acc)) (rev-into acc '())
 end
+
+export defn take-while xs f -> take-while-acc xs f '()
 
 export defn drop-while do
   '() _ -> '()
@@ -145,33 +161,39 @@ end
 
 export defn partition xs f -> xs |> partition-acc f '() '()
 
-export defn zip do
-  '() _ -> '()
-  _ '() -> '()
-  '(a . at) '(b . bt) -> cons {&a &b} (zip at bt)
+defn zip-acc do
+  '() _ acc -> rev-into acc '()
+  _ '() acc -> rev-into acc '()
+  '(a . at) '(b . bt) acc -> zip-acc at bt (cons {&a &b} acc)
 end
 
-export defn zip-with do
-  '() _ _ -> '()
-  _ '() _ -> '()
-  '(a . at) '(b . bt) f -> cons (f &a &b) (zip-with at bt f)
+export defn zip a b -> zip-acc a b '()
+
+defn zip-with-acc do
+  '() _ _ acc -> rev-into acc '()
+  _ '() _ acc -> rev-into acc '()
+  '(a . at) '(b . bt) f acc -> zip-with-acc at bt f (cons (f &a &b) acc)
 end
+
+export defn zip-with a b f -> zip-with-acc a b f '()
 
 defn intersperse-from do
-  '() _ -> '()
-  '(h . t) sep -> cons &sep (cons &h (intersperse-from t sep))
+  '() _ acc -> rev-into acc '()
+  '(h . t) sep acc -> intersperse-from t sep (cons &h (cons &sep acc))
 end
 
 export defn intersperse do
   '() _ -> '()
-  '(h . t) sep -> cons &h (intersperse-from t sep)
+  '(h . t) sep -> intersperse-from t sep (cons &h '())
 end
 
-export defn flatten do
-  '() -> '()
-  '(h . t) when (list? &h) -> &h |> flatten |> append (flatten t)
-  '(h . t) -> cons &h (flatten t)
+defn flatten-into do
+  '() acc -> &acc
+  '(h . t) acc when (list? &h) -> flatten-into t (flatten-into &h acc)
+  '(h . t) acc -> flatten-into t (cons &h acc)
 end
+
+export defn flatten xs -> flatten-into xs '() |> rev-into '()
 
 export defn first do
   '() -> :nil
@@ -214,43 +236,53 @@ export defn init do
 end
 
 export defn delete do
-  '() _ -> '()
-  '(h . t) x when (eq? &h &x) -> &t
-  '(h . t) x -> cons &h (delete t x)
+  xs x -> delete-acc xs x '()
+end
+
+defn delete-acc do
+  '() _ acc -> rev-into acc '()
+  '(h . t) x acc when (eq? &h &x) -> (rev-into acc '()) |> append t
+  '(h . t) x acc -> delete-acc t x (cons &h acc)
 end
 
 export defn delete-all do
-  '() _ -> '()
-  '(h . t) x when (eq? &h &x) -> delete-all t x
-  '(h . t) x -> cons &h (delete-all t x)
+  xs x -> xs |> filter (fn item -> neq? item x)
 end
 
-export defn delete-at do
-  xs i when (lt? i 0) -> &xs
-  '() _ -> '()
-  '(_ . t) 0 -> &t
-  '(h . t) i -> cons &h (delete-at t (sub i 1))
+defn delete-at-acc do
+  xs i acc when (lt? i 0) -> append (rev-into acc '()) xs
+  '() _ acc -> rev-into acc '()
+  '(_ . t) 0 acc -> (rev-into acc '()) |> append t
+  '(h . t) i acc -> delete-at-acc t (sub i 1) (cons &h acc)
 end
 
-export defn insert-at do
-  xs i x when (lte? i 0) -> cons &x &xs
-  '() _ x -> cons &x '()
-  '(h . t) i x -> cons &h (insert-at t (sub i 1) x)
+export defn delete-at xs i -> delete-at-acc xs i '()
+
+defn insert-at-acc do
+  xs i x acc when (lte? i 0) -> (rev-into acc '()) |> append (cons &x &xs)
+  '() _ x acc -> (rev-into acc '()) |> append (cons &x '())
+  '(h . t) i x acc -> insert-at-acc t (sub i 1) x (cons &h acc)
 end
 
-export defn replace-at do
-  xs i _ when (lt? i 0) -> &xs
-  '() _ _ -> '()
-  '(_ . t) 0 x -> cons &x &t
-  '(h . t) i x -> cons &h (replace-at t (sub i 1) x)
+export defn insert-at xs i x -> insert-at-acc xs i x '()
+
+defn replace-at-acc do
+  xs i _ acc when (lt? i 0) -> append (rev-into acc '()) xs
+  '() _ _ acc -> rev-into acc '()
+  '(_ . t) 0 x acc -> (rev-into acc '()) |> append (cons &x &t)
+  '(h . t) i x acc -> replace-at-acc t (sub i 1) x (cons &h acc)
 end
 
-export defn update-at do
-  xs i _ when (lt? i 0) -> &xs
-  '() _ _ -> '()
-  '(h . t) 0 f -> cons (f &h) &t
-  '(h . t) i f -> cons &h (update-at t (sub i 1) f)
+export defn replace-at xs i x -> replace-at-acc xs i x '()
+
+defn update-at-acc do
+  xs i _ acc when (lt? i 0) -> append (rev-into acc '()) xs
+  '() _ _ acc -> rev-into acc '()
+  '(h . t) 0 f acc -> (rev-into acc '()) |> append (cons (f &h) &t)
+  '(h . t) i f acc -> update-at-acc t (sub i 1) f (cons &h acc)
 end
+
+export defn update-at xs i f -> update-at-acc xs i f '()
 
 export defn starts-with? do
   _ '() -> :true
@@ -262,6 +294,10 @@ end
 export defn ends-with? xs suffix -> xs |> reverse |> starts-with? (suffix |> reverse)
 
 export defn duplicate do
-  _ n when (lte? n 0) -> '()
-  x n -> cons &x (duplicate x (sub n 1))
+  x n -> duplicate-acc &x n '()
+end
+
+defn duplicate-acc do
+  _ n acc when (lte? n 0) -> &acc
+  x n acc -> duplicate-acc &x (sub n 1) (cons &x acc)
 end

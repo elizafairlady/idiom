@@ -1,5 +1,0 @@
-#!/usr/bin/env idiomc
-defn double do
-  n -> mul n 2
-end
-println (double 21)

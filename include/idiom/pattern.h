@@ -196,6 +196,7 @@ void idm_byte_match_destroy(IdmByteMatch *m);
 bool idm_pattern_selector_build(IdmRuntime *rt, const IdmPatternSelectorClause *clauses, size_t clause_count, IdmPatternSelector **out, IdmError *err);
 void idm_pattern_selector_retain(IdmPatternSelector *selector);
 void idm_pattern_selector_free(IdmPatternSelector *selector);
+size_t idm_pattern_selector_node_count(const IdmPatternSelector *selector);
 bool idm_pattern_selector_select(IdmRuntime *rt, const IdmPatternSelector *selector, const IdmValue *args, uint32_t argc, IdmPatternGuardFn guard, void *guard_user, uint32_t *out_function_index, IdmPatternBindings *out_bindings, bool *out_has_bindings, bool *out_matched, IdmError *err);
 
 #endif

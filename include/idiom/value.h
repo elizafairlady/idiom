@@ -275,6 +275,33 @@ const char *idm_value_type_name(IdmValueTag tag);
 const char *idm_value_dispatch_type_name(IdmValue value);
 const char *idm_value_sequence_kind_name(IdmValueSequenceKind kind);
 const char *idm_syntax_build_kind_name(IdmSyntaxBuildKind kind);
+typedef enum {
+    IDM_BUILTIN_TYPE_NONE,
+    IDM_BUILTIN_TYPE_NIL,
+    IDM_BUILTIN_TYPE_ATOM,
+    IDM_BUILTIN_TYPE_WORD,
+    IDM_BUILTIN_TYPE_INT,
+    IDM_BUILTIN_TYPE_FIXNUM,
+    IDM_BUILTIN_TYPE_BIGNUM,
+    IDM_BUILTIN_TYPE_FLOAT,
+    IDM_BUILTIN_TYPE_STRING,
+    IDM_BUILTIN_TYPE_PAIR,
+    IDM_BUILTIN_TYPE_EMPTY_LIST,
+    IDM_BUILTIN_TYPE_LIST,
+    IDM_BUILTIN_TYPE_TUPLE,
+    IDM_BUILTIN_TYPE_VECTOR,
+    IDM_BUILTIN_TYPE_DICT,
+    IDM_BUILTIN_TYPE_SYNTAX,
+    IDM_BUILTIN_TYPE_CELL,
+    IDM_BUILTIN_TYPE_CLOSURE,
+    IDM_BUILTIN_TYPE_PID,
+    IDM_BUILTIN_TYPE_REF,
+    IDM_BUILTIN_TYPE_PORT,
+    IDM_BUILTIN_TYPE_RECORD,
+    IDM_BUILTIN_TYPE_REGEX,
+    IDM_BUILTIN_TYPE_REGEX_RESULT
+} IdmBuiltinType;
+IdmBuiltinType idm_value_builtin_type_kind(IdmSymbol *type);
 bool idm_value_builtin_type_symbol(IdmSymbol *type);
 bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type);
 bool idm_is_nil(IdmValue value);

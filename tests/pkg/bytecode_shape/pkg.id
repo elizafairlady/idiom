@@ -1,0 +1,154 @@
+package bytecode_shape
+
+export record Packet do
+  field tag
+  field left
+  field right
+end
+
+export defn packet tag left right -> Packet tag left right
+
+export defn classify do
+  0 -> :zero
+  n when (gt? n 0) -> :positive
+  _ -> :negative
+end
+
+export defn selector base -> fn do
+  0 -> base
+  1 -> base + 1
+  n -> base + n
+end
+
+export defn score value -> match value do
+  {a b} -> a + b
+  [a b c] -> a + b + c
+  _ -> 0
+end
+
+export defn local-parity n do
+  defn even do
+    0 -> :even
+    k -> odd (k - 1)
+  end
+  defn odd do
+    0 -> :odd
+    k -> even (k - 1)
+  end
+  even n
+end
+
+export defn tail-register-sum do
+  0 acc -> acc
+  n acc -> do
+    next = acc + n
+    tail-register-sum (n - 1) next
+  end
+end
+
+export defn captured-adder base -> fn n -> base + n
+
+export defn quasi-list xs n -> `(head ,n ,@xs tail)
+
+export defn quasi-vector n -> `[1 ,n 3]
+
+export defn quasi-tuple n -> `{1 ,n 3}
+
+export defn quasi-dict n -> `%{:n ,n :x 1}
+
+export defn syntax-form -> %`(add 1 2)
+
+export defn syntax-body -> %`do
+  add 1 2
+  add 3 4
+end
+
+export defn syntax-value-matrix -> [
+  (syntax-kind (make-syntax-nil %'word))
+  (syntax-word-text %'syntax_word)
+  (syntax-atom-text %':syntax-atom)
+  (syntax-int-value %'42)
+  (syntax-int-value %'9223372036854775808)
+  (syntax-float-value %'3.5)
+  (syntax-string-text %'"syntax-string")
+  (syntax-length %'(syntax-list :a))
+  (syntax-length %'[1 :v])
+  (syntax-length %'{2 "tuple"})
+  (syntax-length %'%{:dict-key 9})
+]
+
+export defn syntax-pattern-matrix -> [
+  (match %'word do
+    %`word -> :word
+    _ -> :bad
+  end)
+  (match %':atom do
+    %`:atom -> :atom
+    _ -> :bad
+  end)
+  (match %'42 do
+    %`42 -> :int
+    _ -> :bad
+  end)
+  (match %'9223372036854775808 do
+    %`9223372036854775808 -> :bigint
+    _ -> :bad
+  end)
+  (match %'3.5 do
+    %`3.5 -> :float
+    _ -> :bad
+  end)
+  (match %'"s" do
+    %`"s" -> :string
+    _ -> :bad
+  end)
+  (match %'(syntax-list :a) do
+    %`(syntax-list :a) -> :list
+    _ -> :bad
+  end)
+  (match %'[1 :v] do
+    %`[1 :v] -> :vector
+    _ -> :bad
+  end)
+  (match %'{2 "t"} do
+    %`{2 "t"} -> :tuple
+    _ -> :bad
+  end)
+  (match %'%{:k 9} do
+    %`%{:k 9} -> :dict
+    _ -> :bad
+  end)
+  (match %`(same [1 :a] [1 :a]) do
+    %`(same %,same %,same) -> :nonlinear-same
+    _ -> :bad
+  end)
+  (match %`(same [1 :a] [1 :b]) do
+    %`(same %,different %,different) -> :bad
+    _ -> :nonlinear-diff
+  end)
+  (match %`(named-rest 1 2 3) do
+    %`(named-rest %,@tail) -> inspect tail
+    _ -> :bad
+  end)
+  (match %`(anon-rest 1 2 3) do
+    %`(anon-rest %,head %,@_) -> syntax-int-value head
+    _ -> :bad
+  end)
+]
+
+export defn syntax-wire-ok -> and (eq? (inspect (syntax-value-matrix)) "[:nil \"syntax_word\" \"syntax-atom\" 42 9223372036854775808 3.5 \"syntax-string\" 2 2 2 2]") (eq? (syntax-pattern-matrix) [:word :atom :int :bigint :float :string :list :vector :tuple :dict :nonlinear-same :nonlinear-diff "(#<syntax> #<syntax> #<syntax>)" 1])
+
+export defn interpolated label value -> "${label}:#{value}"
+
+export defn receive-timeout -> receive do
+  {:bytecode msg} -> msg
+  after 0 -> :timeout
+end
+
+export defn ensure-reraises value -> try do
+  try do
+    raise value
+    ensure 1
+  end
+  rescue r -> r
+end

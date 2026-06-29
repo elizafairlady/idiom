@@ -1,5 +1,0 @@
-defn pick do
-  0 acc -> acc
-  [h . t] acc -> pick t (add acc h)
-end
-pick :wat 0

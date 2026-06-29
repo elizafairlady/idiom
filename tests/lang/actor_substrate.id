@@ -1,0 +1,114 @@
+use std/test
+use std/port with [port-close-input port-read port-write]
+activate Test
+
+record ActorBox do
+  field value
+end
+
+suite do
+  test "spawn send receive resumes waiter" do
+    parent = self
+    spawn (fn do
+      send parent {:pong 7}
+    end)
+    got = receive do
+      {:pong n} -> n
+      after 500 -> :timeout
+    end
+    got |> assert-eq 7
+  end
+
+  test "receive timeout uses shared wait deadline" do
+    got = receive do
+      {:never _} -> :bad
+      after 0 -> :timeout
+    end
+    got |> assert-eq :timeout
+  end
+
+  test "spawn-monitor emits down signal" do
+    {pid ref} = spawn-monitor (fn -> :ok)
+    reason = receive do
+      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      after 500 -> :timeout
+    end
+    reason |> assert-eq :normal
+  end
+
+  test "actor message copy keeps record shape metadata" do
+    parent = self
+    spawn (fn do
+      send parent (ActorBox 42)
+    end)
+    got = receive do
+      box -> {(ActorBox? box) box.value}
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:true 42}
+  end
+
+  test "demonitor removes monitor peer" do
+    parent = self
+    {pid ref} = spawn-monitor (fn do
+      receive do
+        {:stop} -> do
+          send parent {:child-exiting self}
+          :ok
+        end
+        after 500 -> :late
+      end
+    end)
+    demonitor ref |> assert-eq :ok
+    send pid {:stop}
+    receive do
+      {:child-exiting p} when (eq? p pid) -> :ok
+      after 500 -> :timeout
+    end |> assert-eq :ok
+    receive do
+      {:down r _p _reason} when (eq? r ref) -> :down
+      after 100 -> :quiet
+    end |> assert-eq :quiet
+  end
+
+  test "trap exit receives linked child reason" do
+    trap-exit :true
+    spawn-link (fn -> exit :boom)
+    reason = receive do
+      {:exit _pid value} -> value
+      after 500 -> :timeout
+    end
+    trap-exit :false
+    reason |> assert-eq :boom
+  end
+
+  test "await returns command result" do
+    p = exec {:exec {:stage '({:lit "printf"} {:lit "hi"}) '() '()} {:stdio :null :pipe :pipe}}
+    await p |> assert-eq {:ok 0 "hi" ""}
+  end
+
+  test "port read returns stdout data" do
+    p = exec {:exec {:stage '({:lit "printf"} {:lit "hello"}) '() '()} {:stdio :null :pipe :pipe}}
+    port-read p :stdout 5 |> assert-eq {:data "hello"}
+  end
+
+  test "port write close read uses same port io path" do
+    p = exec {:exec {:stage '({:lit "cat"}) '() '()} {:stdio :pipe :pipe :pipe}}
+    port-write p "ok" |> assert-eq {:ok 2}
+    port-close-input p |> assert-eq :ok
+    port-read p :stdout 2 |> assert-eq {:data "ok"}
+  end
+
+  test "vm intercepted primitives share arity reason" do
+    assert-raises (fn -> apply '()) |> assert-eq {:error {:arity :apply 1 2 2}}
+    assert-raises (fn -> send self) |> assert-eq {:error {:arity :send 1 2 2}}
+    assert-raises (fn -> port-read :stdout :stdout) |> assert-eq {:error {:arity :port-read 2 3 3}}
+    trap-exit :true
+    spawn-link (fn x -> x)
+    receive do
+      {:exit _pid reason} -> reason
+      after 500 -> :timeout
+    end |> assert-eq {:error {:arity :fn 0 1 1}}
+    trap-exit :false
+  end
+end

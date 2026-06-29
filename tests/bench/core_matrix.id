@@ -1,0 +1,32 @@
+use std/test
+activate Test
+
+defn bench-add x acc -> acc + x
+
+bench-add-f = &bench-add
+
+suite "core" do
+  bench "arithmetic/int-add" expect: 3 do
+    1 + 2
+  end
+
+  bench "closure/direct-call" expect: 3 do
+    bench-add-f 1 2
+  end
+
+  bench "apply/list-args" expect: 3 do
+    '(1 2) |> apply &add
+  end
+
+  bench "pipeline/primitive-chain" expect: 22 do
+    7 |> add 1 |> mul 3 |> sub 2
+  end
+
+  bench "rescue/raise" expect: 0 do
+    try do
+      error {:bench 1}
+      rescue _reason -> 0
+    end
+  end
+end
+:ok

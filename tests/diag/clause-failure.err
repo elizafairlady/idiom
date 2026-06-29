@@ -1,2 +1,0 @@
-tests/diag/clause-failure.id:5:11: error: main actor exited with reason no clause of 'pick' matches (:wat 0)
-  in main (tests/diag/clause-failure.id:5)

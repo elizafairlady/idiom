@@ -1,5 +1,0 @@
-use app/ish
-activate Shell
-a = printf one &
-b = printf two &
-println {(await a) (await b)}

@@ -76,12 +76,6 @@ export defmacro operator stx do
     end
   end
 
-  defn head-is? do
-    node name when (and (syntax? node) (syntax-list? node)) ->
-      and (gt? (syntax-length node) 0) (and (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name))
-    _ _ -> :false
-  end
-
   defn string-syntax? p -> and (syntax? p) (eq? (syntax-kind p) :string)
 
   defn capture-part-text do
@@ -90,6 +84,16 @@ export defmacro operator stx do
     stx v when (syntax-int? v) -> "#{syntax-int-value v}"
     stx _ -> syntax-error stx "operator capture must use atoms, strings, integers, tuples, or grouped expressions"
   end
+
+  defn operator-name-text do
+    stx v when (syntax-word? v) -> syntax-word-text v
+    stx v when (syntax-atom? v) -> syntax-atom-text v
+    stx v when (string-syntax? v) -> syntax-string-text v
+    stx v when (syntax-int? v) -> "#{syntax-int-value v}"
+    stx _ -> syntax-error stx "operator name must be a symbol"
+  end
+
+  defn operator-target stx name -> make-syntax-word stx "__operator_target__#{operator-name-text stx name}"
 
   defn capture-join-syntax do
     stx v i len "" when (eq? i len) -> ""
@@ -125,7 +129,7 @@ export defmacro operator stx do
   end
 
   defn emit-fn stx name opts body -> do
-    target = make-syntax-word stx "__operator_target__"
+    target = operator-target stx name
     {p a c} = option-values stx opts
     %`do
       defn %,target %,body
@@ -138,7 +142,7 @@ export defmacro operator stx do
       '() -> syntax-error stx "operator macro requires a parameter or clauses"
       _ -> :ok
     end
-    target = make-syntax-word stx "__operator_target__"
+    target = operator-target stx name
     {p a c} = option-values stx opts
     %`do
       defmacro %,target %,@tail

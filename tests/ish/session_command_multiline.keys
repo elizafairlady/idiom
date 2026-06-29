@@ -1,8 +1,0 @@
-w ~ % 
-s printf hi |
-s \r
-w ...> 
-s wc -c
-s \r
-w 2
-s \x04

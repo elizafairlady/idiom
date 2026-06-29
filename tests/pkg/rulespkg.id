@@ -1,5 +1,0 @@
-package rulespkg
-
-export protocol RulesPkg do
-  export defmacro twice-of %`(twice-of %,x) -> %`(mul 2 %,x)
-end

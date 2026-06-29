@@ -1,8 +1,0 @@
-w ~ % 
-s add 1 2
-s \r
-w 3
-s File.read "hist"
-s \r
-w :ok
-s \x04

@@ -1,0 +1,13 @@
+package surface_macros
+
+defmacro make-public do
+  %`(export make-public %,name %,value) -> %`do
+    export defn %,name -> %,value
+  end
+end
+
+export defmacro emit-value do
+  %`(%,head %,value) -> value
+end
+
+export make-public generated 42

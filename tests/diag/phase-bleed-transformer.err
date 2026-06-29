@@ -1,4 +1,0 @@
-tests/diag/phase-bleed-transformer.id:2:19: error: unbound identifier 'helper'
-  'helper' is bound at runtime (phase 0) but referenced for-syntax (phase 1)
-  use for-syntax for transformer helpers: define or import 'helper' inside for-syntax
-  idiom has exactly two phases; for-syntax inside for-syntax is still for-syntax

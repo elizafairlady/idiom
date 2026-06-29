@@ -1,22 +1,24 @@
 package kernel
 
-export defmacro if stx do
-  defn rev do
-    '() acc -> acc
-    '(h . t) acc -> rev t (cons h acc)
-  end
-
-  defn head-is? do
+for-syntax do
+  export defn head-is? do
     node name when (and (syntax? node) (syntax-list? node)) ->
       and (gt? (syntax-length node) 0) (and (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name))
     _ _ -> :false
   end
 
-  defn word-is? do
+  export defn word-is? do
     node name when (syntax-word? node) -> eq? (syntax-word-text node) name
     _ _ -> :false
   end
 
+  export defn reverse do
+    '() acc -> acc
+    '(h . t) acc -> reverse t (cons h acc)
+  end
+end
+
+export defmacro if stx do
   defn condition do
     '() -> syntax-error stx "if condition is empty"
     '(one) -> one
@@ -37,7 +39,7 @@ export defmacro if stx do
 
   defn scan do
     '() _ -> syntax-error stx "if expects: if COND BODY [else BODY]"
-    '(head . rest) acc when (head-is? head "%-body") -> emit-rest (rev acc '()) head rest
+    '(head . rest) acc when (head-is? head "%-body") -> emit-rest (reverse acc '()) head rest
     '(head . rest) acc -> scan rest (cons head acc)
   end
 
@@ -66,9 +68,7 @@ export defmacro unless do
   %`(unless %,condition %,body) -> %`(cond %,condition :nil %,body)
 end
 
-export defmacro not? do
-  %`(not? %,value) -> %`(cond %,value :false :true)
-end
+export defn not? x -> cond x :false :true
 
 export defmacro and do
   %`(and %,last) -> last

@@ -1,6 +1,0 @@
-use app/ish
-activate Shell
-p = printf hi &
-r1 = await p
-r2 = await p
-println (eq? r1 r2)

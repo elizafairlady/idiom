@@ -1,0 +1,12 @@
+use std/test
+activate Test
+
+suite "cli-filter" do
+  test "pass-only" do
+    :ok
+  end
+
+  test "must-not-run" do
+    error :filtered
+  end
+end

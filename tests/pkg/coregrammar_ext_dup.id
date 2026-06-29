@@ -1,7 +1,0 @@
-package coregrammar_ext_dup
-
-export protocol GrammarExtDup do
-  core-grammar ReaderSurface :extend [
-    {:token ident {:regex "[A-Z]+"} {:capture ident}}
-  ]
-end
