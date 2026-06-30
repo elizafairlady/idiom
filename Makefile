@@ -69,7 +69,8 @@ UNIT_SRCS := $(UNIT_CASE_SRCS) tests/unit/runner.c
 
 LANG_TESTS := tests/lang
 PKG_TESTS := tests/pkg/bytecode_shape tests/pkg/reader_constructor_artifact tests/pkg/surface_macros
-TEST_PATHS := $(LANG_TESTS) $(PKG_TESTS)
+REAL_TESTS := tests/real
+TEST_PATHS := $(LANG_TESTS) $(PKG_TESTS) $(REAL_TESTS)
 REAL_PROG := tests/real/actor_regex_port.id
 BOOT_PKG := tests/pkg/reader_constructor_artifact
 

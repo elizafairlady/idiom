@@ -10,6 +10,8 @@ suite do
     "a\tb" |> assert-eq "a#{byte-str 9}b"
     "\\" |> assert-eq "\\"
     "\"" |> assert-eq "\""
+    "\#{x}" |> assert-eq (str (byte-str 35) "{x}")
+    "\${x}" |> assert-eq (str (byte-str 36) "{x}")
   end
 
   test "regex escape atoms share source string escapes" do
@@ -34,5 +36,9 @@ suite do
 
   test "inspect escapes through shared surface writer" do
     "a#{byte-str 10}#{byte-str 9}\\\"" |> assert-inspect "\"a\\n\\t\\\\\\\"\""
+    hash-open = str (byte-str 35) "{x}"
+    dollar-open = str (byte-str 36) "{x}"
+    hash-open |> assert-inspect (str "\"" "\\" (byte-str 35) "{x}" "\"")
+    dollar-open |> assert-inspect (str "\"" "\\" (byte-str 36) "{x}" "\"")
   end
 end

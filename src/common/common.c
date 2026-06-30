@@ -304,6 +304,13 @@ bool idm_surface_write_escaped(IdmBuffer *buf, const char *text, size_t len) {
             case '\n': if (!idm_buf_append(buf, "\\n")) return false; break;
             case '\r': if (!idm_buf_append(buf, "\\r")) return false; break;
             case '\t': if (!idm_buf_append(buf, "\\t")) return false; break;
+            case '#':
+            case '$':
+                if (i + 1u < len && text[i + 1u] == '{') {
+                    if (!idm_buf_append_char(buf, '\\')) return false;
+                }
+                if (!idm_buf_append_char(buf, (char)ch)) return false;
+                break;
             default:
                 if (ch < 32u) {
                     if (!idm_buf_appendf(buf, "\\x%02x", ch)) return false;

@@ -127,6 +127,7 @@ int idm_unit_syntax_equal(void) {
                    list2(vector2(integer(1), atom("b")), dict2(atom("k"), string("v"))),
                    "nested unequal");
     check_dump(string("a\n\t\\\""), "\"a\\n\\t\\\\\\\"\"", "dump escaped string");
+    check_dump(string("#{x} ${x}"), "\"\\#{x} \\${x}\"", "dump escaped interpolation openers");
     check_dump(list2(word("a"), atom("b")), "(a :b)", "dump list");
     check_dump(vector2(integer(1), string("x")), "[1 \"x\"]", "dump vector");
     check_dump(tuple2(integer(2), string("t")), "{2 \"t\"}", "dump tuple");
