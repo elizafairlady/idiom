@@ -16,8 +16,6 @@ typedef enum {
     IDM_EXEC_DONE,
     IDM_EXEC_YIELD,
     IDM_EXEC_BLOCK_RECEIVE,
-    IDM_EXEC_LAUNCH_PORT,
-    IDM_EXEC_BLOCK_AWAIT,
     IDM_EXEC_BLOCK_PORT_READ,
     IDM_EXEC_BLOCK_PORT_WRITE,
     IDM_EXEC_BLOCK_TTY,
@@ -36,8 +34,6 @@ void idm_exec_destroy(IdmExec *exec);
 bool idm_exec_setup_function(IdmExec *exec, uint32_t function_index, IdmError *err);
 bool idm_exec_setup_thunk(IdmExec *exec, IdmValue closure, IdmError *err);
 bool idm_exec_step(IdmExec *exec, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
-bool idm_exec_take_port_request(IdmExec *exec, IdmValue *out_graph);
-bool idm_exec_take_await(IdmExec *exec, IdmValue *out_port);
 bool idm_exec_take_port_read(IdmExec *exec, IdmValue *out_port, const char **out_stream, size_t *out_max);
 bool idm_exec_take_port_write(IdmExec *exec, IdmValue *out_port, IdmValue *out_data);
 bool idm_exec_take_tty(IdmExec *exec, bool *out_line_mode, bool *out_has_timeout, int64_t *out_timeout_ms);

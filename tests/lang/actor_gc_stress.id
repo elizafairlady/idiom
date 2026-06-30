@@ -1,6 +1,7 @@
 use std/port with [port-close-input port-write]
 use std/string
 use std/test
+import std/cmd as Cmd
 activate Test
 
 defn send-skips do
@@ -18,7 +19,7 @@ defn busy-loop parent n -> do
 end
 
 defn port-write-twice parent -> do
-  p = exec {:exec {:stage '({:lit "sh"} {:lit "-c"} {:lit "sleep 0.1; cat >/dev/null"}) '() '()} {:stdio :pipe :null :pipe}}
+  p = spawn Cmd.command (list "sh" "-c" "sleep 0.1; cat >/dev/null") (Cmd.stdio :pipe :null :null)
   payload = repeat "p" 131072
   first = port-write p payload
   second = port-write p payload

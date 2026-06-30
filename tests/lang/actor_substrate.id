@@ -1,9 +1,20 @@
 use std/test
+use std/file with [open! read! remove]
 use std/port with [port-close-input port-read port-write]
+use std/string
+import std/cmd as Cmd
 activate Test
 
 record ActorBox do
   field value
+end
+
+defn drain-stdout do
+  p acc -> match (port-read p :stdout 8192) do
+    {:data chunk} -> drain-stdout p (acc + (len chunk))
+    :eof -> acc
+    value -> value
+  end
 end
 
 suite do
@@ -82,21 +93,198 @@ suite do
     reason |> assert-eq :boom
   end
 
-  test "await returns command result" do
-    p = exec {:exec {:stage '({:lit "printf"} {:lit "hi"}) '() '()} {:stdio :null :pipe :pipe}}
-    await p |> assert-eq {:ok 0 "hi" ""}
+  test "monitor observes clean port completion" do
+    p = spawn
+      Cmd.command
+        list "printf" "hi"
+        Cmd.stdio :null :pipe :null
+    ref = monitor p
+    reason = receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end
+    reason |> assert-eq :normal
+    port-read p :stdout 2 |> assert-eq {:data "hi"}
+  end
+
+  test "monitor wakes from child signal without port fds" do
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 7") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:error 7}
+  end
+
+  test "spawn-monitor accepts command graph" do
+    {p ref} = spawn-monitor Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq :normal
+    port-read p :stdout 2 |> assert-eq {:data "ok"}
+  end
+
+  test "spawn-link accepts command graph" do
+    trap-exit :true
+    p = spawn-link Cmd.command (list "sh" "-c" "sleep 0.05; exit 6") (Cmd.stdio :null :null :null)
+    receive do
+      {:exit target value} when (eq? target p) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:error 6}
+    trap-exit :false
+  end
+
+  test "pipeline status follows pipefail flag" do
+    stages = list (Cmd.stage (list "sh" "-c" "exit 7")) (Cmd.stage (list "true"))
+    no_pipefail = spawn Cmd.pipeline stages (Cmd.stdio :null :null :null)
+    ref1 = monitor no_pipefail
+    receive do
+      {:down r target value} when (and (eq? r ref1) (eq? target no_pipefail)) -> value
+      after 500 -> :timeout
+    end |> assert-eq :normal
+
+    with_pipefail = spawn Cmd.pipefail stages (Cmd.stdio :null :null :null)
+    ref2 = monitor with_pipefail
+    receive do
+      {:down r target value} when (and (eq? r ref2) (eq? target with_pipefail)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:error 7}
+  end
+
+  test "monitor observes port completion" do
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 9") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    reason = receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end
+    reason |> assert-eq {:error 9}
+  end
+
+  test "demonitor removes port down signal" do
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 8") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    demonitor ref |> assert-eq :ok
+    receive do
+      {:down r _target _value} when (eq? r ref) -> :down
+      after 200 -> :quiet
+    end |> assert-eq :quiet
+  end
+
+  test "exit port shutdown sends termination signal" do
+    p = spawn Cmd.command (list "sleep" "5") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    exit p :shutdown |> assert-eq :ok
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:error 143}
+  end
+
+  test "exit port kill sends kill signal" do
+    p = spawn Cmd.command (list "sleep" "5") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    exit p :kill |> assert-eq :ok
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:error 137}
+  end
+
+  test "linked port failure sends exit signal" do
+    trap-exit :true
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 3") (Cmd.stdio :null :null :null)
+    link p |> assert-eq :ok
+    reason = receive do
+      {:exit target value} when (eq? target p) -> value
+      after 500 -> :timeout
+    end
+    trap-exit :false
+    reason |> assert-eq {:error 3}
+  end
+
+  test "unlink removes port exit signal" do
+    trap-exit :true
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 4") (Cmd.stdio :null :null :null)
+    link p |> assert-eq :ok
+    unlink p |> assert-eq :ok
+    receive do
+      {:exit target _value} when (eq? target p) -> :exit
+      after 200 -> :quiet
+    end |> assert-eq :quiet
+    trap-exit :false
+    ref = monitor p
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:error 4}
   end
 
   test "port read returns stdout data" do
-    p = exec {:exec {:stage '({:lit "printf"} {:lit "hello"}) '() '()} {:stdio :null :pipe :pipe}}
+    p = spawn Cmd.command (list "printf" "hello") (Cmd.stdio :null :pipe :null)
     port-read p :stdout 5 |> assert-eq {:data "hello"}
   end
 
   test "port write close read uses same port io path" do
-    p = exec {:exec {:stage '({:lit "cat"}) '() '()} {:stdio :pipe :pipe :pipe}}
+    p = spawn Cmd.command (list "cat") (Cmd.stdio :pipe :pipe :null)
     port-write p "ok" |> assert-eq {:ok 2}
     port-close-input p |> assert-eq :ok
     port-read p :stdout 2 |> assert-eq {:data "ok"}
+  end
+
+  test "port read streams large stdout" do
+    p = spawn Cmd.command (list "sh" "-c" "yes x | head -c 131072") (Cmd.stdio :null :pipe :null)
+    ref = monitor p
+    drain-stdout p 0 |> assert-eq 131072
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 1000 -> :timeout
+    end |> assert-eq :normal
+  end
+
+  test "cmd constructors cover redirection and env word parts" do
+    path = "build/cmd-graph-redir.txt"
+    stage = Cmd.stage (list "sh" "-c" "printf %s \"$IDM_CMD_PROBE\"") (list (Cmd.redir 1 :> path)) (list (Cmd.assign "IDM_CMD_PROBE" (Cmd.cat (list "o" "k"))))
+    p = spawn Cmd.job stage (Cmd.stdio :null :null :null)
+    ref = monitor p
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq :normal
+    read! path |> assert-eq "ok"
+    remove path
+  end
+
+  test "command graph rejects malformed parts before launch" do
+    {:error bad_word} = assert-raises (fn -> spawn Cmd.command (list (Cmd.lit 42)) (Cmd.stdio :null :null :null))
+    bad_word |> assert-eq {:runtime "invalid command stage"}
+    {:error bad_redir} = assert-raises (fn -> spawn Cmd.job (Cmd.stage (list "true") (list (Cmd.redir 1 42 "build/nope"))) (Cmd.stdio :null :null :null))
+    bad_redir |> assert-eq {:runtime "invalid command stage"}
+    {:error missing_pipefail} = assert-raises (fn -> spawn {:pipeline (list (Cmd.stage (list "true"))) (Cmd.stdio :null :null :null)})
+    missing_pipefail |> assert-eq {:runtime "invalid command graph"}
+    {:error improper_argv} = assert-raises (fn -> spawn {:exec {:stage (cons (Cmd.lit "true") 42) '() '()} (Cmd.stdio :null :null :null)})
+    improper_argv |> assert-eq {:runtime "invalid command stage"}
+  end
+
+  test "open file port does not mask receive timeout" do
+    _p = open! "TASKS.md" :read
+    receive do
+      {:never} -> :bad
+      after 0 -> :ok
+    end |> assert-eq :ok
+  end
+
+  test "file ports are not processes" do
+    p = open! "TASKS.md" :read
+    assert-raises (fn -> monitor p) |> assert-eq {:error {:runtime "monitor expects a process"}}
+    assert-raises (fn -> link p) |> assert-eq {:error {:runtime "link expects a process"}}
+    assert-raises (fn -> unlink p) |> assert-eq {:error {:runtime "unlink expects a process"}}
+    assert-raises (fn -> exit p :shutdown) |> assert-eq {:error {:runtime "exit expects a process"}}
+  end
+
+  test "exec primitive surface is removed" do
+    assert-expand-error "exec {:exec {:stage '({:lit \"true\"}) '() '()} {:stdio :null :null :null}}\n" "unbound identifier 'exec'"
   end
 
   test "vm intercepted primitives share arity reason" do

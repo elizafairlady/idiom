@@ -1,6 +1,7 @@
 #include "idiom/vm.h"
 
 #include "idiom/actor.h"
+#include "idiom/ports.h"
 #include "idiom/prims.h"
 #include "idiom/regex.h"
 
@@ -48,10 +49,6 @@ struct IdmExec {
     size_t frame_cap;
     bool frames_borrowed;
     IdmVmLimits limits;
-    bool has_port_request;
-    IdmValue port_request;
-    bool has_await;
-    IdmValue await_port;
     bool has_port_read_request;
     IdmValue port_read_port;
     const char *port_read_stream;
@@ -224,10 +221,6 @@ static void vm_reset(Vm *vm) {
     vm->raised = idm_nil();
     vm->has_pending_raise = false;
     vm->pending_raise = idm_nil();
-    vm->has_port_request = false;
-    vm->port_request = idm_nil();
-    vm->has_await = false;
-    vm->await_port = idm_nil();
     vm->has_port_read_request = false;
     vm->port_read_port = idm_nil();
     vm->port_read_stream = NULL;
@@ -498,6 +491,44 @@ static bool primitive_actor_context(Vm *vm, IdmPrimitive primitive, IdmError *er
     return idm_error_set(err, idm_span_unknown(NULL), "primitive '%s' must be invoked under the actor scheduler", idm_primitive_name(primitive));
 }
 
+static bool value_atom_named(IdmValue value, const char *name) {
+    return idm_value_tag(value) == IDM_VAL_ATOM && strcmp(idm_symbol_text(idm_value_symbol(value)), name) == 0;
+}
+
+static bool value_is_command_graph(IdmValue value) {
+    if (!idm_is_tuple(value) || idm_sequence_count(value) < 3u) return false;
+    IdmError ignore;
+    idm_error_init(&ignore);
+    IdmValue tag = idm_sequence_item(value, 0, &ignore);
+    idm_error_clear(&ignore);
+    return value_atom_named(tag, "exec") || value_atom_named(tag, "pipeline");
+}
+
+static bool spawn_port_process(Vm *vm, IdmValue graph, IdmValue *out, const char *name, IdmError *err) {
+    if (!value_is_command_graph(graph)) return idm_error_set(err, idm_span_unknown(NULL), "%s expects a function or command graph", name);
+    IdmPort *port = idm_port_launch(vm->rt, graph, vm, err);
+    if (!port) return false;
+    if (!idm_sched_register_port(vm->sched, port, out, err)) {
+        idm_port_free(port);
+        return false;
+    }
+    return true;
+}
+
+static bool spawn_port_link_process(Vm *vm, IdmValue graph, IdmValue *out, bool *self_exits, IdmValue *exit_reason, IdmError *err) {
+    if (!value_is_command_graph(graph)) return idm_error_set(err, idm_span_unknown(NULL), "spawn-link expects a function or command graph");
+    IdmPort *port = idm_port_launch(vm->rt, graph, vm, err);
+    if (!port) return false;
+    return idm_sched_register_port_link(vm->sched, port, vm->self, out, self_exits, exit_reason, err);
+}
+
+static bool spawn_port_monitor_process(Vm *vm, IdmValue graph, IdmValue *out_port, IdmValue *out_ref, IdmError *err) {
+    if (!value_is_command_graph(graph)) return idm_error_set(err, idm_span_unknown(NULL), "spawn-monitor expects a function or command graph");
+    IdmPort *port = idm_port_launch(vm->rt, graph, vm, err);
+    if (!port) return false;
+    return idm_sched_register_port_monitor(vm->sched, port, vm->self, out_port, out_ref, err);
+}
+
 static bool execute_apply_primitive(Vm *vm, uint32_t dst, const IdmValue *args, uint32_t argc, IdmExecStatus *status, IdmValue *out_reason, IdmError *err) {
     if (!idm_primitive_require_arity(vm->rt, IDM_PRIM_APPLY, argc, err)) return false;
     IdmValue arglist = args[0];
@@ -534,36 +565,45 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
             *out = idm_pid(idm_actor_pid(vm->self));
             return true;
         case IDM_PRIM_SPAWN: {
-            IdmValue thunk = args[0];
-            if (!idm_is_closure(thunk)) return idm_error_set(err, idm_span_unknown(NULL), "spawn expects a function value");
-            IdmValue pid = idm_nil();
-            if (!idm_sched_spawn(vm->sched, thunk, vm, &pid, err)) return false;
-            *out = pid;
+            IdmValue spawnable = args[0];
+            if (idm_is_closure(spawnable)) {
+                IdmValue pid = idm_nil();
+                if (!idm_sched_spawn(vm->sched, spawnable, vm, &pid, err)) return false;
+                *out = pid;
+                return true;
+            }
+            if (!spawn_port_process(vm, spawnable, out, "spawn", err)) return false;
             return true;
         }
         case IDM_PRIM_SPAWN_LINK: {
-            IdmValue thunk = args[0];
-            if (!idm_is_closure(thunk)) return idm_error_set(err, idm_span_unknown(NULL), "spawn-link expects a function value");
-            IdmValue pid = idm_nil();
+            IdmValue spawnable = args[0];
             bool self_exits = false;
             IdmValue exit_reason = idm_nil();
-            if (!idm_sched_spawn_link(vm->sched, thunk, vm, vm->self, &pid, &self_exits, &exit_reason, err)) return false;
+            if (idm_is_closure(spawnable)) {
+                IdmValue pid = idm_nil();
+                if (!idm_sched_spawn_link(vm->sched, spawnable, vm, vm->self, &pid, &self_exits, &exit_reason, err)) return false;
+                *out = pid;
+            } else {
+                if (!spawn_port_link_process(vm, spawnable, out, &self_exits, &exit_reason, err)) return false;
+            }
             if (self_exits) {
                 if (!status) return idm_error_set(err, idm_span_unknown(NULL), "spawn-link exit requires a schedulable VM step");
                 *status = IDM_EXEC_EXIT;
                 if (out_reason) *out_reason = exit_reason;
                 return true;
             }
-            *out = pid;
             return true;
         }
         case IDM_PRIM_SPAWN_MONITOR: {
-            IdmValue thunk = args[0];
-            if (!idm_is_closure(thunk)) return idm_error_set(err, idm_span_unknown(NULL), "spawn-monitor expects a function value");
-            IdmValue pid = idm_nil();
+            IdmValue spawnable = args[0];
+            IdmValue proc = idm_nil();
             IdmValue ref = idm_nil();
-            if (!idm_sched_spawn_monitor(vm->sched, thunk, vm, vm->self, &pid, &ref, err)) return false;
-            IdmValue items[2] = { pid, ref };
+            if (idm_is_closure(spawnable)) {
+                if (!idm_sched_spawn_monitor(vm->sched, spawnable, vm, vm->self, &proc, &ref, err)) return false;
+            } else {
+                if (!spawn_port_monitor_process(vm, spawnable, &proc, &ref, err)) return false;
+            }
+            IdmValue items[2] = { proc, ref };
             IdmValue result = idm_tuple(vm->rt, items, 2u, err);
             if (idm_value_tag(result) != IDM_VAL_TUPLE) return false;
             *out = result;
@@ -581,10 +621,10 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
             if (argc == 2u) {
                 IdmValue target = args[0];
                 IdmValue reason = args[1];
-                if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "exit signal expects a pid target");
+                if (idm_value_tag(target) != IDM_VAL_PID && idm_value_tag(target) != IDM_VAL_PORT) return idm_error_set(err, idm_span_unknown(NULL), "exit signal expects a process target");
                 bool self_exits = false;
                 IdmValue exit_reason = idm_nil();
-                if (!idm_sched_exit_signal(vm->sched, vm->self, idm_value_id(target), reason, &self_exits, &exit_reason, err)) return false;
+                if (!idm_sched_exit_signal(vm->sched, vm->self, target, reason, &self_exits, &exit_reason, err)) return false;
                 if (self_exits) {
                     if (!status) return idm_error_set(err, idm_span_unknown(NULL), "exit signal requires a schedulable VM step");
                     *status = IDM_EXEC_EXIT;
@@ -603,10 +643,10 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
         }
         case IDM_PRIM_LINK: {
             IdmValue target = args[0];
-            if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "link expects a pid");
+            if (idm_value_tag(target) != IDM_VAL_PID && idm_value_tag(target) != IDM_VAL_PORT) return idm_error_set(err, idm_span_unknown(NULL), "link expects a process");
             bool self_exits = false;
             IdmValue exit_reason = idm_nil();
-            if (!idm_sched_link(vm->sched, vm->self, idm_value_id(target), &self_exits, &exit_reason, err)) return false;
+            if (!idm_sched_link(vm->sched, vm->self, target, &self_exits, &exit_reason, err)) return false;
             if (self_exits) {
                 if (!status) return idm_error_set(err, idm_span_unknown(NULL), "link exit requires a schedulable VM step");
                 *status = IDM_EXEC_EXIT;
@@ -618,16 +658,16 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
         }
         case IDM_PRIM_UNLINK: {
             IdmValue target = args[0];
-            if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "unlink expects a pid");
-            idm_sched_unlink(vm->sched, vm->self, idm_value_id(target));
+            if (idm_value_tag(target) != IDM_VAL_PID && idm_value_tag(target) != IDM_VAL_PORT) return idm_error_set(err, idm_span_unknown(NULL), "unlink expects a process");
+            if (!idm_sched_unlink(vm->sched, vm->self, target, err)) return false;
             *out = idm_atom(vm->rt, "ok");
             return true;
         }
         case IDM_PRIM_MONITOR: {
             IdmValue target = args[0];
-            if (idm_value_tag(target) != IDM_VAL_PID) return idm_error_set(err, idm_span_unknown(NULL), "monitor expects a pid");
+            if (idm_value_tag(target) != IDM_VAL_PID && idm_value_tag(target) != IDM_VAL_PORT) return idm_error_set(err, idm_span_unknown(NULL), "monitor expects a process");
             IdmValue ref = idm_nil();
-            if (!idm_sched_monitor(vm->sched, vm->self, idm_value_id(target), &ref, err)) return false;
+            if (!idm_sched_monitor(vm->sched, vm->self, target, &ref, err)) return false;
             *out = ref;
             return true;
         }
@@ -643,23 +683,6 @@ static bool execute_actor_primitive(Vm *vm, IdmPrimitive primitive, const IdmVal
             bool previous = idm_actor_trap_exit_get(vm->self);
             idm_actor_trap_exit_set(vm->self, idm_value_ok(flag));
             *out = idm_atom(vm->rt, previous ? "true" : "false");
-            return true;
-        }
-        case IDM_PRIM_EXEC: {
-            if (!status) return idm_error_set(err, idm_span_unknown(NULL), "exec requires a schedulable VM step");
-            IdmValue graph = args[0];
-            vm->port_request = graph;
-            vm->has_port_request = true;
-            *status = IDM_EXEC_LAUNCH_PORT;
-            return true;
-        }
-        case IDM_PRIM_AWAIT: {
-            if (!status) return idm_error_set(err, idm_span_unknown(NULL), "await requires a schedulable VM step");
-            IdmValue port = args[0];
-            if (idm_value_tag(port) != IDM_VAL_PORT) return idm_error_set(err, idm_span_unknown(NULL), "await expects a port");
-            vm->await_port = port;
-            vm->has_await = true;
-            *status = IDM_EXEC_BLOCK_AWAIT;
             return true;
         }
         default:
@@ -725,10 +748,7 @@ static bool execute_primitive_clause(Vm *vm, uint32_t primitive, uint32_t dst, c
         case IDM_PRIM_MONITOR:
         case IDM_PRIM_DEMONITOR:
         case IDM_PRIM_TRAP_EXIT:
-        case IDM_PRIM_EXEC:
-        case IDM_PRIM_AWAIT:
             if (!execute_actor_primitive(vm, (IdmPrimitive)primitive, args, argc, status, &out, out_reason, err)) return false;
-            if (status && (*status == IDM_EXEC_LAUNCH_PORT || *status == IDM_EXEC_BLOCK_AWAIT)) return save_block_result_dst(vm, dst, err);
             if (status && *status == IDM_EXEC_EXIT) return true;
             return write_current_reg(vm, dst, out, err);
         default:
@@ -2083,22 +2103,6 @@ bool idm_exec_step(IdmExec *exec, int64_t budget, IdmExecStatus *status, IdmValu
     return ok;
 }
 
-bool idm_exec_take_port_request(IdmExec *exec, IdmValue *out_graph) {
-    if (!exec->has_port_request) return false;
-    *out_graph = exec->port_request;
-    exec->has_port_request = false;
-    exec->port_request = idm_nil();
-    return true;
-}
-
-bool idm_exec_take_await(IdmExec *exec, IdmValue *out_port) {
-    if (!exec->has_await) return false;
-    *out_port = exec->await_port;
-    exec->has_await = false;
-    exec->await_port = idm_nil();
-    return true;
-}
-
 bool idm_exec_take_port_read(IdmExec *exec, IdmValue *out_port, const char **out_stream, size_t *out_max) {
     if (!exec->has_port_read_request) return false;
     *out_port = exec->port_read_port;
@@ -2172,22 +2176,14 @@ static bool exec_extra_root_at(const IdmExec *exec, uint32_t section, IdmValue *
             *out = exec->pending_raise;
             return true;
         case 4:
-            if (!exec->has_await) return false;
-            *out = exec->await_port;
-            return true;
-        case 5:
-            if (!exec->has_port_request) return false;
-            *out = exec->port_request;
-            return true;
-        case 6:
             if (!exec->has_port_read_request) return false;
             *out = exec->port_read_port;
             return true;
-        case 7:
+        case 5:
             if (!exec->has_port_write_request) return false;
             *out = exec->port_write_port;
             return true;
-        case 8:
+        case 6:
             if (!exec->has_port_write_request) return false;
             *out = exec->port_write_data;
             return true;
@@ -2227,7 +2223,7 @@ bool idm_exec_mark_roots_step(const IdmExec *exec, IdmExecRootCursor *cursor, in
             cursor->index = 0;
             continue;
         }
-        if (cursor->section > 8u) return true;
+        if (cursor->section > 6u) return true;
         IdmValue value = idm_nil();
         bool present = exec_extra_root_at(exec, cursor->section, &value);
         cursor->section++;
@@ -2236,5 +2232,5 @@ bool idm_exec_mark_roots_step(const IdmExec *exec, IdmExecRootCursor *cursor, in
         idm_gc_mark_value(heap, value);
         (*budget)--;
     }
-    return cursor->section > 8u;
+    return cursor->section > 6u;
 }

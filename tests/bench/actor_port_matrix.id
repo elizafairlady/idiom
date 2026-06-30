@@ -1,7 +1,11 @@
 use std/port with [port-close-input port-read port-write]
 use std/string
 use std/test
+import std/cmd as Cmd
 activate Test
+
+printf-ok-graph = Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+cat-graph = Cmd.command (list "cat") (Cmd.stdio :pipe :pipe :null)
 
 suite "actor-port" do
   bench "actor/spawn-send-receive" expect: 1 do
@@ -23,16 +27,21 @@ suite "actor-port" do
     end
   end
 
-  bench "port/exec-await" expect: 1 do
-    p = exec {:exec {:stage '({:lit "printf"} {:lit "ok"}) '() '()} {:stdio :null :pipe :pipe}}
-    match (await p) do
-      {:ok 0 "ok" ""} -> 1
+  bench "port/spawn-monitor" expect: 1 do
+    p = spawn printf-ok-graph
+    ref = monitor p
+    done = receive do
+      {:down r target :normal} when (and (eq? r ref) (eq? target p)) -> :ok
+      after 1000 -> :timeout
+    end
+    match {done (port-read p :stdout 2)} do
+      {:ok {:data "ok"}} -> 1
       _ -> 0
     end
   end
 
   bench "port/pipe-write-read" expect: 1 do
-    p = exec {:exec {:stage '({:lit "cat"}) '() '()} {:stdio :pipe :pipe :pipe}}
+    p = spawn cat-graph
     port-write p "ok"
     port-close-input p
     match (port-read p :stdout 2) do

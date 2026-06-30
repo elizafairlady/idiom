@@ -103,7 +103,7 @@ export defmacro operator stx do
   end
 
   defn capture-text do
-    stx v when (head-is? v "%-group") -> capture-text stx (syntax-nth v 1)
+    stx v when (or (head-is? v "%-group") (head-is? v "%-layout-group")) -> capture-text stx (syntax-nth v 1)
     stx v when (and (head-is? v "%-expr") (gt? (syntax-length v) 1)) -> capture-join-syntax stx v 1 (syntax-length v) ""
     stx v when (eq? (syntax-kind v) :tuple) -> capture-join-syntax stx v 0 (syntax-length v) ""
     stx v -> capture-part-text stx v

@@ -260,7 +260,7 @@ fail:
 }
 
 static IdmSyntaxPattern *syntax_pattern_from_template(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
-    if (syn_is_form(syn, "%-group") && syn->as.seq.count == 2) return syntax_pattern_from_template(ctx, syn->as.seq.items[1], err);
+    if ((syn_is_form(syn, "%-group") || syn_is_form(syn, "%-layout-group")) && syn->as.seq.count == 2) return syntax_pattern_from_template(ctx, syn->as.seq.items[1], err);
     if (syn_is_form(syn, "%-unsyntax")) return syntax_pattern_hole(ctx, syn, err);
     if (syn_is_form(syn, "%-unsyntax-splicing")) {
         idm_error_set(err, syn->span, "syntax rest pattern is only valid inside sequence patterns");
@@ -307,7 +307,7 @@ static bool quoted_list_pattern_items(const IdmSyntax *syn, IdmSyntax *const **o
         *out_span = quoted->span;
         return true;
     }
-    if (syn_is_form(quoted, "%-group") && quoted->as.seq.count == 2) {
+    if ((syn_is_form(quoted, "%-group") || syn_is_form(quoted, "%-layout-group")) && quoted->as.seq.count == 2) {
         const IdmSyntax *expr = quoted->as.seq.items[1];
         if (syn_is_form(expr, "%-expr")) {
             *out_items = expr->as.seq.items + 1;
@@ -691,7 +691,7 @@ static const char *core_operator_text_arg(const IdmSyntax *syn) {
 
 static bool core_operator_parts(const IdmSyntax *form, IdmSyntax *const **out_items, size_t *out_base, size_t *out_count) {
     if (!form || form->kind != IDM_SYN_LIST || form->as.seq.count == 0) return false;
-    if (syn_is_form(form, "%-group") && form->as.seq.count == 2u) {
+    if ((syn_is_form(form, "%-group") || syn_is_form(form, "%-layout-group")) && form->as.seq.count == 2u) {
         return core_operator_parts(form->as.seq.items[1], out_items, out_base, out_count);
     }
     if (syn_is_form(form, "%-expr") && form->as.seq.count >= 2u && syn_is_word(form->as.seq.items[1], "core-operator")) {

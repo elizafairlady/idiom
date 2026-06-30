@@ -185,9 +185,6 @@ struct IdmRuntime {
     IdmRecordShape **record_shapes;
     size_t record_shape_count;
     size_t record_shape_cap;
-    char **owned_temps;
-    size_t owned_temp_count;
-    size_t owned_temp_cap;
     IdmRepl *repl;
     bool interactive;
 };
@@ -201,7 +198,6 @@ IdmValue idm_env_slot_get(const IdmEnv *env, uint32_t id);
 void idm_runtime_init(IdmRuntime *rt);
 void idm_runtime_destroy(IdmRuntime *rt);
 void idm_phase_io_record(IdmRuntime *rt, const char *path);
-bool idm_runtime_own_temp(IdmRuntime *rt, const char *path);
 
 void idm_intern_init(IdmIntern *intern);
 void idm_intern_destroy(IdmIntern *intern);
@@ -310,10 +306,12 @@ typedef enum {
     IDM_BUILTIN_TYPE_PORT,
     IDM_BUILTIN_TYPE_RECORD,
     IDM_BUILTIN_TYPE_REGEX,
-    IDM_BUILTIN_TYPE_REGEX_RESULT
+    IDM_BUILTIN_TYPE_REGEX_RESULT,
+    IDM_BUILTIN_TYPE_COUNT
 } IdmBuiltinType;
 IdmBuiltinType idm_value_builtin_type_kind(IdmSymbol *type);
 bool idm_value_builtin_type_symbol(IdmSymbol *type);
+bool idm_value_matches_builtin_type(IdmValue value, IdmBuiltinType type);
 bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type);
 bool idm_is_nil(IdmValue value);
 bool idm_is_empty_list(IdmValue value);

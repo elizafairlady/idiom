@@ -157,25 +157,6 @@ static bool prim_chomp(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmE
     return !(err && err->present);
 }
 
-static bool prim_capture_stdout(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmValue result = args[0];
-    if (!idm_is_tuple(result) || idm_sequence_count(result) < 3) return idm_error_set(err, idm_span_unknown(NULL), "capture-stdout expects a command result tuple");
-    IdmError ignore;
-    idm_error_init(&ignore);
-    IdmValue reason = idm_sequence_item(result, 1, &ignore);
-    IdmValue stdout_v = idm_sequence_item(result, 2, &ignore);
-    idm_error_clear(&ignore);
-    if (idm_value_is_error(result) && idm_value_tag(reason) == IDM_VAL_ATOM && strcmp(idm_symbol_text(idm_value_symbol(reason)), "capture-overflow") == 0) {
-        return idm_error_set(err, idm_span_unknown(NULL), "command output exceeded the capture limit");
-    }
-    if (idm_value_tag(stdout_v) != IDM_VAL_STRING) { *out = stdout_v; return true; }
-    const char *bytes = idm_string_bytes(stdout_v);
-    size_t len = idm_string_length(stdout_v);
-    while (len > 0 && (bytes[len - 1u] == '\n' || bytes[len - 1u] == '\r')) len--;
-    *out = idm_string_n(rt, bytes, len, err);
-    return !(err && err->present);
-}
-
 static bool prim_tuple_get(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (!idm_is_tuple(args[0])) return idm_primitive_type_error(rt, err, "tuple-get", args[0], "a tuple");
     int64_t idx = 0;
@@ -407,49 +388,6 @@ static bool prim_env_set(IdmRuntime *rt, const IdmValue *args, IdmValue *out, Id
     if (!ok) return idm_error_oom(err, idm_span_unknown(NULL));
     *out = idm_atom(rt, "ok");
     return true;
-}
-
-static bool prim_make_procsub_temp(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    (void)args;
-    char tmpl[] = "/tmp/idm_procsub_XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return idm_error_set(err, idm_span_unknown(NULL), "process substitution: mkstemp failed: %s", strerror(errno));
-    close(fd);
-    if (!idm_runtime_own_temp(rt, tmpl)) {
-        unlink(tmpl);
-        return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    *out = idm_string(rt, tmpl, err);
-    return !(err && err->present);
-}
-
-static bool prim_write_procsub_temp(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    if (!idm_is_tuple(args[0]) || idm_sequence_count(args[0]) < 3) return idm_error_set(err, idm_span_unknown(NULL), "process substitution: expected a command result tuple");
-    IdmError ig;
-    idm_error_init(&ig);
-    IdmValue stdout_val = idm_sequence_item(args[0], 2, &ig);
-    idm_error_clear(&ig);
-    size_t len = idm_value_tag(stdout_val) == IDM_VAL_STRING ? idm_string_length(stdout_val) : 0;
-    const char *bytes = idm_value_tag(stdout_val) == IDM_VAL_STRING ? idm_string_bytes(stdout_val) : "";
-    char tmpl[] = "/tmp/idm_procsub_XXXXXX";
-    int fd = mkstemp(tmpl);
-    if (fd < 0) return idm_error_set(err, idm_span_unknown(NULL), "process substitution: mkstemp failed: %s", strerror(errno));
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(fd, bytes + off, len - off);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            close(fd); unlink(tmpl); return idm_error_set(err, idm_span_unknown(NULL), "process substitution: write failed: %s", strerror(errno));
-        }
-        off += (size_t)w;
-    }
-    close(fd);
-    if (!idm_runtime_own_temp(rt, tmpl)) {
-        unlink(tmpl);
-        return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    *out = idm_string(rt, tmpl, err);
-    return !(err && err->present);
 }
 
 static bool prim_print_to(IdmRuntime *rt, FILE *stream, const IdmValue *args, uint32_t argc, bool newline, IdmValue *out, IdmError *err) {
@@ -891,37 +829,36 @@ static bool prim_is_a(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmEr
     return true;
 }
 
-static const char *type_pred_type_name(IdmPrimitive prim) {
+static IdmBuiltinType type_pred_type_kind(IdmPrimitive prim) {
     switch (prim) {
-        case IDM_PRIM_NIL_P: return "nil";
-        case IDM_PRIM_ATOM_P: return "atom";
-        case IDM_PRIM_WORD_P: return "word";
-        case IDM_PRIM_INT_P: return "int";
-        case IDM_PRIM_FLOAT_P: return "float";
-        case IDM_PRIM_STRING_P: return "string";
-        case IDM_PRIM_PAIR_P: return "pair";
-        case IDM_PRIM_EMPTY_LIST_P: return "empty-list";
-        case IDM_PRIM_LIST_P: return "list";
-        case IDM_PRIM_TUPLE_P: return "tuple";
-        case IDM_PRIM_VECTOR_P: return "vector";
-        case IDM_PRIM_DICT_P: return "dict";
-        case IDM_PRIM_SYNTAX_P: return "syntax";
-        case IDM_PRIM_CELL_P: return "cell";
-        case IDM_PRIM_CLOSURE_P: return "closure";
-        case IDM_PRIM_PID_P: return "pid";
-        case IDM_PRIM_REF_P: return "ref";
-        case IDM_PRIM_PORT_P: return "port";
-        case IDM_PRIM_REGEX_P: return "regex";
-        case IDM_PRIM_REGEX_RESULT_P: return "regex-result";
-        default: return NULL;
+        case IDM_PRIM_NIL_P: return IDM_BUILTIN_TYPE_NIL;
+        case IDM_PRIM_ATOM_P: return IDM_BUILTIN_TYPE_ATOM;
+        case IDM_PRIM_WORD_P: return IDM_BUILTIN_TYPE_WORD;
+        case IDM_PRIM_INT_P: return IDM_BUILTIN_TYPE_INT;
+        case IDM_PRIM_FLOAT_P: return IDM_BUILTIN_TYPE_FLOAT;
+        case IDM_PRIM_STRING_P: return IDM_BUILTIN_TYPE_STRING;
+        case IDM_PRIM_PAIR_P: return IDM_BUILTIN_TYPE_PAIR;
+        case IDM_PRIM_EMPTY_LIST_P: return IDM_BUILTIN_TYPE_EMPTY_LIST;
+        case IDM_PRIM_LIST_P: return IDM_BUILTIN_TYPE_LIST;
+        case IDM_PRIM_TUPLE_P: return IDM_BUILTIN_TYPE_TUPLE;
+        case IDM_PRIM_VECTOR_P: return IDM_BUILTIN_TYPE_VECTOR;
+        case IDM_PRIM_DICT_P: return IDM_BUILTIN_TYPE_DICT;
+        case IDM_PRIM_SYNTAX_P: return IDM_BUILTIN_TYPE_SYNTAX;
+        case IDM_PRIM_CELL_P: return IDM_BUILTIN_TYPE_CELL;
+        case IDM_PRIM_CLOSURE_P: return IDM_BUILTIN_TYPE_CLOSURE;
+        case IDM_PRIM_PID_P: return IDM_BUILTIN_TYPE_PID;
+        case IDM_PRIM_REF_P: return IDM_BUILTIN_TYPE_REF;
+        case IDM_PRIM_PORT_P: return IDM_BUILTIN_TYPE_PORT;
+        case IDM_PRIM_REGEX_P: return IDM_BUILTIN_TYPE_REGEX;
+        case IDM_PRIM_REGEX_RESULT_P: return IDM_BUILTIN_TYPE_REGEX_RESULT;
+        default: return IDM_BUILTIN_TYPE_NONE;
     }
 }
 
 static bool prim_type_pred(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, IdmValue *out, IdmError *err) {
-    const char *type = type_pred_type_name(prim);
-    IdmSymbol *symbol = type ? idm_intern(&rt->intern, IDM_SYMBOL_ATOM, type) : NULL;
-    if (type && !symbol) return idm_error_oom(err, idm_span_unknown(NULL));
-    bool result = symbol && idm_value_matches_type_symbol(args[0], symbol);
+    (void)err;
+    IdmBuiltinType type = type_pred_type_kind(prim);
+    bool result = idm_value_matches_builtin_type(args[0], type);
     *out = idm_bool(rt, result);
     return true;
 }
@@ -2368,8 +2305,6 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
         case IDM_PRIM_MONITOR:
         case IDM_PRIM_DEMONITOR:
         case IDM_PRIM_TRAP_EXIT:
-        case IDM_PRIM_EXEC:
-        case IDM_PRIM_AWAIT:
         case IDM_PRIM_TTY_READ:
         case IDM_PRIM_TTY_READ_LINE:
             return idm_error_set(err, idm_span_unknown(NULL), "primitive '%s' must be invoked under the actor scheduler", idm_primitive_name(prim));
@@ -2377,7 +2312,6 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
             return idm_error_set(err, idm_span_unknown(NULL), "primitive 'apply' is compiled directly and cannot be invoked generically");
         case IDM_PRIM_STR: return prim_str(rt, args, argc, out, err);
         case IDM_PRIM_CHOMP: return prim_chomp(rt, args, out, err);
-        case IDM_PRIM_CAPTURE_STDOUT: return prim_capture_stdout(rt, args, out, err);
         case IDM_PRIM_PRINT: return prim_print_impl(rt, args, argc, false, out, err);
         case IDM_PRIM_PRINTLN: return prim_print_impl(rt, args, argc, true, out, err);
         case IDM_PRIM_CD: return prim_cd(rt, args, out, err);
@@ -2385,8 +2319,6 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
         case IDM_PRIM_PWD: return prim_pwd(rt, args, out, err);
         case IDM_PRIM_ENV_GET: return prim_env_get(rt, args, out, err);
         case IDM_PRIM_ENV_SET: return prim_env_set(rt, args, out, err);
-        case IDM_PRIM_WRITE_PROCSUB_TEMP: return prim_write_procsub_temp(rt, args, out, err);
-        case IDM_PRIM_MAKE_PROCSUB_TEMP: return prim_make_procsub_temp(rt, args, out, err);
         case IDM_PRIM_ABS: return prim_abs(rt, args, out, err);
         case IDM_PRIM_FLOOR: return prim_float_unary(rt, "floor", floor, args, out, err);
         case IDM_PRIM_ROUND: return prim_float_unary(rt, "round", round, args, out, err);

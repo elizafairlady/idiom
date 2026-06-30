@@ -92,7 +92,7 @@ defn shutdown do
   children -> shutdown children 5000
   children timeout-ms -> do
     kill-children (dict-keys children)
-    await-shutdown children (add (time-ms) timeout-ms)
+    wait-shutdown children (add (time-ms) timeout-ms)
   end
 end
 
@@ -104,13 +104,13 @@ defn kill-children do
   end
 end
 
-defn await-shutdown children deadline -> if (eq? (dict-size children) 0) do :ok else do
+defn wait-shutdown children deadline -> if (eq? (dict-size children) 0) do :ok else do
   remaining = sub deadline time-ms
   if (lte? remaining 0) do
     {:error {:shutdown-timeout (dict-keys children)}}
   else do
     receive do
-      {:exit pid _reason} -> await-shutdown (dict-del children pid) deadline
+      {:exit pid _reason} -> wait-shutdown (dict-del children pid) deadline
       after remaining -> {:error {:shutdown-timeout (dict-keys children)}}
     end
   end

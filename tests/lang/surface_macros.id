@@ -48,6 +48,12 @@ suite do
     got |> assert-eq 42
   end
 
+  test "macro syntax patterns unwrap layout groups" do
+    got = twice2
+      add 10 11
+    got |> assert-eq 42
+  end
+
   test "macro-introduced binders do not capture caller names" do
     got = do
       tmp = :user

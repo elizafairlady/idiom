@@ -4,6 +4,7 @@ use std/string
 use std/port with [port-close-input port-read port-write]
 use std/system with [time-ms]
 use tests/pkg/bytecode_shape with [syntax-wire-ok]
+import std/cmd as Cmd
 import std/range as Range
 
 start = time-ms
@@ -24,7 +25,7 @@ parsed = receive do
   after 1000 -> {:timeout 0}
 end
 
-p = exec {:exec {:stage '({:lit "cat"}) '() '()} {:stdio :pipe :pipe :pipe}}
+p = spawn Cmd.command (list "cat") (Cmd.stdio :pipe :pipe :null)
 port-write p "ok" |> eq? {:ok 2}
 port-close-input p
 echo = port-read p :stdout 2

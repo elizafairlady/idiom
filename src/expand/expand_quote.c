@@ -217,7 +217,7 @@ static bool template_walk(ExpandContext *ctx, const IdmSyntax *t, const Template
                 if (t->as.seq.count == 0) { *out_value = idm_empty_list(); return true; }
                 const char *head = t->as.seq.items[0]->kind == IDM_SYN_WORD ? t->as.seq.items[0]->as.text : "";
                 if (strcmp(head, "%-expr") == 0) return template_quote_datum_list(ctx, t->as.seq.items, 1, t->as.seq.count, spec, out_value, err);
-                if (strcmp(head, "%-group") == 0) {
+                if (strcmp(head, "%-group") == 0 || strcmp(head, "%-layout-group") == 0) {
                     if (t->as.seq.count != 2) return idm_error_set(err, t->span, "%-group expects one child");
                     const IdmSyntax *child = t->as.seq.items[1];
                     if (syn_is_form(child, "%-expr")) return template_quote_datum_list(ctx, child->as.seq.items, 1, child->as.seq.count, spec, out_value, err);
@@ -276,7 +276,7 @@ static bool template_walk(ExpandContext *ctx, const IdmSyntax *t, const Template
                     *out_core = template_splice_list_core(ctx, t->as.seq.items, 1, t->as.seq.count, t->span, spec, quasiquote_splice_item, "unquote-splicing", err);
                     return *out_core != NULL;
                 }
-                if (strcmp(head, "%-group") == 0) {
+                if (strcmp(head, "%-group") == 0 || strcmp(head, "%-layout-group") == 0) {
                     if (t->as.seq.count != 2) { expand_error(err, t->span, "%-group expects one child"); return false; }
                     const IdmSyntax *child = t->as.seq.items[1];
                     if (syn_is_form(child, "%-expr")) {
@@ -303,7 +303,7 @@ static bool template_walk(ExpandContext *ctx, const IdmSyntax *t, const Template
         expand_error(err, t->span, "unsyntax-splicing is only valid inside sequence templates");
         return false;
     }
-    if (syn_is_form(t, "%-group") && t->as.seq.count == 2 && syn_is_form(t->as.seq.items[1], "%-expr") && t->as.seq.items[1]->as.seq.count == 2 && syn_is_form(t->as.seq.items[1]->as.seq.items[1], "%-body")) {
+    if ((syn_is_form(t, "%-group") || syn_is_form(t, "%-layout-group")) && t->as.seq.count == 2 && syn_is_form(t->as.seq.items[1], "%-expr") && t->as.seq.items[1]->as.seq.count == 2 && syn_is_form(t->as.seq.items[1]->as.seq.items[1], "%-body")) {
         *out_core = template_walk_core(ctx, t->as.seq.items[1]->as.seq.items[1], spec, err);
         return *out_core != NULL;
     }
@@ -314,7 +314,7 @@ static bool template_walk(ExpandContext *ctx, const IdmSyntax *t, const Template
         *out_core = syntax_build_core(ctx, kind, items, spec->syntax_ctx, t->span, err);
         return *out_core != NULL;
     }
-    if (syn_is_form(t, "%-group")) {
+    if (syn_is_form(t, "%-group") || syn_is_form(t, "%-layout-group")) {
         if (t->as.seq.count != 2) { expand_error(err, t->span, "%-group expects one child"); return false; }
         IdmCore *child = template_walk_core(ctx, t->as.seq.items[1], spec, err);
         if (!child) return false;

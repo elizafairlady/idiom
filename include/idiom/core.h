@@ -103,16 +103,11 @@ typedef enum {
     X(TRAP_EXIT, "trap-exit", 1, 1, "kernel") \
     X(STR, "str", 1, UINT32_MAX, "kernel") \
     X(CHOMP, "chomp", 1, 1, "string") \
-    X(CAPTURE_STDOUT, "capture-stdout", 1, 1, "kernel") \
-    X(EXEC, "exec", 1, 1, "kernel") \
-    X(AWAIT, "await", 1, 1, "kernel") \
     X(PRINT, "print", 0, UINT32_MAX, "kernel") \
     X(PRINTLN, "println", 0, UINT32_MAX, "kernel") \
     X(CD, "cd", 1, 1, "system") \
     X(CHDIR, "chdir", 1, 1, "system") \
     X(PWD, "pwd", 0, 0, "system") \
-    X(WRITE_PROCSUB_TEMP, "write-procsub-temp", 1, 1, "kernel") \
-    X(MAKE_PROCSUB_TEMP, "make-procsub-temp", 0, 0, "kernel") \
     X(ENV_GET, "env-get", 1, 1, "system") \
     X(ENV_SET, "env-set", 2, 2, "system") \
     X(SYNTAX_ADJACENT_PRED, "syntax-adjacent?", 1, 1, "kernel") \

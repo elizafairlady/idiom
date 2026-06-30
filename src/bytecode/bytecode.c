@@ -9,8 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IDM_IC_VERSION 42u
-#define IDM_IC_MIN_READ_VERSION 42u
+#define IDM_IC_VERSION 46u
+#define IDM_IC_MIN_READ_VERSION 46u
 
 static const IdmOpcodeInfo opcode_infos[IDM_OP_COUNT] = {
 #define IDM_OPCODE_INFO(name, fixed, count_index, repeat, roles, repeat_roles, reg_roles, reg_ranges, flow_kind, branch, tail) \

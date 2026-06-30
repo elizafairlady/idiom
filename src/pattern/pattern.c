@@ -774,7 +774,8 @@ static const IdmSyntax *syntax_dict_value_for_key(const IdmSyntax *dict, const I
 
 static const IdmSyntax *syn_subject_unwrap_expr(const IdmSyntax *syn) {
     if (!syn || syn->kind != IDM_SYN_LIST || syn->as.seq.count != 2u ||
-        syn->as.seq.items[0]->kind != IDM_SYN_WORD || strcmp(syn->as.seq.items[0]->as.text, "%-group") != 0) {
+        syn->as.seq.items[0]->kind != IDM_SYN_WORD ||
+        (strcmp(syn->as.seq.items[0]->as.text, "%-group") != 0 && strcmp(syn->as.seq.items[0]->as.text, "%-layout-group") != 0)) {
         return syn;
     }
     const IdmSyntax *inner = syn->as.seq.items[1];

@@ -4,13 +4,19 @@
 #include <fcntl.h>
 #include <glob.h>
 #include <limits.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#ifdef SYS_pidfd_open
+extern long syscall(long number, ...);
+#endif
 
 typedef enum { REDIR_FILE, REDIR_DUP } RedirKind;
 
@@ -30,10 +36,8 @@ typedef struct {
     char **env_names;
     char **env_values;
     size_t env_count;
-    char **owned_temps;
-    size_t owned_temp_count;
-    size_t owned_temp_cap;
     pid_t pid;
+    int pidfd;
     int status;
     bool reaped;
     bool stopped;
@@ -50,19 +54,10 @@ typedef enum {
     PORT_FILE
 } PortKind;
 
-static int int_value_or_default(IdmValue value, int fallback) {
+static bool int_value(IdmValue value, int *out_value) {
     int64_t out = 0;
-    if (!idm_value_is_int(value) || !idm_int_to_i64(value, &out) || out < INT_MIN || out > INT_MAX) return fallback;
-    return (int)out;
-}
-
-static bool stage_own_temp(Stage *stage, const char *path) {
-    if (stage->owned_temp_count == stage->owned_temp_cap) {
-        if (!idm_grow((void **)&stage->owned_temps, &stage->owned_temp_cap, sizeof(*stage->owned_temps), 4u, stage->owned_temp_count + 1u)) return false;
-    }
-    stage->owned_temps[stage->owned_temp_count] = idm_strdup(path);
-    if (!stage->owned_temps[stage->owned_temp_count]) return false;
-    stage->owned_temp_count++;
+    if (!idm_value_is_int(value) || !idm_int_to_i64(value, &out) || out < INT_MIN || out > INT_MAX) return false;
+    *out_value = (int)out;
     return true;
 }
 
@@ -77,12 +72,9 @@ struct IdmPort {
     int in_fd;
     int out_fd;
     int err_fd;
-    IdmBuffer out_buf;
-    IdmBuffer err_buf;
     bool launched;
     char *launch_error;
-    size_t capture_limit;
-    bool overflow;
+    bool process_done;
     bool interactive;
     bool fg;
     bool owns_terminal;
@@ -105,6 +97,32 @@ static void ignore_sigpipe_once(void) {
     pthread_once(&g_sigpipe_once, ignore_sigpipe);
 }
 
+static int open_pidfd(pid_t pid) {
+#ifdef SYS_pidfd_open
+    int fd = (int)syscall(SYS_pidfd_open, pid, 0u);
+    if (fd >= 0) {
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+        fcntl(fd, F_SETFL, O_NONBLOCK);
+    }
+    return fd;
+#else
+    (void)pid;
+    return -1;
+#endif
+}
+
+static void close_drained_done_stream(IdmPort *port, int *fd) {
+    if (!port->process_done || *fd < 0) return;
+    struct pollfd p;
+    p.fd = *fd;
+    p.events = POLLIN;
+    p.revents = 0;
+    if (poll(&p, 1u, 0) > 0 && (p.revents & POLLHUP) != 0 && (p.revents & POLLIN) == 0) {
+        close(*fd);
+        *fd = -1;
+    }
+}
+
 void idm_job_control_init(void) {
     g_job_tty = STDIN_FILENO;
     if (getpgrp() != getpid()) setpgid(0, 0);
@@ -116,29 +134,19 @@ void idm_job_control_init(void) {
     tcsetpgrp(g_job_tty, g_shell_pgid);
 }
 
-static size_t capture_limit_from_env(void) {
-    const char *text = getenv("IDM_CAPTURE_LIMIT");
-    if (text && *text) {
-        char *end = NULL;
-        unsigned long long value = strtoull(text, &end, 10);
-        if (end != text && value > 0) return (size_t)value;
-    }
-    return 64u * 1024u * 1024u;
-}
-
 static bool value_is_atom(IdmValue v, const char *name) {
     return idm_value_tag(v) == IDM_VAL_ATOM && strcmp(idm_symbol_text(idm_value_symbol(v)), name) == 0;
 }
 
 static bool parse_stdio_policy(IdmValue v, StdioPolicy *out) {
     if (value_is_atom(v, "inherit")) { *out = STDIO_INHERIT; return true; }
-    if (value_is_atom(v, "pipe") || value_is_atom(v, "capture")) { *out = STDIO_PIPE; return true; }
+    if (value_is_atom(v, "pipe")) { *out = STDIO_PIPE; return true; }
     if (value_is_atom(v, "null")) { *out = STDIO_NULL; return true; }
     return false;
 }
 
 static bool parse_stdio_tuple(IdmValue v, StdioPolicy *in, StdioPolicy *out, StdioPolicy *err) {
-    if (!idm_is_tuple(v) || idm_sequence_count(v) < 4) return false;
+    if (!idm_is_tuple(v) || idm_sequence_count(v) != 4) return false;
     IdmError ignore;
     idm_error_init(&ignore);
     IdmValue tag = idm_sequence_item(v, 0, &ignore);
@@ -162,6 +170,7 @@ static bool list_to_array(IdmValue list, IdmValue **out_items, size_t *out_count
         cur = idm_cdr(cur, &ignore);
         idm_error_clear(&ignore);
     }
+    if (!idm_is_empty_list(cur)) return false;
     IdmValue *items = count == 0 ? NULL : calloc(count, sizeof(*items));
     if (count != 0 && !items) return false;
     cur = list;
@@ -178,7 +187,7 @@ static bool list_to_array(IdmValue list, IdmValue **out_items, size_t *out_count
 }
 
 static char *dup_string_value(IdmValue v) {
-    if (idm_value_tag(v) != IDM_VAL_STRING) return idm_strdup("");
+    if (idm_value_tag(v) != IDM_VAL_STRING) return NULL;
     return idm_strndup(idm_string_bytes(v), idm_string_length(v));
 }
 
@@ -191,34 +200,36 @@ static bool argv_push(char ***argv, size_t *count, size_t *cap, char *item) {
 }
 
 static bool part_append_text(IdmValue part, const IdmExec *exec_ctx, Stage *stage, IdmBuffer *out, bool *is_glob) {
-    if (!idm_is_tuple(part) || idm_sequence_count(part) < 2) return false;
+    if (!idm_is_tuple(part) || idm_sequence_count(part) != 2) return false;
     IdmError ignore;
     idm_error_init(&ignore);
     IdmValue tag = idm_sequence_item(part, 0, &ignore);
     IdmValue payload = idm_sequence_item(part, 1, &ignore);
     idm_error_clear(&ignore);
-    if (value_is_atom(tag, "lit") || value_is_atom(tag, "glob") || value_is_atom(tag, "temp")) {
+    if (value_is_atom(tag, "lit") || value_is_atom(tag, "glob")) {
+        if (idm_value_tag(payload) != IDM_VAL_STRING) return false;
         if (value_is_atom(tag, "glob")) *is_glob = true;
-        const char *text = idm_value_tag(payload) == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
-        size_t len = idm_value_tag(payload) == IDM_VAL_STRING ? idm_string_length(payload) : 0;
-        if (value_is_atom(tag, "temp") && !stage_own_temp(stage, text)) return false;
-        return idm_buf_append_n(out, text, len);
+        return idm_buf_append_n(out, idm_string_bytes(payload), idm_string_length(payload));
     }
     if (value_is_atom(tag, "env")) {
-        const char *name = idm_value_tag(payload) == IDM_VAL_STRING ? idm_string_bytes(payload) : "";
+        if (idm_value_tag(payload) != IDM_VAL_STRING) return false;
+        const char *name = idm_string_bytes(payload);
         const char *value = idm_exec_env_get(exec_ctx, name);
         if (!value) value = getenv(name);
         return idm_buf_append(out, value ? value : "");
     }
     if (value_is_atom(tag, "cat")) {
-        IdmValue cur = payload;
-        while (idm_is_pair(cur)) {
-            idm_error_init(&ignore);
-            IdmValue sub = idm_car(cur, &ignore);
-            cur = idm_cdr(cur, &ignore);
-            idm_error_clear(&ignore);
-            if (!part_append_text(sub, exec_ctx, stage, out, is_glob)) return false;
+        IdmValue *parts = NULL;
+        size_t part_count = 0;
+        if (!list_to_array(payload, &parts, &part_count)) return false;
+        for (size_t i = 0; i < part_count; i++) {
+            IdmValue sub = parts[i];
+            if (!part_append_text(sub, exec_ctx, stage, out, is_glob)) {
+                free(parts);
+                return false;
+            }
         }
+        free(parts);
         return true;
     }
     return false;
@@ -273,7 +284,8 @@ static bool resolve_argv_part(IdmValue part, const IdmExec *exec_ctx, Stage *sta
 static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *stage) {
     memset(stage, 0, sizeof(*stage));
     stage->pid = -1;
-    if (!idm_is_tuple(stage_value) || idm_sequence_count(stage_value) < 4) return false;
+    stage->pidfd = -1;
+    if (!idm_is_tuple(stage_value) || idm_sequence_count(stage_value) != 4) return false;
     IdmError ignore;
     idm_error_init(&ignore);
     IdmValue tag = idm_sequence_item(stage_value, 0, &ignore);
@@ -303,22 +315,27 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
     }
     for (size_t i = 0; i < redir_count; i++) {
         IdmValue r = redirs[i];
-        if (!idm_is_tuple(r) || idm_sequence_count(r) < 3) { free(redirs); return false; }
+        if (!idm_is_tuple(r) || idm_sequence_count(r) < 1) { free(redirs); return false; }
         IdmValue rtag = idm_sequence_item(r, 0, &ignore);
         Redir *out = &stage->redirs[stage->redir_count];
         if (value_is_atom(rtag, "redir")) {
-            if (idm_sequence_count(r) < 4) { free(redirs); return false; }
+            if (idm_sequence_count(r) != 4) { free(redirs); return false; }
             IdmValue op = idm_sequence_item(r, 1, &ignore);
             IdmValue fd = idm_sequence_item(r, 2, &ignore);
             IdmValue target = idm_sequence_item(r, 3, &ignore);
             out->kind = REDIR_FILE;
-            out->fd = int_value_or_default(fd, 1);
-            const char *ops = idm_value_tag(op) == IDM_VAL_ATOM ? idm_symbol_text(idm_value_symbol(op)) : ">";
+            if (!int_value(fd, &out->fd)) { free(redirs); return false; }
+            const char *ops = idm_value_tag(op) == IDM_VAL_ATOM ? idm_symbol_text(idm_value_symbol(op))
+                            : idm_value_tag(op) == IDM_VAL_STRING ? idm_string_bytes(op)
+                            : NULL;
+            if (!ops) { free(redirs); return false; }
             out->op = strcmp(ops, "<") == 0 ? '<'
                     : strcmp(ops, ">>") == 0 ? 'a'
                     : strcmp(ops, "&>") == 0 ? 'b'
                     : strcmp(ops, "&>>") == 0 ? 'B'
-                    : '>';
+                    : strcmp(ops, ">") == 0 ? '>'
+                    : 0;
+            if (!out->op) { free(redirs); return false; }
             char **tav = NULL;
             size_t tac = 0, tcap = 0;
             if (!resolve_argv_part(target, exec_ctx, stage, &tav, &tac, &tcap) || tac < 1) { free(tav); free(redirs); return false; }
@@ -326,11 +343,11 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
             for (size_t j = 1; j < tac; j++) free(tav[j]);
             free(tav);
         } else if (value_is_atom(rtag, "dup")) {
+            if (idm_sequence_count(r) != 3) { free(redirs); return false; }
             IdmValue a = idm_sequence_item(r, 1, &ignore);
             IdmValue b = idm_sequence_item(r, 2, &ignore);
             out->kind = REDIR_DUP;
-            out->fd = int_value_or_default(a, 2);
-            out->dup_to = int_value_or_default(b, 1);
+            if (!int_value(a, &out->fd) || !int_value(b, &out->dup_to)) { free(redirs); return false; }
         } else {
             free(redirs);
             return false;
@@ -349,13 +366,20 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
     }
     for (size_t i = 0; i < env_count; i++) {
         IdmValue pair = envs[i];
-        if (!idm_is_tuple(pair) || idm_sequence_count(pair) < 2) { free(envs); return false; }
+        if (!idm_is_tuple(pair) || idm_sequence_count(pair) != 2) { free(envs); return false; }
         IdmValue name = idm_sequence_item(pair, 0, &ignore);
         IdmValue valpart = idm_sequence_item(pair, 1, &ignore);
         char **vav = NULL;
         size_t vac = 0, vcap = 0;
         if (!resolve_argv_part(valpart, exec_ctx, stage, &vav, &vac, &vcap) || vac < 1) { free(vav); free(envs); return false; }
-        stage->env_names[stage->env_count] = dup_string_value(name);
+        char *env_name = dup_string_value(name);
+        if (!env_name) {
+            for (size_t j = 0; j < vac; j++) free(vav[j]);
+            free(vav);
+            free(envs);
+            return false;
+        }
+        stage->env_names[stage->env_count] = env_name;
         stage->env_values[stage->env_count] = vav[0];
         for (size_t j = 1; j < vac; j++) free(vav[j]);
         free(vav);
@@ -366,11 +390,10 @@ static bool parse_stage(IdmValue stage_value, const IdmExec *exec_ctx, Stage *st
 }
 
 static void stage_destroy(Stage *stage) {
-    for (size_t i = 0; i < stage->owned_temp_count; i++) {
-        remove(stage->owned_temps[i]);
-        free(stage->owned_temps[i]);
+    if (stage->pidfd >= 0) {
+        close(stage->pidfd);
+        stage->pidfd = -1;
     }
-    free(stage->owned_temps);
     for (size_t i = 0; i < stage->argc; i++) free(stage->argv[i]);
     free(stage->argv);
     for (size_t i = 0; i < stage->redir_count; i++) free(stage->redirs[i].target);
@@ -390,6 +413,10 @@ static void port_reap_stages(IdmPort *port) {
         kill(stage->pid, SIGKILL);
         waitpid(stage->pid, NULL, 0);
         stage->reaped = true;
+        if (stage->pidfd >= 0) {
+            close(stage->pidfd);
+            stage->pidfd = -1;
+        }
     }
 }
 
@@ -402,8 +429,6 @@ void idm_port_free(IdmPort *port) {
     if (port->in_fd >= 0) close(port->in_fd);
     if (port->out_fd >= 0) close(port->out_fd);
     if (port->err_fd >= 0) close(port->err_fd);
-    idm_buf_destroy(&port->out_buf);
-    idm_buf_destroy(&port->err_buf);
     free(port->launch_error);
     free(port);
 }
@@ -425,6 +450,10 @@ IdmPort *idm_port_open_file(const char *path, const char *mode, bool readable, b
     port->out_fd = -1;
     port->err_fd = -1;
     return port;
+}
+
+bool idm_port_waits_completion(const IdmPort *port) {
+    return port && port->kind == PORT_PROCESS;
 }
 
 static void set_nonblocking(int fd) {
@@ -471,15 +500,12 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
     port->stdin_policy = STDIO_INHERIT;
     port->stdout_policy = STDIO_INHERIT;
     port->stderr_policy = STDIO_INHERIT;
-    port->capture_limit = capture_limit_from_env();
-    idm_buf_init(&port->out_buf);
-    idm_buf_init(&port->err_buf);
-
-    if (!idm_is_tuple(graph) || idm_sequence_count(graph) < 3) { idm_error_set(err, idm_span_unknown(NULL), "invalid command graph"); idm_port_free(port); return NULL; }
+    if (!idm_is_tuple(graph) || idm_sequence_count(graph) < 1) { idm_error_set(err, idm_span_unknown(NULL), "invalid command graph"); idm_port_free(port); return NULL; }
     IdmError ignore;
     idm_error_init(&ignore);
     IdmValue tag = idm_sequence_item(graph, 0, &ignore);
     if (value_is_atom(tag, "exec")) {
+        if (idm_sequence_count(graph) != 3) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid command graph"); idm_port_free(port); return NULL; }
         IdmValue stage = idm_sequence_item(graph, 1, &ignore);
         IdmValue io = idm_sequence_item(graph, 2, &ignore);
         if (!parse_stdio_tuple(io, &port->stdin_policy, &port->stdout_policy, &port->stderr_policy)) {
@@ -492,6 +518,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
         port->stages = calloc(1u, sizeof(*port->stages));
         if (!port->stages || !parse_stage(stage, exec_ctx, &port->stages[0])) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid command stage"); idm_port_free(port); return NULL; }
     } else if (value_is_atom(tag, "pipeline")) {
+        if (idm_sequence_count(graph) != 4) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid command graph"); idm_port_free(port); return NULL; }
         IdmValue list = idm_sequence_item(graph, 1, &ignore);
         IdmValue io = idm_sequence_item(graph, 2, &ignore);
         IdmValue pf = idm_sequence_item(graph, 3, &ignore);
@@ -501,7 +528,9 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
             idm_port_free(port);
             return NULL;
         }
-        port->pipefail = value_is_atom(pf, "true");
+        if (value_is_atom(pf, "true")) port->pipefail = true;
+        else if (value_is_atom(pf, "false")) port->pipefail = false;
+        else { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "invalid command pipefail policy"); idm_port_free(port); return NULL; }
         IdmValue *sv = NULL;
         size_t sc = 0;
         if (!list_to_array(list, &sv, &sc) || sc == 0) { idm_error_clear(&ignore); idm_error_set(err, idm_span_unknown(NULL), "empty pipeline"); idm_port_free(port); return NULL; }
@@ -645,6 +674,7 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
             _exit(126);
         }
         port->stages[i].pid = pid;
+        port->stages[i].pidfd = open_pidfd(pid);
         if (port->interactive) {
             if (i == 0) port->pgid = pid;
             setpgid(pid, port->pgid);
@@ -688,8 +718,11 @@ IdmPort *idm_port_launch(IdmRuntime *rt, IdmValue graph, const IdmExec *exec_ctx
 size_t idm_port_live_fds(const IdmPort *port, int *out_fds, size_t max) {
     if (port->kind == PORT_FILE) return 0;
     size_t n = 0;
-    if (port->out_fd >= 0 && n < max) out_fds[n++] = port->out_fd;
-    if (port->err_fd >= 0 && n < max) out_fds[n++] = port->err_fd;
+    for (size_t i = 0; i < port->stage_count && n < max; i++) {
+        if (!port->stages[i].reaped && port->stages[i].pidfd >= 0) {
+            out_fds[n++] = port->stages[i].pidfd;
+        }
+    }
     return n;
 }
 
@@ -698,58 +731,11 @@ int idm_port_input_fd(const IdmPort *port) {
     return port->stdin_policy == STDIO_PIPE ? port->in_fd : -1;
 }
 
-static void forward_bytes(int fd, const char *data, size_t len) {
-    size_t off = 0;
-    while (off < len) {
-        ssize_t w = write(fd, data + off, len - off);
-        if (w < 0) {
-            if (errno == EINTR) continue;
-            return;
-        }
-        off += (size_t)w;
-    }
-}
-
-static void drain_fd(IdmPort *port, int *fd, IdmBuffer *buf, int forward_to) {
-    if (*fd < 0) return;
-    char tmp[4096];
-    for (;;) {
-        ssize_t r = read(*fd, tmp, sizeof(tmp));
-        if (r > 0) {
-            if (forward_to >= 0) forward_bytes(forward_to, tmp, (size_t)r);
-            size_t room = buf->len < port->capture_limit ? port->capture_limit - buf->len : 0;
-            size_t take = (size_t)r < room ? (size_t)r : room;
-            if (take > 0) idm_buf_append_n(buf, tmp, take);
-            if ((size_t)r > room) port->overflow = true;
-            continue;
-        }
-        if (r == 0) { close(*fd); *fd = -1; return; }
-        if (errno == EINTR) continue;
-        return;
-    }
-}
-
-void idm_port_drain(IdmPort *port) {
-    if (port->kind == PORT_FILE) return;
-    drain_fd(port, &port->out_fd, &port->out_buf, -1);
-    drain_fd(port, &port->err_fd, &port->err_buf, 2);
-}
-
-static bool take_buffer_prefix(IdmBuffer *buf, size_t max, char **out_data, size_t *out_len, IdmError *err) {
-    size_t take = buf->len < max ? buf->len : max;
-    char *copy = idm_strndup(buf->data ? buf->data : "", take);
-    if (!copy) return idm_error_oom(err, idm_span_unknown(NULL));
-    if (take < buf->len) {
-        memmove(buf->data, buf->data + take, buf->len - take);
-        buf->len -= take;
-        buf->data[buf->len] = '\0';
-    } else {
-        buf->len = 0;
-        if (buf->data) buf->data[0] = '\0';
-    }
-    *out_data = copy;
-    *out_len = take;
-    return true;
+int idm_port_output_fd(const IdmPort *port, const char *stream) {
+    if (port->kind == PORT_FILE) return -1;
+    if (strcmp(stream, "stdout") == 0) return port->stdout_policy == STDIO_PIPE ? port->out_fd : -1;
+    if (strcmp(stream, "stderr") == 0) return port->stderr_policy == STDIO_PIPE ? port->err_fd : -1;
+    return -1;
 }
 
 bool idm_port_read(IdmPort *port, const char *stream, size_t max, char **out_data, size_t *out_len, IdmPortIoStatus *out_status, IdmError *err) {
@@ -778,28 +764,53 @@ bool idm_port_read(IdmPort *port, const char *stream, size_t max, char **out_dat
         *out_status = IDM_PORT_IO_OK;
         return true;
     }
-    IdmBuffer *buf = NULL;
     int *fd = NULL;
     bool has_stream = false;
     if (strcmp(stream, "stdout") == 0) {
-        buf = &port->out_buf;
         fd = &port->out_fd;
         has_stream = port->stdout_policy == STDIO_PIPE;
     } else if (strcmp(stream, "stderr") == 0) {
-        buf = &port->err_buf;
         fd = &port->err_fd;
         has_stream = port->stderr_policy == STDIO_PIPE;
     } else {
         return idm_error_set(err, idm_span_unknown(NULL), "unknown port stream '%s'", stream);
     }
-    idm_port_drain(port);
-    if (buf->len == 0) {
-        *out_status = !has_stream ? IDM_PORT_IO_CLOSED : (*fd >= 0 ? IDM_PORT_IO_AGAIN : IDM_PORT_IO_EOF);
+    if (!has_stream) {
+        *out_status = IDM_PORT_IO_CLOSED;
         return true;
     }
-    if (!take_buffer_prefix(buf, max, out_data, out_len, err)) return false;
-    *out_status = IDM_PORT_IO_OK;
-    return true;
+    if (*fd < 0) {
+        *out_status = IDM_PORT_IO_EOF;
+        return true;
+    }
+    char *buf = malloc(max);
+    if (!buf) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (;;) {
+        ssize_t n = read(*fd, buf, max);
+        if (n > 0) {
+            *out_data = buf;
+            *out_len = (size_t)n;
+            *out_status = IDM_PORT_IO_OK;
+            close_drained_done_stream(port, fd);
+            return true;
+        }
+        if (n == 0) {
+            close(*fd);
+            *fd = -1;
+            free(buf);
+            *out_status = IDM_PORT_IO_EOF;
+            return true;
+        }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            free(buf);
+            *out_status = IDM_PORT_IO_AGAIN;
+            return true;
+        }
+        int saved = errno;
+        free(buf);
+        return idm_error_set(err, idm_span_unknown(NULL), "port read failed: %s", strerror(saved));
+    }
 }
 
 bool idm_port_write(IdmPort *port, const char *data, size_t len, size_t *out_written, IdmPortIoStatus *out_status, IdmError *err) {
@@ -909,7 +920,6 @@ void idm_port_resume(IdmPort *port, bool fg) {
 
 bool idm_port_try_complete(IdmPort *port) {
     if (port->kind == PORT_FILE) return port->file_closed || port->file == NULL;
-    idm_port_drain(port);
     bool all_reaped = true;
     int flags = WNOHANG;
     if (port->interactive) flags |= WUNTRACED | WCONTINUED;
@@ -921,9 +931,23 @@ bool idm_port_try_complete(IdmPort *port) {
         if (r == stage->pid) {
             if (WIFSTOPPED(status)) { stage->stopped = true; all_reaped = false; }
             else if (WIFCONTINUED(status)) { stage->stopped = false; all_reaped = false; }
-            else { stage->status = status; stage->reaped = true; }
+            else {
+                stage->status = status;
+                stage->reaped = true;
+                if (stage->pidfd >= 0) {
+                    close(stage->pidfd);
+                    stage->pidfd = -1;
+                }
+            }
         }
-        else if (r < 0 && errno == ECHILD) { stage->status = 0; stage->reaped = true; }
+        else if (r < 0 && errno == ECHILD) {
+            stage->status = 0;
+            stage->reaped = true;
+            if (stage->pidfd >= 0) {
+                close(stage->pidfd);
+                stage->pidfd = -1;
+            }
+        }
         else all_reaped = false;
     }
     if (port->owns_terminal && (all_reaped || idm_port_stopped(port))) {
@@ -934,8 +958,12 @@ bool idm_port_try_complete(IdmPort *port) {
         close(port->in_fd);
         port->in_fd = -1;
     }
-    bool fds_open = port->out_fd >= 0 || port->err_fd >= 0;
-    return all_reaped && !fds_open;
+    if (all_reaped) {
+        port->process_done = true;
+        close_drained_done_stream(port, &port->out_fd);
+        close_drained_done_stream(port, &port->err_fd);
+    }
+    return all_reaped;
 }
 
 static int stage_exit_code(int status) {
@@ -946,10 +974,8 @@ static int stage_exit_code(int status) {
 
 IdmValue idm_port_result(IdmPort *port, IdmRuntime *rt, IdmError *err) {
     if (port->kind == PORT_FILE) {
-        IdmValue empty = idm_string_n(rt, "", 0, err);
-        if (err->present) return idm_nil();
-        IdmValue items[4] = { idm_atom(rt, "ok"), idm_int(0), empty, empty };
-        return idm_tuple(rt, items, 4u, err);
+        IdmValue items[2] = { idm_atom(rt, "ok"), idm_int(0) };
+        return idm_tuple(rt, items, 2u, err);
     }
     int final_code = 0;
     bool any_failure = false;
@@ -964,19 +990,14 @@ IdmValue idm_port_result(IdmPort *port, IdmRuntime *rt, IdmError *err) {
     }
     bool ok = port->pipefail ? !any_failure : final_code == 0;
     if (!ok && port->pipefail && final_code == 0) final_code = rightmost_failure;
-    IdmValue out_str = idm_string_n(rt, port->out_buf.data ? port->out_buf.data : "", port->out_buf.len, err);
-    if (err->present) return idm_nil();
-    IdmValue err_str = idm_string_n(rt, port->err_buf.data ? port->err_buf.data : "", port->err_buf.len, err);
-    if (err->present) return idm_nil();
-    IdmValue items[4];
-    if (port->overflow) {
-        items[0] = idm_atom(rt, "error");
-        items[1] = idm_atom(rt, "capture-overflow");
-    } else {
-        items[0] = idm_atom(rt, ok ? "ok" : "error");
-        items[1] = idm_int(final_code);
-    }
-    items[2] = out_str;
-    items[3] = err_str;
-    return idm_tuple(rt, items, 4u, err);
+    IdmValue items[2] = { idm_atom(rt, ok ? "ok" : "error"), idm_int(final_code) };
+    return idm_tuple(rt, items, 2u, err);
+}
+
+void idm_port_release_process_state(IdmPort *port) {
+    if (!port || port->kind == PORT_FILE) return;
+    for (size_t i = 0; i < port->stage_count; i++) stage_destroy(&port->stages[i]);
+    free(port->stages);
+    port->stages = NULL;
+    port->stage_count = 0;
 }

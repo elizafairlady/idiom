@@ -22,6 +22,8 @@ char *idm_sched_take_diagnostic(IdmScheduler *sched);
 bool idm_signals_install(IdmError *err);
 bool idm_sched_port_status(IdmScheduler *sched, uint64_t port_id, int *out_state);
 bool idm_sched_register_port(IdmScheduler *sched, IdmPort *port, IdmValue *out_port, IdmError *err);
+bool idm_sched_register_port_link(IdmScheduler *sched, IdmPort *port, IdmActor *self, IdmValue *out_port, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
+bool idm_sched_register_port_monitor(IdmScheduler *sched, IdmPort *port, IdmActor *self, IdmValue *out_port, IdmValue *out_ref, IdmError *err);
 bool idm_sched_port_read(IdmScheduler *sched, uint64_t port_id, const char *stream, size_t max, IdmValue *out, bool *out_found, IdmError *err);
 bool idm_sched_port_write(IdmScheduler *sched, uint64_t port_id, const char *data, size_t len, IdmValue *out, bool *out_found, IdmError *err);
 bool idm_sched_port_close_input(IdmScheduler *sched, uint64_t port_id, IdmValue *out, bool *out_found, IdmError *err);
@@ -45,10 +47,10 @@ bool idm_sched_spawn(IdmScheduler *sched, IdmValue thunk, const IdmExec *parent,
 bool idm_sched_spawn_link(IdmScheduler *sched, IdmValue thunk, const IdmExec *parent, IdmActor *self, IdmValue *out_pid, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
 bool idm_sched_spawn_monitor(IdmScheduler *sched, IdmValue thunk, const IdmExec *parent, IdmActor *self, IdmValue *out_pid, IdmValue *out_ref, IdmError *err);
 void idm_sched_send(IdmScheduler *sched, uint64_t target_pid, IdmValue msg);
-bool idm_sched_link(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
-bool idm_sched_exit_signal(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, IdmValue reason, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
-bool idm_sched_unlink(IdmScheduler *sched, IdmActor *self, uint64_t target_pid);
-bool idm_sched_monitor(IdmScheduler *sched, IdmActor *self, uint64_t target_pid, IdmValue *out_ref, IdmError *err);
+bool idm_sched_link(IdmScheduler *sched, IdmActor *self, IdmValue target, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
+bool idm_sched_exit_signal(IdmScheduler *sched, IdmActor *self, IdmValue target, IdmValue reason, bool *self_should_exit, IdmValue *self_exit_reason, IdmError *err);
+bool idm_sched_unlink(IdmScheduler *sched, IdmActor *self, IdmValue target, IdmError *err);
+bool idm_sched_monitor(IdmScheduler *sched, IdmActor *self, IdmValue target, IdmValue *out_ref, IdmError *err);
 bool idm_sched_demonitor(IdmScheduler *sched, IdmActor *self, IdmValue ref);
 
 #endif

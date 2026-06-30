@@ -108,6 +108,7 @@ struct IdmSymbol {
     char *text;
     uint32_t id;
     IdmSymbolKind kind;
+    IdmBuiltinType builtin_type;
     uint32_t hash;
     struct IdmSymbol *hnext;
 };
@@ -343,21 +344,8 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->record_shapes = NULL;
     rt->record_shape_count = 0;
     rt->record_shape_cap = 0;
-    rt->owned_temps = NULL;
-    rt->owned_temp_count = 0;
-    rt->owned_temp_cap = 0;
     rt->repl = NULL;
     rt->interactive = false;
-}
-
-bool idm_runtime_own_temp(IdmRuntime *rt, const char *path) {
-    if (rt->owned_temp_count == rt->owned_temp_cap) {
-        if (!idm_grow((void **)&rt->owned_temps, &rt->owned_temp_cap, sizeof(*rt->owned_temps), 8u, rt->owned_temp_count + 1u)) return false;
-    }
-    rt->owned_temps[rt->owned_temp_count] = idm_strdup(path);
-    if (!rt->owned_temps[rt->owned_temp_count]) return false;
-    rt->owned_temp_count++;
-    return true;
 }
 
 void idm_runtime_destroy(IdmRuntime *rt) {
@@ -381,14 +369,6 @@ void idm_runtime_destroy(IdmRuntime *rt) {
     rt->record_shape_count = 0;
     rt->record_shape_cap = 0;
     pthread_mutex_unlock(&g_record_shape_mu);
-    for (size_t i = 0; i < rt->owned_temp_count; i++) {
-        remove(rt->owned_temps[i]);
-        free(rt->owned_temps[i]);
-    }
-    free(rt->owned_temps);
-    rt->owned_temps = NULL;
-    rt->owned_temp_count = 0;
-    rt->owned_temp_cap = 0;
     idm_heap_destroy(&rt->immortal);
     idm_intern_destroy(&rt->intern);
 }
@@ -511,6 +491,33 @@ static uint32_t intern_hash(IdmSymbolKind kind, const char *text) {
     return h;
 }
 
+static IdmBuiltinType builtin_type_from_text(const char *text) {
+    if (strcmp(text, "nil") == 0) return IDM_BUILTIN_TYPE_NIL;
+    if (strcmp(text, "atom") == 0) return IDM_BUILTIN_TYPE_ATOM;
+    if (strcmp(text, "word") == 0) return IDM_BUILTIN_TYPE_WORD;
+    if (strcmp(text, "int") == 0) return IDM_BUILTIN_TYPE_INT;
+    if (strcmp(text, "fixnum") == 0) return IDM_BUILTIN_TYPE_FIXNUM;
+    if (strcmp(text, "bignum") == 0) return IDM_BUILTIN_TYPE_BIGNUM;
+    if (strcmp(text, "float") == 0) return IDM_BUILTIN_TYPE_FLOAT;
+    if (strcmp(text, "string") == 0) return IDM_BUILTIN_TYPE_STRING;
+    if (strcmp(text, "pair") == 0) return IDM_BUILTIN_TYPE_PAIR;
+    if (strcmp(text, "empty-list") == 0) return IDM_BUILTIN_TYPE_EMPTY_LIST;
+    if (strcmp(text, "list") == 0) return IDM_BUILTIN_TYPE_LIST;
+    if (strcmp(text, "tuple") == 0) return IDM_BUILTIN_TYPE_TUPLE;
+    if (strcmp(text, "vector") == 0) return IDM_BUILTIN_TYPE_VECTOR;
+    if (strcmp(text, "dict") == 0) return IDM_BUILTIN_TYPE_DICT;
+    if (strcmp(text, "syntax") == 0) return IDM_BUILTIN_TYPE_SYNTAX;
+    if (strcmp(text, "cell") == 0) return IDM_BUILTIN_TYPE_CELL;
+    if (strcmp(text, "closure") == 0) return IDM_BUILTIN_TYPE_CLOSURE;
+    if (strcmp(text, "pid") == 0) return IDM_BUILTIN_TYPE_PID;
+    if (strcmp(text, "ref") == 0) return IDM_BUILTIN_TYPE_REF;
+    if (strcmp(text, "port") == 0) return IDM_BUILTIN_TYPE_PORT;
+    if (strcmp(text, "record") == 0) return IDM_BUILTIN_TYPE_RECORD;
+    if (strcmp(text, "regex") == 0) return IDM_BUILTIN_TYPE_REGEX;
+    if (strcmp(text, "regex-result") == 0) return IDM_BUILTIN_TYPE_REGEX_RESULT;
+    return IDM_BUILTIN_TYPE_NONE;
+}
+
 static bool intern_rehash(IdmIntern *intern, size_t new_count) {
     IdmSymbol **buckets = calloc(new_count, sizeof(*buckets));
     if (!buckets) return false;
@@ -548,6 +555,7 @@ static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, con
     }
     sym->id = intern->next_id++;
     sym->kind = kind;
+    sym->builtin_type = builtin_type_from_text(text);
     sym->hash = h;
     intern->symbols[intern->count++] = sym;
     size_t b = h & (intern->bucket_count - 1u);
@@ -1938,42 +1946,16 @@ const char *idm_value_dispatch_type_name(IdmValue value) {
 }
 
 IdmBuiltinType idm_value_builtin_type_kind(IdmSymbol *type) {
-    if (!type) return IDM_BUILTIN_TYPE_NONE;
-    const char *text = idm_symbol_text(type);
-    if (strcmp(text, "nil") == 0) return IDM_BUILTIN_TYPE_NIL;
-    if (strcmp(text, "atom") == 0) return IDM_BUILTIN_TYPE_ATOM;
-    if (strcmp(text, "word") == 0) return IDM_BUILTIN_TYPE_WORD;
-    if (strcmp(text, "int") == 0) return IDM_BUILTIN_TYPE_INT;
-    if (strcmp(text, "fixnum") == 0) return IDM_BUILTIN_TYPE_FIXNUM;
-    if (strcmp(text, "bignum") == 0) return IDM_BUILTIN_TYPE_BIGNUM;
-    if (strcmp(text, "float") == 0) return IDM_BUILTIN_TYPE_FLOAT;
-    if (strcmp(text, "string") == 0) return IDM_BUILTIN_TYPE_STRING;
-    if (strcmp(text, "pair") == 0) return IDM_BUILTIN_TYPE_PAIR;
-    if (strcmp(text, "empty-list") == 0) return IDM_BUILTIN_TYPE_EMPTY_LIST;
-    if (strcmp(text, "list") == 0) return IDM_BUILTIN_TYPE_LIST;
-    if (strcmp(text, "tuple") == 0) return IDM_BUILTIN_TYPE_TUPLE;
-    if (strcmp(text, "vector") == 0) return IDM_BUILTIN_TYPE_VECTOR;
-    if (strcmp(text, "dict") == 0) return IDM_BUILTIN_TYPE_DICT;
-    if (strcmp(text, "syntax") == 0) return IDM_BUILTIN_TYPE_SYNTAX;
-    if (strcmp(text, "cell") == 0) return IDM_BUILTIN_TYPE_CELL;
-    if (strcmp(text, "closure") == 0) return IDM_BUILTIN_TYPE_CLOSURE;
-    if (strcmp(text, "pid") == 0) return IDM_BUILTIN_TYPE_PID;
-    if (strcmp(text, "ref") == 0) return IDM_BUILTIN_TYPE_REF;
-    if (strcmp(text, "port") == 0) return IDM_BUILTIN_TYPE_PORT;
-    if (strcmp(text, "record") == 0) return IDM_BUILTIN_TYPE_RECORD;
-    if (strcmp(text, "regex") == 0) return IDM_BUILTIN_TYPE_REGEX;
-    if (strcmp(text, "regex-result") == 0) return IDM_BUILTIN_TYPE_REGEX_RESULT;
-    return IDM_BUILTIN_TYPE_NONE;
+    return type ? type->builtin_type : IDM_BUILTIN_TYPE_NONE;
 }
 
 bool idm_value_builtin_type_symbol(IdmSymbol *type) {
     return idm_value_builtin_type_kind(type) != IDM_BUILTIN_TYPE_NONE;
 }
 
-bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type) {
-    if (!type) return false;
+bool idm_value_matches_builtin_type(IdmValue value, IdmBuiltinType type) {
     IdmValueTag vt = idm_value_tag(value);
-    switch (idm_value_builtin_type_kind(type)) {
+    switch (type) {
         case IDM_BUILTIN_TYPE_NIL: return vt == IDM_VAL_NIL;
         case IDM_BUILTIN_TYPE_ATOM: return vt == IDM_VAL_ATOM;
         case IDM_BUILTIN_TYPE_WORD: return vt == IDM_VAL_WORD;
@@ -2001,8 +1983,16 @@ bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type) {
         case IDM_BUILTIN_TYPE_RECORD: return vt == IDM_VAL_RECORD;
         case IDM_BUILTIN_TYPE_REGEX: return vt == IDM_VAL_REGEX;
         case IDM_BUILTIN_TYPE_REGEX_RESULT: return vt == IDM_VAL_REGEX_RESULT;
+        case IDM_BUILTIN_TYPE_COUNT:
         case IDM_BUILTIN_TYPE_NONE: break;
     }
+    return false;
+}
+
+bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type) {
+    if (!type) return false;
+    if (type->builtin_type != IDM_BUILTIN_TYPE_NONE) return idm_value_matches_builtin_type(value, type->builtin_type);
+    IdmValueTag vt = idm_value_tag(value);
     return vt == IDM_VAL_RECORD && idm_record_is_symbol(value, type);
 }
 
@@ -2229,7 +2219,7 @@ bool idm_record_field_project_symbols(IdmValue value, IdmSymbol *type, IdmSymbol
 
 bool idm_record_is_symbol(IdmValue value, IdmSymbol *type) {
     if (!type) return false;
-    if (idm_value_builtin_type_kind(type) == IDM_BUILTIN_TYPE_RECORD) return idm_value_tag(value) == IDM_VAL_RECORD;
+    if (type->builtin_type == IDM_BUILTIN_TYPE_RECORD) return idm_value_tag(value) == IDM_VAL_RECORD;
     return idm_value_tag(value) == IDM_VAL_RECORD && idm_boxed_object(value)->as.record.shape->type == type;
 }
 

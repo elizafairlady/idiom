@@ -1,7 +1,10 @@
 use std/test
+import std/cmd as Cmd
 activate Test
 
 core-operator $> 10 "left" "infix" add
+
+defn hold x -> x
 
 protocol LocalPrimarySurface do
   core-operator <++> 10 "left" "infix" add
@@ -30,6 +33,52 @@ suite do
 
   test "expression-call-primary-pipes-as-one-left-operand" do
     not? :false |> assert-eq :true
+  end
+
+  test "colon atoms read punctuation until delimiter" do
+    :> |> assert-eq :>
+    :&> |> assert-eq :&>
+    :>> |> assert-eq :>>
+    :< |> assert-eq :<
+    :foo/bar? |> assert-eq :foo/bar?
+    got = :foo#comment
+    got |> assert-eq :foo
+  end
+
+  test "layout groups application arguments everywhere" do
+    [
+      add
+        1
+        2
+    ] |> assert-eq [3]
+
+    got = hold
+      x:
+        add 1 2
+    got |> assert-eq %{:x 3}
+  end
+
+  test "qualified callee application does not require grouping" do
+    expected = Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+    hold Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null) |> assert-eq expected
+  end
+
+  test "layout groups nested qualified callee arguments" do
+    expected = Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+    got = hold
+      Cmd.command
+        list "printf" "ok"
+        Cmd.stdio :null :pipe :null
+    got |> assert-eq expected
+  end
+
+  test "thread pipe captures application lhs" do
+    expected = Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+    Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null) |> hold |> assert-eq expected
+  end
+
+  test "function values keep application shape under unary call" do
+    hold &add 1 2 |> assert-eq 3
   end
 
   test "escaped-word-operator-token-resolves" do

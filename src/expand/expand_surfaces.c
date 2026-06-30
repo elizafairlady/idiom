@@ -207,7 +207,7 @@ bool expand_surface_macro_form_to_syntax(ExpandContext *ctx, const IdmSyntax *fo
 }
 
 static bool expand_macro_syntax_only(ExpandContext *ctx, const IdmSyntax *syntax, IdmSyntax **out_syntax, IdmError *err) {
-    if (syn_is_form(syntax, "%-group")) {
+    if (syn_is_form(syntax, "%-group") || syn_is_form(syntax, "%-layout-group")) {
         if (syntax->as.seq.count != 2) return idm_error_set(err, syntax->span, "%-group expects one child");
         return expand_macro_syntax_only(ctx, syntax->as.seq.items[1], out_syntax, err);
     }
