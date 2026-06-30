@@ -52,6 +52,7 @@ CLI_SRCS := src/cli/main.c
 
 UNIT_CASE_SRCS := \
 	tests/unit/bytecode_record.c \
+	tests/unit/closure_arity.c \
 	tests/unit/byteprog.c \
 	tests/unit/cli.c \
 	tests/unit/gc.c \

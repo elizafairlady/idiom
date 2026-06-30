@@ -474,6 +474,8 @@ bool local_expand_callback(void *user, IdmRuntime *rt, const IdmSyntax *syntax, 
 bool dict_rest_index(const IdmSyntax *syn, size_t *out_index, IdmError *err);
 bool try_qualified_word_at(IdmSyntax *const *items, size_t start, size_t end, IdmSyntax **out_word, size_t *out_end, IdmError *err);
 IdmSyntax *expect_qualified_word_at(IdmSyntax *const *items, size_t start, size_t *inout_end, const char *message, IdmError *err);
+bool expand_arity_auto_calls_zero(const IdmArity *arity);
+bool expand_syntax_call_arity(ExpandContext *ctx, const IdmSyntax *syn, IdmArity *out, IdmError *err);
 bool local_macro_invoke(void *user, IdmRuntime *rt, uint32_t payload, const IdmSyntax *use_syntax, IdmSyntax **out_syntax, IdmError *err);
 void local_pop_to(ExpandContext *ctx, size_t table_base, uint32_t next_slot);
 bool local_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_slot);

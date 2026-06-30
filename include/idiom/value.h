@@ -332,6 +332,7 @@ uint32_t idm_closure_function_index(IdmValue value);
 const IdmBytecodeModule *idm_closure_module(IdmValue value);
 size_t idm_closure_entry_count(IdmValue value);
 uint32_t idm_closure_entry(IdmValue value, size_t index, IdmError *err);
+bool idm_closure_arity(IdmValue value, IdmArity *out);
 size_t idm_closure_capture_count(IdmValue value);
 IdmValue idm_closure_capture(IdmValue value, size_t index, IdmError *err);
 IdmEnv *idm_closure_env(IdmValue value);

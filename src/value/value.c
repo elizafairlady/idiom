@@ -2108,6 +2108,24 @@ uint32_t idm_closure_entry(IdmValue value, size_t index, IdmError *err) {
     return idm_boxed_object(value)->as.closure.entries[index];
 }
 
+bool idm_closure_arity(IdmValue value, IdmArity *out) {
+    if (out) *out = idm_arity_unknown();
+    if (!out || idm_value_tag(value) != IDM_VAL_CLOSURE) return false;
+    const IdmClosureObj *closure = &idm_boxed_object(value)->as.closure;
+    const IdmBytecodeModule *module = closure->module;
+    if (!idm_bc_is_finalized(module)) return false;
+    IdmArity arity = idm_arity_unknown();
+    size_t count = closure->entry_count;
+    if (count == 0) return false;
+    for (size_t i = 0; i < count; i++) {
+        uint32_t index = count == 1u ? closure->function_index : closure->entries[i];
+        if (index >= module->function_count) return false;
+        if (!idm_arity_merge(&arity, &module->functions[index].call_arity)) return false;
+    }
+    *out = arity;
+    return true;
+}
+
 size_t idm_closure_capture_count(IdmValue value) {
     return idm_value_tag(value) == IDM_VAL_CLOSURE ? idm_boxed_object(value)->as.closure.capture_count : 0;
 }

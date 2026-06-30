@@ -1161,20 +1161,37 @@ static IdmArity core_callable_arity(const IdmCore *core) {
     return arity;
 }
 
+static bool syntax_forces_callable_value(const IdmSyntax *syn) {
+    if (!syn) return false;
+    if (syn_is_form(syn, "%-expression") && syn->as.seq.count == 2u) {
+        const IdmSyntax *child = syn->as.seq.items[1];
+        return child->kind == IDM_SYN_WORD && child->as.text[0] == '&' && child->as.text[1] != '\0';
+    }
+    if (syn_is_form(syn, "%-layout-group") && syn->as.seq.count == 2u) {
+        const IdmSyntax *inner = syn->as.seq.items[1];
+        if (syn_is_form(inner, "%-expr") && inner->as.seq.count >= 2u) return syntax_forces_callable_value(inner->as.seq.items[1]);
+    }
+    return false;
+}
+
 static bool syntax_callable_value_binding_info(ExpandContext *ctx, const IdmSyntax *syn, IdmArity *out, IdmError *err) {
-    (void)ctx;
     if (syn_is_form(syn, "%-expr") && syn->as.seq.count >= 2u && syn_is_word(syn->as.seq.items[1], "fn")) {
         return function_literal_arity(syn->as.seq.items[1], syn->as.seq.items, 2u, syn->as.seq.count, out, err);
     }
-    return false;
+    IdmArity arity = idm_arity_unknown();
+    if (!expand_syntax_call_arity(ctx, syn, &arity, err)) return false;
+    if (arity.kind == IDM_ARITY_UNKNOWN) return false;
+    if (!syntax_forces_callable_value(syn) && expand_arity_auto_calls_zero(&arity)) return false;
+    *out = arity;
+    return true;
 }
 
 static bool rhs_callable_value_binding_info(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmArity *out, IdmError *err) {
     if (start < end && syn_is_word(items[start], "fn")) {
         return function_literal_arity(items[start], items, start + 1u, end, out, err);
     }
-    if (start + 1u != end) return false;
-    return syntax_callable_value_binding_info(ctx, items[start], out, err);
+    if (start + 1u == end) return syntax_callable_value_binding_info(ctx, items[start], out, err);
+    return false;
 }
 
 static bool pattern_bind_infos_walk(ExpandContext *ctx, const IdmSyntax *pattern, const IdmSyntax *rhs, CallableBindingInfo *bindings, size_t count, size_t *index, IdmError *err) {

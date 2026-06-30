@@ -962,13 +962,9 @@ static bool run_selector(Vm *vm, IdmPatternSelector *selector, ClauseGuardCtx *g
     return sel_ok;
 }
 
-static bool select_closure_clause(Vm *vm, IdmValue callee, ClauseArgs args, ClauseSelection *selection, IdmError *err) {
+static bool select_ready_closure_clause(Vm *vm, IdmValue callee, ClauseArgs args, ClauseSelection *selection, IdmError *err) {
     clause_selection_init(selection);
     const IdmBytecodeModule *callee_module = closure_module_or_current(vm, callee);
-    if (!closure_selector_ready(vm, callee, err)) {
-        clause_selection_destroy(selection);
-        return false;
-    }
     IdmPatternSelector *selector = idm_closure_selector(callee);
     if (!selector) {
         clause_selection_destroy(selection);
@@ -984,6 +980,11 @@ static bool select_closure_clause(Vm *vm, IdmValue callee, ClauseArgs args, Clau
     guard_ctx.args = args;
     guard_ctx.exhausted = false;
     return run_selector(vm, selector, &guard_ctx, selection, err);
+}
+
+static bool select_closure_clause(Vm *vm, IdmValue callee, ClauseArgs args, ClauseSelection *selection, IdmError *err) {
+    if (!closure_selector_ready(vm, callee, err)) return false;
+    return select_ready_closure_clause(vm, callee, args, selection, err);
 }
 
 static bool raise_no_clause(Vm *vm, const char *name, ClauseArgs args, IdmError *err) {
@@ -1009,23 +1010,6 @@ static bool raise_no_clause(Vm *vm, const char *name, ClauseArgs args, IdmError 
     IdmValue args_tuple = idm_tuple(vm->rt, args.count == 0 ? NULL : args.values, args.count, NULL);
     idm_buf_destroy(&message_buf);
     return idm_error_reason(vm->rt, err, "no-clause", 2, idm_atom(vm->rt, reason_name), args_tuple);
-}
-
-static IdmArity closure_arity(Vm *vm, IdmValue closure) {
-    IdmArity arity = idm_arity_unknown();
-    const IdmBytecodeModule *m = closure_module_or_current(vm, closure);
-    if (!m) return arity;
-    size_t n = idm_closure_entry_count(closure);
-    if (n == 0) {
-        uint32_t idx = idm_closure_function_index(closure);
-        if (idx < m->function_count) (void)idm_arity_merge(&arity, &m->functions[idx].call_arity);
-        return arity;
-    }
-    for (size_t i = 0; i < n; i++) {
-        uint32_t idx = idm_closure_entry(closure, i, NULL);
-        if (idx < m->function_count) (void)idm_arity_merge(&arity, &m->functions[idx].call_arity);
-    }
-    return arity;
 }
 
 static bool raise_call_arity(Vm *vm, const char *name, uint32_t argc, uint32_t min, uint32_t max, IdmError *err) {
@@ -1167,15 +1151,31 @@ static bool call_closure_clause(Vm *vm, uint32_t dst, IdmValue callee, const Idm
         idm_error_set(err, idm_span_unknown(NULL), "attempted to call a non-closure");
         return idm_error_reason(vm->rt, err, "not-callable", 1, callee);
     }
+    if (idm_closure_entry_count(callee) == 1u) {
+        if (!closure_selector_ready(vm, callee, err)) return false;
+        const IdmBytecodeModule *callee_module = closure_module_or_current(vm, callee);
+        if (!callee_module) return idm_error_set(err, idm_span_unknown(NULL), "closure has no bytecode module");
+        uint32_t entry = idm_closure_function_index(callee);
+        if (entry >= callee_module->function_count) return idm_error_set(err, idm_span_unknown(NULL), "closure references invalid function %u", entry);
+        const IdmBcFunction *fn = &callee_module->functions[entry];
+        bool trivial = fn->primitive_backed || fn->trivial_match || fn->pattern_count == 0;
+        if (trivial && !fn->has_guard && fn->pattern_local_count == 0 && idm_arity_accepts(&fn->call_arity, argc)) {
+            return enter_clause(vm, callee_module, entry, callee, NULL, NULL, 0, dst, arg_values, argc, NULL, tail, status, out_reason, err);
+        }
+    }
     ClauseSelection selected;
     ClauseArgs args = clause_args_from(arg_values, argc);
-    if (!select_closure_clause(vm, callee, args, &selected, err)) return false;
+    bool selected_ok = idm_closure_entry_count(callee) == 1u ?
+                       select_ready_closure_clause(vm, callee, args, &selected, err) :
+                       select_closure_clause(vm, callee, args, &selected, err);
+    if (!selected_ok) return false;
     if (!selected.matched) {
         const IdmBytecodeModule *cm = closure_module_or_current(vm, callee);
         const char *cname = NULL;
         uint32_t first_entry = idm_closure_entry_count(callee) != 0 ? idm_closure_entry(callee, 0, NULL) : idm_closure_function_index(callee);
         if (cm && first_entry < cm->function_count) cname = cm->functions[first_entry].name;
-        IdmArity arity = closure_arity(vm, callee);
+        IdmArity arity = idm_arity_unknown();
+        (void)idm_closure_arity(callee, &arity);
         bool budget_exhausted = selected.guard_budget_exhausted;
         clause_selection_destroy(&selected);
         if (budget_exhausted) return raise_guard_budget(cname, err);

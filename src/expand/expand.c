@@ -106,13 +106,19 @@ static bool binding_phase_visible(const IdmBinding *binding, int phase) {
     return binding->phase == phase || binding->phase == IDM_PHASE_ANY;
 }
 
+bool expand_arity_auto_calls_zero(const IdmArity *arity) {
+    if (!arity || arity->kind == IDM_ARITY_UNKNOWN) return false;
+    if (arity->kind == IDM_ARITY_RANGE && arity->max == UINT32_MAX) return false;
+    return idm_arity_accepts(arity, 0u);
+}
+
 static IdmCore *zero_arity_call_if_known(IdmCore *callee, const IdmArity *arity, bool callee_position, IdmSpan span, IdmError *err) {
     if (!callee) {
         idm_error_oom(err, span);
         return NULL;
     }
     if (callee_position) return callee;
-    if (!arity || arity->kind == IDM_ARITY_UNKNOWN || !idm_arity_accepts(arity, 0u)) return callee;
+    if (!expand_arity_auto_calls_zero(arity)) return callee;
     IdmCore *call = idm_core_call(callee, span);
     if (!call) {
         idm_core_free(callee);
@@ -268,6 +274,21 @@ static bool method_group_accepts(const MethodSurfaceGroup *group, uint32_t argc)
         if (idm_arity_accepts(&group->items[i]->arity, argc)) return true;
     }
     return false;
+}
+
+static bool method_group_arity(const MethodSurfaceGroup *group, IdmArity *out) {
+    IdmArity arity = idm_arity_unknown();
+    for (size_t i = 0; i < group->count; i++) {
+        if (group->items[i]->arity.kind == IDM_ARITY_UNKNOWN) return false;
+        if (arity.kind == IDM_ARITY_UNKNOWN) {
+            arity = group->items[i]->arity;
+        } else if (!idm_arity_merge(&arity, &group->items[i]->arity)) {
+            return false;
+        }
+    }
+    if (arity.kind == IDM_ARITY_UNKNOWN) return false;
+    *out = arity;
+    return true;
 }
 
 static bool method_group_max_accepting_at_least(const MethodSurfaceGroup *group, uint32_t min, uint32_t *out) {
@@ -518,7 +539,9 @@ static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, 
         return expand_error(err, word->span, "field '%s' requires a receiver", word->as.text);
     }
     if (method_group.count != 0) {
-        if (!callee_position && method_group_accepts(&method_group, 0u)) {
+        IdmArity arity = idm_arity_unknown();
+        bool auto_call = !callee_position && method_group_arity(&method_group, &arity) && expand_arity_auto_calls_zero(&arity);
+        if (auto_call) {
             IdmCore *call = expand_method_surface_call_cores(ctx, &method_group, NULL, NULL, 0u, word->span, err);
             field_surface_group_destroy(&field_group);
             method_surface_group_destroy(&method_group);
@@ -900,21 +923,13 @@ static bool syntax_call_arity(ExpandContext *ctx, const IdmSyntax *syn, IdmArity
         method_surface_group_destroy(&group);
         return false;
     }
-    IdmArity arity = idm_arity_unknown();
-    for (size_t i = 0; i < group.count; i++) {
-        if (group.items[i]->arity.kind == IDM_ARITY_UNKNOWN) {
-            method_surface_group_destroy(&group);
-            return false;
-        }
-        if (arity.kind == IDM_ARITY_UNKNOWN) arity = group.items[i]->arity;
-        else if (!idm_arity_merge(&arity, &group.items[i]->arity)) {
-            method_surface_group_destroy(&group);
-            return false;
-        }
-    }
+    bool ok = method_group_arity(&group, out);
     method_surface_group_destroy(&group);
-    *out = arity;
-    return true;
+    return ok;
+}
+
+bool expand_syntax_call_arity(ExpandContext *ctx, const IdmSyntax *syn, IdmArity *out, IdmError *err) {
+    return syntax_call_arity(ctx, syn, out, err);
 }
 
 static void member_surface_groups_destroy(FieldSurfaceGroup *fields, MethodSurfaceGroup *methods) {

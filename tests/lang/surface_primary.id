@@ -5,6 +5,8 @@ activate Test
 core-operator $> 10 "left" "infix" add
 
 defn hold x -> x
+defn arity-nullary-probe -> 42
+defn call-nullary-through-value f -> '() |> apply f
 
 protocol LocalPrimarySurface do
   core-operator <++> 10 "left" "infix" add
@@ -79,6 +81,17 @@ suite do
 
   test "function values keep application shape under unary call" do
     hold &add 1 2 |> assert-eq 3
+  end
+
+  test "arity metadata owns zero argument surface calls" do
+    escaped-nullary = &arity-nullary-probe
+    escaped-nullary |> assert-eq 42
+    '() |> apply &escaped-nullary |> assert-eq 42
+    {pattern-nullary} = {&arity-nullary-probe}
+    pattern-nullary |> assert-eq 42
+    call-nullary-through-value &arity-nullary-probe |> assert-eq 42
+    list |> closure? |> assert
+    list 1 2 |> assert-eq '(1 2)
   end
 
   test "escaped-word-operator-token-resolves" do

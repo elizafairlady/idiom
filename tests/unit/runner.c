@@ -3,6 +3,7 @@
 typedef int (*IdmUnitFn)(void);
 
 int idm_unit_bytecode_record(void);
+int idm_unit_closure_arity(void);
 int idm_unit_byteprog(void);
 int idm_unit_cli(void);
 int idm_unit_gc(void);
@@ -23,6 +24,7 @@ typedef struct {
 
 static const IdmUnit tests[] = {
     {"bytecode_record", idm_unit_bytecode_record},
+    {"closure_arity", idm_unit_closure_arity},
     {"byteprog", idm_unit_byteprog},
     {"cli", idm_unit_cli},
     {"gc", idm_unit_gc},
