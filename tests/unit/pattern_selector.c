@@ -227,11 +227,11 @@ static void test_rest_cache(IdmRuntime *rt, IdmError *err) {
 
     IdmPatternBindings bindings;
     idm_pattern_bindings_init(&bindings);
-    size_t before = idm_heap_object_count(&rt->heap);
+    size_t before = idm_heap_object_count(&rt->immortal);
     uint32_t fn = 0;
     bool has = false;
     select_one(rt, selector, arg, reject_first_guard, &fn, &bindings, &has, err);
-    size_t after = idm_heap_object_count(&rt->heap);
+    size_t after = idm_heap_object_count(&rt->immortal);
     check(fn == 2u && has, "guard retry result");
     check(after == before + 1u, "rest access cached");
 

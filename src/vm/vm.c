@@ -137,6 +137,8 @@ static void frame_release(Frame *frame) {
     if (!frame) return;
     if (frame->regs_owned) free(frame->regs);
     frame->regs = NULL;
+    frame->reg_count = 0;
+    frame->reg_cap = 0;
     frame->regs_owned = false;
     frame_clear_captures(frame);
 }
@@ -216,6 +218,23 @@ static void vm_reset(Vm *vm) {
     vm->env_save_count = 0;
     vm->env_save_cap = 0;
     vm->root_env = NULL;
+    vm->has_direct_result = false;
+    vm->direct_result = idm_nil();
+    vm->has_raised = false;
+    vm->raised = idm_nil();
+    vm->has_pending_raise = false;
+    vm->pending_raise = idm_nil();
+    vm->has_port_request = false;
+    vm->port_request = idm_nil();
+    vm->has_await = false;
+    vm->await_port = idm_nil();
+    vm->has_port_read_request = false;
+    vm->port_read_port = idm_nil();
+    vm->port_read_stream = NULL;
+    vm->port_read_max = 0;
+    vm->has_port_write_request = false;
+    vm->port_write_port = idm_nil();
+    vm->port_write_data = idm_nil();
 }
 
 static void vm_borrow_storage(Vm *vm, Frame *frames, size_t frame_cap, Handler *handlers, size_t handler_cap) {
@@ -723,7 +742,7 @@ static bool execute_primitive_clause(Vm *vm, uint32_t primitive, uint32_t dst, c
 #define IDM_GUARD_FRAME_SLOTS 4u
 #define IDM_GUARD_HANDLER_SLOTS 2u
 
-static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
+static bool vm_run_loop(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
 static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err);
 static bool enter_clause(Vm *vm, const IdmBytecodeModule *module, uint32_t function_index, IdmValue closure, IdmEnv *env, const IdmValue *captures, uint32_t capture_count, uint32_t dst, const IdmValue *args, uint32_t argc, const IdmPatternBindings *bindings, bool tail, IdmExecStatus *status, IdmValue *out_reason, IdmError *err);
 
@@ -732,7 +751,7 @@ static bool vm_run_call_with_exit_message(Vm *vm, int64_t budget, IdmExecStatus 
     IdmExecStatus status = IDM_EXEC_DONE;
     IdmValue result = idm_nil();
     IdmValue reason = idm_nil();
-    bool ok = vm_run_loop(vm, budget, &status, &result, &reason, err);
+    bool ok = vm_run_loop(vm, &budget, &status, &result, &reason, err);
     vm_reset(vm);
     if (out_status) *out_status = status;
     if (!ok) return false;
@@ -802,7 +821,7 @@ static bool init_pattern_locals(Vm *vm, Frame *frame, const IdmBcFunction *fn, c
         if (!bound) return idm_error_set(err, idm_span_unknown(NULL), "pattern binding '%s' missing", fn->pattern_locals[i].name);
         uint32_t reg = fn->arity + slot;
         if (reg >= frame->reg_count) return idm_error_set(err, idm_span_unknown(NULL), "pattern local register out of bounds");
-        frame->regs[reg] = *bound;
+        if (!frame_reg_write(frame, reg, *bound, err)) return false;
     }
     return true;
 }
@@ -1806,9 +1825,9 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
     return true;
 }
 
-static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
+static bool vm_run_loop(Vm *vm, int64_t *budget, IdmExecStatus *status, IdmValue *out_result, IdmValue *out_reason, IdmError *err) {
     for (;;) {
-        bool ok = vm_run_loop_inner(vm, &budget, status, out_result, out_reason, err);
+        bool ok = vm_run_loop_inner(vm, budget, status, out_result, out_reason, err);
         if (ok) return true;
         if (vm->handler_count == 0) {
             if (vm->has_raised) {
@@ -1855,7 +1874,7 @@ static bool vm_run_loop(Vm *vm, int64_t budget, IdmExecStatus *status, IdmValue 
         }
         idm_error_clear(err);
         frame->ip = handler.catch_ip;
-        if (budget >= 0 && vm->sched) {
+        if (budget && *budget >= 0 && vm->sched) {
             *status = IDM_EXEC_YIELD;
             return true;
         }
@@ -2058,7 +2077,7 @@ bool idm_exec_step(IdmExec *exec, int64_t budget, IdmExecStatus *status, IdmValu
     }
     IdmExec *prev = g_current_exec;
     g_current_exec = exec;
-    bool ok = vm_run_loop(exec, budget, status, out_result, out_reason, err);
+    bool ok = vm_run_loop(exec, &budget, status, out_result, out_reason, err);
     g_current_exec = prev;
     idm_profile_scope_end(&prof);
     return ok;
@@ -2123,6 +2142,7 @@ bool idm_exec_push_result(IdmExec *exec, IdmValue value, IdmError *err) {
 }
 
 void idm_exec_inject_raise(IdmExec *exec, IdmValue reason) {
+    if (exec->has_pending_raise) idm_gc_write_barrier(exec->pending_raise);
     exec->pending_raise = reason;
     exec->has_pending_raise = true;
 }
@@ -2131,22 +2151,90 @@ IdmScheduler *idm_exec_scheduler(const IdmExec *exec) {
     return exec ? exec->sched : NULL;
 }
 
-void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user) {
-    if (!exec) return;
-    for (size_t f = 0; f < exec->frame_count; f++) {
-        const Frame *frame = &exec->frames[f];
-        for (uint32_t i = 0; i < frame->reg_count; i++) visit(user, frame->regs[i]);
-        for (uint32_t i = 0; i < frame->capture_count; i++) visit(user, frame->captures[i]);
-        visit(user, frame->closure);
+void idm_exec_root_cursor_init(IdmExecRootCursor *cursor) {
+    if (!cursor) return;
+    cursor->frame = 0;
+    cursor->section = 0;
+    cursor->index = 0;
+}
+
+static bool exec_extra_root_at(const IdmExec *exec, uint32_t section, IdmValue *out) {
+    switch (section) {
+        case 1:
+            if (!exec->has_direct_result) return false;
+            *out = exec->direct_result;
+            return true;
+        case 2:
+            *out = exec->raised;
+            return true;
+        case 3:
+            if (!exec->has_pending_raise) return false;
+            *out = exec->pending_raise;
+            return true;
+        case 4:
+            if (!exec->has_await) return false;
+            *out = exec->await_port;
+            return true;
+        case 5:
+            if (!exec->has_port_request) return false;
+            *out = exec->port_request;
+            return true;
+        case 6:
+            if (!exec->has_port_read_request) return false;
+            *out = exec->port_read_port;
+            return true;
+        case 7:
+            if (!exec->has_port_write_request) return false;
+            *out = exec->port_write_port;
+            return true;
+        case 8:
+            if (!exec->has_port_write_request) return false;
+            *out = exec->port_write_data;
+            return true;
+        default:
+            return false;
     }
-    if (exec->has_direct_result) visit(user, exec->direct_result);
-    visit(user, exec->raised);
-    if (exec->has_pending_raise) visit(user, exec->pending_raise);
-    if (exec->has_await) visit(user, exec->await_port);
-    if (exec->has_port_request) visit(user, exec->port_request);
-    if (exec->has_port_read_request) visit(user, exec->port_read_port);
-    if (exec->has_port_write_request) {
-        visit(user, exec->port_write_port);
-        visit(user, exec->port_write_data);
+}
+
+bool idm_exec_mark_roots_step(const IdmExec *exec, IdmExecRootCursor *cursor, int64_t *budget, IdmHeap *heap) {
+    if (!exec || !cursor || !budget) return true;
+    while (*budget > 0) {
+        if (cursor->section == 0) {
+            if (cursor->frame >= exec->frame_count) {
+                cursor->section = 1;
+                cursor->index = 0;
+                continue;
+            }
+            const Frame *frame = &exec->frames[cursor->frame];
+            uint32_t roots = frame->reg_count + frame->capture_count + 1u;
+            if (cursor->index < frame->reg_count) {
+                idm_gc_mark_value(heap, frame->regs[cursor->index++]);
+                (*budget)--;
+                continue;
+            }
+            if (cursor->index < frame->reg_count + frame->capture_count) {
+                idm_gc_mark_value(heap, frame->captures[cursor->index++ - frame->reg_count]);
+                (*budget)--;
+                continue;
+            }
+            if (cursor->index < roots) {
+                idm_gc_mark_value(heap, frame->closure);
+                cursor->index++;
+                (*budget)--;
+                continue;
+            }
+            cursor->frame++;
+            cursor->index = 0;
+            continue;
+        }
+        if (cursor->section > 8u) return true;
+        IdmValue value = idm_nil();
+        bool present = exec_extra_root_at(exec, cursor->section, &value);
+        cursor->section++;
+        cursor->index = 0;
+        if (!present) continue;
+        idm_gc_mark_value(heap, value);
+        (*budget)--;
     }
+    return cursor->section > 8u;
 }

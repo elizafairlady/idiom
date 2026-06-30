@@ -54,6 +54,7 @@ UNIT_CASE_SRCS := \
 	tests/unit/bytecode_record.c \
 	tests/unit/byteprog.c \
 	tests/unit/cli.c \
+	tests/unit/gc.c \
 	tests/unit/grow.c \
 	tests/unit/intern.c \
 	tests/unit/pattern_selector.c \

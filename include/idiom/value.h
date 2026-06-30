@@ -2,6 +2,7 @@
 #define IDM_VALUE_H
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include "idiom/common.h"
 #include "idiom/scope.h"
 
@@ -140,8 +141,12 @@ typedef struct {
 typedef struct {
     IdmObject *objects;
     IdmObject *grey;
+    IdmObject **sweep;
     size_t object_count;
     size_t bytes_allocated;
+    unsigned mark;
+    atomic_bool gc_marking;
+    atomic_bool gc_sweeping;
     bool locking;
     pthread_mutex_t lock;
 } IdmHeap;
@@ -159,7 +164,6 @@ struct IdmRuntime {
     IdmIntern intern;
     IdmValue cached_true;
     IdmValue cached_false;
-    IdmHeap heap;
     IdmHeap immortal;
     bool macro_intro_active;
     IdmScopeId macro_intro_scope;
@@ -211,9 +215,16 @@ void idm_heap_init(IdmHeap *heap);
 void idm_heap_destroy(IdmHeap *heap);
 IdmHeap *idm_active_heap(IdmRuntime *rt);
 void idm_set_active_heap(IdmHeap *heap);
-void idm_heap_collect(IdmHeap *heap, const IdmValue *roots, size_t root_count);
+void idm_heap_gc_begin(IdmHeap *heap);
+void idm_heap_gc_cancel(IdmHeap *heap);
 void idm_gc_mark_value(IdmHeap *heap, IdmValue value);
-void idm_heap_sweep(IdmHeap *heap);
+bool idm_heap_gc_step(IdmHeap *heap, int64_t *budget);
+bool idm_heap_gc_active(const IdmHeap *heap);
+extern atomic_uint idm_gc_marking_heap_count;
+void idm_gc_write_barrier_slow(IdmValue old_value);
+static inline void idm_gc_write_barrier(IdmValue old_value) {
+    if (atomic_load_explicit(&idm_gc_marking_heap_count, memory_order_acquire) != 0) idm_gc_write_barrier_slow(old_value);
+}
 IdmValue idm_value_copy(IdmRuntime *rt, IdmHeap *target, IdmValue value, IdmError *err);
 IdmValue idm_value_copy_locked(IdmRuntime *rt, IdmHeap *target, IdmValue value, IdmError *err);
 size_t idm_heap_object_count(const IdmHeap *heap);

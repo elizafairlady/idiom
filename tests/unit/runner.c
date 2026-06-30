@@ -5,6 +5,7 @@ typedef int (*IdmUnitFn)(void);
 int idm_unit_bytecode_record(void);
 int idm_unit_byteprog(void);
 int idm_unit_cli(void);
+int idm_unit_gc(void);
 int idm_unit_grow(void);
 int idm_unit_intern(void);
 int idm_unit_pattern_selector(void);
@@ -24,6 +25,7 @@ static const IdmUnit tests[] = {
     {"bytecode_record", idm_unit_bytecode_record},
     {"byteprog", idm_unit_byteprog},
     {"cli", idm_unit_cli},
+    {"gc", idm_unit_gc},
     {"grow", idm_unit_grow},
     {"intern", idm_unit_intern},
     {"pattern_selector", idm_unit_pattern_selector},

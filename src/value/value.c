@@ -26,12 +26,6 @@ typedef enum {
     IDM_OBJ_BIGNUM
 } IdmObjectKind;
 
-typedef enum {
-    IDM_GC_WHITE,
-    IDM_GC_GREY,
-    IDM_GC_BLACK
-} IdmGcColor;
-
 typedef struct {
     char *bytes;
     size_t len;
@@ -87,11 +81,13 @@ typedef struct {
 
 struct IdmObject {
     IdmObjectKind kind;
-    IdmGcColor color;
+    unsigned mark;
+    bool greyed;
     IdmHeap *heap;
     size_t bytes;
     struct IdmObject *next;
     struct IdmObject *grey_next;
+    size_t scan;
     union {
         IdmStringObj string;
         IdmPairObj pair;
@@ -119,6 +115,7 @@ struct IdmSymbol {
 static pthread_mutex_t g_intern_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_env_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_record_shape_mu = PTHREAD_MUTEX_INITIALIZER;
+atomic_uint idm_gc_marking_heap_count = 0;
 
 static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text);
 static IdmSymbol *intern_find_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, uint32_t h);
@@ -133,12 +130,19 @@ static void heap_unlock(IdmHeap *heap) {
     if (heap->locking) pthread_mutex_unlock(&heap->lock);
 }
 
+static void heap_push_grey_unlocked(IdmHeap *heap, IdmObject *obj) {
+    obj->grey_next = heap->grey;
+    heap->grey = obj;
+}
+
 static IdmObject *heap_alloc_extra_unlocked(IdmHeap *heap, IdmObjectKind kind, size_t extra) {
     if (extra > SIZE_MAX - sizeof(IdmObject)) return NULL;
     IdmObject *obj = calloc(1u, sizeof(*obj) + extra);
     if (!obj) return NULL;
     obj->kind = kind;
-    obj->color = IDM_GC_WHITE;
+    obj->mark = heap->mark;
+    obj->greyed = false;
+    obj->scan = 0;
     obj->heap = heap;
     obj->bytes = sizeof(*obj) + extra;
     obj->next = heap->objects;
@@ -317,7 +321,6 @@ void idm_runtime_init(IdmRuntime *rt) {
     idm_intern_init(&rt->intern);
     rt->cached_true = idm_atom(rt, "true");
     rt->cached_false = idm_atom(rt, "false");
-    idm_heap_init(&rt->heap);
     idm_heap_init(&rt->immortal);
     rt->macro_intro_active = false;
     rt->macro_intro_scope = 0;
@@ -386,7 +389,6 @@ void idm_runtime_destroy(IdmRuntime *rt) {
     rt->owned_temps = NULL;
     rt->owned_temp_count = 0;
     rt->owned_temp_cap = 0;
-    idm_heap_destroy(&rt->heap);
     idm_heap_destroy(&rt->immortal);
     idm_intern_destroy(&rt->intern);
 }
@@ -577,8 +579,12 @@ IdmSymbolKind idm_symbol_kind(const IdmSymbol *sym) {
 void idm_heap_init(IdmHeap *heap) {
     heap->objects = NULL;
     heap->grey = NULL;
+    heap->sweep = NULL;
     heap->object_count = 0;
     heap->bytes_allocated = 0;
+    heap->mark = 0;
+    atomic_init(&heap->gc_marking, false);
+    atomic_init(&heap->gc_sweeping, false);
     heap->locking = false;
     pthread_mutex_init(&heap->lock, NULL);
 }
@@ -586,7 +592,7 @@ void idm_heap_init(IdmHeap *heap) {
 static _Thread_local IdmHeap *t_active_heap = NULL;
 
 IdmHeap *idm_active_heap(IdmRuntime *rt) {
-    return t_active_heap ? t_active_heap : &rt->heap;
+    return t_active_heap ? t_active_heap : &rt->immortal;
 }
 
 void idm_set_active_heap(IdmHeap *heap) {
@@ -594,6 +600,9 @@ void idm_set_active_heap(IdmHeap *heap) {
 }
 
 void idm_heap_destroy(IdmHeap *heap) {
+    bool marking = atomic_exchange_explicit(&heap->gc_marking, false, memory_order_acq_rel);
+    atomic_store_explicit(&heap->gc_sweeping, false, memory_order_release);
+    if (marking) atomic_fetch_sub_explicit(&idm_gc_marking_heap_count, 1u, memory_order_acq_rel);
     IdmObject *obj = heap->objects;
     while (obj) {
         IdmObject *next = obj->next;
@@ -602,6 +611,7 @@ void idm_heap_destroy(IdmHeap *heap) {
     }
     heap->objects = NULL;
     heap->grey = NULL;
+    heap->sweep = NULL;
     heap->object_count = 0;
     heap->bytes_allocated = 0;
     pthread_mutex_destroy(&heap->lock);
@@ -646,71 +656,79 @@ uint64_t idm_value_id(IdmValue value) {
     return idm_immediate_payload(value);
 }
 
-static void gc_push_grey(IdmHeap *heap, IdmObject *obj) {
-    obj->grey_next = heap->grey;
-    heap->grey = obj;
-}
-
-static void gc_grey_value(IdmHeap *heap, IdmValue value) {
+static bool gc_grey_value_unlocked(IdmHeap *heap, IdmValue value) {
     IdmObject *obj = value_object(value);
-    if (!obj || obj->heap != heap || obj->color != IDM_GC_WHITE) return;
-    obj->color = IDM_GC_GREY;
-    gc_push_grey(heap, obj);
+    if (!obj || obj->heap != heap || obj->mark == heap->mark) return false;
+    obj->mark = heap->mark;
+    obj->greyed = true;
+    obj->scan = 0;
+    heap_push_grey_unlocked(heap, obj);
+    return true;
 }
 
-static void gc_trace_object(IdmHeap *heap, IdmObject *obj) {
-    if (!obj || obj->color != IDM_GC_GREY) return;
-    obj->color = IDM_GC_BLACK;
-    if (obj->kind == IDM_OBJ_PAIR) {
-        gc_grey_value(heap, obj->as.pair.car);
-        gc_grey_value(heap, obj->as.pair.cdr);
-    } else if (obj->kind == IDM_OBJ_TUPLE || obj->kind == IDM_OBJ_VECTOR) {
-        for (size_t i = 0; i < obj->as.sequence.count; i++) gc_grey_value(heap, obj->as.sequence.items[i]);
-    } else if (obj->kind == IDM_OBJ_DICT) {
-        for (size_t i = 0; i < obj->as.dict.count; i++) {
-            gc_grey_value(heap, obj->as.dict.entries[i].key);
-            gc_grey_value(heap, obj->as.dict.entries[i].value);
-        }
-    } else if (obj->kind == IDM_OBJ_CELL) {
-        gc_grey_value(heap, obj->as.cell.value);
-    } else if (obj->kind == IDM_OBJ_CLOSURE) {
-        for (size_t i = 0; i < obj->as.closure.capture_count; i++) gc_grey_value(heap, obj->as.closure.captures[i]);
-    } else if (obj->kind == IDM_OBJ_RECORD) {
-        for (size_t i = 0; i < obj->as.record.shape->field_count; i++) gc_grey_value(heap, obj->as.record.field_values[i]);
-    } else if (obj->kind == IDM_OBJ_REGEX_RESULT) {
-        gc_grey_value(heap, idm_regex_result_subject_value(obj->as.regex_result));
+static size_t gc_object_child_count(const IdmObject *obj) {
+    if (!obj) return 0;
+    switch (obj->kind) {
+        case IDM_OBJ_PAIR:
+            return 2u;
+        case IDM_OBJ_TUPLE:
+        case IDM_OBJ_VECTOR:
+            return obj->as.sequence.count;
+        case IDM_OBJ_DICT:
+            return obj->as.dict.count > SIZE_MAX / 2u ? SIZE_MAX : obj->as.dict.count * 2u;
+        case IDM_OBJ_CELL:
+            return 1u;
+        case IDM_OBJ_CLOSURE:
+            return obj->as.closure.capture_count;
+        case IDM_OBJ_RECORD:
+            return obj->as.record.shape ? obj->as.record.shape->field_count : 0u;
+        case IDM_OBJ_REGEX_RESULT:
+            return 1u;
+        default:
+            return 0;
     }
 }
 
-static void gc_drain_grey(IdmHeap *heap) {
-    while (heap->grey) {
-        IdmObject *obj = heap->grey;
-        heap->grey = obj->grey_next;
-        obj->grey_next = NULL;
-        gc_trace_object(heap, obj);
+static IdmValue gc_object_child_at(const IdmObject *obj, size_t index) {
+    if (obj->kind == IDM_OBJ_PAIR) return index == 0 ? obj->as.pair.car : obj->as.pair.cdr;
+    if (obj->kind == IDM_OBJ_TUPLE || obj->kind == IDM_OBJ_VECTOR) return obj->as.sequence.items[index];
+    if (obj->kind == IDM_OBJ_DICT) {
+        size_t entry = index / 2u;
+        return (index & 1u) == 0 ? obj->as.dict.entries[entry].key : obj->as.dict.entries[entry].value;
+    }
+    if (obj->kind == IDM_OBJ_CELL) return obj->as.cell.value;
+    if (obj->kind == IDM_OBJ_CLOSURE) return obj->as.closure.captures[index];
+    if (obj->kind == IDM_OBJ_RECORD) return obj->as.record.field_values[index];
+    if (obj->kind == IDM_OBJ_REGEX_RESULT) return idm_regex_result_subject_value(obj->as.regex_result);
+    return idm_nil();
+}
+
+static void gc_trace_object(IdmHeap *heap, IdmObject *obj, int64_t *budget) {
+    if (!obj || !budget || *budget <= 0 || obj->mark != heap->mark || !obj->greyed) return;
+    size_t child_count = gc_object_child_count(obj);
+    if (child_count == 0) {
+        obj->greyed = false;
+        obj->scan = 0;
+        (*budget)--;
+        return;
+    }
+    while (obj->scan < child_count && *budget > 0) {
+        gc_grey_value_unlocked(heap, gc_object_child_at(obj, obj->scan));
+        obj->scan++;
+        (*budget)--;
+    }
+    if (obj->scan == child_count) {
+        obj->greyed = false;
+        obj->scan = 0;
+    } else {
+        heap_push_grey_unlocked(heap, obj);
     }
 }
 
 void idm_gc_mark_value(IdmHeap *heap, IdmValue value) {
-    gc_grey_value(heap, value);
-}
-
-void idm_heap_sweep(IdmHeap *heap) {
-    gc_drain_grey(heap);
-    IdmObject **cursor = &heap->objects;
-    while (*cursor) {
-        IdmObject *obj = *cursor;
-        if (obj->color == IDM_GC_BLACK) {
-            obj->color = IDM_GC_WHITE;
-            obj->grey_next = NULL;
-            cursor = &obj->next;
-        } else {
-            *cursor = obj->next;
-            heap->object_count--;
-            heap->bytes_allocated -= obj->bytes < heap->bytes_allocated ? obj->bytes : heap->bytes_allocated;
-            object_free(obj);
-        }
-    }
+    heap_lock(heap);
+    gc_grey_value_unlocked(heap, value);
+    heap_unlock(heap);
 }
 
 size_t idm_heap_bytes(const IdmHeap *heap) {
@@ -722,13 +740,97 @@ size_t idm_heap_bytes(const IdmHeap *heap) {
 }
 
 
-void idm_heap_collect(IdmHeap *heap, const IdmValue *roots, size_t root_count) {
-    for (size_t i = 0; i < root_count; i++) idm_gc_mark_value(heap, roots[i]);
-    idm_heap_sweep(heap);
+void idm_heap_gc_begin(IdmHeap *heap) {
+    heap_lock(heap);
+    if (!atomic_load_explicit(&heap->gc_marking, memory_order_acquire) && !atomic_load_explicit(&heap->gc_sweeping, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&idm_gc_marking_heap_count, 1u, memory_order_acq_rel);
+        heap->mark ^= 1u;
+        heap->grey = NULL;
+        heap->sweep = NULL;
+        atomic_store_explicit(&heap->gc_marking, true, memory_order_release);
+        atomic_store_explicit(&heap->gc_sweeping, false, memory_order_release);
+    }
+    heap_unlock(heap);
+}
+
+void idm_heap_gc_cancel(IdmHeap *heap) {
+    heap_lock(heap);
+    bool marking = atomic_exchange_explicit(&heap->gc_marking, false, memory_order_acq_rel);
+    atomic_store_explicit(&heap->gc_sweeping, false, memory_order_release);
+    heap->grey = NULL;
+    heap->sweep = NULL;
+    if (marking) atomic_fetch_sub_explicit(&idm_gc_marking_heap_count, 1u, memory_order_acq_rel);
+    heap_unlock(heap);
+}
+
+bool idm_heap_gc_step(IdmHeap *heap, int64_t *budget) {
+    if (!budget || *budget <= 0) return !idm_heap_gc_active(heap);
+    heap_lock(heap);
+    while (*budget > 0) {
+        if (heap->grey) {
+            IdmObject *obj = heap->grey;
+            heap->grey = obj->grey_next;
+            obj->grey_next = NULL;
+            gc_trace_object(heap, obj, budget);
+            continue;
+        }
+        if (atomic_load_explicit(&heap->gc_marking, memory_order_acquire)) {
+            atomic_store_explicit(&heap->gc_marking, false, memory_order_release);
+            atomic_fetch_sub_explicit(&idm_gc_marking_heap_count, 1u, memory_order_acq_rel);
+            atomic_store_explicit(&heap->gc_sweeping, true, memory_order_release);
+            heap->sweep = &heap->objects;
+            (*budget)--;
+            continue;
+        }
+        if (!atomic_load_explicit(&heap->gc_sweeping, memory_order_acquire)) {
+            heap_unlock(heap);
+            return true;
+        }
+        if (!heap->sweep || !*heap->sweep) {
+            heap->sweep = NULL;
+            atomic_store_explicit(&heap->gc_sweeping, false, memory_order_release);
+            heap_unlock(heap);
+            return true;
+        }
+        IdmObject *obj = *heap->sweep;
+        if (obj->mark == heap->mark) {
+            obj->greyed = false;
+            obj->grey_next = NULL;
+            obj->scan = 0;
+            heap->sweep = &obj->next;
+        } else {
+            *heap->sweep = obj->next;
+            heap->object_count--;
+            heap->bytes_allocated -= obj->bytes < heap->bytes_allocated ? obj->bytes : heap->bytes_allocated;
+            object_free(obj);
+        }
+        (*budget)--;
+    }
+    bool done = !atomic_load_explicit(&heap->gc_marking, memory_order_acquire) && !atomic_load_explicit(&heap->gc_sweeping, memory_order_acquire);
+    heap_unlock(heap);
+    return done;
+}
+
+bool idm_heap_gc_active(const IdmHeap *heap) {
+    return atomic_load_explicit(&heap->gc_marking, memory_order_acquire) || atomic_load_explicit(&heap->gc_sweeping, memory_order_acquire);
+}
+
+void idm_gc_write_barrier_slow(IdmValue old_value) {
+    IdmObject *obj = value_object(old_value);
+    if (!obj || !obj->heap) return;
+    IdmHeap *heap = obj->heap;
+    if (!atomic_load_explicit(&heap->gc_marking, memory_order_acquire)) return;
+    heap_lock(heap);
+    if (atomic_load_explicit(&heap->gc_marking, memory_order_acquire)) gc_grey_value_unlocked(heap, old_value);
+    heap_unlock(heap);
 }
 
 size_t idm_heap_object_count(const IdmHeap *heap) {
-    return heap->object_count;
+    IdmHeap *h = (IdmHeap *)heap;
+    heap_lock(h);
+    size_t n = h->object_count;
+    heap_unlock(h);
+    return n;
 }
 
 IdmValue idm_nil(void) {
@@ -1974,7 +2076,13 @@ IdmValue idm_cell_get(IdmValue cell, IdmError *err) {
 
 static bool cell_set_unlocked(IdmValue cell, IdmValue value, IdmError *err) {
     if (idm_value_tag(cell) != IDM_VAL_CELL) return idm_error_set(err, idm_span_unknown(NULL), "expected cell");
-    idm_boxed_object(cell)->as.cell.value = value;
+    IdmObject *obj = idm_boxed_object(cell);
+    heap_lock(obj->heap);
+    if (atomic_load_explicit(&obj->heap->gc_marking, memory_order_acquire)) {
+        gc_grey_value_unlocked(obj->heap, obj->as.cell.value);
+    }
+    obj->as.cell.value = value;
+    heap_unlock(obj->heap);
     return true;
 }
 bool idm_cell_set(IdmValue cell, IdmValue value, IdmError *err) {

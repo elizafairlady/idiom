@@ -46,8 +46,13 @@ void idm_exec_inject_raise(IdmExec *exec, IdmValue reason);
 IdmScheduler *idm_exec_scheduler(const IdmExec *exec);
 IdmExec *idm_current_exec(void);
 
-typedef void (*IdmRootVisitor)(void *user, IdmValue value);
-void idm_exec_visit_roots(const IdmExec *exec, IdmRootVisitor visit, void *user);
+typedef struct {
+    size_t frame;
+    uint32_t section;
+    size_t index;
+} IdmExecRootCursor;
+void idm_exec_root_cursor_init(IdmExecRootCursor *cursor);
+bool idm_exec_mark_roots_step(const IdmExec *exec, IdmExecRootCursor *cursor, int64_t *budget, IdmHeap *heap);
 
 const char *idm_exec_cwd(const IdmExec *exec);
 bool idm_exec_set_cwd(IdmExec *exec, const char *cwd);
