@@ -83,8 +83,23 @@ static bool install_artifact_typed_entities(ExpandContext *ctx, const IdmArtifac
     return true;
 }
 
+static bool install_artifact_field_selectors(ExpandContext *ctx, const IdmArtifact *art, const char *provider_key, IdmError *err) {
+    for (size_t i = 0; i < art->field_selector_count; i++) {
+        if (field_selector_lookup(ctx, art->field_selectors[i].name)) continue;
+        FieldSelectorDef *sel = field_selector_ensure(ctx, art->field_selectors[i].name, err);
+        if (!sel) return false;
+        sel->slot = art->field_selectors[i].slot;
+        sel->env = true;
+        sel->emitted = true;
+        sel->env_key = idm_strdup(art->field_selectors[i].env_key ? art->field_selectors[i].env_key : (provider_key ? provider_key : ""));
+        if (!sel->env_key) return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
+}
+
 static bool install_artifact_typed_registry(ExpandContext *ctx, const IdmArtifact *art, UseSelection *selection, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err) {
-    return install_artifact_typed_entities(ctx, art, selection, scopes, qualifier, provider, provider_key, err) &&
+    return install_artifact_field_selectors(ctx, art, provider_key, err) &&
+           install_artifact_typed_entities(ctx, art, selection, scopes, qualifier, provider, provider_key, err) &&
            install_artifact_method_impls(ctx, art->typed.method_impls, art->typed.method_impl_count, provider_key, err);
 }
 
@@ -1836,6 +1851,19 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
     }
     idm_core_free(body);
     hooks_restore(rt, &saved);
+    if (ctx.field_selector_count != 0) {
+        out->field_selectors = calloc(ctx.field_selector_count, sizeof(*out->field_selectors));
+        if (out->field_selectors) {
+            for (size_t i = 0; i < ctx.field_selector_count; i++) {
+                if (!ctx.field_selectors[i].env || !ctx.field_selectors[i].emitted || ctx.field_selectors[i].env_key) continue;
+                out->field_selectors[out->field_selector_count].name = idm_strdup(ctx.field_selectors[i].name);
+                if (!out->field_selectors[out->field_selector_count].name) continue;
+                out->field_selectors[out->field_selector_count].env_key = idm_strdup(ctx.unit_key);
+                out->field_selectors[out->field_selector_count].slot = ctx.field_selectors[i].slot;
+                out->field_selector_count++;
+            }
+        }
+    }
     IdmScopeStore output_store = ctx.scope_store;
     *store = output_store;
     ctx_destroy(&ctx);

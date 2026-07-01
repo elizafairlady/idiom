@@ -235,6 +235,7 @@ typedef struct {
     uint32_t slot;
     bool env;
     bool emitted;
+    char *env_key;
 } FieldSelectorDef;
 typedef struct {
     IdmRuntime *rt;

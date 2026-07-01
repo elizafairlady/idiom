@@ -1985,8 +1985,8 @@ bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableCont
                  primitive_contract_result_con(out, "atom", err, span);
             break;
         default:
-            ok = false;
-            break;
+            idm_callable_contract_destroy(out);
+            return idm_error_set(err, span, "primitive '%s' has no declared contract", idm_primitive_name(primitive));
     }
     if (!ok) {
         idm_callable_contract_destroy(out);

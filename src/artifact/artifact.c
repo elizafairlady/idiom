@@ -350,6 +350,10 @@ void idm_artifact_destroy(IdmArtifact *art) {
         for (size_t i = 0; i < art->macro_count; i++) idm_pkg_macro_destroy(&art->macros[i]);
         free(art->macros);
     }
+    if (art->field_selectors) {
+        for (size_t i = 0; i < art->field_selector_count; i++) { free(art->field_selectors[i].name); free(art->field_selectors[i].env_key); }
+        free(art->field_selectors);
+    }
     if (art->operators) {
         for (size_t i = 0; i < art->operator_count; i++) idm_operator_def_destroy(&art->operators[i]);
         free(art->operators);
@@ -496,7 +500,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 81u
+#define IDM_ARTIFACT_VERSION 82u
 
 const char *idm_grammar_mode_name(uint8_t mode) {
     switch ((IdmGrammarMode)mode) {
@@ -1252,6 +1256,12 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
              idm_buf_put_u8(out, art->slots[i].exported ? 1u : 0u) &&
              idm_scope_set_serialize(out, &art->slots[i].scopes, NULL);
     }
+    ok = ok && idm_buf_put_u32(out, (uint32_t)art->field_selector_count);
+    for (size_t i = 0; ok && i < art->field_selector_count; i++) {
+        ok = idm_buf_put_str(out, art->field_selectors[i].name, strlen(art->field_selectors[i].name)) &&
+             idm_buf_put_str(out, art->field_selectors[i].env_key ? art->field_selectors[i].env_key : "", strlen(art->field_selectors[i].env_key ? art->field_selectors[i].env_key : "")) &&
+             idm_buf_put_u32(out, art->field_selectors[i].slot);
+    }
     ok = ok && idm_buf_put_u32(out, (uint32_t)art->operator_count);
     for (size_t i = 0; ok && i < art->operator_count; i++) {
         const IdmOperatorDef *op = &art->operators[i];
@@ -1444,6 +1454,19 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             if (ok && !r.ok) ok = false;
             idm_scope_set_init(&out->slots[i].scopes);
             if (ok) ok = idm_scope_set_deserialize(&r, &out->slots[i].scopes, NULL);
+        }
+    }
+    uint32_t fsel_count = ok ? idm_rd_u32(&r) : 0;
+    if (ok && !r.ok) ok = false;
+    if (ok && fsel_count != 0) {
+        out->field_selectors = calloc(fsel_count, sizeof(*out->field_selectors));
+        if (!out->field_selectors) ok = false;
+        for (uint32_t i = 0; ok && i < fsel_count; i++) {
+            out->field_selector_count = i + 1u;
+            ok = artifact_read_str(&r, &out->field_selectors[i].name, err);
+            if (ok) ok = artifact_read_str(&r, &out->field_selectors[i].env_key, err);
+            out->field_selectors[i].slot = ok ? idm_rd_u32(&r) : 0;
+            if (ok && !r.ok) ok = false;
         }
     }
     uint32_t operator_count = ok ? idm_rd_u32(&r) : 0;

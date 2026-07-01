@@ -424,6 +424,34 @@ static bool method_contract_for_type(const TraitMethodDef *method, const char *t
     return true;
 }
 
+static bool receiver_only_contract(const ExpandContext *ctx, const char *type, const IdmArity *arity, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span) {
+    *out_has = false;
+    memset(out, 0, sizeof(*out));
+    if (!type || (type[0] == '_' && type[1] == '.')) return true;
+    if (arity->kind == IDM_ARITY_UNKNOWN || arity->max < arity->min || arity->max - arity->min > 64u) return true;
+    const TypeDef *td = type_def_lookup_name(ctx, type);
+    const char *identity = td ? type_def_identity_text(td) : type;
+    for (uint32_t argc = arity->min; argc <= arity->max; argc++) {
+        if (!idm_arity_accepts(arity, argc)) continue;
+        if (argc == 0u) continue;
+        IdmContractSig *sig = idm_contract_add_sig(out);
+        if (!sig) goto oom;
+        sig->args = calloc(argc, sizeof(*sig->args));
+        if (!sig->args) goto oom;
+        sig->arg_count = argc;
+        if (!idm_type_con(&sig->args[0], identity)) goto oom;
+        for (uint32_t i = 1u; i < argc; i++) {
+            if (!idm_type_var(&sig->args[i], "_", 0u, false)) goto oom;
+        }
+        if (argc == UINT32_MAX) break;
+    }
+    *out_has = out->sig_count != 0;
+    return true;
+oom:
+    idm_callable_contract_destroy(out);
+    return idm_error_oom(err, span);
+}
+
 static bool trait_dispatch_env_storage(const ExpandContext *ctx) {
     return ctx->frame == IDM_FRAME_TOP && (ctx->repl_env_binds || ctx->in_package);
 }
@@ -753,6 +781,16 @@ static bool refresh_add_field_selectors(ExpandContext *ctx, IdmCore **core, IdmS
     for (size_t i = 0; i < ctx->field_selector_count; i++) {
         FieldSelectorDef *sel = &ctx->field_selectors[i];
         if (!sel->env) continue;
+        bool any = false;
+        for (size_t e = 0; !any && e < ctx->typed.entity_count; e++) {
+            const TypedEntity *ent = &ctx->typed.entities[e];
+            if (ent->kind != IDM_TYPED_ENTITY_TYPE) continue;
+            for (size_t f = 0; f < ent->as.type.field_count; f++) {
+                const char *fname = type_field_name_text(&ent->as.type.fields[f]);
+                if (fname && strcmp(fname, sel->name) == 0) { any = true; break; }
+            }
+        }
+        if (!any) continue;
         IdmCore *sel_core = build_field_selector_core(ctx, sel->name, span, err);
         if (!sel_core) return false;
         if (!*core) {
@@ -760,8 +798,9 @@ static bool refresh_add_field_selectors(ExpandContext *ctx, IdmCore **core, IdmS
             if (!*core) { idm_core_free(sel_core); return idm_error_oom(err, span); }
             idm_core_letrec_set_env(*core);
         }
-        bool added = ctx->unit_key[0] && ctx->in_package
-            ? idm_core_letrec_add_env_fill(*core, sel->name, idm_atom(ctx->rt, ctx->unit_key), sel->slot, sel_core, sel->emitted)
+        const char *sel_key = sel->env_key ? sel->env_key : (ctx->unit_key[0] && ctx->in_package ? ctx->unit_key : NULL);
+        bool added = sel_key
+            ? idm_core_letrec_add_env_fill(*core, sel->name, idm_atom(ctx->rt, sel_key), sel->slot, sel_core, sel->emitted)
             : idm_core_letrec_add_fill(*core, sel->name, sel->slot, sel_core, sel->emitted);
         if (!added) { idm_core_free(sel_core); return idm_error_oom(err, span); }
         sel->emitted = true;
@@ -967,8 +1006,17 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait_d
             ok = false;
             break;
         }
-        const IdmCallableContract *active_contract = trait_has_contract ? &trait_contract : (provided_has_contract ? &provided_contract : NULL);
+        IdmCallableContract receiver_contract;
+        bool receiver_has_contract = false;
+        if (!trait_has_contract && !provided_has_contract) {
+            if (!receiver_only_contract(ctx, type, &arity, &receiver_contract, &receiver_has_contract, err, name->span)) {
+                ok = false;
+                break;
+            }
+        }
+        const IdmCallableContract *active_contract = trait_has_contract ? &trait_contract : (provided_has_contract ? &provided_contract : (receiver_has_contract ? &receiver_contract : NULL));
         IdmCore *fn = expand_function_literal_with_contract(ctx, name->as.text, stmt->as.seq.items[1], stmt->as.seq.items, param_start, stmt->as.seq.count, active_contract, err);
+        if (receiver_has_contract) idm_callable_contract_destroy(&receiver_contract);
         if (!fn) {
             if (provided_has_contract) idm_callable_contract_destroy(&provided_contract);
             if (trait_has_contract) idm_callable_contract_destroy(&trait_contract);
@@ -2220,6 +2268,29 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         if (letrec_ok) predicate = NULL;
     }
     const TypeDef *sel_type = record_identity ? type_def_lookup_name(ctx, idm_symbol_text(record_identity)) : NULL;
+    for (size_t si = 0; letrec_ok && sel_type && si < ctx->typed.method_surface_count; si++) {
+        const MethodSurfaceDef *surface = &ctx->typed.method_surfaces[si];
+        if (!surface->has_dispatch) continue;
+        bool structural_member = false;
+        for (size_t ii = 0; ii < ctx->typed.method_impl_count; ii++) {
+            const MethodImplDef *impl = &ctx->typed.method_impls[ii];
+            const char *t = method_impl_type_text(impl);
+            if (!t || t[0] != '_' || t[1] != '.') continue;
+            if (!method_impl_matches_identity(ctx, impl, method_surface_trait_text(surface), method_surface_name_text(surface), NULL)) continue;
+            if (type_satisfies_structural_head(ctx, t, idm_symbol_text(record_identity))) { structural_member = true; break; }
+        }
+        if (!structural_member) continue;
+        IdmCore *dispatcher = build_method_dispatcher_core(ctx, method_surface_trait_text(surface), method_surface_name_text(surface), form->span, err);
+        if (!dispatcher) { letrec_ok = false; break; }
+        bool added = surface->dispatch_env && surface->dispatch_env_key && surface->dispatch_env_key[0]
+            ? idm_core_letrec_add_env_fill(letrec, method_surface_name_text(surface), idm_atom(ctx->rt, surface->dispatch_env_key), surface->dispatch_slot, dispatcher, true)
+            : idm_core_letrec_add_fill(letrec, method_surface_name_text(surface), surface->dispatch_slot, dispatcher, true);
+        if (!added) {
+            idm_core_free(dispatcher);
+            letrec_ok = false;
+            break;
+        }
+    }
     for (size_t fi = 0; letrec_ok && sel_type && fi < sel_type->field_count; fi++) {
         const char *fname = type_field_name_text(&sel_type->fields[fi]);
         if (!fname) continue;
@@ -2228,7 +2299,9 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         IdmCore *sel_core = build_field_selector_core(ctx, fname, form->span, err);
         if (!sel_core) { letrec_ok = false; break; }
         if (!sel->env && sel->emitted) sel->slot = ctx->next_slot++;
-        letrec_ok = idm_core_letrec_add_fill(letrec, fname, sel->slot, sel_core, sel->env && sel->emitted);
+        letrec_ok = sel->env_key && sel->env_key[0]
+            ? idm_core_letrec_add_env_fill(letrec, fname, idm_atom(ctx->rt, sel->env_key), sel->slot, sel_core, true)
+            : idm_core_letrec_add_fill(letrec, fname, sel->slot, sel_core, sel->env && sel->emitted);
         if (!letrec_ok) idm_core_free(sel_core);
         else sel->emitted = true;
     }

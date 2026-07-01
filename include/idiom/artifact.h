@@ -300,6 +300,8 @@ struct IdmArtifact {
     char *name;
     IdmPkgSlot *slots;
     size_t slot_count;
+    struct { char *name; char *env_key; uint32_t slot; } *field_selectors;
+    size_t field_selector_count;
     IdmPkgMacro *macros;
     size_t macro_count;
     IdmOperatorDef *operators;

@@ -376,7 +376,7 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->grammars);
     for (size_t i = 0; i < ctx->operator_count; i++) idm_operator_def_destroy(&ctx->operators[i]);
     free(ctx->operators);
-    for (size_t i = 0; i < ctx->field_selector_count; i++) free(ctx->field_selectors[i].name);
+    for (size_t i = 0; i < ctx->field_selector_count; i++) { free(ctx->field_selectors[i].name); free(ctx->field_selectors[i].env_key); }
     free(ctx->field_selectors);
     for (size_t i = 0; i < ctx->typed.entity_count; i++) typed_entity_destroy(&ctx->typed.entities[i]);
     free(ctx->typed.entities);
@@ -438,7 +438,8 @@ bool expand_multi_add_dispatch_clause(ExpandContext *ctx, IdmCore *multi, uint32
     if (argc != 0 && !patterns) return idm_error_oom(err, span);
     bool ok = true;
     for (uint32_t i = 0; i < argc && ok; i++) {
-        patterns[i] = i == 0 && arg0_type ? idm_pat_type(arg0_type, span) : idm_pat_wildcard(span);
+        bool structural_head = arg0_type && arg0_type[0] == '_' && arg0_type[1] == '.';
+        patterns[i] = i == 0 && arg0_type && !structural_head ? idm_pat_type(arg0_type, span) : idm_pat_wildcard(span);
         if (!patterns[i]) ok = false;
     }
     IdmCore *body = ok ? body_fn(ctx, multi, body_user, argc, span, err) : NULL;

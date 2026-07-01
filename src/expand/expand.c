@@ -16,6 +16,7 @@ static const IdmSyntax *try_section_head(const IdmSyntax *stmt);
 static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, uint32_t *out_slot, IdmError *err);
 static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
+static IdmCore *rewrite_is_a_call(ExpandContext *ctx, IdmCore *call, IdmError *err);
 static bool syn_is_dot(const IdmSyntax *s);
 static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word);
 typedef struct {
@@ -1113,8 +1114,9 @@ static IdmCore *expand_dynamic_field_surface_call(ExpandContext *ctx, const Fiel
     }
     IdmCore *callee = NULL;
     if (sel->env) {
-        callee = ctx->unit_key[0] && ctx->in_package
-            ? idm_core_package_ref(name, idm_atom(ctx->rt, ctx->unit_key), sel->slot, span)
+        const char *key = sel->env_key && sel->env_key[0] ? sel->env_key : (ctx->unit_key[0] && ctx->in_package ? ctx->unit_key : NULL);
+        callee = key
+            ? idm_core_package_ref(name, idm_atom(ctx->rt, key), sel->slot, span)
             : idm_core_env_ref(name, sel->slot, span);
     } else {
         callee = idm_core_local_ref(name, sel->slot, span);
@@ -1600,7 +1602,117 @@ static IdmCore *application_surface_call_from(ExpandContext *ctx, FieldSurfaceGr
         : expand_method_surface_call_cores(ctx, methods, NULL, args, argc, items[start]->span, err);
     free(args);
     if (!call) return NULL;
+    call = rewrite_is_a_call(ctx, call, err);
+    if (!call) return NULL;
     return parse_dot_tail(ctx, items, pos, end, stop_at_operator, call, err);
+}
+
+static bool is_a_target_push(const char *resolved, const char **out, size_t *out_count, size_t cap) {
+    for (size_t i = 0; i < *out_count; i++) {
+        if (strcmp(out[i], resolved) == 0) return true;
+    }
+    if (*out_count == cap) return false;
+    out[(*out_count)++] = resolved;
+    return true;
+}
+
+static bool is_a_target_names(ExpandContext *ctx, const char *name, const char **out, size_t *out_count, size_t cap) {
+    const TypeDef *td = type_def_lookup_name(ctx, name);
+    const char *resolved = td ? type_def_identity_text(td) : NULL;
+    if (!resolved) resolved = name;
+    if (!is_a_target_push(resolved, out, out_count, cap)) return false;
+    if (td && td->member_count != 0) {
+        for (size_t i = 0; i < td->member_count; i++) {
+            const IdmTypeTerm *m = &td->members[i].term;
+            if (m->kind != IDM_TYPE_CON || !m->name) return false;
+            if (!is_a_target_names(ctx, m->name, out, out_count, cap)) return false;
+        }
+    }
+    return true;
+}
+
+static bool is_a_static_member(ExpandContext *ctx, const char *type_name, const char *target) {
+    if (strcmp(target, "Any") == 0) return true;
+    if (type_name_same(ctx, target, type_name)) return true;
+    if (strcmp(target, "record") == 0) {
+        const TypeDef *td = type_def_lookup_name(ctx, type_name);
+        return td && td->field_count != 0;
+    }
+    return false;
+}
+
+static IdmCore *rewrite_is_a_call(ExpandContext *ctx, IdmCore *call, IdmError *err) {
+    if (!call || call->kind != IDM_CORE_CALL || call->as.call.arg_count != 2u) return call;
+    const IdmCore *callee = call->as.call.callee;
+    if (!callee || callee->kind != IDM_CORE_FN_MULTI || callee->as.fn_multi.count != 1u) return call;
+    if (!callee->as.fn_multi.clauses[0].primitive_backed || callee->as.fn_multi.clauses[0].primitive != IDM_PRIM_IS_A_P) return call;
+    const IdmCore *targ = call->as.call.args[1];
+    if (!targ || targ->kind != IDM_CORE_LITERAL) return call;
+    const char *name = NULL;
+    IdmValue tv = targ->as.literal;
+    if (idm_value_tag(tv) == IDM_VAL_ATOM || idm_value_tag(tv) == IDM_VAL_WORD) name = idm_symbol_text(idm_value_symbol(tv));
+    else if (idm_value_tag(tv) == IDM_VAL_STRING) name = idm_string_bytes(tv);
+    if (!name || !name[0]) return call;
+    const char *targets[16];
+    size_t target_count = 0;
+    if (!is_a_target_names(ctx, name, targets, &target_count, 16u) || target_count == 0) return call;
+    IdmSpan span = call->span;
+    char *static_name = NULL;
+    if (!engine_static_type_name(ctx, call->as.call.args[0], &static_name, err)) {
+        idm_core_free(call);
+        return NULL;
+    }
+    if (static_name) {
+        bool member = false;
+        for (size_t i = 0; !member && i < target_count; i++) member = is_a_static_member(ctx, static_name, targets[i]);
+        free(static_name);
+        IdmCore *lit = idm_core_literal(idm_bool(ctx->rt, member), span);
+        if (!lit) {
+            idm_core_free(call);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
+        idm_core_free(call);
+        return lit;
+    }
+    IdmCore *value = call->as.call.args[0];
+    call->as.call.args[0] = NULL;
+    idm_core_free(call);
+    uint32_t slot = ctx->next_slot++;
+    IdmCore *body = NULL;
+    for (size_t i = target_count; i > 0; i--) {
+        IdmCore *test = expand_primitive_clause_call(IDM_PRIM_IS_A_P, span, err);
+        IdmCore *ref = test ? idm_core_local_ref("is-a-value", slot, span) : NULL;
+        IdmCore *atom = ref ? idm_core_literal(idm_atom(ctx->rt, targets[i - 1u]), span) : NULL;
+        if (!atom || !idm_core_call_add_arg(test, ref) || !idm_core_call_add_arg(test, atom)) {
+            idm_core_free(atom);
+            idm_core_free(ref);
+            idm_core_free(test);
+            idm_core_free(body);
+            idm_core_free(value);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
+        if (!body) {
+            body = test;
+        } else {
+            IdmCore *truth = idm_core_literal(idm_bool(ctx->rt, true), span);
+            IdmCore *branch = truth ? idm_core_cond(test, truth, body, span) : NULL;
+            if (!branch) {
+                idm_core_free(truth);
+                idm_core_free(test);
+                idm_core_free(body);
+                idm_core_free(value);
+                return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+            }
+            body = branch;
+        }
+    }
+    IdmCore *bound = idm_core_bind_local("is-a-value", slot, value, body, span);
+    if (!bound) {
+        idm_core_free(value);
+        idm_core_free(body);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+    }
+    return bound;
 }
 
 static IdmCore *application_call_from(ExpandContext *ctx, IdmCore *callee, IdmSyntax *const *items, size_t start, size_t *pos, size_t end, bool stop_at_operator, bool known, IdmArity arity, IdmError *err) {
@@ -1637,6 +1749,8 @@ static IdmCore *application_call_from(ExpandContext *ctx, IdmCore *callee, IdmSy
         if (!core_call_add_arg_or_free(call, arg, err, items[start]->span)) return NULL;
         argc++;
     }
+    call = rewrite_is_a_call(ctx, call, err);
+    if (!call) return NULL;
     return parse_dot_tail(ctx, items, pos, end, stop_at_operator, call, err);
 }
 
