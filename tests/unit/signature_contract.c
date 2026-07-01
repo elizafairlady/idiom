@@ -422,6 +422,23 @@ int idm_unit_signature_contract(void) {
     idm_buf_destroy(&core_dump);
     idm_core_free(core);
 
+    const char *fold_source =
+        "a = add 2 3\n"
+        "b = mul (add 1 2) (sub 10 4)\n"
+        "d = div 1 0\n"
+        "b\n";
+    IdmCore *fold_core = NULL;
+    check_ok(idm_expand_source_string(&rt, "<fold>", fold_source, &fold_core, &err), &err, "fold expand");
+    IdmBuffer fold_dump;
+    idm_buf_init(&fold_dump);
+    check(idm_core_dump(&fold_dump, fold_core), "fold core dump");
+    check(fold_dump.data && strstr(fold_dump.data, "5") != NULL, "fold add literal");
+    check(fold_dump.data && strstr(fold_dump.data, "18") != NULL, "fold nested literal");
+    check(fold_dump.data && strstr(fold_dump.data, "primitive div") != NULL, "fold preserves crashing call");
+    check(!fold_dump.data || strstr(fold_dump.data, "primitive add") == NULL, "fold erased pure add");
+    idm_buf_destroy(&fold_dump);
+    idm_core_free(fold_core);
+
     const char *generic_method_source =
         "package generic_method_signature_contract\n"
         "\n"
@@ -944,22 +961,37 @@ int idm_unit_signature_contract(void) {
         "\n"
         "export defn croaky x -> cond (lt? x 0) (raise :neg) x\n"
         "\n"
-        "export defn stacked x -> calm (calm x)\n";
+        "export defn stacked x -> calm (calm x)\n"
+        "\n"
+        "export defn twice f x -> f (f x)\n"
+        "\n"
+        "export defn resolved x -> twice (fn v -> add v 1) x\n"
+        "\n"
+        "export defn tainted x -> twice (fn v -> do\n"
+        "  println v\n"
+        "  v\n"
+        "end) x\n";
     dir = write_package_dir(purity_source, &err);
     idm_buf_init(&wire);
     check_ok(idm_expand_package_artifact_serialize(&rt, dir, &wire, &err), &err, "purity package compiles");
     IdmArtifact pur_art;
     check_ok(idm_artifact_deserialize(&rt, (const unsigned char *)(wire.data ? wire.data : ""), wire.len, &pur_art, &err), &err, "purity artifact");
     const IdmPkgSlot *calm = find_slot(&pur_art, "calm");
-    check(calm && calm->has_contract && calm->contract.pure, "calm is pure");
+    check(calm && calm->has_contract && calm->contract.purity == IDM_PURITY_PURE, "calm is pure");
     const IdmPkgSlot *chatty = find_slot(&pur_art, "chatty");
-    check(chatty && chatty->has_contract && !chatty->contract.pure, "chatty is impure");
+    check(chatty && chatty->has_contract && chatty->contract.purity == IDM_PURITY_IMPURE, "chatty is impure");
     const IdmPkgSlot *relay = find_slot(&pur_art, "relay");
-    check(relay && relay->has_contract && !relay->contract.pure, "relay impurity is transitive");
+    check(relay && relay->has_contract && relay->contract.purity == IDM_PURITY_IMPURE, "relay impurity is transitive");
     const IdmPkgSlot *croaky = find_slot(&pur_art, "croaky");
-    check(croaky && croaky->has_contract && !croaky->contract.pure, "croaky crash home is impure");
+    check(croaky && croaky->has_contract && croaky->contract.purity == IDM_PURITY_IMPURE, "croaky crash home is impure");
     const IdmPkgSlot *stacked = find_slot(&pur_art, "stacked");
-    check(stacked && stacked->has_contract && stacked->contract.pure, "stacked purity is transitive");
+    check(stacked && stacked->has_contract && stacked->contract.purity == IDM_PURITY_PURE, "stacked purity is transitive");
+    const IdmPkgSlot *twice = find_slot(&pur_art, "twice");
+    check(twice && twice->has_contract && twice->contract.purity == IDM_PURITY_ARGS, "twice is pure-if-args-pure");
+    const IdmPkgSlot *resolved = find_slot(&pur_art, "resolved");
+    check(resolved && resolved->has_contract && resolved->contract.purity >= IDM_PURITY_ARGS, "resolved higher-order call is not impure");
+    const IdmPkgSlot *tainted = find_slot(&pur_art, "tainted");
+    check(tainted && tainted->has_contract && tainted->contract.purity == IDM_PURITY_IMPURE, "tainted higher-order call is impure");
     idm_artifact_destroy(&pur_art);
     idm_buf_destroy(&wire);
     remove_package_dir(dir);

@@ -816,7 +816,7 @@ bool idm_callable_contract_copy(IdmCallableContract *dst, const IdmCallableContr
             if (!idm_constraint_copy(&dst->context[i], &src->context[i])) { idm_callable_contract_destroy(dst); return false; }
         }
     }
-    dst->pure = src->pure;
+    dst->purity = src->purity;
     if (src->sig_count) {
         dst->sigs = calloc(src->sig_count, sizeof(*dst->sigs));
         if (!dst->sigs) { idm_callable_contract_destroy(dst); return false; }
@@ -853,7 +853,7 @@ bool idm_callable_contract_serialize(IdmBuffer *out, const IdmCallableContract *
         if (!idm_buf_put_u8(out, sig->has_result ? 1u : 0u)) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
         if (sig->has_result && !idm_type_term_serialize(out, &sig->result, err)) return false;
     }
-    return idm_buf_put_u8(out, contract->pure ? 1u : 0u) || (err ? idm_error_oom(err, idm_span_unknown(NULL)) : false);
+    return idm_buf_put_u8(out, contract->purity) || (err ? idm_error_oom(err, idm_span_unknown(NULL)) : false);
 }
 
 bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *contract, IdmError *err) {
@@ -919,12 +919,12 @@ bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *co
             }
         }
     }
-    uint8_t pure = idm_rd_u8(r);
-    if (!r->ok || pure > 1u) {
+    uint8_t purity = idm_rd_u8(r);
+    if (!r->ok || purity > IDM_PURITY_PURE) {
         r->ok = false;
         idm_callable_contract_destroy(contract);
         return idm_error_set(err, idm_span_unknown(NULL), "invalid callable contract purity flag");
     }
-    contract->pure = pure != 0;
+    contract->purity = purity;
     return true;
 }

@@ -103,8 +103,12 @@ typedef struct {
     size_t context_count;
     IdmContractSig *sigs;
     size_t sig_count;
-    bool pure;
+    uint8_t purity;
 } IdmCallableContract;
+
+#define IDM_PURITY_IMPURE 0u
+#define IDM_PURITY_ARGS 1u
+#define IDM_PURITY_PURE 2u
 
 bool idm_type_var(IdmTypeTerm *out, const char *name, uint32_t var_id, bool rigid);
 bool idm_type_con(IdmTypeTerm *out, const char *name);

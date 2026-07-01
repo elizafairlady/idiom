@@ -1616,7 +1616,7 @@ bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableCont
     IdmArity arity = idm_primitive_arity(primitive);
     if (!idm_arity_accepts(&arity, (uint32_t)argc)) return true;
     if (!primitive_contract_args(out, argc, err, span)) return false;
-    out->pure = idm_primitive_pure(primitive);
+    out->purity = idm_primitive_pure(primitive) ? IDM_PURITY_PURE : IDM_PURITY_IMPURE;
     bool ok = true;
     switch (primitive) {
         case IDM_PRIM_ADD:

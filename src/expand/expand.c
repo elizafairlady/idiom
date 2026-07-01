@@ -17,6 +17,7 @@ static IdmCore *expand_try_handler(ExpandContext *ctx, const IdmSyntax *stmt, ui
 static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static IdmCore *rewrite_is_a_call(ExpandContext *ctx, IdmCore *call, IdmError *err);
+static IdmCore *fold_pure_primitive_call(ExpandContext *ctx, IdmCore *call);
 static bool syn_is_dot(const IdmSyntax *s);
 static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word);
 typedef struct {
@@ -1604,6 +1605,7 @@ static IdmCore *application_surface_call_from(ExpandContext *ctx, FieldSurfaceGr
     if (!call) return NULL;
     call = rewrite_is_a_call(ctx, call, err);
     if (!call) return NULL;
+    call = fold_pure_primitive_call(ctx, call);
     return parse_dot_tail(ctx, items, pos, end, stop_at_operator, call, err);
 }
 
@@ -1639,6 +1641,33 @@ static bool is_a_static_member(ExpandContext *ctx, const char *type_name, const 
         return td && td->field_count != 0;
     }
     return false;
+}
+
+static IdmCore *fold_pure_primitive_call(ExpandContext *ctx, IdmCore *call) {
+    if (!call || call->kind != IDM_CORE_CALL || call->as.call.arg_count > 8u) return call;
+    const IdmCore *callee = call->as.call.callee;
+    if (!callee || callee->kind != IDM_CORE_FN_MULTI || callee->as.fn_multi.count != 1u) return call;
+    if (!callee->as.fn_multi.clauses[0].primitive_backed) return call;
+    IdmPrimitive prim = callee->as.fn_multi.clauses[0].primitive;
+    if (!idm_primitive_pure(prim)) return call;
+    IdmValue args[8];
+    for (size_t i = 0; i < call->as.call.arg_count; i++) {
+        const IdmCore *arg = call->as.call.args[i];
+        if (!arg || arg->kind != IDM_CORE_LITERAL) return call;
+        args[i] = arg->as.literal;
+    }
+    IdmError probe;
+    idm_error_init(&probe);
+    IdmValue out = idm_nil();
+    bool ok = idm_prim_invoke(ctx->rt, prim, args, (uint32_t)call->as.call.arg_count, &out, &probe);
+    if (!ok || probe.present) {
+        idm_error_clear(&probe);
+        return call;
+    }
+    IdmCore *lit = idm_core_literal(out, call->span);
+    if (!lit) return call;
+    idm_core_free(call);
+    return lit;
 }
 
 static IdmCore *rewrite_is_a_call(ExpandContext *ctx, IdmCore *call, IdmError *err) {
@@ -1751,6 +1780,7 @@ static IdmCore *application_call_from(ExpandContext *ctx, IdmCore *callee, IdmSy
     }
     call = rewrite_is_a_call(ctx, call, err);
     if (!call) return NULL;
+    call = fold_pure_primitive_call(ctx, call);
     return parse_dot_tail(ctx, items, pos, end, stop_at_operator, call, err);
 }
 

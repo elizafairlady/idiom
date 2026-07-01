@@ -530,8 +530,8 @@ bool expand_core_static_type_term(ExpandContext *ctx, const IdmCore *core, IdmTy
 bool expand_typecheck_value(ExpandContext *ctx, const char *name, IdmCore *value, IdmCallableContract *contract, bool *has_contract, IdmError *err);
 bool expand_typecheck_infer_scheme(ExpandContext *ctx, const IdmCore *value, const char *name, IdmCallableContract *out, bool *out_has, IdmError *err);
 bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, IdmError *err);
-bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, bool *out_pure);
-bool expand_typecheck_core_pure(ExpandContext *ctx, const IdmCore *core);
+bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, uint8_t *out_purity);
+uint8_t expand_typecheck_core_purity(ExpandContext *ctx, const IdmCore *core);
 IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const TypeDef *type, uint32_t field_index, IdmSpan span, IdmError *err);
 bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err);
 IdmCore *literal_from_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
