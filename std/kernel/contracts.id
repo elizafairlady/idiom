@@ -1,0 +1,15 @@
+package kernel
+
+export trait Number do
+  method number? x -> :true
+end
+
+implement Number on int
+implement Number on float
+
+export trait Integer do
+  require Number
+  method integer? x -> :true
+end
+
+implement Integer on int

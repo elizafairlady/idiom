@@ -29,10 +29,13 @@ combining-ranges = {
   {119362 119364} {917505 917505} {917536 917631} {917760 917999}
 }
 
+spec combining-range-count :: int
 defn combining-range-count -> 142
 
+spec in? :: int int int -> atom
 defn in? cp lo hi -> and (gte? cp lo) (lte? cp hi)
 
+spec combining-search :: int int int -> atom
 defn combining-search cp lo hi do
   if (gte? lo hi) do
     :false
@@ -49,8 +52,10 @@ defn combining-search cp lo hi do
   end
 end
 
+spec combining? :: int -> atom
 defn combining? cp -> combining-search cp 0 combining-range-count
 
+spec wide? :: int -> atom
 defn wide? cp ->
   and (gte? cp 4352)
       (or (lte? cp 4447)
@@ -69,6 +74,7 @@ defn wide? cp ->
           (in? cp 131072 196605)
           (in? cp 196608 262141))
 
+spec char-width :: int -> int
 export defn char-width do
   0 -> 0
   cp when (combining? cp) -> 0
@@ -76,9 +82,11 @@ export defn char-width do
   _ -> 1
 end
 
+spec width-runes :: list int -> int
 defn width-runes do
   '() acc -> acc
   '(cp . t) acc -> width-runes t (add acc (char-width cp))
 end
 
+spec width :: string -> int
 export defn width s -> width-runes (str-to-list s) 0

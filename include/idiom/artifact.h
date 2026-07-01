@@ -58,15 +58,17 @@ typedef struct IdmCore IdmCore;
 typedef struct {
     char *name;
     IdmArity arity;
+    bool has_contract;
+    IdmCallableContract contract;
     bool has_default;
     bool seen_decl;
     IdmCore *default_fn;
     IdmScopeSet scopes;
     bool exported;
-    uint32_t dispatch_slot;
-    bool has_dispatch;
     uint32_t default_slot;
     bool has_default_slot;
+    bool has_dispatch;
+    uint32_t dispatch_slot;
 } IdmTraitMethodDef;
 
 typedef struct {
@@ -199,6 +201,8 @@ typedef struct {
     uint32_t slot;
     IdmScopeSet scopes;
     IdmArity arity;
+    bool has_contract;
+    IdmCallableContract contract;
     bool exported;
 } IdmPkgSlot;
 
@@ -244,13 +248,20 @@ typedef struct {
 
 typedef struct {
     char *name;
-    char *contract;
+    bool has_contract;
+    IdmTypeTerm contract;
 } IdmPkgTypeField;
+
+typedef struct {
+    IdmTypeTerm term;
+} IdmPkgTypeMember;
 
 typedef struct {
     char *name;
     char *identity;
     IdmScopeSet scopes;
+    IdmPkgTypeMember *members;
+    size_t member_count;
     IdmPkgTypeField *fields;
     size_t field_count;
 } IdmPkgType;

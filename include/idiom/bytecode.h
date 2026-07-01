@@ -40,7 +40,7 @@ typedef enum {
     X(STORE_PACKAGE_SLOT, 3, IDM_OPCODE_NO_COUNT, 0, "crr", "", "rrs", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
     X(PUSH_PACKAGE_ENV, 1, IDM_OPCODE_NO_COUNT, 0, "c", "", "r", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
     X(POP_PACKAGE_ENV, 0, IDM_OPCODE_NO_COUNT, 0, "", "", "", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
-    X(MAKE_RECORD, 4, 3, 2, "rcrr", "cc", "drrr", "23", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
+    X(MAKE_RECORD, 4, 3, 2, "rcrr", "cT", "drrr", "23", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
     X(RECORD_FIELD, 5, IDM_OPCODE_NO_COUNT, 0, "rrccr", "", "dsrrr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
     X(RECORD_IS, 3, IDM_OPCODE_NO_COUNT, 0, "rrc", "", "dsr", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
     X(LIST_CONS, 3, IDM_OPCODE_NO_COUNT, 0, "rrr", "", "dss", "", IDM_OPCODE_FLOW_NEXT, IDM_OPCODE_NO_COUNT, IDM_OPCODE_NO_COUNT) \
@@ -108,6 +108,9 @@ typedef struct IdmBytecodeModule {
     IdmValue *constants;
     size_t const_count;
     size_t const_cap;
+    IdmTypeTerm *types;
+    size_t type_count;
+    size_t type_cap;
     IdmBcFunction *functions;
     size_t function_count;
     size_t function_cap;
@@ -134,6 +137,7 @@ typedef struct IdmBytecodeModule {
 void idm_bc_init(IdmBytecodeModule *module);
 void idm_bc_destroy(IdmBytecodeModule *module);
 bool idm_bc_add_const(IdmBytecodeModule *module, IdmValue value, uint32_t *out_index);
+bool idm_bc_add_type_term(IdmBytecodeModule *module, const IdmTypeTerm *term, uint32_t *out_index);
 bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError *err);
 bool idm_bc_is_finalized(const IdmBytecodeModule *module);
 bool idm_bc_add_function(IdmBytecodeModule *module, const char *name, uint32_t arity, uint32_t local_count, size_t entry, uint32_t *out_index);

@@ -1,0 +1,17 @@
+package cross_trait_order
+
+use std/test
+use tests/pkg/cross_trait_order/impl
+use tests/pkg/cross_trait_order/trait
+activate Test
+
+spec cross-id :: CrossTrait a => a -> a
+defn cross-id x -> x
+
+suite do
+  test "trait impl remains visible across package order" do
+    box = CrossBox 7
+    cross-id box |> cross-value |> assert-eq 7
+    implements? CrossTrait box |> assert
+  end
+end

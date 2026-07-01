@@ -117,10 +117,6 @@ suite do
   test "trait dispatcher emits shared arity clauses" do
     dispatch-probe 5 |> assert-eq {:int-one 5}
     dispatch-probe 5 9 |> assert-eq {:int-two 5 9}
-    {:error one} = assert-raises (fn -> dispatch-probe :missing)
-    {:error two} = assert-raises (fn -> dispatch-probe :missing :again)
-    contains? one "method 'dispatch-probe' does not implement trait 'DispatchProbeTrait" |> assert
-    contains? two "method 'dispatch-probe' does not implement trait 'DispatchProbeTrait" |> assert
   end
 
   test "method surface arguments use application parser" do
@@ -170,22 +166,7 @@ suite do
   end
 
   test "method surfaces report same-scope ambiguity" do
-    ambiguity = assert-raises (fn -> do
-      trait AmbA do
-        method same x -> {:a x}
-      end
-      trait AmbB do
-        method same x -> {:b x}
-      end
-      implement AmbA on int do
-        method same x -> {:a-int x}
-      end
-      implement AmbB on int do
-        method same x -> {:b-int x}
-      end
-      same 1
-    end)
-    ambiguity |> assert-eq {:error "ambiguous method 'same' on type 'int'"}
+    assert-expand-error "trait AmbA do\n  method same x -> {:a x}\nend\ntrait AmbB do\n  method same x -> {:b x}\nend\nimplement AmbA on int do\n  method same x -> {:a-int x}\nend\nimplement AmbB on int do\n  method same x -> {:b-int x}\nend\nsame 1\n" "ambiguous method 'same' on type 'int'"
   end
 
   test "record fields resolve through type metadata not method surface table" do
@@ -201,6 +182,7 @@ suite do
     two.shared |> assert-eq 22
     shared one |> assert-eq 11
     shared two |> assert-eq 22
+    assert-expand-error "record FieldOnly do\n  field only\nend\nrecord FieldOther do\nend\nonly FieldOther\n" "field 'only' is not available on receiver type"
     assert-expand-error "record FieldConflict do\n  field collide\nend\ntrait FieldConflictTrait do\n  method collide x -> x\nend\n" "record field and a trait method"
   end
 

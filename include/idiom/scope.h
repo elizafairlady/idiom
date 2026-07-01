@@ -63,6 +63,74 @@ typedef struct {
     uint64_t mask;
 } IdmArity;
 
+typedef enum {
+    IDM_TYPE_VAR,
+    IDM_TYPE_CON,
+    IDM_TYPE_TUPLE,
+    IDM_TYPE_VECTOR,
+    IDM_TYPE_UNION
+} IdmTypeKind;
+
+typedef struct IdmTypeTerm {
+    IdmTypeKind kind;
+    char *name;
+    uint32_t var_id;
+    bool rigid;
+    struct IdmTypeTerm *args;
+    size_t arg_count;
+} IdmTypeTerm;
+
+typedef enum { IDM_CONSTR_EQ, IDM_CONSTR_CLASS } IdmConstraintKind;
+
+typedef struct {
+    IdmConstraintKind kind;
+    IdmTypeTerm lhs;
+    IdmTypeTerm rhs;
+    char *trait;
+} IdmConstraint;
+
+typedef struct {
+    IdmTypeTerm *args;
+    size_t arg_count;
+    IdmTypeTerm result;
+    bool has_result;
+} IdmContractSig;
+
+typedef struct {
+    char **quantified;
+    size_t quantified_count;
+    IdmConstraint *context;
+    size_t context_count;
+    IdmContractSig *sigs;
+    size_t sig_count;
+} IdmCallableContract;
+
+bool idm_type_var(IdmTypeTerm *out, const char *name, uint32_t var_id, bool rigid);
+bool idm_type_con(IdmTypeTerm *out, const char *name);
+bool idm_type_con_take(IdmTypeTerm *out, const char *name, IdmTypeTerm *args, size_t arg_count);
+bool idm_type_compound(IdmTypeTerm *out, IdmTypeKind kind, IdmTypeTerm *args, size_t arg_count);
+void idm_type_term_destroy(IdmTypeTerm *term);
+bool idm_type_term_copy(IdmTypeTerm *dst, const IdmTypeTerm *src);
+bool idm_type_term_equal(const IdmTypeTerm *a, const IdmTypeTerm *b);
+bool idm_type_term_write(IdmBuffer *buf, const IdmTypeTerm *term);
+bool idm_type_term_mentions(const IdmTypeTerm *term, const char *var_name);
+bool idm_type_term_serialize(IdmBuffer *out, const IdmTypeTerm *term, IdmError *err);
+bool idm_type_term_deserialize(IdmByteReader *r, IdmTypeTerm *out, IdmError *err);
+
+void idm_constraint_destroy(IdmConstraint *c);
+bool idm_constraint_copy(IdmConstraint *dst, const IdmConstraint *src);
+bool idm_constraint_serialize(IdmBuffer *out, const IdmConstraint *constraint, IdmError *err);
+bool idm_constraint_deserialize(IdmByteReader *r, IdmConstraint *constraint, IdmError *err);
+
+void idm_contract_sig_destroy(IdmContractSig *sig);
+bool idm_contract_sig_copy(IdmContractSig *dst, const IdmContractSig *src);
+const IdmContractSig *idm_contract_sig_for(const IdmCallableContract *c, size_t argc);
+IdmContractSig *idm_contract_add_sig(IdmCallableContract *c);
+void idm_callable_contract_destroy(IdmCallableContract *c);
+bool idm_callable_contract_copy(IdmCallableContract *dst, const IdmCallableContract *src);
+bool idm_callable_contract_serialize(IdmBuffer *out, const IdmCallableContract *contract, IdmError *err);
+bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *contract, IdmError *err);
+
 typedef struct {
     char *name;
     int phase;
@@ -74,6 +142,8 @@ typedef struct {
     void *data;
     uint32_t frame_id;
     IdmArity arity;
+    bool has_contract;
+    IdmCallableContract contract;
     bool primitive_backed;
     uint32_t primitive;
 } IdmBinding;
@@ -116,6 +186,7 @@ bool idm_binding_table_add_data(IdmBindingTable *table, const char *name, int ph
 bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id);
 bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id);
 bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, uint32_t primitive, IdmBindingId *out_id);
+bool idm_binding_table_set_contract(IdmBindingTable *table, IdmBindingId id, const IdmCallableContract *contract);
 void idm_binding_table_truncate(IdmBindingTable *table, size_t count);
 IdmResolveStatus idm_binding_resolve(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding);
 IdmResolveStatus idm_binding_resolve_scopes(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmScopeSet **out_scopes);

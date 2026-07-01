@@ -6,8 +6,6 @@ export record Packet do
   field right
 end
 
-export defn packet tag left right -> Packet tag left right
-
 export defn classify do
   0 -> :zero
   n when (gt? n 0) -> :positive

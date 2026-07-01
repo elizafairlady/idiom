@@ -310,9 +310,12 @@ typedef enum {
     IDM_BUILTIN_TYPE_COUNT
 } IdmBuiltinType;
 IdmBuiltinType idm_value_builtin_type_kind(IdmSymbol *type);
+bool idm_type_name_is_builtin(const char *text);
+size_t idm_builtin_overtype_members(const char *parent, const char *const **out_names);
 bool idm_value_builtin_type_symbol(IdmSymbol *type);
 bool idm_value_matches_builtin_type(IdmValue value, IdmBuiltinType type);
 bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type);
+bool idm_value_matches_type_term(IdmValue value, const IdmTypeTerm *term);
 bool idm_is_nil(IdmValue value);
 bool idm_is_empty_list(IdmValue value);
 bool idm_is_pair(IdmValue value);

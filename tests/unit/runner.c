@@ -11,11 +11,14 @@ int idm_unit_grow(void);
 int idm_unit_intern(void);
 int idm_unit_pattern_selector(void);
 int idm_unit_primitive_registry(void);
+int idm_unit_signature_contract(void);
 int idm_unit_reader_escape(void);
 int idm_unit_repl(void);
 int idm_unit_regex_set(void);
 int idm_unit_syntax_equal(void);
 int idm_unit_wire_helpers(void);
+int idm_unit_type_term(void);
+int idm_unit_infer(void);
 
 typedef struct {
     const char *name;
@@ -23,6 +26,8 @@ typedef struct {
 } IdmUnit;
 
 static const IdmUnit tests[] = {
+    {"type_term", idm_unit_type_term},
+    {"infer", idm_unit_infer},
     {"bytecode_record", idm_unit_bytecode_record},
     {"closure_arity", idm_unit_closure_arity},
     {"byteprog", idm_unit_byteprog},
@@ -32,6 +37,7 @@ static const IdmUnit tests[] = {
     {"intern", idm_unit_intern},
     {"pattern_selector", idm_unit_pattern_selector},
     {"primitive_registry", idm_unit_primitive_registry},
+    {"signature_contract", idm_unit_signature_contract},
     {"reader_escape", idm_unit_reader_escape},
     {"repl", idm_unit_repl},
     {"regex_set", idm_unit_regex_set},

@@ -97,6 +97,7 @@ void idm_operator_def_destroy(IdmOperatorDef *op) {
 void idm_trait_method_def_destroy(IdmTraitMethodDef *method) {
     if (!method) return;
     free(method->name);
+    if (method->has_contract) idm_callable_contract_destroy(&method->contract);
     idm_core_free(method->default_fn);
     idm_scope_set_destroy(&method->scopes);
     memset(method, 0, sizeof(*method));
@@ -222,9 +223,11 @@ void idm_pkg_slot_destroy(IdmPkgSlot *slot) {
     if (!slot) return;
     free(slot->name);
     idm_scope_set_destroy(&slot->scopes);
+    if (slot->has_contract) idm_callable_contract_destroy(&slot->contract);
     slot->name = NULL;
     slot->slot = 0;
     slot->arity = idm_arity_unknown();
+    slot->has_contract = false;
 }
 
 void idm_pkg_trait_destroy(IdmPkgTrait *trait) {
@@ -252,9 +255,11 @@ void idm_pkg_type_destroy(IdmPkgType *type) {
     free(type->name);
     free(type->identity);
     idm_scope_set_destroy(&type->scopes);
+    for (size_t i = 0; i < type->member_count; i++) idm_type_term_destroy(&type->members[i].term);
+    free(type->members);
     for (size_t i = 0; i < type->field_count; i++) {
         free(type->fields[i].name);
-        free(type->fields[i].contract);
+        if (type->fields[i].has_contract) idm_type_term_destroy(&type->fields[i].contract);
     }
     free(type->fields);
     memset(type, 0, sizeof(*type));
@@ -295,11 +300,15 @@ bool idm_trait_method_defs_copy(const IdmTraitMethodDef *src, size_t count, IdmT
     for (size_t i = 0; i < count; i++) {
         methods[i].name = idm_strdup(src[i].name);
         methods[i].arity = src[i].arity;
+        methods[i].has_contract = src[i].has_contract;
+        if (src[i].has_contract && !idm_callable_contract_copy(&methods[i].contract, &src[i].contract)) {
+            for (size_t j = 0; j <= i; j++) idm_trait_method_def_destroy(&methods[j]);
+            free(methods);
+            return false;
+        }
         methods[i].has_default = src[i].has_default;
         methods[i].seen_decl = src[i].seen_decl;
         methods[i].exported = true;
-        methods[i].dispatch_slot = src[i].dispatch_slot;
-        methods[i].has_dispatch = src[i].has_dispatch;
         methods[i].default_slot = src[i].default_slot;
         methods[i].has_default_slot = src[i].has_default_slot;
         if (!methods[i].name || !idm_scope_set_copy(&methods[i].scopes, &src[i].scopes)) {
@@ -487,7 +496,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 72u
+#define IDM_ARTIFACT_VERSION 81u
 
 const char *idm_grammar_mode_name(uint8_t mode) {
     switch ((IdmGrammarMode)mode) {
@@ -1070,12 +1079,14 @@ static bool put_method_defs(IdmBuffer *out, const IdmTraitMethodDef *methods, si
     for (size_t i = 0; i < count; i++) {
         const IdmTraitMethodDef *m = &methods[i];
         if (!idm_buf_put_str(out, m->name, strlen(m->name)) || !idm_arity_serialize(out, m->arity, NULL)) return false;
+        if (!idm_buf_put_u8(out, m->has_contract ? 1u : 0u)) return false;
+        if (m->has_contract && !idm_callable_contract_serialize(out, &m->contract, NULL)) return false;
         if (!idm_buf_put_u8(out, m->has_default ? 1u : 0u) ||
             !idm_buf_put_u8(out, m->seen_decl ? 1u : 0u) ||
-            !idm_buf_put_u8(out, m->has_dispatch ? 1u : 0u) ||
-            !idm_buf_put_u32(out, m->dispatch_slot) ||
             !idm_buf_put_u8(out, m->has_default_slot ? 1u : 0u) ||
-            !idm_buf_put_u32(out, m->default_slot)) return false;
+            !idm_buf_put_u32(out, m->default_slot) ||
+            !idm_buf_put_u8(out, m->has_dispatch ? 1u : 0u) ||
+            !idm_buf_put_u32(out, m->dispatch_slot)) return false;
         if (!idm_scope_set_serialize(out, &m->scopes, NULL)) return false;
     }
     return true;
@@ -1093,12 +1104,14 @@ static bool read_method_defs(IdmByteReader *r, IdmTraitMethodDef **out_methods, 
         *out_count = i + 1u;
         if (!artifact_read_str(r, &m->name, err)) return false;
         if (!idm_arity_deserialize(r, &m->arity, err)) return false;
+        m->has_contract = r->ok && idm_rd_u8(r) != 0;
+        if (m->has_contract && !idm_callable_contract_deserialize(r, &m->contract, err)) return false;
         m->has_default = r->ok && idm_rd_u8(r) != 0;
         m->seen_decl = r->ok && idm_rd_u8(r) != 0;
-        m->has_dispatch = r->ok && idm_rd_u8(r) != 0;
-        m->dispatch_slot = r->ok ? idm_rd_u32(r) : 0;
         m->has_default_slot = r->ok && idm_rd_u8(r) != 0;
         m->default_slot = r->ok ? idm_rd_u32(r) : 0;
+        m->has_dispatch = r->ok && idm_rd_u8(r) != 0;
+        m->dispatch_slot = r->ok ? idm_rd_u32(r) : 0;
         if (!r->ok) return false;
         m->exported = true;
         idm_scope_set_init(&m->scopes);
@@ -1233,6 +1246,9 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
         ok = idm_buf_put_str(out, art->slots[i].name, strlen(art->slots[i].name)) &&
              idm_buf_put_u32(out, art->slots[i].slot) &&
              idm_arity_serialize(out, art->slots[i].arity, err) &&
+             idm_buf_put_u8(out, art->slots[i].has_contract ? 1u : 0u);
+        if (ok && art->slots[i].has_contract) ok = idm_callable_contract_serialize(out, &art->slots[i].contract, err);
+        ok = ok &&
              idm_buf_put_u8(out, art->slots[i].exported ? 1u : 0u) &&
              idm_scope_set_serialize(out, &art->slots[i].scopes, NULL);
     }
@@ -1261,11 +1277,13 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
         if (art->typed.entities[i].kind != IDM_TYPED_ENTITY_TYPE) continue;
         const IdmPkgType *t = &art->typed.entities[i].as.type;
         ok = idm_buf_put_str(out, t->name, strlen(t->name)) && idm_buf_put_str(out, t->identity, strlen(t->identity)) && idm_scope_set_serialize(out, &t->scopes, NULL);
+        ok = ok && idm_buf_put_u32(out, (uint32_t)t->member_count);
+        for (size_t m = 0; ok && m < t->member_count; m++) ok = idm_type_term_serialize(out, &t->members[m].term, err);
         ok = ok && idm_buf_put_u32(out, (uint32_t)t->field_count);
         for (size_t f = 0; ok && f < t->field_count; f++) {
-            const char *contract = t->fields[f].contract ? t->fields[f].contract : "";
             ok = idm_buf_put_str(out, t->fields[f].name, strlen(t->fields[f].name)) &&
-                 idm_buf_put_str(out, contract, strlen(contract));
+                 idm_buf_put_u8(out, t->fields[f].has_contract ? 1u : 0u);
+            if (ok && t->fields[f].has_contract) ok = idm_type_term_serialize(out, &t->fields[f].contract, err);
         }
     }
     ok = ok && idm_buf_put_u32(out, (uint32_t)artifact_typed_entity_count(&art->typed, IDM_TYPED_ENTITY_TRAIT));
@@ -1412,6 +1430,16 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             out->slots[i].slot = ok ? idm_rd_u32(&r) : 0;
             out->slots[i].arity = idm_arity_unknown();
             if (ok) ok = idm_arity_deserialize(&r, &out->slots[i].arity, err);
+            uint8_t has_contract = ok ? idm_rd_u8(&r) : 0u;
+            if (ok && !r.ok) ok = false;
+            if (ok && has_contract > 1u) {
+                r.ok = false;
+                ok = idm_error_set(err, idm_span_unknown(NULL), "invalid package slot contract flag");
+            }
+            if (ok && has_contract) {
+                out->slots[i].has_contract = true;
+                ok = idm_callable_contract_deserialize(&r, &out->slots[i].contract, err);
+            }
             out->slots[i].exported = ok ? idm_rd_u8(&r) != 0 : false;
             if (ok && !r.ok) ok = false;
             idm_scope_set_init(&out->slots[i].scopes);
@@ -1474,6 +1502,16 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             IdmPkgType *t = &entity->as.type;
             idm_scope_set_init(&t->scopes);
             ok = artifact_read_str(&r, &t->name, err) && artifact_read_str(&r, &t->identity, err) && idm_scope_set_deserialize(&r, &t->scopes, NULL);
+            uint32_t member_count = ok ? idm_rd_u32(&r) : 0;
+            if (ok && !r.ok) ok = false;
+            if (ok && member_count != 0) {
+                t->members = calloc(member_count, sizeof(*t->members));
+                if (!t->members) ok = false;
+                for (uint32_t m = 0; ok && m < member_count; m++) {
+                    t->member_count = m + 1u;
+                    ok = idm_type_term_deserialize(&r, &t->members[m].term, err);
+                }
+            }
             uint32_t field_count = ok ? idm_rd_u32(&r) : 0;
             if (ok && !r.ok) ok = false;
             if (ok && field_count != 0) {
@@ -1481,11 +1519,16 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
                 if (!t->fields) ok = false;
                 for (uint32_t f = 0; ok && f < field_count; f++) {
                     t->field_count = f + 1u;
-                    ok = artifact_read_str(&r, &t->fields[f].name, err) &&
-                         artifact_read_str(&r, &t->fields[f].contract, err);
-                    if (ok && t->fields[f].contract && t->fields[f].contract[0] == '\0') {
-                        free(t->fields[f].contract);
-                        t->fields[f].contract = NULL;
+                    ok = artifact_read_str(&r, &t->fields[f].name, err);
+                    uint8_t has_contract = ok ? idm_rd_u8(&r) : 0u;
+                    if (ok && !r.ok) ok = false;
+                    if (ok && has_contract > 1u) {
+                        r.ok = false;
+                        ok = idm_error_set(err, idm_span_unknown(NULL), "invalid type field contract flag");
+                    }
+                    if (ok && has_contract) {
+                        t->fields[f].has_contract = true;
+                        ok = idm_type_term_deserialize(&r, &t->fields[f].contract, err);
                     }
                 }
             }

@@ -92,16 +92,4 @@ suite do
     Tea.command-messages (Tea.batch (list (Tea.emit :a) (Tea.emit :b))) |> assert-eq '(:a :b)
     Tea.command-messages (Tea.sequence (list (Tea.emit :c) (Tea.emit :d))) |> assert-eq '(:c :d)
   end
-
-  test "tea step keeps record model separate from command" do
-    record TeaProbe do
-      field value
-    end
-    implement Tea.Model on TeaProbe do
-      method update state msg -> {(TeaProbe (state.value + msg)) (Tea.none)}
-    end
-    {next cmd} = Tea.step (TeaProbe 1) 2
-    next.value |> assert-eq 3
-    cmd |> assert-eq Tea.none
-  end
 end

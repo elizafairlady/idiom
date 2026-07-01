@@ -76,7 +76,8 @@ defn str-parts do
   parts -> apply parts &str
 end
 
-export defn join xs sep -> str-parts (List.intersperse (xs.to-list) sep)
+spec join :: Enum a => a string -> string
+export defn join xs sep -> xs.to-list |> List.intersperse sep |> str-parts
 
 export defn replace s old new ->
   s |> split old |> join new

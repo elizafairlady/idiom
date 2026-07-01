@@ -1,0 +1,11 @@
+package cross_trait_order_impl
+
+use tests/pkg/cross_trait_order/trait
+
+export record CrossBox do
+  field value :: int
+end
+
+implement CrossTrait on CrossBox do
+  method cross-value x -> x.value
+end

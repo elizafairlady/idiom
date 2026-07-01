@@ -12,28 +12,42 @@ static bool check_trait_requirements_for_type(ExpandContext *ctx, const TraitDef
 static bool install_required_trait_methods(ExpandContext *ctx, const TraitDef *required, const IdmSyntax *name_syntax, IdmError *err);
 static bool method_signature_arity(const IdmSyntax *form, IdmArity *out_arity, IdmError *err);
 static bool method_arity_mismatch(IdmError *err, IdmSpan span, const char *trait, const char *name, const IdmArity *expected, const IdmArity *got);
+static bool method_implicit_trait_contract(const char *trait, const IdmArity *arity, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span);
+static bool method_contract_ensure_trait_context(ExpandContext *ctx, IdmCallableContract *contract, const char *trait, IdmError *err, IdmSpan span);
+static bool method_contract_ensure_requirement_contexts(ExpandContext *ctx, IdmCallableContract *contract, const IdmTraitRequirementDef *requirements, size_t requirement_count, IdmError *err, IdmSpan span);
 static TraitMethodDef *find_decl_method(ExpandContext *ctx, const char *name);
 static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmArity arity, IdmError *err);
 static void trait_impls_destroy(TraitMethodImpl *impls, size_t count);
 static const TraitMethodDef *find_trait_method_def(ExpandContext *ctx, const TraitMethodDef *methods, size_t count, const char *name);
 static bool trait_has_impl(ExpandContext *ctx, const TraitMethodImpl *impls, size_t count, const char *name);
 static bool trait_impls_push(ExpandContext *ctx, TraitMethodImpl **impls, size_t *count, size_t *cap, const char *name, IdmArity arity, IdmCore *fn, IdmError *err, IdmSpan span);
-static IdmCore *build_trait_implement_core(ExpandContext *ctx, const TraitDef *trait, const char *trait_key, const char *type, const IdmScopeSet *method_scopes, const IdmSyntax *body, IdmSpan span, IdmError *err);
+static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait, const char *trait_key, const char *type, const IdmScopeSet *method_scopes, const IdmSyntax *body, IdmSpan span, IdmError *err);
 static IdmCore *sequence_two(IdmCore *first, IdmCore *second, IdmSpan span, IdmError *err);
 static bool record_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, const IdmSyntax **out_body, bool *out_exported);
+static bool type_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_member_start, bool *out_exported);
 typedef struct {
     char *name;
     IdmSymbol *name_symbol;
-    IdmSyntax *contract_syntax;
-    IdmSymbol *contract_symbol;
+    bool has_contract;
+    IdmTypeTerm contract;
 } RecordFieldDecl;
+typedef struct {
+    const IdmSyntax *name;
+    IdmCallableContract contract;
+    bool used;
+} MethodSignature;
 static void record_fields_destroy(RecordFieldDecl *fields, size_t count);
+static void type_members_destroy(TypeMemberDef *members, size_t count);
 static bool record_field_seen(const RecordFieldDecl *fields, size_t count, const char *name);
-static bool parse_record_fields(const IdmSyntax *body, RecordFieldDecl **out_fields, size_t *out_count, IdmError *err);
+static bool parse_record_fields(ExpandContext *ctx, const IdmSyntax *body, RecordFieldDecl **out_fields, size_t *out_count, IdmError *err);
 static bool resolve_record_field_contracts(ExpandContext *ctx, RecordFieldDecl *fields, size_t field_count, const char *record_name, const char *identity, IdmError *err);
+static bool resolve_type_members(ExpandContext *ctx, TypeMemberDef *members, size_t member_count, const char *self_name, const char *identity, IdmError *err);
+static bool resolve_pending_type_members(ExpandContext *ctx, const char *surface_name, const char *identity, IdmSpan span, IdmError *err);
+static bool parse_type_members(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, TypeMemberDef **out_members, size_t *out_count, IdmError *err);
 static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_name, const TypeDef *type, IdmSpan span, IdmError *err);
 static IdmCore *record_predicate_fn(ExpandContext *ctx, const TypeDef *type, const char *predicate_name, IdmSpan span, IdmError *err);
 static char *record_predicate_name(const char *record_name);
+static bool register_type_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *type_name, char *identity, bool exported, const TypeMemberDef *members, size_t member_count, TypeDef **out_type, IdmSpan span, IdmError *err);
 static bool register_record_type_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *record_name, char *identity, bool exported, const RecordFieldDecl *fields, size_t field_count, TypeDef **out_type, IdmSpan span, IdmError *err);
 static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const IdmSyntax *name_syntax, const IdmSyntax *body, bool exported, IdmSyntax *const *items, size_t index, size_t count, IdmError *err);
 
@@ -164,6 +178,256 @@ static bool method_arity_mismatch(IdmError *err, IdmSpan span, const char *trait
     return ok;
 }
 
+static bool method_spec_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_contract_start) {
+    if (!syn_is_form(form, "%-expr")) return false;
+    if (form->as.seq.count < 5u) return false;
+    if (!syn_is_word(form->as.seq.items[1], "spec")) return false;
+    if (form->as.seq.items[2]->kind != IDM_SYN_WORD) return false;
+    const char *op = surface_token_text(form->as.seq.items[3]);
+    if (!op || strcmp(op, "::") != 0) return false;
+    if (out_name) *out_name = form->as.seq.items[2];
+    if (out_contract_start) *out_contract_start = 4u;
+    return true;
+}
+
+static void method_signatures_destroy(MethodSignature *signatures, size_t count) {
+    for (size_t i = 0; i < count; i++) idm_callable_contract_destroy(&signatures[i].contract);
+    free(signatures);
+}
+
+static bool method_signature_add(ExpandContext *ctx, MethodSignature **signatures, size_t *count, size_t *cap, const IdmSyntax *form, IdmError *err) {
+    const IdmSyntax *name = NULL;
+    size_t contract_start = 0;
+    if (!method_spec_form_parts(form, &name, &contract_start)) return true;
+    for (size_t i = 0; i < *count; i++) {
+        if (strcmp((*signatures)[i].name->as.text, name->as.text) == 0) return idm_error_set(err, name->span, "duplicate signature for method '%s'", name->as.text);
+    }
+    if (*count == *cap && !idm_grow((void **)signatures, cap, sizeof(**signatures), 4u, *count + 1u)) return idm_error_oom(err, name->span);
+    MethodSignature *sig = &(*signatures)[(*count)++];
+    memset(sig, 0, sizeof(*sig));
+    sig->name = name;
+    if (!parse_callable_contract_parts(ctx, (IdmSyntax *const *)form->as.seq.items, contract_start, form->as.seq.count, &sig->contract, err)) {
+        (*count)--;
+        return false;
+    }
+    return true;
+}
+
+static bool method_signatures_collect(ExpandContext *ctx, const IdmSyntax *body, MethodSignature **out, size_t *out_count, IdmError *err) {
+    *out = NULL;
+    *out_count = 0;
+    size_t cap = 0;
+    size_t body_count = body ? body->as.seq.count : 1u;
+    for (size_t i = 1; i < body_count; i++) {
+        if (!method_signature_add(ctx, out, out_count, &cap, body->as.seq.items[i], err)) {
+            method_signatures_destroy(*out, *out_count);
+            *out = NULL;
+            *out_count = 0;
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool method_signature_take(const IdmSyntax *name, MethodSignature *signatures, size_t count, IdmCallableContract *out, bool *out_has, IdmError *err) {
+    *out_has = false;
+    memset(out, 0, sizeof(*out));
+    for (size_t i = 0; i < count; i++) {
+        MethodSignature *sig = &signatures[i];
+        if (strcmp(sig->name->as.text, name->as.text) != 0) continue;
+        if (sig->used) return idm_error_set(err, name->span, "duplicate signature use for method '%s'", name->as.text);
+        if (!idm_callable_contract_copy(out, &sig->contract)) return idm_error_oom(err, name->span);
+        sig->used = true;
+        *out_has = true;
+        return true;
+    }
+    return true;
+}
+
+static bool method_signatures_all_used(const MethodSignature *signatures, size_t count, IdmError *err) {
+    for (size_t i = 0; i < count; i++) {
+        if (!signatures[i].used) return idm_error_set(err, signatures[i].name->span, "signature for method '%s' has no definition", signatures[i].name->as.text);
+    }
+    return true;
+}
+
+static bool method_contract_apply_arity(const IdmSyntax *name, const IdmCallableContract *contract, const IdmArity *arity, IdmError *err) {
+    if (!contract) return true;
+    if (contract->sigs[0].arg_count > UINT32_MAX) return idm_error_set(err, name->span, "signature for method '%s' has too many arguments", name->as.text);
+    IdmArity expected = idm_arity_exact((uint32_t)contract->sigs[0].arg_count);
+    if (idm_arity_equal(arity, &expected)) return true;
+    IdmBuffer want;
+    IdmBuffer got;
+    idm_buf_init(&want);
+    idm_buf_init(&got);
+    bool ok = idm_arity_describe(&want, &expected) && idm_arity_describe(&got, arity);
+    if (!ok) {
+        idm_buf_destroy(&want);
+        idm_buf_destroy(&got);
+        return idm_error_oom(err, name->span);
+    }
+    bool set = idm_error_set(err, name->span, "signature for method '%s' expects arity %s, method has %s", name->as.text, want.data ? want.data : "?", got.data ? got.data : "?");
+    idm_buf_destroy(&want);
+    idm_buf_destroy(&got);
+    return set;
+}
+
+static bool method_arity_single(const IdmArity *arity, uint32_t *out) {
+    if (!arity || arity->kind == IDM_ARITY_UNKNOWN) return false;
+    if (arity->min != arity->max) return false;
+    if (!idm_arity_accepts(arity, arity->min)) return false;
+    if (out) *out = arity->min;
+    return true;
+}
+
+static bool method_contract_add_trait_context(IdmCallableContract *contract, const char *trait, const IdmTypeTerm *receiver, IdmError *err, IdmSpan span) {
+    IdmConstraint *items = realloc(contract->context, (contract->context_count + 1u) * sizeof(*items));
+    if (!items) return idm_error_oom(err, span);
+    contract->context = items;
+    IdmConstraint *constraint = &contract->context[contract->context_count];
+    memset(constraint, 0, sizeof(*constraint));
+    constraint->kind = IDM_CONSTR_CLASS;
+    constraint->trait = idm_strdup(trait);
+    if (!constraint->trait || !idm_type_term_copy(&constraint->lhs, receiver)) {
+        idm_constraint_destroy(constraint);
+        return idm_error_oom(err, span);
+    }
+    contract->context_count++;
+    return true;
+}
+
+static bool method_contract_ensure_trait_context(ExpandContext *ctx, IdmCallableContract *contract, const char *trait, IdmError *err, IdmSpan span) {
+    if (!contract || !trait || contract->sigs[0].arg_count == 0u) return true;
+    const IdmTypeTerm *receiver = &contract->sigs[0].args[0];
+    if (receiver->kind != IDM_TYPE_VAR) return true;
+    for (size_t i = 0; i < contract->context_count; i++) {
+        if (typeclass_given_matches(ctx, &contract->context[i], trait, receiver)) return true;
+    }
+    return method_contract_add_trait_context(contract, trait, receiver, err, span);
+}
+
+static bool method_contract_ensure_requirement_contexts(ExpandContext *ctx, IdmCallableContract *contract, const IdmTraitRequirementDef *requirements, size_t requirement_count, IdmError *err, IdmSpan span) {
+    if (!contract || contract->sigs[0].arg_count == 0u) return true;
+    const IdmTypeTerm *receiver = &contract->sigs[0].args[0];
+    if (receiver->kind != IDM_TYPE_VAR) return true;
+    for (size_t i = 0; i < requirement_count; i++) {
+        const char *trait = requirements[i].name;
+        bool present = false;
+        for (size_t j = 0; j < contract->context_count; j++) {
+            if (typeclass_given_matches(ctx, &contract->context[j], trait, receiver)) {
+                present = true;
+                break;
+            }
+        }
+        if (!present && !method_contract_add_trait_context(contract, trait, receiver, err, span)) return false;
+    }
+    return true;
+}
+
+static bool method_implicit_trait_contract(const char *trait, const IdmArity *arity, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span) {
+    *out_has = false;
+    memset(out, 0, sizeof(*out));
+    uint32_t argc = 0;
+    if (!method_arity_single(arity, &argc) || argc == 0u) return true;
+    out->quantified = calloc(1u, sizeof(*out->quantified));
+    out->context = calloc(1u, sizeof(*out->context));
+    IdmContractSig *osig = idm_contract_add_sig(out);
+    if (osig) osig->args = calloc(argc, sizeof(*osig->args));
+    if (!out->quantified || !out->context || !osig || !osig->args) {
+        idm_callable_contract_destroy(out);
+        return idm_error_oom(err, span);
+    }
+    out->quantified[0] = idm_strdup("a");
+    if (!out->quantified[0]) {
+        idm_callable_contract_destroy(out);
+        return idm_error_oom(err, span);
+    }
+    out->quantified_count = 1u;
+    osig->arg_count = argc;
+    if (!idm_type_var(&osig->args[0], "a", 1u, false)) {
+        idm_callable_contract_destroy(out);
+        return idm_error_oom(err, span);
+    }
+    for (uint32_t i = 1u; i < argc; i++) {
+        if (!idm_type_var(&osig->args[i], "_", 0u, false)) {
+            idm_callable_contract_destroy(out);
+            return idm_error_oom(err, span);
+        }
+    }
+    out->context[0].kind = IDM_CONSTR_CLASS;
+    out->context[0].trait = idm_strdup(trait);
+    if (!out->context[0].trait || !idm_type_term_copy(&out->context[0].lhs, &osig->args[0])) {
+        idm_callable_contract_destroy(out);
+        return idm_error_oom(err, span);
+    }
+    out->context_count = 1u;
+    *out_has = true;
+    return true;
+}
+
+static bool method_type_var_same(const IdmTypeTerm *a, const IdmTypeTerm *b) {
+    if (!a || !b || a->kind != IDM_TYPE_VAR || b->kind != IDM_TYPE_VAR) return false;
+    if (a->var_id != 0u || b->var_id != 0u) return a->var_id == b->var_id;
+    return a->name && b->name && strcmp(a->name, b->name) == 0;
+}
+
+static bool method_contract_replace_type(IdmTypeTerm *term, const IdmTypeTerm *var, const IdmTypeTerm *replacement, IdmError *err, IdmSpan span) {
+    if (!term) return true;
+    if (term->kind == IDM_TYPE_VAR && method_type_var_same(term, var)) {
+        IdmTypeTerm copy;
+        memset(&copy, 0, sizeof(copy));
+        if (!idm_type_term_copy(&copy, replacement)) return idm_error_oom(err, span);
+        idm_type_term_destroy(term);
+        *term = copy;
+        return true;
+    }
+    for (size_t i = 0; i < term->arg_count; i++) {
+        if (!method_contract_replace_type(&term->args[i], var, replacement, err, span)) return false;
+    }
+    return true;
+}
+
+static bool method_contract_replace_receiver_var(IdmCallableContract *contract, const char *type, IdmError *err, IdmSpan span) {
+    if (!contract || contract->sigs[0].arg_count == 0 || contract->sigs[0].args[0].kind != IDM_TYPE_VAR) return true;
+    IdmTypeTerm var;
+    IdmTypeTerm replacement;
+    memset(&var, 0, sizeof(var));
+    memset(&replacement, 0, sizeof(replacement));
+    if (!idm_type_term_copy(&var, &contract->sigs[0].args[0])) return idm_error_oom(err, span);
+    if (!idm_type_con(&replacement, type)) {
+        idm_type_term_destroy(&var);
+        return idm_error_oom(err, span);
+    }
+    bool ok = true;
+    for (size_t i = 0; ok && i < contract->sigs[0].arg_count; i++) ok = method_contract_replace_type(&contract->sigs[0].args[i], &var, &replacement, err, span);
+    for (size_t i = 0; ok && i < contract->context_count; i++) {
+        ok = method_contract_replace_type(&contract->context[i].lhs, &var, &replacement, err, span) &&
+             method_contract_replace_type(&contract->context[i].rhs, &var, &replacement, err, span);
+    }
+    if (ok && contract->sigs[0].has_result) ok = method_contract_replace_type(&contract->sigs[0].result, &var, &replacement, err, span);
+    idm_type_term_destroy(&replacement);
+    idm_type_term_destroy(&var);
+    return ok;
+}
+
+static bool method_contract_for_type(const TraitMethodDef *method, const char *type, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span) {
+    *out_has = false;
+    memset(out, 0, sizeof(*out));
+    if (!method || !method->has_contract) return true;
+    if (!idm_callable_contract_copy(out, &method->contract)) return idm_error_oom(err, span);
+    *out_has = true;
+    if (!method_contract_replace_receiver_var(out, type, err, span)) {
+        idm_callable_contract_destroy(out);
+        *out_has = false;
+        return false;
+    }
+    return true;
+}
+
+static bool trait_dispatch_env_storage(const ExpandContext *ctx) {
+    return ctx->frame == IDM_FRAME_TOP && (ctx->repl_env_binds || ctx->in_package);
+}
+
 static TraitMethodDef *find_decl_method(ExpandContext *ctx, const char *name) {
     for (size_t i = 0; i < ctx->decl_method_count; i++) {
         if (trait_method_matches_name(ctx, &ctx->decl_methods[i], name)) return &ctx->decl_methods[i];
@@ -182,13 +446,14 @@ static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, Id
     method->arity = arity;
     method->exported = true;
     method->has_dispatch = true;
-    method->dispatch_slot = ctx->frame == IDM_FRAME_TOP ? ctx->env_slot_seq++ : ctx->next_slot++;
+    bool dispatch_env = trait_dispatch_env_storage(ctx);
+    method->dispatch_slot = dispatch_env ? ctx->env_slot_seq++ : ctx->next_slot++;
     if (!binder_scopes_pruned(ctx, name_syntax, &method->scopes)) {
         trait_method_def_destroy(method);
         return idm_error_oom(err, name_syntax->span);
     }
     ctx->decl_method_count++;
-    return install_method_surface(ctx, ctx->trait_name ? ctx->trait_name : "<anonymous>", ctx->trait_key ? ctx->trait_key : (ctx->trait_name ? ctx->trait_name : "<anonymous>"), trait_method_name_text(method), arity, &method->scopes, ctx->unit, ctx->unit_key, true, ctx->frame == IDM_FRAME_TOP, NULL, method->dispatch_slot, err);
+    return install_method_surface(ctx, ctx->trait_name ? ctx->trait_name : "<anonymous>", ctx->trait_key ? ctx->trait_key : (ctx->trait_name ? ctx->trait_name : "<anonymous>"), trait_method_name_text(method), arity, &method->scopes, ctx->unit, ctx->unit_key, true, dispatch_env, NULL, method->dispatch_slot, err);
 }
 
 bool predeclare_trait_methods(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmError *err) {
@@ -297,6 +562,7 @@ static bool method_impl_record(ExpandContext *ctx, uint32_t method_surface, cons
         if (!method_impl_matches_identity(ctx, impl, method_surface_trait_text(surface), method_surface_name_text(surface), type)) continue;
         impl->arity = arity;
         impl->impl_env = impl_env;
+        impl->impl_frame = ctx->frame;
         impl->impl_slot = impl_slot;
         char *key = idm_strdup(impl_env_key ? impl_env_key : "");
         if (!key) return idm_error_oom(err, span);
@@ -313,8 +579,9 @@ static bool method_impl_record(ExpandContext *ctx, uint32_t method_surface, cons
     impl->impl_env_key = idm_strdup(impl_env_key ? impl_env_key : "");
     impl->arity = arity;
     impl->impl_env = impl_env;
+    impl->impl_frame = ctx->frame;
     impl->impl_slot = impl_slot;
-    if (!impl->impl_env_key || !method_impl_set_type(ctx, impl, type, err, span)) {
+    if (!impl->impl_env_key || !method_impl_set_identity(ctx, impl, method_surface_trait_text(surface), method_surface_name_text(surface), type, err, span)) {
         free(impl->impl_env_key);
         memset(impl, 0, sizeof(*impl));
         return false;
@@ -357,24 +624,28 @@ static IdmCore *impl_dispatch_clause_body(ExpandContext *ctx, IdmCore *multi, co
     return call;
 }
 
-static bool dispatch_add_clause(ExpandContext *ctx, IdmCore *multi, const MethodImplDef *impl, const MethodSurfaceDef *surface, uint32_t argc, IdmSpan span, IdmError *err) {
+static bool dispatch_add_clause_for_type(ExpandContext *ctx, IdmCore *multi, const MethodImplDef *impl, const MethodSurfaceDef *surface, const char *type, uint32_t argc, IdmSpan span, IdmError *err) {
     ImplDispatchBody body = {impl, surface};
-    const char *type = method_impl_type_text(impl);
     if (!type) return idm_error_set(err, span, "method implementation requires a receiver type");
     return expand_multi_add_dispatch_clause(ctx, multi, argc, type, impl_dispatch_clause_body, &body, span, err);
 }
 
-typedef bool (*DispatchArityClauseFn)(ExpandContext *ctx, IdmCore *multi, const void *user, uint32_t argc, IdmSpan span, IdmError *err);
-
-static IdmCore *method_unimplemented_body(ExpandContext *ctx, const char *trait, const char *method, IdmSpan span, IdmError *err) {
-    IdmBuffer msg;
-    idm_buf_init(&msg);
-    bool ok = idm_buf_appendf(&msg, "method '%s' does not implement trait '%s'", method, trait);
-    IdmCore *body = ok ? expand_raise_message_body(ctx, msg.data ? msg.data : "", span, err) : NULL;
-    idm_buf_destroy(&msg);
-    if (!ok) idm_error_oom(err, span);
-    return body;
+static bool dispatch_add_clause(ExpandContext *ctx, IdmCore *multi, const MethodImplDef *impl, const MethodSurfaceDef *surface, uint32_t argc, IdmSpan span, IdmError *err) {
+    const char *type = method_impl_type_text(impl);
+    if (type && type[0] == '_' && type[1] == '.') {
+        for (size_t i = 0; i < ctx->typed.entity_count; i++) {
+            const TypedEntity *e = &ctx->typed.entities[i];
+            if (e->kind != IDM_TYPED_ENTITY_TYPE || e->as.type.field_count == 0) continue;
+            const char *id = type_def_identity_text(&e->as.type);
+            if (!id || !type_satisfies_structural_head(ctx, type, id)) continue;
+            if (!dispatch_add_clause_for_type(ctx, multi, impl, surface, id, argc, span, err)) return false;
+        }
+        return true;
+    }
+    return dispatch_add_clause_for_type(ctx, multi, impl, surface, type, argc, span, err);
 }
+
+typedef bool (*DispatchArityClauseFn)(ExpandContext *ctx, IdmCore *multi, const void *user, uint32_t argc, IdmSpan span, IdmError *err);
 
 static bool dispatch_add_arity_clauses(ExpandContext *ctx, IdmCore *multi, const char *trait, const char *method, const IdmArity *arity, DispatchArityClauseFn clause_fn, const void *user, IdmError *err, IdmSpan span) {
     if (arity->kind == IDM_ARITY_UNKNOWN) return idm_error_set(err, span, "method '%s.%s' has unknown arity", trait, method);
@@ -396,67 +667,54 @@ static bool dispatch_add_impl_clauses(ExpandContext *ctx, IdmCore *multi, const 
     return dispatch_add_arity_clauses(ctx, multi, method_surface_trait_text(surface), method_surface_name_text(surface), &impl->arity, dispatch_add_impl_clause_at_arity, &body, err, span);
 }
 
-typedef struct {
-    const char *trait;
-    const TraitMethodDef *method;
-} UnimplementedClauseBody;
-
-static IdmCore *unimplemented_dispatch_clause_body(ExpandContext *ctx, IdmCore *multi, const void *user, uint32_t argc, IdmSpan span, IdmError *err) {
-    const UnimplementedClauseBody *body = user;
-    (void)multi;
-    (void)argc;
-    return method_unimplemented_body(ctx, body->trait, trait_method_name_text(body->method), span, err);
-}
-
-static bool dispatch_add_unimplemented_clause(ExpandContext *ctx, IdmCore *multi, const char *trait, const TraitMethodDef *method, uint32_t argc, IdmSpan span, IdmError *err) {
-    UnimplementedClauseBody body = {trait, method};
-    return expand_multi_add_dispatch_clause(ctx, multi, argc, NULL, unimplemented_dispatch_clause_body, &body, span, err);
-}
-
-static bool dispatch_add_unimplemented_clause_at_arity(ExpandContext *ctx, IdmCore *multi, const void *user, uint32_t argc, IdmSpan span, IdmError *err) {
-    const UnimplementedClauseBody *body = user;
-    return dispatch_add_unimplemented_clause(ctx, multi, body->trait, body->method, argc, span, err);
-}
-
-static bool dispatch_add_unimplemented_clauses(ExpandContext *ctx, IdmCore *multi, const char *trait, const TraitMethodDef *method, IdmError *err, IdmSpan span) {
-    UnimplementedClauseBody body = {trait, method};
-    return dispatch_add_arity_clauses(ctx, multi, trait, trait_method_name_text(method), &method->arity, dispatch_add_unimplemented_clause_at_arity, &body, err, span);
-}
-
-static IdmCore *method_empty_dispatcher_fn(ExpandContext *ctx, const char *trait, const TraitMethodDef *method, IdmSpan span, IdmError *err) {
-    IdmCore *multi = idm_core_fn_multi(trait_method_name_text(method), span);
-    if (!multi) return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    if (!dispatch_add_unimplemented_clauses(ctx, multi, trait, method, err, span)) {
-        idm_core_free(multi);
-        return NULL;
-    }
-    return multi;
-}
-
-static IdmCore *method_dispatcher_fn(ExpandContext *ctx, const char *trait, const TraitMethodDef *method, IdmSpan span, IdmError *err) {
-    const char *method_name = trait_method_name_text(method);
+IdmCore *build_method_dispatcher_core(ExpandContext *ctx, const char *trait, const char *method_name, IdmSpan span, IdmError *err) {
     IdmCore *multi = idm_core_fn_multi(method_name, span);
     if (!multi) return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
-    size_t clauses = 0;
     for (size_t i = 0; i < ctx->typed.method_impl_count; i++) {
         const MethodImplDef *impl = &ctx->typed.method_impls[i];
+        if (!method_impl_matches_identity(ctx, impl, trait, method_name, NULL)) continue;
         const MethodSurfaceDef *surface = method_surface_by_index(ctx, impl->method_surface);
         if (!surface) {
-            idm_error_set(err, span, "method implementation references missing surface");
             idm_core_free(multi);
+            expand_error(err, span, "method implementation references missing surface");
             return NULL;
         }
-        if (!method_impl_matches_identity(ctx, impl, trait, method_name, NULL)) continue;
         if (!dispatch_add_impl_clauses(ctx, multi, impl, surface, err, span)) {
             idm_core_free(multi);
             return NULL;
         }
-        clauses++;
     }
-    (void)clauses;
-    if (!dispatch_add_unimplemented_clauses(ctx, multi, trait, method, err, span)) {
-        idm_core_free(multi);
-        return NULL;
+    if (multi->as.fn_multi.count == 0) {
+        bool structural = false;
+        for (size_t i = 0; i < ctx->typed.method_impl_count; i++) {
+            const MethodImplDef *impl = &ctx->typed.method_impls[i];
+            if (!method_impl_matches_identity(ctx, impl, trait, method_name, NULL)) continue;
+            const char *t = method_impl_type_text(impl);
+            if (t && t[0] == '_' && t[1] == '.') { structural = true; break; }
+        }
+        if (!structural) {
+            idm_core_free(multi);
+            return expand_error(err, span, "method '%s.%s' has no compiled dispatch clauses", trait, method_name);
+        }
+        IdmCore *raise_fn = expand_primitive_clause_call(IDM_PRIM_RAISE, span, err);
+        IdmCore *raise_call = raise_fn ? idm_core_call(raise_fn, span) : NULL;
+        IdmCore *reason = raise_call ? idm_core_literal(idm_atom(ctx->rt, "no-method-implementation"), span) : NULL;
+        if (!reason || !idm_core_call_add_arg(raise_call, reason)) {
+            idm_core_free(reason);
+            idm_core_free(raise_call);
+            idm_core_free(multi);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
+        IdmPattern *pat = idm_pat_wildcard(span);
+        IdmPattern **pats = pat ? calloc(1u, sizeof(*pats)) : NULL;
+        if (pats) pats[0] = pat;
+        if (!pats || !idm_core_fn_multi_add_clause_take(multi, 1u, pats, 1u, NULL, 0u, NULL, raise_call)) {
+            if (!pats) idm_pat_free(pat);
+            free(pats);
+            idm_core_free(raise_call);
+            idm_core_free(multi);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
     }
     return multi;
 }
@@ -484,6 +742,33 @@ static bool refresh_slot_push(RefreshSlot **slots, size_t *count, size_t *cap, c
     return true;
 }
 
+static bool method_dispatch_has_impl_clause(const ExpandContext *ctx, const char *trait, const char *method) {
+    for (size_t i = 0; i < ctx->typed.method_impl_count; i++) {
+        if (method_impl_matches_identity(ctx, &ctx->typed.method_impls[i], trait, method, NULL)) return true;
+    }
+    return false;
+}
+
+static bool refresh_add_field_selectors(ExpandContext *ctx, IdmCore **core, IdmSpan span, IdmError *err) {
+    for (size_t i = 0; i < ctx->field_selector_count; i++) {
+        FieldSelectorDef *sel = &ctx->field_selectors[i];
+        if (!sel->env) continue;
+        IdmCore *sel_core = build_field_selector_core(ctx, sel->name, span, err);
+        if (!sel_core) return false;
+        if (!*core) {
+            *core = idm_core_letrec(span);
+            if (!*core) { idm_core_free(sel_core); return idm_error_oom(err, span); }
+            idm_core_letrec_set_env(*core);
+        }
+        bool added = ctx->unit_key[0] && ctx->in_package
+            ? idm_core_letrec_add_env_fill(*core, sel->name, idm_atom(ctx->rt, ctx->unit_key), sel->slot, sel_core, sel->emitted)
+            : idm_core_letrec_add_fill(*core, sel->name, sel->slot, sel_core, sel->emitted);
+        if (!added) { idm_core_free(sel_core); return idm_error_oom(err, span); }
+        sel->emitted = true;
+    }
+    return true;
+}
+
 IdmCore *build_method_dispatch_refresh_core(ExpandContext *ctx, IdmSpan span, IdmError *err) {
     IdmCore *core = NULL;
     RefreshSlot *slots = NULL;
@@ -493,14 +778,15 @@ IdmCore *build_method_dispatch_refresh_core(ExpandContext *ctx, IdmSpan span, Id
     for (size_t i = 0; ok && i < ctx->typed.method_surface_count; i++) {
         const MethodSurfaceDef *surface = &ctx->typed.method_surfaces[i];
         if (!surface->has_dispatch || !surface->dispatch_env || !surface->dispatch_env_key || !surface->dispatch_env_key[0]) continue;
+        const TraitDef *trait = typed_trait_by_identity(ctx, method_surface_trait_text(surface));
+        const TraitMethodDef *method = trait ? find_trait_method_def(ctx, trait->methods, trait->method_count, method_surface_name_text(surface)) : NULL;
+        if (!method) continue;
+        if (!method_dispatch_has_impl_clause(ctx, method_surface_trait_text(surface), method_surface_name_text(surface))) continue;
         if (refresh_slot_seen(slots, slot_count, surface->dispatch_env_key, surface->dispatch_slot)) continue;
         if (!refresh_slot_push(&slots, &slot_count, &slot_cap, surface->dispatch_env_key, surface->dispatch_slot, err, span)) {
             ok = false;
             break;
         }
-        const TraitDef *trait = typed_trait_by_identity(ctx, method_surface_trait_text(surface));
-        const TraitMethodDef *method = trait ? find_trait_method_def(ctx, trait->methods, trait->method_count, method_surface_name_text(surface)) : NULL;
-        if (!method) continue;
         if (!core) {
             core = idm_core_letrec(span);
             if (!core) {
@@ -509,7 +795,7 @@ IdmCore *build_method_dispatch_refresh_core(ExpandContext *ctx, IdmSpan span, Id
             }
             idm_core_letrec_set_env(core);
         }
-        IdmCore *dispatcher = method_dispatcher_fn(ctx, method_surface_trait_text(surface), method, span, err);
+        IdmCore *dispatcher = build_method_dispatcher_core(ctx, method_surface_trait_text(surface), method_surface_name_text(surface), span, err);
         if (!dispatcher || !idm_core_letrec_add_env_fill(core, method_surface_name_text(surface), idm_atom(ctx->rt, surface->dispatch_env_key), surface->dispatch_slot, dispatcher, false)) {
             idm_core_free(dispatcher);
             ok = err && err->present ? false : idm_error_oom(err, span);
@@ -517,6 +803,7 @@ IdmCore *build_method_dispatch_refresh_core(ExpandContext *ctx, IdmSpan span, Id
         }
     }
     free(slots);
+    if (ok) ok = refresh_add_field_selectors(ctx, &core, span, err);
     if (!ok) {
         idm_core_free(core);
         return NULL;
@@ -597,11 +884,12 @@ static bool implement_dispatch_bindings_prepare(ExpandContext *ctx, const TraitD
         if (surface) {
             bindings[i].slot = surface->dispatch_slot;
             bindings[i].env = surface->dispatch_env;
-            bindings[i].fill_existing = !surface->dispatch_env;
+            bindings[i].fill_existing = !surface->dispatch_env && method_dispatch_has_impl_clause(ctx, trait_def_identity_text(trait), method_name);
             bindings[i].env_key = idm_strdup(surface->dispatch_env_key ? surface->dispatch_env_key : "");
         } else {
-            bindings[i].slot = ctx->frame == IDM_FRAME_TOP ? ctx->env_slot_seq++ : ctx->next_slot++;
-            bindings[i].env = ctx->frame == IDM_FRAME_TOP;
+            bool dispatch_env = trait_dispatch_env_storage(ctx);
+            bindings[i].slot = dispatch_env ? ctx->env_slot_seq++ : ctx->next_slot++;
+            bindings[i].env = dispatch_env;
             bindings[i].fill_existing = false;
             bindings[i].env_key = idm_strdup("");
         }
@@ -614,9 +902,9 @@ static bool implement_dispatch_bindings_prepare(ExpandContext *ctx, const TraitD
     return true;
 }
 
-static IdmCore *build_trait_implement_core(ExpandContext *ctx, const TraitDef *trait_def, const char *trait_key, const char *type, const IdmScopeSet *method_scopes, const IdmSyntax *body, IdmSpan span, IdmError *err) {
+static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait_def, const char *trait_key, const char *type, const IdmScopeSet *method_scopes, const IdmSyntax *body, IdmSpan span, IdmError *err) {
     const char *trait = trait_def_identity_text(trait_def);
-    const TraitMethodDef *methods = trait_def->methods;
+    TraitMethodDef *methods = trait_def->methods;
     size_t method_count = trait_def->method_count;
     if (!check_trait_requirements_for_type(ctx, trait_def, type, span, err)) return NULL;
     ImplementDispatchBinding *dispatch = NULL;
@@ -624,13 +912,23 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, const TraitDef *t
     SurfaceCheckpoint checkpoint;
     surface_checkpoint(ctx, &checkpoint);
     bool surface_ok = true;
+    bool saved_suppress_refresh = ctx->suppress_method_impl_surface_refresh;
+    ctx->suppress_method_impl_surface_refresh = true;
     for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, trait, trait_key, trait_method_name_text(&methods[i]), methods[i].arity, method_scopes, ctx->unit, ctx->unit_key, true, dispatch[i].env, dispatch[i].env_key, dispatch[i].slot, err);
+    ctx->suppress_method_impl_surface_refresh = saved_suppress_refresh;
     if (!surface_ok) {
         surface_rollback(ctx, &checkpoint);
         implement_dispatch_bindings_destroy(dispatch, method_count);
         return NULL;
     }
 
+    MethodSignature *method_signatures = NULL;
+    size_t method_signature_count = 0;
+    if (!method_signatures_collect(ctx, body, &method_signatures, &method_signature_count, err)) {
+        surface_rollback(ctx, &checkpoint);
+        implement_dispatch_bindings_destroy(dispatch, method_count);
+        return NULL;
+    }
     TraitMethodImpl *impls = NULL;
     size_t impl_count = 0;
     size_t impl_cap = 0;
@@ -638,6 +936,7 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, const TraitDef *t
     size_t body_count = body ? body->as.seq.count : 1u;
     for (size_t i = 1; i < body_count && ok; i++) {
         const IdmSyntax *stmt = body->as.seq.items[i];
+        if (method_spec_form_parts(stmt, NULL, NULL)) continue;
         const IdmSyntax *name = NULL;
         size_t param_start = 0;
         bool has_body = false;
@@ -653,15 +952,52 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, const TraitDef *t
         if (!contract) { expand_error(err, name->span, "trait '%s' has no method '%s'", trait, name->as.text); ok = false; break; }
         if (!idm_arity_equal(&contract->arity, &arity)) { method_arity_mismatch(err, name->span, trait, name->as.text, &contract->arity, &arity); ok = false; break; }
         if (trait_has_impl(ctx, impls, impl_count, name->as.text)) { expand_error(err, name->span, "implement for '%s' provides method '%s' more than once", trait, name->as.text); ok = false; break; }
-        IdmCore *fn = expand_function_literal(ctx, name->as.text, stmt->as.seq.items[1], stmt->as.seq.items, param_start, stmt->as.seq.count, err);
-        if (!fn) { ok = false; break; }
+        IdmCallableContract provided_contract;
+        bool provided_has_contract = false;
+        if (!method_signature_take(name, method_signatures, method_signature_count, &provided_contract, &provided_has_contract, err)) { ok = false; break; }
+        if (provided_has_contract && !method_contract_apply_arity(name, &provided_contract, &arity, err)) {
+            idm_callable_contract_destroy(&provided_contract);
+            ok = false;
+            break;
+        }
+        IdmCallableContract trait_contract;
+        bool trait_has_contract = false;
+        if (!method_contract_for_type(contract, type, &trait_contract, &trait_has_contract, err, name->span)) {
+            if (provided_has_contract) idm_callable_contract_destroy(&provided_contract);
+            ok = false;
+            break;
+        }
+        const IdmCallableContract *active_contract = trait_has_contract ? &trait_contract : (provided_has_contract ? &provided_contract : NULL);
+        IdmCore *fn = expand_function_literal_with_contract(ctx, name->as.text, stmt->as.seq.items[1], stmt->as.seq.items, param_start, stmt->as.seq.count, active_contract, err);
+        if (!fn) {
+            if (provided_has_contract) idm_callable_contract_destroy(&provided_contract);
+            if (trait_has_contract) idm_callable_contract_destroy(&trait_contract);
+            ok = false;
+            break;
+        }
+        if (provided_has_contract) {
+            bool has_contract = true;
+            if (!expand_typecheck_value(ctx, name->as.text, fn, &provided_contract, &has_contract, err)) ok = false;
+        }
+        if (ok && trait_has_contract) {
+            bool has_contract = true;
+            if (!expand_typecheck_value(ctx, name->as.text, fn, &trait_contract, &has_contract, err)) ok = false;
+        }
+        if (provided_has_contract) idm_callable_contract_destroy(&provided_contract);
+        if (trait_has_contract) idm_callable_contract_destroy(&trait_contract);
+        if (!ok) {
+            idm_core_free(fn);
+            break;
+        }
         if (!trait_impls_push(ctx, &impls, &impl_count, &impl_cap, name->as.text, arity, fn, err, name->span)) {
             idm_core_free(fn);
             ok = false;
             break;
         }
     }
+    if (ok) ok = method_signatures_all_used(method_signatures, method_signature_count, err);
     surface_rollback(ctx, &checkpoint);
+    method_signatures_destroy(method_signatures, method_signature_count);
     if (!ok) {
         trait_impls_destroy(impls, impl_count);
         implement_dispatch_bindings_destroy(dispatch, method_count);
@@ -704,21 +1040,31 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, const TraitDef *t
             return NULL;
         }
         if (provided) {
+            bool impl_pkg = letrec_env && ctx->unit_key[0];
             uint32_t impl_slot = letrec_env ? ctx->env_slot_seq++ : ctx->next_slot++;
             IdmCore *fn = provided->fn;
             provided->fn = NULL;
-            if (!idm_core_letrec_add(core, trait_method_impl_name_text(provided), impl_slot, fn)) {
+            bool impl_added = impl_pkg
+                ? idm_core_letrec_add_env_fill(core, trait_method_impl_name_text(provided), idm_atom(ctx->rt, ctx->unit_key), impl_slot, fn, false)
+                : idm_core_letrec_add(core, trait_method_impl_name_text(provided), impl_slot, fn);
+            if (!impl_added) {
                 idm_core_free(fn);
                 idm_core_free(core);
                 trait_impls_destroy(impls, impl_count);
                 implement_dispatch_bindings_destroy(dispatch, method_count);
                 return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
             }
-            if (!method_impl_record(ctx, method_surface, type, methods[i].arity, letrec_env, NULL, impl_slot, err, span)) {
+            if (!method_impl_record(ctx, method_surface, type, methods[i].arity, letrec_env, impl_pkg ? ctx->unit_key : NULL, impl_slot, err, span)) {
                 idm_core_free(core);
                 trait_impls_destroy(impls, impl_count);
                 implement_dispatch_bindings_destroy(dispatch, method_count);
                 return NULL;
+            }
+            if (impl_pkg && !record_package_slot(ctx, trait_method_impl_name_text(provided), impl_slot, method_scopes, methods[i].arity, NULL, true)) {
+                idm_core_free(core);
+                trait_impls_destroy(impls, impl_count);
+                implement_dispatch_bindings_destroy(dispatch, method_count);
+                return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
             }
         } else if (methods[i].has_default) {
             if (!methods[i].has_default_slot) {
@@ -737,12 +1083,21 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, const TraitDef *t
         }
     }
     for (size_t i = 0; i < method_count; i++) {
-        IdmCore *dispatcher = method_dispatcher_fn(ctx, trait, &methods[i], span, err);
+        IdmCore *dispatcher = build_method_dispatcher_core(ctx, trait, trait_method_name_text(&methods[i]), span, err);
         bool added = dispatcher && (dispatch[i].env && dispatch[i].env_key[0]
             ? idm_core_letrec_add_env_fill(core, trait_method_name_text(&methods[i]), idm_atom(ctx->rt, dispatch[i].env_key), dispatch[i].slot, dispatcher, dispatch[i].fill_existing)
             : idm_core_letrec_add_fill(core, trait_method_name_text(&methods[i]), dispatch[i].slot, dispatcher, dispatch[i].fill_existing));
         if (!added) {
             idm_core_free(dispatcher);
+            idm_core_free(core);
+            trait_impls_destroy(impls, impl_count);
+            implement_dispatch_bindings_destroy(dispatch, method_count);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
+        }
+        methods[i].has_dispatch = true;
+        methods[i].dispatch_slot = dispatch[i].slot;
+        if (ctx->in_package && dispatch[i].env && dispatch[i].env_key[0] && strcmp(dispatch[i].env_key, ctx->unit_key) == 0 &&
+            !record_package_slot(ctx, trait_method_name_text(&methods[i]), dispatch[i].slot, method_scopes, methods[i].arity, NULL, true)) {
             idm_core_free(core);
             trait_impls_destroy(impls, impl_count);
             implement_dispatch_bindings_destroy(dispatch, method_count);
@@ -865,6 +1220,8 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
 
     SurfaceCheckpoint checkpoint;
     surface_checkpoint(ctx, &checkpoint);
+    bool saved_suppress_refresh = ctx->suppress_method_impl_surface_refresh;
+    ctx->suppress_method_impl_surface_refresh = true;
     const char *saved_trait_name = ctx->trait_name;
     const char *saved_trait_key = ctx->trait_key;
     ctx->trait_name = identity;
@@ -872,7 +1229,10 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
     IdmTraitRequirementDef *requirements = NULL;
     size_t requirement_count = 0;
     size_t requirement_cap = 0;
+    MethodSignature *method_signatures = NULL;
+    size_t method_signature_count = 0;
     bool ok = true;
+    if (!method_signatures_collect(ctx, body, &method_signatures, &method_signature_count, err)) ok = false;
     for (size_t i = 1; ok && i < body->as.seq.count; i++) {
         const IdmSyntax *stmt = body->as.seq.items[i];
         IdmSyntax *required_name = require_form_trait_word(stmt, err);
@@ -901,6 +1261,7 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
     for (size_t i = 1; ok && i < body->as.seq.count; i++) {
         const IdmSyntax *stmt = body->as.seq.items[i];
         if (syn_is_form(stmt, "%-expr") && stmt->as.seq.count >= 2u && syn_is_word(stmt->as.seq.items[1], "require")) continue;
+        if (method_spec_form_parts(stmt, NULL, NULL)) continue;
         const IdmSyntax *method_name = NULL;
         size_t param_start = 0;
         bool has_body = false;
@@ -915,16 +1276,49 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         if (!method) { ok = false; idm_error_oom(err, method_name->span); break; }
         if (method->seen_decl) { expand_error(err, method_name->span, "trait '%s' declares method '%s' more than once", identity, method_name->as.text); ok = false; break; }
         if (!idm_arity_equal(&method->arity, &arity)) { expand_error(err, method_name->span, "method '%s.%s' arity changed during declaration", identity, method_name->as.text); ok = false; break; }
+        IdmCallableContract method_contract;
+        bool method_has_contract = false;
+        if (!method_signature_take(method_name, method_signatures, method_signature_count, &method_contract, &method_has_contract, err)) { ok = false; break; }
+        if (method_has_contract && !method_contract_apply_arity(method_name, &method_contract, &arity, err)) {
+            idm_callable_contract_destroy(&method_contract);
+            ok = false;
+            break;
+        }
+        if (!method_has_contract && !method_implicit_trait_contract(identity, &arity, &method_contract, &method_has_contract, err, method_name->span)) { ok = false; break; }
+        if (method_has_contract && !method_contract_ensure_trait_context(ctx, &method_contract, identity, err, method_name->span)) {
+            idm_callable_contract_destroy(&method_contract);
+            ok = false;
+            break;
+        }
+        if (method_has_contract && !method_contract_ensure_requirement_contexts(ctx, &method_contract, requirements, requirement_count, err, method_name->span)) {
+            idm_callable_contract_destroy(&method_contract);
+            ok = false;
+            break;
+        }
+        if (method_has_contract) {
+            method->contract = method_contract;
+            method->has_contract = true;
+        }
         method->seen_decl = true;
         if (has_body) {
-            IdmCore *fn = expand_function_literal(ctx, method_name->as.text, stmt->as.seq.items[1], stmt->as.seq.items, param_start, stmt->as.seq.count, err);
+            IdmCore *fn = expand_function_literal_with_contract(ctx, method_name->as.text, stmt->as.seq.items[1], stmt->as.seq.items, param_start, stmt->as.seq.count, method->has_contract ? &method->contract : NULL, err);
             if (!fn) { ok = false; break; }
+            if (method->has_contract) {
+                bool has_contract = true;
+                if (!expand_typecheck_value(ctx, method_name->as.text, fn, &method->contract, &has_contract, err)) {
+                    idm_core_free(fn);
+                    ok = false;
+                    break;
+                }
+            }
             method->default_fn = fn;
             method->has_default = true;
             method->has_default_slot = true;
-            method->default_slot = ctx->frame == IDM_FRAME_TOP ? ctx->env_slot_seq++ : ctx->next_slot++;
+            bool default_env = trait_dispatch_env_storage(ctx);
+            method->default_slot = default_env ? ctx->env_slot_seq++ : ctx->next_slot++;
         }
     }
+    if (ok) ok = method_signatures_all_used(method_signatures, method_signature_count, err);
 
     size_t method_count = ok ? ctx->decl_method_count - checkpoint.decl_method_count : 0u;
     TraitMethodDef *methods = NULL;
@@ -932,6 +1326,9 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         ok = false;
         idm_error_oom(err, form->span);
     }
+    method_signatures_destroy(method_signatures, method_signature_count);
+    method_signatures = NULL;
+    method_signature_count = 0;
 
     IdmCore *init = NULL;
     if (ok) {
@@ -939,23 +1336,20 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         if (!init) {
             ok = false;
             idm_error_oom(err, form->span);
-        } else if (ctx->frame == IDM_FRAME_TOP) {
+        } else if (trait_dispatch_env_storage(ctx)) {
             idm_core_letrec_set_env(init);
         }
     }
     for (size_t i = 0; ok && i < method_count; i++) {
         TraitMethodDef *method = &ctx->decl_methods[checkpoint.decl_method_count + i];
-        IdmCore *empty_dispatch = method_empty_dispatcher_fn(ctx, identity, method, form->span, err);
-        if (!empty_dispatch || !idm_core_letrec_add(init, trait_method_name_text(method), method->dispatch_slot, empty_dispatch)) {
-            idm_core_free(empty_dispatch);
-            ok = false;
-            idm_error_oom(err, form->span);
-            break;
-        }
         IdmCore *default_fn = method->default_fn;
         method->default_fn = NULL;
         if (default_fn) {
-            if (!idm_core_letrec_add(init, trait_method_name_text(method), method->default_slot, default_fn)) {
+            bool def_pkg = trait_dispatch_env_storage(ctx) && ctx->unit_key[0];
+            bool def_added = def_pkg
+                ? idm_core_letrec_add_env_fill(init, trait_method_name_text(method), idm_atom(ctx->rt, ctx->unit_key), method->default_slot, default_fn, false)
+                : idm_core_letrec_add(init, trait_method_name_text(method), method->default_slot, default_fn);
+            if (!def_added) {
                 idm_core_free(default_fn);
                 ok = false;
                 idm_error_oom(err, form->span);
@@ -974,8 +1368,10 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
 
     ctx->trait_name = saved_trait_name;
     ctx->trait_key = saved_trait_key;
+    ctx->suppress_method_impl_surface_refresh = saved_suppress_refresh;
     surface_rollback(ctx, &checkpoint);
     if (!ok) {
+        method_signatures_destroy(method_signatures, method_signature_count);
         idm_core_free(init);
         if (methods) { for (size_t i = 0; i < method_count; i++) trait_method_def_destroy(&methods[i]); free(methods); }
         trait_requirements_destroy(requirements, requirement_count);
@@ -1011,7 +1407,7 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
     trait->requirement_count = requirement_count;
     trait->methods = methods;
     trait->method_count = method_count;
-    trait->dispatch_env = ctx->frame == IDM_FRAME_TOP;
+    trait->dispatch_env = trait_dispatch_env_storage(ctx);
     IdmScopeSet trait_scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &trait_scopes)) {
         surface_rollback(ctx, &install_checkpoint);
@@ -1026,8 +1422,20 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         free(identity);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
+    trait->dispatch_env_key = idm_strdup(ctx->unit_key);
+    if (!trait->dispatch_env_key) {
+        idm_scope_set_destroy(&trait_scopes);
+        surface_rollback(ctx, &install_checkpoint);
+        idm_core_free(init);
+        free(identity);
+        return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
+    }
     for (size_t i = 0; i < method_count; i++) {
-        if (!install_method_surface(ctx, trait_identity, name_syntax->as.text, trait_method_name_text(&methods[i]), methods[i].arity, &trait_scopes, ctx->unit, ctx->unit_key, methods[i].has_dispatch, ctx->frame == IDM_FRAME_TOP, NULL, methods[i].dispatch_slot, err)) {
+        methods[i].has_dispatch = true;
+        methods[i].dispatch_slot = trait->dispatch_env ? ctx->env_slot_seq++ : ctx->next_slot++;
+    }
+    for (size_t i = 0; i < method_count; i++) {
+        if (!install_method_surface(ctx, trait_identity, name_syntax->as.text, trait_method_name_text(&methods[i]), methods[i].arity, &trait_scopes, ctx->unit, ctx->unit_key, methods[i].has_dispatch, trait->dispatch_env, trait->dispatch_env_key, methods[i].dispatch_slot, err)) {
             idm_scope_set_destroy(&trait_scopes);
             surface_rollback(ctx, &install_checkpoint);
             idm_core_free(init);
@@ -1148,6 +1556,32 @@ IdmCore *expand_implement_trait_decl(ExpandContext *ctx, const IdmSyntax *form, 
         return NULL;
     }
     pos = parse_end;
+    if (type->kind == IDM_SYN_WORD && type->as.text[0] == '_' && type->as.text[1] == '.' && pos + 1u < form->as.seq.count && syn_is_word(form->as.seq.items[pos], "::") && form->as.seq.items[pos + 1u]->kind == IDM_SYN_WORD) {
+        const IdmSyntax *cname = form->as.seq.items[pos + 1u];
+        IdmBuffer joined;
+        idm_buf_init(&joined);
+        if (!idm_buf_append(&joined, type->as.text) || !idm_buf_append(&joined, "::") || !idm_buf_append(&joined, cname->as.text)) {
+            idm_buf_destroy(&joined);
+            idm_syn_free(type);
+            idm_syn_free(trait);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
+        }
+        IdmSyntax *joined_word = idm_syn_clone(type);
+        char *joined_text = joined_word ? idm_strdup(joined.data) : NULL;
+        idm_buf_destroy(&joined);
+        if (!joined_word || !joined_text) {
+            free(joined_text);
+            idm_syn_free(joined_word);
+            idm_syn_free(type);
+            idm_syn_free(trait);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
+        }
+        free(joined_word->as.text);
+        joined_word->as.text = joined_text;
+        idm_syn_free(type);
+        type = joined_word;
+        pos += 2u;
+    }
     const IdmSyntax *body = NULL;
     if (pos < form->as.seq.count) {
         if (pos + 1u != form->as.seq.count || !syn_is_form(form->as.seq.items[pos], "%-body")) {
@@ -1178,19 +1612,46 @@ static bool record_form_parts(const IdmSyntax *form, const IdmSyntax **out_name,
     return true;
 }
 
+static bool type_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_member_start, bool *out_exported) {
+    if (!syn_is_form(form, "%-expr")) return false;
+    size_t base = 1u;
+    bool exported = false;
+    if (form->as.seq.count >= 2u && syn_is_word(form->as.seq.items[1], "export")) {
+        exported = true;
+        base = 2u;
+    }
+    if (form->as.seq.count < base + 4u || !syn_is_word(form->as.seq.items[base], "type") || form->as.seq.items[base + 1u]->kind != IDM_SYN_WORD) return false;
+    const char *sep = surface_token_text(form->as.seq.items[base + 2u]);
+    if (!sep || strcmp(sep, "::") != 0) return false;
+    if (out_name) *out_name = form->as.seq.items[base + 1u];
+    if (out_member_start) *out_member_start = base + 3u;
+    if (out_exported) *out_exported = exported;
+    return true;
+}
+
 static void record_fields_destroy(RecordFieldDecl *fields, size_t count) {
     for (size_t i = 0; i < count; i++) {
         free(fields[i].name);
-        idm_syn_free(fields[i].contract_syntax);
+        if (fields[i].has_contract) idm_type_term_destroy(&fields[i].contract);
     }
     free(fields);
+}
+
+static void type_members_destroy(TypeMemberDef *members, size_t count) {
+    for (size_t i = 0; i < count; i++) idm_type_term_destroy(&members[i].term);
+    free(members);
 }
 
 static bool record_field_seen(const RecordFieldDecl *fields, size_t count, const char *name) {
     return find_named((void *)fields, count, sizeof(*fields), offsetof(RecordFieldDecl, name), name) != NULL;
 }
 
-static bool parse_record_fields(const IdmSyntax *body, RecordFieldDecl **out_fields, size_t *out_count, IdmError *err) {
+static bool record_field_contract_marker(const IdmSyntax *syn) {
+    const char *text = surface_token_text(syn);
+    return text && strcmp(text, "::") == 0;
+}
+
+static bool parse_record_fields(ExpandContext *ctx, const IdmSyntax *body, RecordFieldDecl **out_fields, size_t *out_count, IdmError *err) {
     RecordFieldDecl *fields = NULL;
     size_t count = 0;
     size_t cap = 0;
@@ -1198,42 +1659,39 @@ static bool parse_record_fields(const IdmSyntax *body, RecordFieldDecl **out_fie
         const IdmSyntax *stmt = body->as.seq.items[i];
         if (!syn_is_form(stmt, "%-expr") || stmt->as.seq.count < 3u || !syn_is_word(stmt->as.seq.items[1], "field") || stmt->as.seq.items[2]->kind != IDM_SYN_WORD) {
             record_fields_destroy(fields, count);
-            return idm_error_set(err, stmt->span, "record body expects 'field NAME' or 'field NAME : TYPE' declarations");
+            return idm_error_set(err, stmt->span, "record body expects 'field NAME' or 'field NAME :: TYPE' declarations");
         }
-        IdmSyntax *contract = NULL;
+        IdmTypeTerm contract;
+        memset(&contract, 0, sizeof(contract));
+        bool has_contract = false;
         if (stmt->as.seq.count != 3u) {
-            if (stmt->as.seq.count < 5u || !syn_is_word(stmt->as.seq.items[3], ":")) {
+            if (stmt->as.seq.count < 5u || !record_field_contract_marker(stmt->as.seq.items[3])) {
                 record_fields_destroy(fields, count);
-                return idm_error_set(err, stmt->span, "record body expects 'field NAME' or 'field NAME : TYPE' declarations");
+                return idm_error_set(err, stmt->span, "record body expects 'field NAME' or 'field NAME :: TYPE' declarations");
             }
-            size_t contract_end = stmt->as.seq.count;
-            contract = expect_qualified_word_at(stmt->as.seq.items, 4u, &contract_end, "record field contract expects a type name", err);
-            if (!contract) {
+            if (!parse_type_term_parts(ctx, (IdmSyntax *const *)stmt->as.seq.items, 4u, stmt->as.seq.count, &contract, err)) {
                 record_fields_destroy(fields, count);
                 return false;
             }
-            if (contract_end != stmt->as.seq.count) {
-                idm_syn_free(contract);
-                record_fields_destroy(fields, count);
-                return idm_error_set(err, stmt->as.seq.items[contract_end]->span, "record field contract expects one type name");
-            }
+            has_contract = true;
         }
         const char *name = stmt->as.seq.items[2]->as.text;
         if (record_field_seen(fields, count, name)) {
-            idm_syn_free(contract);
+            if (has_contract) idm_type_term_destroy(&contract);
             record_fields_destroy(fields, count);
             return idm_error_set(err, stmt->as.seq.items[2]->span, "record field '%s' is declared more than once", name);
         }
         if (count == cap) {
             if (!idm_grow((void **)&fields, &cap, sizeof(*fields), 4u, count + 1u)) {
-                idm_syn_free(contract);
+                if (has_contract) idm_type_term_destroy(&contract);
                 record_fields_destroy(fields, count);
                 return idm_error_oom(err, stmt->span);
             }
         }
         memset(&fields[count], 0, sizeof(fields[count]));
         fields[count].name = idm_strdup(name);
-        fields[count].contract_syntax = contract;
+        fields[count].has_contract = has_contract;
+        fields[count].contract = contract;
         if (!fields[count].name) {
             record_fields_destroy(fields, count + 1u);
             return idm_error_oom(err, stmt->as.seq.items[2]->span);
@@ -1245,38 +1703,190 @@ static bool parse_record_fields(const IdmSyntax *body, RecordFieldDecl **out_fie
     return true;
 }
 
+static bool replace_type_term_name(IdmTypeTerm *term, const char *name, IdmError *err, IdmSpan span) {
+    char *copy = idm_strdup(name);
+    if (!copy) return idm_error_oom(err, span);
+    free(term->name);
+    term->name = copy;
+    return true;
+}
+
+static bool resolve_type_term_names(ExpandContext *ctx, IdmTypeTerm *term, const char *self_name, const char *identity, bool allow_unbound, IdmSpan span, IdmError *err) {
+    if (!term) return true;
+    if (term->kind == IDM_TYPE_CON && term->name) {
+        const char *name = term->name;
+        if (strcmp(name, "_") != 0) {
+            const char *resolved = NULL;
+            IdmSymbol *contract_symbol = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, name);
+            if (!contract_symbol) return idm_error_oom(err, span);
+            if (idm_value_builtin_type_symbol(contract_symbol)) {
+                resolved = idm_symbol_text(contract_symbol);
+            } else if (self_name && strcmp(name, self_name) == 0) {
+                resolved = identity;
+            } else {
+                IdmSyntax probe;
+                memset(&probe, 0, sizeof(probe));
+                probe.kind = IDM_SYN_WORD;
+                probe.as.text = (char *)name;
+                probe.span = span;
+                IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
+                TypeDef *type = resolve_type_def(ctx, &probe, &status);
+                if (status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, span, "ambiguous type '%s'", name);
+                if (!type) {
+                    if (allow_unbound) resolved = name;
+                    else return expand_error(err, span, "unbound type '%s'", name);
+                } else {
+                    resolved = type_def_identity_text(type);
+                }
+            }
+            if (!resolved || !replace_type_term_name(term, resolved, err, span)) return false;
+        }
+    }
+    for (size_t i = 0; i < term->arg_count; i++) {
+        if (!resolve_type_term_names(ctx, &term->args[i], self_name, identity, allow_unbound, span, err)) return false;
+    }
+    return true;
+}
+
 static bool resolve_record_field_contracts(ExpandContext *ctx, RecordFieldDecl *fields, size_t field_count, const char *record_name, const char *identity, IdmError *err) {
     for (size_t i = 0; i < field_count; i++) {
         fields[i].name_symbol = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, fields[i].name);
         if (!fields[i].name_symbol) return idm_error_oom(err, idm_span_unknown(NULL));
-        IdmSyntax *contract = fields[i].contract_syntax;
-        if (!contract) continue;
-        const char *name = contract->as.text;
-        if (strcmp(name, "_") == 0) continue;
-        IdmSymbol *resolved = NULL;
-        IdmSymbol *contract_symbol = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, name);
-        if (!contract_symbol) return idm_error_oom(err, contract->span);
-        if (idm_value_builtin_type_symbol(contract_symbol)) {
-            resolved = contract_symbol;
-        } else if (strcmp(name, record_name) == 0) {
-            resolved = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, identity);
-            if (!resolved) return idm_error_oom(err, contract->span);
-        } else {
-            IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
-            TypeDef *type = resolve_type_def(ctx, contract, &status);
-            if (status == IDM_RESOLVE_AMBIGUOUS) {
-                expand_error(err, contract->span, "ambiguous type '%s'", name);
-                return false;
-            }
-            if (!type) {
-                expand_error(err, contract->span, "unbound type '%s'", name);
-                return false;
-            }
-            resolved = type_def_identity_symbol(type);
+        if (fields[i].has_contract &&
+            !resolve_type_term_names(ctx, &fields[i].contract, record_name, identity, false, idm_span_unknown(NULL), err)) {
+            return false;
         }
-        fields[i].contract_symbol = resolved;
     }
     return true;
+}
+
+static bool resolve_type_members(ExpandContext *ctx, TypeMemberDef *members, size_t member_count, const char *self_name, const char *identity, IdmError *err) {
+    for (size_t i = 0; i < member_count; i++) {
+        if (!resolve_type_term_names(ctx, &members[i].term, self_name, identity, true, idm_span_unknown(NULL), err)) return false;
+    }
+    return true;
+}
+
+static bool resolve_pending_type_member_term(IdmTypeTerm *term, const char *surface_name, const char *identity, IdmSpan span, IdmError *err) {
+    if (!term) return true;
+    if (term->kind == IDM_TYPE_CON && term->name && strcmp(term->name, surface_name) == 0) {
+        if (!replace_type_term_name(term, identity, err, span)) return false;
+    }
+    for (size_t i = 0; i < term->arg_count; i++) {
+        if (!resolve_pending_type_member_term(&term->args[i], surface_name, identity, span, err)) return false;
+    }
+    return true;
+}
+
+static bool resolve_pending_type_members(ExpandContext *ctx, const char *surface_name, const char *identity, IdmSpan span, IdmError *err) {
+    if (!surface_name || !identity) return true;
+    for (size_t i = 0; i < ctx->typed.entity_count; i++) {
+        TypedEntity *entity = &ctx->typed.entities[i];
+        if (entity->kind != IDM_TYPED_ENTITY_TYPE) continue;
+        TypeDef *type = &entity->as.type;
+        for (size_t m = 0; m < type->member_count; m++) {
+            if (!resolve_pending_type_member_term(&type->members[m].term, surface_name, identity, span, err)) return false;
+        }
+    }
+    return true;
+}
+
+static bool parse_type_members(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, TypeMemberDef **out_members, size_t *out_count, IdmError *err) {
+    *out_members = NULL;
+    *out_count = 0;
+    IdmTypeTerm term;
+    memset(&term, 0, sizeof(term));
+    if (!parse_type_term_parts(ctx, items, start, count, &term, err)) return false;
+    size_t member_count = term.kind == IDM_TYPE_UNION ? term.arg_count : 1u;
+    TypeMemberDef *members = calloc(member_count, sizeof(*members));
+    if (!members) {
+        idm_type_term_destroy(&term);
+        return idm_error_oom(err, items[start]->span);
+    }
+    bool ok = true;
+    if (term.kind == IDM_TYPE_UNION) {
+        for (size_t i = 0; ok && i < term.arg_count; i++) {
+            ok = idm_type_term_copy(&members[i].term, &term.args[i]);
+        }
+    } else {
+        ok = idm_type_term_copy(&members[0].term, &term);
+    }
+    idm_type_term_destroy(&term);
+    if (!ok) {
+        type_members_destroy(members, member_count);
+        return idm_error_oom(err, items[start]->span);
+    }
+    *out_members = members;
+    *out_count = member_count;
+    return true;
+}
+
+static bool register_type_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *type_name, char *identity, bool exported, const TypeMemberDef *members, size_t member_count, TypeDef **out_type, IdmSpan span, IdmError *err) {
+    if (out_type) *out_type = NULL;
+    SurfaceCheckpoint checkpoint;
+    surface_checkpoint(ctx, &checkpoint);
+    uint32_t payload = 0;
+    TypeDef *type = typed_registry_add_type(ctx, &payload, err, span);
+    if (!type) { free(identity); return false; }
+    type->name = idm_strdup(type_name);
+    if (!type_def_set_identity(ctx, type, identity, err, span)) { free(identity); surface_rollback(ctx, &checkpoint); return false; }
+    free(identity);
+    identity = NULL;
+    type->exported = exported;
+    if (!type->name) { surface_rollback(ctx, &checkpoint); return idm_error_oom(err, span); }
+    if (member_count != 0) {
+        type->members = calloc(member_count, sizeof(*type->members));
+        if (!type->members) { surface_rollback(ctx, &checkpoint); return idm_error_oom(err, span); }
+        type->member_count = member_count;
+        for (size_t i = 0; i < member_count; i++) {
+            if (!idm_type_term_copy(&type->members[i].term, &members[i].term)) {
+                surface_rollback(ctx, &checkpoint);
+                return idm_error_oom(err, span);
+            }
+        }
+    }
+    if (!binder_scopes_pruned(ctx, name_syntax, &type->scopes)) {
+        surface_rollback(ctx, &checkpoint);
+        return idm_error_oom(err, span);
+    }
+    if (!idm_binding_table_add(&ctx->bindings, type_name, IDM_PHASE_ANY, IDM_BIND_SPACE_TYPE, IDM_BIND_TYPE, &type->scopes, payload, ctx->frame, NULL)) {
+        surface_rollback(ctx, &checkpoint);
+        return idm_error_oom(err, span);
+    }
+    if (!resolve_pending_type_members(ctx, type_name, type_def_identity_text(type), span, err)) {
+        surface_rollback(ctx, &checkpoint);
+        return false;
+    }
+    if (out_type) *out_type = type;
+    return true;
+}
+
+IdmCore *expand_type_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax *const *items, size_t index, size_t count, IdmError *err) {
+    const IdmSyntax *name_syntax = NULL;
+    size_t member_start = 0;
+    bool exported = false;
+    if (!type_form_parts(form, &name_syntax, &member_start, &exported)) return expand_error(err, form->span, "type expects 'type NAME :: TYPE' or 'type NAME :: TYPE | TYPE ...'");
+    TypeMemberDef *members = NULL;
+    size_t member_count = 0;
+    if (!parse_type_members(ctx, form->as.seq.items, member_start, form->as.seq.count, &members, &member_count, err)) return NULL;
+    unsigned char hash[32];
+    char *owned_identity = scoped_identity(ctx, name_syntax->as.text, form, hash, err);
+    if (!owned_identity) {
+        type_members_destroy(members, member_count);
+        if (err && !err->present) idm_error_oom(err, name_syntax->span);
+        return NULL;
+    }
+    if (!resolve_type_members(ctx, members, member_count, name_syntax->as.text, owned_identity, err)) {
+        free(owned_identity);
+        type_members_destroy(members, member_count);
+        return NULL;
+    }
+    if (!register_type_surface(ctx, name_syntax, name_syntax->as.text, owned_identity, exported && ctx->in_package, members, member_count, NULL, form->span, err)) {
+        type_members_destroy(members, member_count);
+        return NULL;
+    }
+    type_members_destroy(members, member_count);
+    return expand_body_items(ctx, items, index + 1u, count, false, err);
 }
 
 IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const TypeDef *type, uint32_t field_index, IdmSpan span, IdmError *err) {
@@ -1303,7 +1913,8 @@ static IdmCore *record_constructor_fn(ExpandContext *ctx, const char *record_nam
         const TypeFieldDef *field = &type->fields[i];
         const char *name = type_field_name_text(field);
         IdmCore *arg = idm_core_arg_ref(name, (uint32_t)i, span);
-        if (!arg || !idm_core_record_construct_add(record, field->name, field->contract, arg)) {
+        const IdmTypeTerm *contract = type_field_contract_term(field);
+        if (!arg || !idm_core_record_construct_add(record, field->name, contract, arg)) {
             idm_core_free(arg);
             idm_core_free(record);
             return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
@@ -1334,6 +1945,63 @@ static IdmCore *record_predicate_fn(ExpandContext *ctx, const TypeDef *type, con
     return fn;
 }
 
+static bool record_contract_add_arg(IdmCallableContract *contract, const IdmTypeTerm *term, IdmError *err, IdmSpan span) {
+    if (contract->sig_count == 0 && !idm_contract_add_sig(contract)) return idm_error_oom(err, span);
+    IdmTypeTerm *args = realloc(contract->sigs[0].args, (contract->sigs[0].arg_count + 1u) * sizeof(*args));
+    if (!args) return idm_error_oom(err, span);
+    contract->sigs[0].args = args;
+    memset(&contract->sigs[0].args[contract->sigs[0].arg_count], 0, sizeof(contract->sigs[0].args[contract->sigs[0].arg_count]));
+    if (!idm_type_term_copy(&contract->sigs[0].args[contract->sigs[0].arg_count], term)) return idm_error_oom(err, span);
+    contract->sigs[0].arg_count++;
+    return true;
+}
+
+static bool record_constructor_contract(const TypeDef *type, IdmCallableContract *contract, IdmError *err, IdmSpan span) {
+    memset(contract, 0, sizeof(*contract));
+    if (!idm_contract_add_sig(contract)) return idm_error_oom(err, span);
+    for (size_t i = 0; i < type->field_count; i++) {
+        IdmTypeTerm any;
+        memset(&any, 0, sizeof(any));
+        const IdmTypeTerm *arg = type->fields[i].has_contract ? &type->fields[i].contract : NULL;
+        if (!arg) {
+            if (!idm_type_var(&any, "_", 0u, false)) return idm_error_oom(err, span);
+            arg = &any;
+        }
+        bool ok = record_contract_add_arg(contract, arg, err, span);
+        idm_type_term_destroy(&any);
+        if (!ok) {
+            idm_callable_contract_destroy(contract);
+            return false;
+        }
+    }
+    if (!idm_type_con(&contract->sigs[0].result, type_def_identity_text(type))) {
+        idm_callable_contract_destroy(contract);
+        return idm_error_oom(err, span);
+    }
+    contract->sigs[0].has_result = true;
+    return true;
+}
+
+static bool record_predicate_contract(IdmCallableContract *contract, IdmError *err, IdmSpan span) {
+    memset(contract, 0, sizeof(*contract));
+    if (!idm_contract_add_sig(contract)) return idm_error_oom(err, span);
+    IdmTypeTerm arg;
+    memset(&arg, 0, sizeof(arg));
+    if (!idm_type_var(&arg, "_", 0u, false)) return idm_error_oom(err, span);
+    bool ok = record_contract_add_arg(contract, &arg, err, span);
+    idm_type_term_destroy(&arg);
+    if (!ok) {
+        idm_callable_contract_destroy(contract);
+        return false;
+    }
+    if (!idm_type_con(&contract->sigs[0].result, "atom")) {
+        idm_callable_contract_destroy(contract);
+        return idm_error_oom(err, span);
+    }
+    contract->sigs[0].has_result = true;
+    return true;
+}
+
 static char *record_predicate_name(const char *record_name) {
     IdmBuffer buf;
     idm_buf_init(&buf);
@@ -1361,7 +2029,13 @@ static bool register_record_type_surface(ExpandContext *ctx, const IdmSyntax *na
         for (size_t i = 0; i < field_count; i++) {
             if (!fields[i].name_symbol) { surface_rollback(ctx, &checkpoint); return idm_error_set(err, span, "record field metadata missing symbol"); }
             type->fields[i].name = fields[i].name_symbol;
-            type->fields[i].contract = fields[i].contract_symbol;
+            if (fields[i].has_contract) {
+                if (!idm_type_term_copy(&type->fields[i].contract, &fields[i].contract)) {
+                    surface_rollback(ctx, &checkpoint);
+                    return idm_error_oom(err, span);
+                }
+                type->fields[i].has_contract = true;
+            }
         }
     }
 
@@ -1377,6 +2051,10 @@ static bool register_record_type_surface(ExpandContext *ctx, const IdmSyntax *na
         surface_rollback(ctx, &checkpoint);
         return false;
     }
+    if (!resolve_pending_type_members(ctx, record_name, type_def_identity_text(type), span, err)) {
+        surface_rollback(ctx, &checkpoint);
+        return false;
+    }
     if (out_type) *out_type = type;
     return true;
 }
@@ -1389,7 +2067,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     const char *record_name = name_syntax->as.text;
     RecordFieldDecl *fields = NULL;
     size_t field_count = 0;
-    if (!parse_record_fields(body, &fields, &field_count, err)) return NULL;
+    if (!parse_record_fields(ctx, body, &fields, &field_count, err)) return NULL;
     if (field_count > UINT32_MAX) {
         record_fields_destroy(fields, field_count);
         return expand_error(err, name_syntax->span, "record has too many fields");
@@ -1413,6 +2091,7 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     }
 
     TypeDef *record_type = NULL;
+    IdmSymbol *record_identity = NULL;
     if (!register_record_type_surface(ctx, name_syntax, record_name, owned_identity, exported && ctx->in_package, fields, field_count, &record_type, form->span, err)) {
         free(predicate_name);
         record_fields_destroy(fields, field_count);
@@ -1427,7 +2106,19 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
     uint32_t predicate_slot = 0;
     IdmArity constructor_arity = idm_arity_exact((uint32_t)field_count);
     IdmArity predicate_arity = idm_arity_exact(1u);
-    bool ok = top_level ? env_push_def_binder_with_arity(ctx, record_name, name_syntax, constructor_arity, &constructor_slot) : local_push_def_binder_with_arity(ctx, record_name, name_syntax, constructor_arity, &constructor_slot);
+    IdmCallableContract constructor_contract;
+    IdmCallableContract predicate_contract;
+    bool contracts_ready = false;
+    record_identity = record_type ? type_def_identity_symbol(record_type) : NULL;
+    if (!record_constructor_contract(record_type, &constructor_contract, err, form->span) ||
+        !record_predicate_contract(&predicate_contract, err, form->span)) {
+        idm_callable_contract_destroy(&constructor_contract);
+        free(predicate_name);
+        record_fields_destroy(fields, field_count);
+        return NULL;
+    }
+    contracts_ready = true;
+    bool ok = top_level ? env_push_def_binder_with_arity(ctx, record_name, name_syntax, constructor_arity, &constructor_contract, &constructor_slot) : local_push_def_binder_with_arity(ctx, record_name, name_syntax, constructor_arity, &constructor_contract, &constructor_slot);
     IdmSyntax *predicate_syntax = NULL;
     if (ok) {
         predicate_syntax = idm_syn_word(predicate_name, name_syntax->span);
@@ -1437,10 +2128,14 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         const IdmScopeSet *scopes = idm_syn_scope_set(name_syntax, 0);
         if (scopes) for (size_t i = 0; i < scopes->count && ok; i++) ok = idm_syn_scope_add(predicate_syntax, 0, scopes->items[i]);
     }
-    if (ok) ok = top_level ? env_push_def_binder_with_arity(ctx, predicate_name, predicate_syntax, predicate_arity, &predicate_slot) : local_push_def_binder_with_arity(ctx, predicate_name, predicate_syntax, predicate_arity, &predicate_slot);
+    if (ok) ok = top_level ? env_push_def_binder_with_arity(ctx, predicate_name, predicate_syntax, predicate_arity, &predicate_contract, &predicate_slot) : local_push_def_binder_with_arity(ctx, predicate_name, predicate_syntax, predicate_arity, &predicate_contract, &predicate_slot);
     if (!ok) {
         if (!top_level) local_pop_to(ctx, saved_count, saved_next);
         idm_syn_free(predicate_syntax);
+        if (contracts_ready) {
+            idm_callable_contract_destroy(&constructor_contract);
+            idm_callable_contract_destroy(&predicate_contract);
+        }
         free(predicate_name);
         record_fields_destroy(fields, field_count);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
@@ -1449,13 +2144,17 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         IdmScopeSet record_scopes;
         idm_scope_set_init(&record_scopes);
         if (!syntax_scopes_copy(&record_scopes, name_syntax)) ok = false;
-        if (ok && !record_package_slot(ctx, record_name, constructor_slot, &record_scopes, constructor_arity, exported)) ok = false;
-        if (ok && !record_package_slot(ctx, predicate_name, predicate_slot, &record_scopes, predicate_arity, exported)) ok = false;
+        if (ok && !record_package_slot(ctx, record_name, constructor_slot, &record_scopes, constructor_arity, &constructor_contract, exported)) ok = false;
+        if (ok && !record_package_slot(ctx, predicate_name, predicate_slot, &record_scopes, predicate_arity, &predicate_contract, exported)) ok = false;
         idm_scope_set_destroy(&record_scopes);
     }
     if (!ok) {
         if (!top_level) local_pop_to(ctx, saved_count, saved_next);
         idm_syn_free(predicate_syntax);
+        if (contracts_ready) {
+            idm_callable_contract_destroy(&constructor_contract);
+            idm_callable_contract_destroy(&predicate_contract);
+        }
         free(predicate_name);
         record_fields_destroy(fields, field_count);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
@@ -1467,6 +2166,21 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         idm_syn_free(predicate_syntax);
         idm_core_free(constructor);
         idm_core_free(predicate);
+        if (contracts_ready) {
+            idm_callable_contract_destroy(&constructor_contract);
+            idm_callable_contract_destroy(&predicate_contract);
+        }
+        free(predicate_name);
+        record_fields_destroy(fields, field_count);
+        return NULL;
+    }
+    if (!expand_typecheck_value(ctx, record_name, constructor, &constructor_contract, &contracts_ready, err) ||
+        !expand_typecheck_value(ctx, predicate_name, predicate, &predicate_contract, &contracts_ready, err)) {
+        idm_syn_free(predicate_syntax);
+        idm_core_free(constructor);
+        idm_core_free(predicate);
+        idm_callable_contract_destroy(&constructor_contract);
+        idm_callable_contract_destroy(&predicate_contract);
         free(predicate_name);
         record_fields_destroy(fields, field_count);
         return NULL;
@@ -1476,6 +2190,10 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         idm_syn_free(predicate_syntax);
         idm_core_free(constructor);
         idm_core_free(predicate);
+        if (contracts_ready) {
+            idm_callable_contract_destroy(&constructor_contract);
+            idm_callable_contract_destroy(&predicate_contract);
+        }
         free(predicate_name);
         record_fields_destroy(fields, field_count);
         return NULL;
@@ -1486,6 +2204,10 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         idm_core_free(constructor);
         idm_core_free(predicate);
         idm_core_free(cont);
+        if (contracts_ready) {
+            idm_callable_contract_destroy(&constructor_contract);
+            idm_callable_contract_destroy(&predicate_contract);
+        }
         free(predicate_name);
         record_fields_destroy(fields, field_count);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
@@ -1497,6 +2219,19 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         letrec_ok = idm_core_letrec_add(letrec, predicate_name, predicate_slot, predicate);
         if (letrec_ok) predicate = NULL;
     }
+    const TypeDef *sel_type = record_identity ? type_def_lookup_name(ctx, idm_symbol_text(record_identity)) : NULL;
+    for (size_t fi = 0; letrec_ok && sel_type && fi < sel_type->field_count; fi++) {
+        const char *fname = type_field_name_text(&sel_type->fields[fi]);
+        if (!fname) continue;
+        FieldSelectorDef *sel = field_selector_ensure(ctx, fname, err);
+        if (!sel) { letrec_ok = false; break; }
+        IdmCore *sel_core = build_field_selector_core(ctx, fname, form->span, err);
+        if (!sel_core) { letrec_ok = false; break; }
+        if (!sel->env && sel->emitted) sel->slot = ctx->next_slot++;
+        letrec_ok = idm_core_letrec_add_fill(letrec, fname, sel->slot, sel_core, sel->env && sel->emitted);
+        if (!letrec_ok) idm_core_free(sel_core);
+        else sel->emitted = true;
+    }
     if (letrec_ok) {
         letrec_ok = idm_core_letrec_set_body(letrec, cont);
         if (letrec_ok) cont = NULL;
@@ -1507,11 +2242,19 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmSyntax
         idm_core_free(predicate);
         idm_core_free(cont);
         idm_core_free(letrec);
+        if (contracts_ready) {
+            idm_callable_contract_destroy(&constructor_contract);
+            idm_callable_contract_destroy(&predicate_contract);
+        }
         free(predicate_name);
         record_fields_destroy(fields, field_count);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
     }
     idm_syn_free(predicate_syntax);
+    if (contracts_ready) {
+        idm_callable_contract_destroy(&constructor_contract);
+        idm_callable_contract_destroy(&predicate_contract);
+    }
     free(predicate_name);
     record_fields_destroy(fields, field_count);
     return letrec;

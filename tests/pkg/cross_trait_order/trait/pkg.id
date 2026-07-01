@@ -1,0 +1,6 @@
+package cross_trait_order_trait
+
+export trait CrossTrait do
+  spec cross-value :: CrossTrait a => a -> int
+  method cross-value x
+end

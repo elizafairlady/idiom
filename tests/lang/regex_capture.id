@@ -7,7 +7,7 @@ suite do
     rx = r"(?<word>[a-z]+)-([0-9]+)"
     rx |> regex? |> assert
     rx |> group-count |> assert-eq 2
-    m = rx |> scan-full "abc-42"
+    m = rx |> scan-full! "abc-42"
     m |> result? |> assert
     m |> text-of |> assert-eq "abc-42"
     m |> capture 1 |> assert-eq "abc"

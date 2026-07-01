@@ -1,4 +1,5 @@
 #include "idiom/artifact.h"
+#include "idiom/expand.h"
 #include "idiom/reader.h"
 
 #include <stdio.h>
@@ -107,6 +108,20 @@ static void check_classified(IdmReaderArtifact *artifact, const char *raw, IdmSy
     idm_syn_free(custom);
 }
 
+static void check_source_reader_double_colon(IdmError *err) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
+    IdmSyntax *program = NULL;
+    check_ok_or_error(idm_expand_read_source_string(&rt, "reader_escape", "spec id :: int -> int\n", &program, err), err, "source reader double colon read");
+    check(program && program->kind == IDM_SYN_LIST && program->as.seq.count == 2u, "source reader double colon program");
+    IdmSyntax *expr = program->as.seq.items[1];
+    check(expr && expr->kind == IDM_SYN_LIST && expr->as.seq.count == 7u, "source reader double colon expr");
+    IdmSyntax *op = expr->as.seq.items[3];
+    check(op && op->kind == IDM_SYN_WORD && strcmp(op->as.text, "::") == 0, "source reader double colon token");
+    idm_syn_free(program);
+    idm_runtime_destroy(&rt);
+}
+
 int idm_unit_reader_escape(void) {
     IdmError err;
     idm_error_init(&err);
@@ -143,6 +158,8 @@ int idm_unit_reader_escape(void) {
     check_classified(artifact, "3.5", IDM_SYN_FLOAT, NULL, 0, 3.5, &err, "classify float");
     check_classified(artifact, "word", IDM_SYN_WORD, "word", 0, 0.0, &err, "classify word");
     idm_reader_artifact_destroy(artifact);
+
+    check_source_reader_double_colon(&err);
 
     idm_error_clear(&err);
     return 0;

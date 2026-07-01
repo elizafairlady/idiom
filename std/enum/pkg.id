@@ -12,91 +12,23 @@ implement Iter on empty-list do
 end
 
 implement Iter on pair do
-  method foldl do
-    '(h . t) acc f -> t.foldl (f &h &acc) f
-  end
+  method foldl xs acc f -> List.foldl xs acc f
 end
 
 implement Iter on vector do
-  method foldl xs acc f -> (xs |> vector-to-list).foldl acc f
+  method foldl xs acc f -> xs |> vector-to-list |> List.foldl acc f
 end
 
 implement Iter on tuple do
-  method foldl xs acc f -> (xs |> tuple-to-list).foldl acc f
+  method foldl xs acc f -> xs |> tuple-to-list |> List.foldl acc f
 end
 
 implement Iter on dict do
-  method foldl xs acc f -> (xs |> dict-to-list).foldl acc f
+  method foldl xs acc f -> xs |> dict-to-list |> List.foldl acc f
 end
 
 implement Iter on string do
-  method foldl xs acc f -> (xs |> str-to-list).foldl acc f
-end
-
-defn with-index-list do
-  '() _ -> '()
-  '(h . t) i -> cons {&h i} (with-index-list t (add i 1))
-end
-
-defn dedup-rest do
-  _ '() acc -> List.reverse acc
-  last '(h . t) acc -> cond (eq? &last &h) (dedup-rest last t acc) (dedup-rest &h t (cons &h acc))
-end
-
-defn dedup-list do
-  '() -> '()
-  '(h . t) -> dedup-rest &h t (list &h)
-end
-
-defn uniq-into do
-  '() _seen acc -> List.reverse acc
-  '(h . t) seen acc -> cond (List.member? seen &h) (uniq-into t seen acc) (uniq-into t (cons &h seen) (cons &h acc))
-end
-
-defn insert-sorted do
-  x '() _cmp -> cons &x '()
-  x '(h . t) cmp -> cond (cmp &x &h) (cons &x (cons &h &t)) (cons &h (insert-sorted x t cmp))
-end
-
-defn compare-lt? a b -> a |> compare b |> eq? :lt
-
-defn min-of-list do
-  '(h . t) -> t.foldl &h (fn x best -> cond (lt? x best) &x &best)
-end
-
-defn max-of-list do
-  '(h . t) -> t.foldl &h (fn x best -> cond (gt? x best) &x &best)
-end
-
-defn min-max-list do
-  '(h . t) -> t.foldl {&h &h} (fn x best -> match best do
-    {lo hi} -> {(cond (lt? x lo) &x &lo) (cond (gt? x hi) &x &hi)}
-  end)
-end
-
-defn map-reduce-list do
-  '() acc _ out -> {(out |> List.reverse) acc}
-  '(h . t) acc f out -> match (f &h &acc) do
-    {item next} -> map-reduce-list t &next f (cons &item out)
-  end
-end
-
-defn scan-list do
-  '() _ _ accs -> List.reverse accs
-  '(h . t) acc f accs -> do
-    next = f &h &acc
-    scan-list t next f (cons next accs)
-  end
-end
-
-defn join-values-from do
-  '() _ acc -> &acc
-  '(h . t) sep acc -> join-values-from t sep "${acc}${sep}#{str h}"
-end
-
-defn join-values-list do
-  '() _ -> ""
-  '(h . t) sep -> join-values-from t sep (str h)
+  method foldl xs acc f -> xs |> str-to-list |> List.foldl acc f
 end
 
 export trait Enum do
@@ -104,54 +36,33 @@ export trait Enum do
 
   method reduce xs acc f -> xs.foldl acc f
   method to-list xs -> List.reverse (xs.foldl '() &cons)
-  method reverse xs -> List.reverse (xs.to-list)
   method map xs f -> List.reverse (xs.foldl '() (fn x acc -> cons (f &x) acc))
   method filter xs f -> List.reverse (xs.foldl '() (fn x acc -> cond (f &x) (cons &x acc) &acc))
-  method reject xs f -> xs.filter (fn x -> cond (f &x) :false :true)
+  method reject xs f -> List.reverse (xs.foldl '() (fn x acc -> cond (f &x) &acc (cons &x acc)))
   method each xs f -> do
     xs.foldl :ok (fn x _acc -> do f &x; :ok end)
     :ok
   end
-  method concat xs ys -> (List.reverse (xs.to-list)).foldl (ys.to-list) &cons
-  method flat-map xs f -> List.reverse (xs.foldl '() (fn x acc -> ((f &x).to-list).foldl acc &cons))
-  method length xs -> List.length (xs.to-list)
-  method count xs -> xs.length
+  method length xs -> xs.foldl 0 (fn _x acc -> add acc 1)
+  method count xs -> xs.foldl 0 (fn _x acc -> add acc 1)
   method count-matching xs f -> xs.foldl 0 (fn x acc -> cond (f &x) (add acc 1) acc)
   method sum xs -> xs.foldl 0 &add
   method product xs -> xs.foldl 1 &mul
-  method member? xs x -> List.member? (xs.to-list) x
-  method nth xs i -> List.nth (xs.to-list) i
-  method nth! xs i -> List.nth! (xs.to-list) i
-  method take xs n -> List.take (xs.to-list) n
-  method drop xs n -> List.drop (xs.to-list) n
-  method take-while xs f -> List.take-while (xs.to-list) f
-  method drop-while xs f -> List.drop-while (xs.to-list) f
-  method split-at xs n -> List.split-at (xs.to-list) n
-  method split-with xs f -> List.split-with (xs.to-list) f
-  method partition xs f -> List.partition (xs.to-list) f
-  method any? xs f -> List.any? (xs.to-list) f
-  method all? xs f -> List.all? (xs.to-list) f
-  method find xs f -> List.find (xs.to-list) f
-  method zip xs ys -> List.zip (xs.to-list) (ys.to-list)
-  method zip-with xs ys f -> List.zip-with (xs.to-list) (ys.to-list) f
-  method intersperse xs sep -> List.intersperse (xs.to-list) sep
-  method with-index xs -> xs.to-list |> with-index-list 0
-  method dedup xs -> xs.to-list |> dedup-list
-  method uniq xs -> xs.to-list |> uniq-into '() '()
+  method any? xs f -> xs.foldl :false (fn x acc -> cond acc :true (f &x))
+  method all? xs f -> xs.foldl :true (fn x acc -> cond acc (f &x) :false)
+  method member? xs x -> xs.foldl :false (fn item acc -> cond acc :true (eq? &item &x))
   method frequencies xs -> xs.foldl %{} (fn x acc -> dict-put acc &x (add (dict-get acc &x 0) 1))
-  method map-reduce xs acc f -> map-reduce-list (xs.to-list) acc f '()
-  method scanl xs acc f -> scan-list (xs.to-list) acc f '()
-  method sort-by xs cmp -> xs.foldl '() (fn x acc -> insert-sorted &x acc cmp)
-  method sort xs -> xs.sort-by &lt?
-  method sort-compare xs -> xs.sort-by &compare-lt?
-  method min-of xs -> min-of-list (xs.to-list)
-  method max-of xs -> max-of-list (xs.to-list)
-  method min-max xs -> min-max-list (xs.to-list)
-  method join-values xs sep -> join-values-list (xs.to-list) sep
   method group-by xs f -> xs.foldl %{} (fn x acc -> do
     key = f &x
     dict-put acc key (cons &x (dict-get acc key '()))
   end)
+  method reverse xs -> xs.foldl '() &cons
+  method take xs n -> List.take (List.reverse (xs.foldl '() &cons)) n
+  method drop xs n -> List.drop (List.reverse (xs.foldl '() &cons)) n
+  method take-while xs f -> List.take-while (List.reverse (xs.foldl '() &cons)) f
+  method drop-while xs f -> List.drop-while (List.reverse (xs.foldl '() &cons)) f
+  method nth xs i -> List.nth (List.reverse (xs.foldl '() &cons)) i
+  method partition xs f -> List.partition (List.reverse (xs.foldl '() &cons)) f
 end
 
 implement Enum on empty-list

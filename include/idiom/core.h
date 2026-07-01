@@ -3,6 +3,7 @@
 
 #include "idiom/bytecode.h"
 #include "idiom/pattern.h"
+#include "idiom/scope.h"
 
 typedef enum {
     IDM_CORE_LITERAL,
@@ -283,12 +284,16 @@ typedef struct {
 typedef struct {
     char *name;
     uint32_t slot;
+    bool has_contract;
+    IdmCallableContract contract;
 } IdmCoreSlot;
 
 typedef struct {
     char *name;
     IdmValue env_key;
     uint32_t slot;
+    bool has_contract;
+    IdmCallableContract contract;
 } IdmCorePackageSlot;
 
 typedef struct {
@@ -426,7 +431,8 @@ struct IdmCore {
         struct {
             IdmSymbol *type;
             IdmSymbol **field_names;
-            IdmSymbol **field_contracts;
+            IdmTypeTerm *field_contracts;
+            bool *field_has_contracts;
             IdmCore **field_values;
             size_t count;
             size_t cap;
@@ -448,6 +454,7 @@ IdmCore *idm_core_literal(IdmValue value, IdmSpan span);
 IdmCore *idm_core_arg_ref(const char *name, uint32_t slot, IdmSpan span);
 IdmCore *idm_core_local_ref(const char *name, uint32_t slot, IdmSpan span);
 IdmCore *idm_core_capture_ref(const char *name, uint32_t slot, IdmSpan span);
+bool idm_core_ref_set_contract(IdmCore *core, const IdmCallableContract *contract);
 IdmCore *idm_core_primitive_backed_fn(const char *name, IdmPrimitive primitive, IdmArity arity, IdmSpan span);
 IdmCore *idm_core_call(IdmCore *callee, IdmSpan span);
 bool idm_core_call_add_arg(IdmCore *call, IdmCore *arg);
@@ -487,7 +494,7 @@ IdmCore *idm_core_receive(IdmCore *receiver, IdmCore *timeout, IdmCore *timeout_
 IdmCore *idm_core_guard(IdmCore *body, IdmCore *handler, uint32_t rescue_slot, IdmCore *cleanup, uint32_t ensure_slot, IdmSpan span);
 IdmCore *idm_core_use_package(IdmValue env_key, IdmBytecodeModule *module, bool module_owned, uint32_t init_fn, IdmCore *cont, IdmSpan span);
 IdmCore *idm_core_record_construct(IdmSymbol *type, IdmSpan span);
-bool idm_core_record_construct_add(IdmCore *core, IdmSymbol *field, IdmSymbol *contract, IdmCore *value);
+bool idm_core_record_construct_add(IdmCore *core, IdmSymbol *field, const IdmTypeTerm *contract, IdmCore *value);
 IdmCore *idm_core_record_field(IdmCore *receiver, IdmSymbol *type, IdmSymbol *field, uint32_t field_index, IdmSpan span);
 IdmCore *idm_core_record_is(IdmCore *value, IdmSymbol *type, IdmSpan span);
 void idm_core_free(IdmCore *core);
@@ -506,6 +513,7 @@ bool idm_checked_pow(int64_t base, int64_t exponent, int64_t *out);
 size_t idm_primitive_count(void);
 const IdmPrimitiveInfo *idm_primitive_info(IdmPrimitive primitive);
 IdmArity idm_primitive_arity(IdmPrimitive primitive);
+bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableContract *out, bool *has_contract, IdmError *err, IdmSpan span);
 const char *idm_primitive_home(IdmPrimitive primitive);
 bool idm_primitive_home_exists(const char *home);
 bool idm_primitive_lookup(const char *home, const char *name, IdmPrimitive *out);

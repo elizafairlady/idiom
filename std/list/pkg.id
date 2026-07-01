@@ -19,6 +19,7 @@ export defn proper? xs -> xs |> list?
 
 export defn length xs -> len-into 0 xs
 
+spec reverse :: list -> list
 export defn reverse xs -> xs |> rev-into '()
 
 export defn append do

@@ -1357,13 +1357,13 @@ static IdmSymbol *module_const_symbol(IdmRuntime *rt, const IdmBytecodeModule *m
     return NULL;
 }
 
-static IdmSymbol *module_const_contract_symbol(IdmRuntime *rt, const IdmBytecodeModule *module, uint32_t index, const char *what, IdmError *err) {
-    if (index >= module->const_count) {
-        idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", what, index);
+static const IdmTypeTerm *module_type_term(const IdmBytecodeModule *module, uint32_t index, const char *what, IdmError *err) {
+    if (index == UINT32_MAX) return NULL;
+    if (index >= module->type_count) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s type %u out of bounds", what, index);
         return NULL;
     }
-    if (idm_value_tag(module->constants[index]) == IDM_VAL_NIL) return NULL;
-    return module_const_symbol(rt, module, index, what, err);
+    return &module->types[index];
 }
 
 static bool op_make_record(Vm *vm, Frame *frame, const uint32_t *operands, const uint32_t *field_refs, IdmError *err) {
@@ -1381,13 +1381,21 @@ static bool op_make_record(Vm *vm, Frame *frame, const uint32_t *operands, const
     bool ok = true;
     for (uint32_t i = 0; i < field_count && ok; i++) {
         uint32_t field_const = field_refs[(size_t)i * 2u];
-        uint32_t contract_const = field_refs[(size_t)i * 2u + 1u];
+        uint32_t contract_index = field_refs[(size_t)i * 2u + 1u];
         field_names[i] = module_const_symbol(vm->rt, module, field_const, "MAKE_RECORD field", err);
         if (!field_names[i]) ok = false;
-        IdmSymbol *contract = ok ? module_const_contract_symbol(vm->rt, module, contract_const, "MAKE_RECORD field contract", err) : NULL;
+        const IdmTypeTerm *contract = ok ? module_type_term(module, contract_index, "MAKE_RECORD field contract", err) : NULL;
         if (ok && err && err->present) ok = false;
-        if (ok && contract && !idm_value_matches_type_symbol(field_values[i], contract)) {
-            ok = idm_error_set(err, idm_span_unknown(NULL), "record field '%s' expects %s, got %s", idm_symbol_text(field_names[i]), idm_symbol_text(contract), idm_value_dispatch_type_name(field_values[i]));
+        if (ok && contract && !idm_value_matches_type_term(field_values[i], contract)) {
+            IdmBuffer expected;
+            idm_buf_init(&expected);
+            if (!idm_type_term_write(&expected, contract)) {
+                idm_buf_destroy(&expected);
+                ok = idm_error_oom(err, idm_span_unknown(NULL));
+            } else {
+                ok = idm_error_set(err, idm_span_unknown(NULL), "record field '%s' expects %s, got %s", idm_symbol_text(field_names[i]), expected.data ? expected.data : "_", idm_value_dispatch_type_name(field_values[i]));
+                idm_buf_destroy(&expected);
+            }
         }
     }
     IdmValue record = idm_nil();

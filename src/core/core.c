@@ -55,6 +55,33 @@ IdmCore *idm_core_capture_ref(const char *name, uint32_t slot, IdmSpan span) {
     return core;
 }
 
+bool idm_core_ref_set_contract(IdmCore *core, const IdmCallableContract *contract) {
+    if (!core || !contract) return true;
+    switch (core->kind) {
+        case IDM_CORE_ARG_REF:
+        case IDM_CORE_LOCAL_REF:
+        case IDM_CORE_CAPTURE_REF:
+        case IDM_CORE_ENV_REF:
+            if (core->as.slot_ref.has_contract) {
+                idm_callable_contract_destroy(&core->as.slot_ref.contract);
+                core->as.slot_ref.has_contract = false;
+            }
+            if (!idm_callable_contract_copy(&core->as.slot_ref.contract, contract)) return false;
+            core->as.slot_ref.has_contract = true;
+            return true;
+        case IDM_CORE_PACKAGE_REF:
+            if (core->as.package_ref.has_contract) {
+                idm_callable_contract_destroy(&core->as.package_ref.contract);
+                core->as.package_ref.has_contract = false;
+            }
+            if (!idm_callable_contract_copy(&core->as.package_ref.contract, contract)) return false;
+            core->as.package_ref.has_contract = true;
+            return true;
+        default:
+            return true;
+    }
+}
+
 IdmCore *idm_core_call(IdmCore *callee, IdmSpan span) {
     IdmCore *core = core_alloc(IDM_CORE_CALL, span);
     if (!core) return NULL;
@@ -442,19 +469,25 @@ IdmCore *idm_core_record_construct(IdmSymbol *type, IdmSpan span) {
     return core;
 }
 
-bool idm_core_record_construct_add(IdmCore *core, IdmSymbol *field, IdmSymbol *contract, IdmCore *value) {
+bool idm_core_record_construct_add(IdmCore *core, IdmSymbol *field, const IdmTypeTerm *contract, IdmCore *value) {
     if (!core || core->kind != IDM_CORE_RECORD_CONSTRUCT || !field || !value) return false;
     if (core->as.record_construct.count == core->as.record_construct.cap) {
         IdmGrowItem items[] = {
             { .base = (void **)&core->as.record_construct.field_names, .elem_size = sizeof(*core->as.record_construct.field_names) },
             { .base = (void **)&core->as.record_construct.field_contracts, .elem_size = sizeof(*core->as.record_construct.field_contracts) },
+            { .base = (void **)&core->as.record_construct.field_has_contracts, .elem_size = sizeof(*core->as.record_construct.field_has_contracts) },
             { .base = (void **)&core->as.record_construct.field_values, .elem_size = sizeof(*core->as.record_construct.field_values) },
         };
-        if (!idm_growv(items, 3u, &core->as.record_construct.cap, 4u, core->as.record_construct.count + 1u)) return false;
+        if (!idm_growv(items, 4u, &core->as.record_construct.cap, 4u, core->as.record_construct.count + 1u)) return false;
     }
     size_t index = core->as.record_construct.count;
     core->as.record_construct.field_names[index] = field;
-    core->as.record_construct.field_contracts[index] = contract;
+    memset(&core->as.record_construct.field_contracts[index], 0, sizeof(core->as.record_construct.field_contracts[index]));
+    core->as.record_construct.field_has_contracts[index] = false;
+    if (contract) {
+        if (!idm_type_term_copy(&core->as.record_construct.field_contracts[index], contract)) return false;
+        core->as.record_construct.field_has_contracts[index] = true;
+    }
     core->as.record_construct.field_values[index] = value;
     core->as.record_construct.count++;
     return true;
@@ -494,10 +527,12 @@ void idm_core_free(IdmCore *core) {
             break;
         case IDM_CORE_RECORD_CONSTRUCT:
             for (size_t i = 0; i < core->as.record_construct.count; i++) {
+                if (core->as.record_construct.field_has_contracts[i]) idm_type_term_destroy(&core->as.record_construct.field_contracts[i]);
                 idm_core_free(core->as.record_construct.field_values[i]);
             }
             free(core->as.record_construct.field_names);
             free(core->as.record_construct.field_contracts);
+            free(core->as.record_construct.field_has_contracts);
             free(core->as.record_construct.field_values);
             break;
         case IDM_CORE_RECORD_FIELD:
@@ -596,9 +631,11 @@ void idm_core_free(IdmCore *core) {
         case IDM_CORE_ARG_REF:
         case IDM_CORE_LOCAL_REF:
         case IDM_CORE_CAPTURE_REF:
+            if (core->as.slot_ref.has_contract) idm_callable_contract_destroy(&core->as.slot_ref.contract);
             free(core->as.slot_ref.name);
             break;
         case IDM_CORE_PACKAGE_REF:
+            if (core->as.package_ref.has_contract) idm_callable_contract_destroy(&core->as.package_ref.contract);
             free(core->as.package_ref.name);
             break;
         case IDM_CORE_LITERAL:
@@ -1376,6 +1413,590 @@ const char *idm_primitive_name(IdmPrimitive primitive) {
     return "<bad-primitive>";
 }
 
+static bool primitive_contract_quantify(IdmCallableContract *contract, const char *name, IdmError *err, IdmSpan span) {
+    if (!name || !name[0] || strcmp(name, "_") == 0) return true;
+    for (size_t i = 0; i < contract->quantified_count; i++) {
+        if (contract->quantified[i] && strcmp(contract->quantified[i], name) == 0) return true;
+    }
+    char **items = realloc(contract->quantified, sizeof(*items) * (contract->quantified_count + 1u));
+    if (!items) return idm_error_oom(err, span);
+    contract->quantified = items;
+    contract->quantified[contract->quantified_count] = idm_strdup(name);
+    if (!contract->quantified[contract->quantified_count]) return idm_error_oom(err, span);
+    contract->quantified_count++;
+    return true;
+}
+
+static bool primitive_contract_args(IdmCallableContract *contract, size_t argc, IdmError *err, IdmSpan span) {
+    memset(contract, 0, sizeof(*contract));
+    IdmContractSig *sig = idm_contract_add_sig(contract);
+    if (!sig) return idm_error_oom(err, span);
+    if (argc == 0u) return true;
+    sig->args = calloc(argc, sizeof(*sig->args));
+    if (!sig->args) return idm_error_oom(err, span);
+    sig->arg_count = argc;
+    for (size_t i = 0; i < argc; i++) {
+        if (!idm_type_var(&sig->args[i], "_", 0u, false)) {
+            idm_callable_contract_destroy(contract);
+            return idm_error_oom(err, span);
+        }
+    }
+    return true;
+}
+
+static bool primitive_contract_set_var(IdmCallableContract *contract, IdmTypeTerm *term, const char *name, uint32_t var_id, IdmError *err, IdmSpan span) {
+    IdmTypeTerm next;
+    if (!idm_type_var(&next, name, var_id, false)) return idm_error_oom(err, span);
+    idm_type_term_destroy(term);
+    *term = next;
+    return primitive_contract_quantify(contract, name, err, span);
+}
+
+static bool primitive_contract_set_con(IdmTypeTerm *term, const char *name, IdmError *err, IdmSpan span) {
+    IdmTypeTerm next;
+    if (!idm_type_con(&next, name)) return idm_error_oom(err, span);
+    idm_type_term_destroy(term);
+    *term = next;
+    return true;
+}
+
+static bool primitive_contract_arg_var(IdmCallableContract *contract, size_t index, const char *name, uint32_t var_id, IdmError *err, IdmSpan span) {
+    if (index >= contract->sigs[0].arg_count) return idm_error_set(err, span, "primitive contract argument out of range");
+    return primitive_contract_set_var(contract, &contract->sigs[0].args[index], name, var_id, err, span);
+}
+
+static bool primitive_contract_arg_con(IdmCallableContract *contract, size_t index, const char *name, IdmError *err, IdmSpan span) {
+    if (index >= contract->sigs[0].arg_count) return idm_error_set(err, span, "primitive contract argument out of range");
+    return primitive_contract_set_con(&contract->sigs[0].args[index], name, err, span);
+}
+
+static bool primitive_contract_arg_union_cons(IdmCallableContract *contract, size_t index, const char *a, const char *b, IdmError *err, IdmSpan span) {
+    if (index >= contract->sigs[0].arg_count) return idm_error_set(err, span, "primitive contract argument out of range");
+    IdmTypeTerm *items = calloc(2u, sizeof(*items));
+    if (!items) return idm_error_oom(err, span);
+    if (!idm_type_con(&items[0], a) || !idm_type_con(&items[1], b)) {
+        idm_type_term_destroy(&items[0]);
+        idm_type_term_destroy(&items[1]);
+        free(items);
+        return idm_error_oom(err, span);
+    }
+    IdmTypeTerm next;
+    if (!idm_type_compound(&next, IDM_TYPE_UNION, items, 2u)) {
+        idm_type_term_destroy(&items[0]);
+        idm_type_term_destroy(&items[1]);
+        free(items);
+        return idm_error_oom(err, span);
+    }
+    idm_type_term_destroy(&contract->sigs[0].args[index]);
+    contract->sigs[0].args[index] = next;
+    return true;
+}
+
+static bool primitive_contract_result_var(IdmCallableContract *contract, const char *name, uint32_t var_id, IdmError *err, IdmSpan span) {
+    if (!primitive_contract_set_var(contract, &contract->sigs[0].result, name, var_id, err, span)) return false;
+    contract->sigs[0].has_result = true;
+    return true;
+}
+
+static bool primitive_contract_result_con(IdmCallableContract *contract, const char *name, IdmError *err, IdmSpan span) {
+    if (!primitive_contract_set_con(&contract->sigs[0].result, name, err, span)) return false;
+    contract->sigs[0].has_result = true;
+    return true;
+}
+
+static bool primitive_contract_result_union_take(IdmCallableContract *contract, IdmTypeTerm *items, size_t count, IdmError *err, IdmSpan span) {
+    IdmTypeTerm next;
+    if (!idm_type_compound(&next, IDM_TYPE_UNION, items, count)) {
+        for (size_t i = 0; i < count; i++) idm_type_term_destroy(&items[i]);
+        free(items);
+        return idm_error_oom(err, span);
+    }
+    idm_type_term_destroy(&contract->sigs[0].result);
+    contract->sigs[0].result = next;
+    contract->sigs[0].has_result = true;
+    return true;
+}
+
+static bool primitive_contract_result_union_cons(IdmCallableContract *contract, const char *a, const char *b, IdmError *err, IdmSpan span) {
+    IdmTypeTerm *items = calloc(2u, sizeof(*items));
+    if (!items) return idm_error_oom(err, span);
+    if (!idm_type_con(&items[0], a) || !idm_type_con(&items[1], b)) {
+        idm_type_term_destroy(&items[0]);
+        idm_type_term_destroy(&items[1]);
+        free(items);
+        return idm_error_oom(err, span);
+    }
+    return primitive_contract_result_union_take(contract, items, 2u, err, span);
+}
+
+static bool primitive_contract_result_union_var_con(IdmCallableContract *contract, const char *var_name, uint32_t var_id, const char *con, IdmError *err, IdmSpan span) {
+    IdmTypeTerm *items = calloc(2u, sizeof(*items));
+    if (!items) return idm_error_oom(err, span);
+    if (!idm_type_var(&items[0], var_name, var_id, false) || !idm_type_con(&items[1], con)) {
+        idm_type_term_destroy(&items[0]);
+        idm_type_term_destroy(&items[1]);
+        free(items);
+        return idm_error_oom(err, span);
+    }
+    if (!primitive_contract_quantify(contract, var_name, err, span)) {
+        idm_type_term_destroy(&items[0]);
+        idm_type_term_destroy(&items[1]);
+        free(items);
+        return false;
+    }
+    return primitive_contract_result_union_take(contract, items, 2u, err, span);
+}
+
+static bool primitive_contract_result_union_vars(IdmCallableContract *contract, const char *a_name, uint32_t a_id, const char *b_name, uint32_t b_id, IdmError *err, IdmSpan span) {
+    IdmTypeTerm *items = calloc(2u, sizeof(*items));
+    if (!items) return idm_error_oom(err, span);
+    if (!idm_type_var(&items[0], a_name, a_id, false) || !idm_type_var(&items[1], b_name, b_id, false)) {
+        idm_type_term_destroy(&items[0]);
+        idm_type_term_destroy(&items[1]);
+        free(items);
+        return idm_error_oom(err, span);
+    }
+    if (!primitive_contract_quantify(contract, a_name, err, span) || !primitive_contract_quantify(contract, b_name, err, span)) {
+        idm_type_term_destroy(&items[0]);
+        idm_type_term_destroy(&items[1]);
+        free(items);
+        return false;
+    }
+    return primitive_contract_result_union_take(contract, items, 2u, err, span);
+}
+
+static bool primitive_contract_class(IdmCallableContract *contract, const char *trait, const char *var_name, uint32_t var_id, IdmError *err, IdmSpan span) {
+    IdmConstraint *items = realloc(contract->context, sizeof(*items) * (contract->context_count + 1u));
+    if (!items) return idm_error_oom(err, span);
+    contract->context = items;
+    IdmConstraint *constraint = &contract->context[contract->context_count];
+    memset(constraint, 0, sizeof(*constraint));
+    constraint->kind = IDM_CONSTR_CLASS;
+    constraint->trait = idm_strdup(trait);
+    if (!constraint->trait || !idm_type_var(&constraint->lhs, var_name, var_id, false)) {
+        idm_constraint_destroy(constraint);
+        return idm_error_oom(err, span);
+    }
+    contract->context_count++;
+    return primitive_contract_quantify(contract, var_name, err, span);
+}
+
+static bool primitive_contract_numeric_same(IdmCallableContract *contract, IdmError *err, IdmSpan span) {
+    for (size_t i = 0; i < contract->sigs[0].arg_count; i++) {
+        if (!primitive_contract_arg_var(contract, i, "a", 1u, err, span)) return false;
+    }
+    return primitive_contract_result_var(contract, "a", 1u, err, span) &&
+           primitive_contract_class(contract, "Number", "a", 1u, err, span);
+}
+
+static bool primitive_contract_numeric_to(IdmCallableContract *contract, const char *result, IdmError *err, IdmSpan span) {
+    for (size_t i = 0; i < contract->sigs[0].arg_count; i++) {
+        if (!primitive_contract_arg_var(contract, i, "a", 1u, err, span)) return false;
+    }
+    return primitive_contract_result_con(contract, result, err, span) &&
+           primitive_contract_class(contract, "Number", "a", 1u, err, span);
+}
+
+static bool primitive_contract_all_args(IdmCallableContract *contract, const char *name, IdmError *err, IdmSpan span) {
+    for (size_t i = 0; i < contract->sigs[0].arg_count; i++) {
+        if (!primitive_contract_arg_con(contract, i, name, err, span)) return false;
+    }
+    return true;
+}
+
+bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableContract *out, bool *has_contract, IdmError *err, IdmSpan span) {
+    if (has_contract) *has_contract = false;
+    if (!out) return true;
+    memset(out, 0, sizeof(*out));
+    IdmArity arity = idm_primitive_arity(primitive);
+    if (!idm_arity_accepts(&arity, (uint32_t)argc)) return true;
+    if (!primitive_contract_args(out, argc, err, span)) return false;
+    bool ok = true;
+    switch (primitive) {
+        case IDM_PRIM_ADD:
+        case IDM_PRIM_SUB:
+        case IDM_PRIM_MUL:
+        case IDM_PRIM_DIV:
+        case IDM_PRIM_MOD:
+        case IDM_PRIM_POW:
+        case IDM_PRIM_NEG:
+        case IDM_PRIM_ABS:
+        case IDM_PRIM_FLOOR_DIV:
+        case IDM_PRIM_FLOOR_MOD:
+            ok = primitive_contract_numeric_same(out, err, span);
+            break;
+        case IDM_PRIM_LT:
+        case IDM_PRIM_GT:
+        case IDM_PRIM_LTE:
+        case IDM_PRIM_GTE:
+        case IDM_PRIM_NAN_P:
+        case IDM_PRIM_FINITE_P:
+        case IDM_PRIM_INFINITE_P:
+            ok = primitive_contract_numeric_to(out, "atom", err, span);
+            break;
+        case IDM_PRIM_FLOOR:
+        case IDM_PRIM_ROUND:
+        case IDM_PRIM_CEIL:
+        case IDM_PRIM_TRUNCATE:
+        case IDM_PRIM_SQRT:
+        case IDM_PRIM_SIN:
+        case IDM_PRIM_COS:
+        case IDM_PRIM_TAN:
+        case IDM_PRIM_ASIN:
+        case IDM_PRIM_ACOS:
+        case IDM_PRIM_ATAN:
+        case IDM_PRIM_ATAN2:
+        case IDM_PRIM_EXP:
+        case IDM_PRIM_LOG:
+        case IDM_PRIM_LOG2:
+        case IDM_PRIM_LOG10:
+        case IDM_PRIM_HYPOT:
+        case IDM_PRIM_TO_FLOAT:
+            ok = primitive_contract_numeric_to(out, "float", err, span);
+            break;
+        case IDM_PRIM_TO_INT:
+            ok = primitive_contract_numeric_to(out, "int", err, span);
+            break;
+        case IDM_PRIM_DIVMOD:
+            ok = primitive_contract_numeric_to(out, "tuple", err, span);
+            break;
+        case IDM_PRIM_BIT_AND:
+        case IDM_PRIM_BIT_OR:
+        case IDM_PRIM_BIT_XOR:
+        case IDM_PRIM_BIT_NOT:
+        case IDM_PRIM_SHIFT_LEFT:
+        case IDM_PRIM_SHIFT_RIGHT:
+        case IDM_PRIM_BIT_COUNT:
+        case IDM_PRIM_BIT_LENGTH:
+            ok = primitive_contract_all_args(out, "int", err, span) &&
+                 primitive_contract_result_con(out, "int", err, span);
+            break;
+        case IDM_PRIM_EQ:
+        case IDM_PRIM_NEQ:
+        case IDM_PRIM_OK:
+        case IDM_PRIM_SYNTAX_LIST_PRED:
+        case IDM_PRIM_SYNTAX_WORD_PRED:
+        case IDM_PRIM_SYNTAX_ATOM_PRED:
+        case IDM_PRIM_SYNTAX_INT_PRED:
+        case IDM_PRIM_SYNTAX_ADJACENT_PRED:
+        case IDM_PRIM_STR_CONTAINS:
+        case IDM_PRIM_REGEX_PRED:
+        case IDM_PRIM_REGEX_RESULT_PRED:
+        case IDM_PRIM_REGEX_TEST:
+        case IDM_PRIM_DICT_HAS:
+        case IDM_PRIM_FILE_EXISTS:
+        case IDM_PRIM_TTY_PRED:
+        case IDM_PRIM_IS_A_P:
+        case IDM_PRIM_NIL_P:
+        case IDM_PRIM_ATOM_P:
+        case IDM_PRIM_WORD_P:
+        case IDM_PRIM_INT_P:
+        case IDM_PRIM_FLOAT_P:
+        case IDM_PRIM_STRING_P:
+        case IDM_PRIM_PAIR_P:
+        case IDM_PRIM_EMPTY_LIST_P:
+        case IDM_PRIM_LIST_P:
+        case IDM_PRIM_TUPLE_P:
+        case IDM_PRIM_VECTOR_P:
+        case IDM_PRIM_DICT_P:
+        case IDM_PRIM_SYNTAX_P:
+        case IDM_PRIM_CELL_P:
+        case IDM_PRIM_CLOSURE_P:
+        case IDM_PRIM_PID_P:
+        case IDM_PRIM_REF_P:
+        case IDM_PRIM_PORT_P:
+        case IDM_PRIM_REGEX_P:
+        case IDM_PRIM_REGEX_RESULT_P:
+        case IDM_PRIM_NAN:
+        case IDM_PRIM_INF:
+        case IDM_PRIM_CD:
+        case IDM_PRIM_CHDIR:
+        case IDM_PRIM_ENV_SET:
+        case IDM_PRIM_PRINT:
+        case IDM_PRIM_PRINTLN:
+        case IDM_PRIM_EPRINTLN:
+        case IDM_PRIM_REPL_ABORT:
+        case IDM_PRIM_TTY_RAW:
+        case IDM_PRIM_TTY_RESTORE:
+        case IDM_PRIM_TTY_WRITE:
+        case IDM_PRIM_PORT_CLOSE_INPUT:
+        case IDM_PRIM_JOB_RESUME:
+        case IDM_PRIM_JOB_SIGNAL:
+        case IDM_PRIM_SEND:
+        case IDM_PRIM_EXIT:
+        case IDM_PRIM_LINK:
+        case IDM_PRIM_UNLINK:
+        case IDM_PRIM_DEMONITOR:
+        case IDM_PRIM_TRAP_EXIT:
+            ok = primitive_contract_result_con(out, "atom", err, span);
+            break;
+        case IDM_PRIM_INSPECT:
+        case IDM_PRIM_STR:
+        case IDM_PRIM_CHOMP:
+        case IDM_PRIM_SYNTAX_WORD_TEXT:
+        case IDM_PRIM_SYNTAX_ATOM_TEXT:
+        case IDM_PRIM_SYNTAX_STRING_TEXT:
+        case IDM_PRIM_STR_SLICE:
+        case IDM_PRIM_BYTE_STR:
+        case IDM_PRIM_REGEX_SOURCE:
+        case IDM_PRIM_REGEX_RESULT_TEXT:
+        case IDM_PRIM_REGEX_REPLACE:
+        case IDM_PRIM_REGEX_REPLACE_ALL:
+        case IDM_PRIM_REGEX_ESCAPE:
+        case IDM_PRIM_PWD:
+        case IDM_PRIM_ERROR_MESSAGE:
+        case IDM_PRIM_ORD_STR:
+            ok = primitive_contract_result_con(out, "string", err, span);
+            break;
+        case IDM_PRIM_REPL_DIAGNOSTIC:
+            ok = primitive_contract_result_union_cons(out, "string", "nil", err, span);
+            break;
+        case IDM_PRIM_PORT_READ:
+        case IDM_PRIM_PORT_WRITE:
+            ok = primitive_contract_result_union_cons(out, "tuple", "atom", err, span);
+            break;
+        case IDM_PRIM_ENV_GET:
+            ok = primitive_contract_arg_con(out, 0u, "string", err, span) &&
+                 primitive_contract_result_union_cons(out, "string", "nil", err, span);
+            break;
+        case IDM_PRIM_STR_FIND:
+        case IDM_PRIM_STR_BYTE:
+        case IDM_PRIM_STR_ORD:
+        case IDM_PRIM_REGEX_RESULT_START:
+        case IDM_PRIM_REGEX_RESULT_END:
+            ok = primitive_contract_result_union_cons(out, "int", "nil", err, span);
+            break;
+        case IDM_PRIM_STR_LEN:
+        case IDM_PRIM_SYNTAX_LENGTH:
+        case IDM_PRIM_SYNTAX_INT_VALUE:
+        case IDM_PRIM_REGEX_GROUP_COUNT:
+        case IDM_PRIM_TIME_MS:
+        case IDM_PRIM_RANDOM:
+        case IDM_PRIM_DICT_SIZE:
+        case IDM_PRIM_COMPARE:
+            ok = primitive_contract_result_con(out, "int", err, span);
+            break;
+        case IDM_PRIM_SYNTAX_FLOAT_VALUE:
+            ok = primitive_contract_result_con(out, "float", err, span);
+            break;
+        case IDM_PRIM_LIST:
+        case IDM_PRIM_STR_TO_LIST:
+        case IDM_PRIM_DICT_TO_LIST:
+        case IDM_PRIM_VECTOR_TO_LIST:
+        case IDM_PRIM_TUPLE_TO_LIST:
+        case IDM_PRIM_SYNTAX_ORIGIN:
+        case IDM_PRIM_SYNTAX_SLICE:
+        case IDM_PRIM_REGEX_OPTIONS:
+        case IDM_PRIM_REGEX_GROUP_NAMES:
+        case IDM_PRIM_REGEX_CAPTURES:
+        case IDM_PRIM_REGEX_SCAN_ALL:
+        case IDM_PRIM_REGEX_SPLIT_ON:
+        case IDM_PRIM_FILE_LIST:
+        case IDM_PRIM_ARGS:
+        case IDM_PRIM_DICT_KEYS:
+        case IDM_PRIM_DICT_VALS:
+            ok = primitive_contract_result_con(out, "list", err, span);
+            break;
+        case IDM_PRIM_CONS:
+        case IDM_PRIM_APPEND:
+            ok = primitive_contract_result_con(out, "pair", err, span);
+            break;
+        case IDM_PRIM_TUPLE:
+        case IDM_PRIM_MAKE_ERROR:
+        case IDM_PRIM_FILE_READ:
+        case IDM_PRIM_FILE_STAT:
+        case IDM_PRIM_FILE_OPEN:
+        case IDM_PRIM_PARSE_INT:
+        case IDM_PRIM_PARSE_FLOAT:
+        case IDM_PRIM_TTY_SIZE:
+            ok = primitive_contract_result_con(out, "tuple", err, span);
+            break;
+        case IDM_PRIM_REPL_COMPILE:
+        case IDM_PRIM_FILE_WRITE:
+        case IDM_PRIM_FILE_REMOVE:
+        case IDM_PRIM_FILE_MKDIR:
+        case IDM_PRIM_FILE_APPEND:
+            ok = primitive_contract_result_union_cons(out, "tuple", "atom", err, span);
+            break;
+        case IDM_PRIM_TTY_READ:
+            ok = primitive_contract_arg_union_cons(out, 0u, "int", "nil", err, span) &&
+                 primitive_contract_result_union_cons(out, "tuple", "atom", err, span);
+            break;
+        case IDM_PRIM_TTY_READ_LINE:
+            ok = primitive_contract_result_union_cons(out, "tuple", "atom", err, span);
+            break;
+        case IDM_PRIM_VECTOR:
+            ok = primitive_contract_result_con(out, "vector", err, span);
+            break;
+        case IDM_PRIM_DICT:
+        case IDM_PRIM_DICT_PUT:
+        case IDM_PRIM_DICT_DEL:
+            ok = primitive_contract_result_con(out, "dict", err, span);
+            break;
+        case IDM_PRIM_TUPLE_GET:
+            ok = primitive_contract_arg_con(out, 0u, "tuple", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "int", err, span) &&
+                 primitive_contract_result_var(out, "a", 1u, err, span);
+            break;
+        case IDM_PRIM_DICT_GET:
+            ok = primitive_contract_arg_con(out, 0u, "dict", err, span) &&
+                 primitive_contract_arg_var(out, 2u, "a", 1u, err, span) &&
+                 primitive_contract_result_var(out, "a", 1u, err, span);
+            break;
+        case IDM_PRIM_FIRST:
+            ok = primitive_contract_result_var(out, "a", 1u, err, span);
+            break;
+        case IDM_PRIM_REST:
+            ok = primitive_contract_result_con(out, "list", err, span);
+            break;
+        case IDM_PRIM_COND:
+            if (argc == 2u) {
+                ok = primitive_contract_arg_var(out, 1u, "a", 1u, err, span) &&
+                     primitive_contract_result_union_var_con(out, "a", 1u, "nil", err, span);
+            } else {
+                ok = primitive_contract_arg_var(out, 1u, "a", 1u, err, span) &&
+                     primitive_contract_arg_var(out, 2u, "b", 2u, err, span) &&
+                     primitive_contract_result_union_vars(out, "a", 1u, "b", 2u, err, span);
+            }
+            break;
+        case IDM_PRIM_REGEX_COMPILE:
+            ok = primitive_contract_arg_con(out, 0u, "string", err, span) &&
+                 primitive_contract_arg_union_cons(out, 1u, "list", "atom", err, span) &&
+                 primitive_contract_result_con(out, "tuple", err, span);
+            break;
+        case IDM_PRIM_REGEX_SCAN_AT:
+        case IDM_PRIM_REGEX_SCAN_FROM:
+            ok = primitive_contract_arg_con(out, 0u, "regex", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "string", err, span) &&
+                 primitive_contract_arg_con(out, 2u, "int", err, span) &&
+                 primitive_contract_result_union_cons(out, "regex-result", "nil", err, span);
+            break;
+        case IDM_PRIM_REGEX_SCAN_FULL:
+            ok = primitive_contract_arg_con(out, 0u, "regex", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "string", err, span) &&
+                 primitive_contract_result_union_cons(out, "regex-result", "nil", err, span);
+            break;
+        case IDM_PRIM_REGEX_CAPTURE:
+        case IDM_PRIM_REGEX_CAPTURE_NAMED:
+            ok = primitive_contract_arg_con(out, 0u, "regex-result", err, span) &&
+                 primitive_contract_result_union_cons(out, "string", "nil", err, span);
+            break;
+        case IDM_PRIM_REGEX_CAPTURE_RANGE:
+            ok = primitive_contract_arg_con(out, 0u, "regex-result", err, span) &&
+                 primitive_contract_result_union_cons(out, "tuple", "nil", err, span);
+            break;
+        case IDM_PRIM_SYNTAX_KIND:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_result_con(out, "atom", err, span);
+            break;
+        case IDM_PRIM_SYNTAX_PROPERTY:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "string", err, span) &&
+                 primitive_contract_result_union_cons(out, "string", "nil", err, span);
+            break;
+        case IDM_PRIM_SYNTAX_SET_PROPERTY:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "string", err, span) &&
+                 primitive_contract_arg_con(out, 2u, "string", err, span) &&
+                 primitive_contract_result_con(out, "syntax", err, span);
+            break;
+        case IDM_PRIM_SYNTAX_NTH:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "int", err, span) &&
+                 primitive_contract_result_con(out, "syntax", err, span);
+            break;
+        case IDM_PRIM_MAKE_SYNTAX_NIL:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_result_con(out, "syntax", err, span);
+            break;
+        case IDM_PRIM_MAKE_SYNTAX_WORD:
+        case IDM_PRIM_MAKE_SYNTAX_ATOM:
+        case IDM_PRIM_MAKE_SYNTAX_STRING:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "string", err, span) &&
+                 primitive_contract_result_con(out, "syntax", err, span);
+            break;
+        case IDM_PRIM_MAKE_SYNTAX_INT:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "int", err, span) &&
+                 primitive_contract_result_con(out, "syntax", err, span);
+            break;
+        case IDM_PRIM_MAKE_SYNTAX_LIST:
+        case IDM_PRIM_MAKE_SYNTAX_VECTOR:
+        case IDM_PRIM_MAKE_SYNTAX_TUPLE:
+        case IDM_PRIM_MAKE_SYNTAX_DICT:
+        case IDM_PRIM_MAKE_SYNTAX_EXPR:
+        case IDM_PRIM_MAKE_SYNTAX_BODY:
+        case IDM_PRIM_MAKE_SYNTAX_GROUP:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "list", err, span) &&
+                 primitive_contract_result_con(out, "syntax", err, span);
+            break;
+        case IDM_PRIM_SYNTAX_ERROR:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "string", err, span) &&
+                 primitive_contract_result_con(out, "syntax", err, span);
+            break;
+        case IDM_PRIM_LOCAL_EXPAND:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_result_con(out, "syntax", err, span);
+            break;
+        case IDM_PRIM_FREE_IDENTIFIER_EQ:
+        case IDM_PRIM_BOUND_IDENTIFIER_EQ:
+            ok = primitive_contract_all_args(out, "syntax", err, span) &&
+                 primitive_contract_result_con(out, "atom", err, span);
+            break;
+        case IDM_PRIM_BIND_BANG:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_result_con(out, "atom", err, span);
+            break;
+        case IDM_PRIM_INTERNAL_REGISTER_MACRO:
+            ok = primitive_contract_arg_con(out, 0u, "syntax", err, span) &&
+                 primitive_contract_arg_con(out, 1u, "closure", err, span) &&
+                 primitive_contract_result_con(out, "atom", err, span);
+            break;
+        case IDM_PRIM_EXPAND_CHECK:
+            ok = primitive_contract_arg_con(out, 0u, "string", err, span) &&
+                 primitive_contract_result_union_cons(out, "atom", "tuple", err, span);
+            break;
+        case IDM_PRIM_SELF:
+        case IDM_PRIM_SPAWN:
+        case IDM_PRIM_SPAWN_LINK:
+        case IDM_PRIM_SPAWN_MONITOR:
+        case IDM_PRIM_REPL_SPAWN:
+            ok = primitive_contract_result_con(out, "pid", err, span);
+            break;
+        case IDM_PRIM_MONITOR:
+            ok = primitive_contract_result_con(out, "ref", err, span);
+            break;
+        case IDM_PRIM_APPLY:
+        case IDM_PRIM_RAISE:
+            ok = primitive_contract_result_var(out, "a", 1u, err, span);
+            break;
+        case IDM_PRIM_FROM_RUNES:
+            ok = primitive_contract_arg_con(out, 0u, "list", err, span) &&
+                 primitive_contract_result_con(out, "string", err, span);
+            break;
+        case IDM_PRIM_ISH_SESSION:
+            ok = primitive_contract_result_union_cons(out, "pid", "nil", err, span);
+            break;
+        case IDM_PRIM_PORT_STATUS:
+            ok = primitive_contract_arg_con(out, 0u, "port", err, span) &&
+                 primitive_contract_result_con(out, "atom", err, span);
+            break;
+        default:
+            ok = false;
+            break;
+    }
+    if (!ok) {
+        idm_callable_contract_destroy(out);
+        if (err && err->present) return false;
+        return true;
+    }
+    if (has_contract) *has_contract = true;
+    return true;
+}
+
 static bool emit_op1(IdmBytecodeModule *module, IdmOpcode op, uint32_t a, size_t *out_offset) {
     return idm_bc_emit_u32(module, op, a, out_offset);
 }
@@ -2142,11 +2763,14 @@ static bool compile_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail
             if (!emit_op4(ctx->module, IDM_OP_MAKE_RECORD, dst, type_const, first, count, NULL)) return idm_error_oom(err, core->span);
             for (uint32_t i = 0; i < count; i++) {
                 uint32_t field_const = 0;
-                uint32_t contract_const = 0;
+                uint32_t contract_type = UINT32_MAX;
                 if (!add_const_symbol(ctx, core->as.record_construct.field_names[i], &field_const, err, core->span)) return false;
-                if (!add_const_symbol(ctx, core->as.record_construct.field_contracts[i], &contract_const, err, core->span)) return false;
+                if (core->as.record_construct.field_has_contracts[i] &&
+                    !idm_bc_add_type_term(ctx->module, &core->as.record_construct.field_contracts[i], &contract_type)) {
+                    return idm_error_oom(err, core->span);
+                }
                 if (!idm_bc_emit(ctx->module, field_const, NULL)) return idm_error_oom(err, core->span);
-                if (!idm_bc_emit(ctx->module, contract_const, NULL)) return idm_error_oom(err, core->span);
+                if (!idm_bc_emit(ctx->module, contract_type, NULL)) return idm_error_oom(err, core->span);
             }
             return true;
         }
@@ -2533,9 +3157,11 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core) {
             for (size_t i = 0; i < core->as.record_construct.count; i++) {
                 if (!idm_buf_append(buf, " (field ") ||
                     !idm_buf_append(buf, core_symbol_text(core->as.record_construct.field_names[i])) ||
-                    !idm_buf_append(buf, " : ") ||
-                    !idm_buf_append(buf, core_symbol_text(core->as.record_construct.field_contracts[i]) ? core_symbol_text(core->as.record_construct.field_contracts[i]) : "_") ||
-                    !idm_buf_append_char(buf, ' ') ||
+                    !idm_buf_append(buf, " : ")) return false;
+                if (core->as.record_construct.field_has_contracts[i]) {
+                    if (!idm_type_term_write(buf, &core->as.record_construct.field_contracts[i])) return false;
+                } else if (!idm_buf_append(buf, "_")) return false;
+                if (!idm_buf_append_char(buf, ' ') ||
                     !idm_core_dump(buf, core->as.record_construct.field_values[i]) ||
                     !idm_buf_append_char(buf, ')')) return false;
             }
@@ -2821,9 +3447,11 @@ static bool core_pretty(IdmBuffer *buf, const IdmCore *core, size_t indent) {
                 if (!pretty_newline(buf, ci) ||
                     !idm_buf_append(buf, "(field ") ||
                     !idm_buf_append(buf, core_symbol_text(core->as.record_construct.field_names[i])) ||
-                    !idm_buf_append(buf, " : ") ||
-                    !idm_buf_append(buf, core_symbol_text(core->as.record_construct.field_contracts[i]) ? core_symbol_text(core->as.record_construct.field_contracts[i]) : "_") ||
-                    !pretty_newline(buf, ci + 2) ||
+                    !idm_buf_append(buf, " : ")) return false;
+                if (core->as.record_construct.field_has_contracts[i]) {
+                    if (!idm_type_term_write(buf, &core->as.record_construct.field_contracts[i])) return false;
+                } else if (!idm_buf_append(buf, "_")) return false;
+                if (!pretty_newline(buf, ci + 2) ||
                     !core_pretty(buf, core->as.record_construct.field_values[i], ci + 2) ||
                     !idm_buf_append_char(buf, ')')) return false;
             }

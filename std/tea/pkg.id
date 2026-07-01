@@ -13,16 +13,6 @@ export defn interrupt-msg -> {:tea-interrupt}
 export defn suspend-msg -> {:tea-suspend}
 export defn resume-msg -> {:tea-resume}
 
-export trait Model do
-  method init model -> none
-  method update model msg -> {model none}
-  method view model -> ""
-end
-
-export trait Command do
-  method run-command cmd
-end
-
 export record Emit do
   field msg
 end
@@ -33,12 +23,6 @@ end
 
 export record Sequence do
   field commands
-end
-
-export record Program do
-  field model
-  field status
-  field pending
 end
 
 export defn emit msg -> Emit msg
@@ -59,20 +43,12 @@ export defn interrupt -> emit interrupt-msg
 export defn suspend -> emit suspend-msg
 export defn resume -> emit resume-msg
 
-implement Command on Emit do
-  method run-command cmd -> cmd.msg
-end
-
-implement Command on Batch do
-  method run-command cmd -> {:tea-batch cmd.commands}
-end
-
-implement Command on Sequence do
-  method run-command cmd -> {:tea-sequence cmd.commands}
-end
-
-implement Command on closure do
-  method run-command cmd -> '() |> apply cmd
+defn command-result do
+  cmd when (Emit? cmd) -> cmd.msg
+  cmd when (Batch? cmd) -> {:tea-batch cmd.commands}
+  cmd when (Sequence? cmd) -> {:tea-sequence cmd.commands}
+  cmd when (closure? cmd) -> '() |> apply cmd
+  cmd -> cmd
 end
 
 defn messages-rev-from-list do
@@ -88,48 +64,5 @@ end
 
 export defn command-messages do
   cmd when (eq? cmd none) -> '()
-  cmd -> command-result-messages (run-command cmd)
-end
-
-export defn step model msg -> update model msg
-
-export defn start model -> Program model :running (command-messages (init model))
-
-defn halted? status -> cond (eq? status :running) :false :true
-
-defn status-for msg -> match msg do
-  {:tea-quit} -> :quit
-  {:tea-interrupt} -> :interrupt
-  {:tea-suspend} -> :suspend
-  _ -> :running
-end
-
-export defn advance program msg do
-  if (halted? program.status) do
-    program
-  else do
-    status = status-for msg
-    if (eq? status :running) do
-      {next cmd} = step program.model msg
-      Program next :running (command-messages cmd)
-    else do
-      Program program.model status '()
-    end
-  end
-end
-
-defn run-pending-list do
-  program '() -> program
-  program '(msg . rest) -> do
-    next = advance program &msg
-    all = List.concat next.pending rest
-    run-pending-list (Program next.model next.status '()) all
-  end
-end
-
-export defn drain program -> run-pending-list program program.pending
-
-export defn run-messages do
-  program '() -> drain program
-  program '(msg . rest) -> run-messages (drain (advance program &msg)) rest
+  cmd -> command-result-messages (command-result cmd)
 end

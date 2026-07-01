@@ -4,7 +4,7 @@ activate Test
 
 suite do
   test "package-variable-width-bytecode-relocates" do
-    p = packet :sum 10 32
+    p = Packet :sum 10 32
     p |> Packet? |> assert
     p.tag |> assert-eq :sum
     p.left |> assert-eq 10

@@ -1,6 +1,5 @@
 package repl
 
-import std/tea as Tea
 use std/string with [trim]
 use std/term with [tty-read-line tty-write tty?]
 
@@ -26,19 +25,11 @@ defn quit-line? line do
   or (eq? clean ":quit") (eq? clean ":q")
 end
 
-implement Tea.Model on State do
-  method init _state -> Tea.none
-  method update state msg -> match msg do
-    {:append line} -> {(State (append-source state.source line) state.status) (Tea.none)}
-    {:status status} -> {(State "" status) (Tea.none)}
-    {:quit} -> {state (Tea.quit)}
-    _ -> {state (Tea.none)}
-  end
-  method view state -> prompt state
-end
-
-defn step-state state msg -> match (Tea.step state msg) do
-  {next _cmd} -> next
+defn step-state state msg -> match msg do
+  {:append line} -> State (append-source state.source line) state.status
+  {:status status} -> State "" status
+  {:quit} -> state
+  _ -> state
 end
 
 defn read-input state do

@@ -25,8 +25,10 @@ static bool install_inherited_package_slot_refs(ExpandContext *ctx, const char *
     if (!env_key) return idm_error_set(err, idm_span_unknown(NULL), "inherited package slots require a provider key");
     for (size_t i = 0; i < count; i++) {
         uint32_t ref_id = 0;
+        IdmBindingId binding_id = 0;
         if (!package_slot_ref_add(ctx, env_key, slots[i].slot, &ref_id) ||
-            !idm_binding_table_add_with_arity(&ctx->bindings, slots[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, &slots[i].scopes, ref_id, IDM_FRAME_ENV, slots[i].arity, NULL)) {
+            !idm_binding_table_add_with_arity(&ctx->bindings, slots[i].name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, &slots[i].scopes, ref_id, IDM_FRAME_ENV, slots[i].arity, &binding_id) ||
+            (slots[i].has_contract && !idm_binding_table_set_contract(&ctx->bindings, binding_id, &slots[i].contract))) {
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
     }
@@ -125,15 +127,27 @@ static bool record_runtime_init(ExpandContext *ctx, const IdmArtifact *art, IdmS
     return true;
 }
 
-static bool bind_package_slot_ref(ExpandContext *ctx, const char *bind_name, int phase, const IdmScopeSet *scopes, IdmArity arity, const char *env_key, uint32_t source_slot, bool primitive_backed, IdmPrimitive primitive, IdmSpan span, IdmError *err) {
+static bool bind_package_slot_ref(ExpandContext *ctx, const char *bind_name, int phase, const IdmScopeSet *scopes, IdmArity arity, const IdmCallableContract *contract, const char *env_key, uint32_t source_slot, bool primitive_backed, IdmPrimitive primitive, IdmSpan span, IdmError *err) {
     uint32_t ref_id = 0;
     if (!package_slot_ref_add(ctx, env_key, source_slot, &ref_id)) return idm_error_oom(err, span);
-    if (primitive_backed) {
-        return idm_binding_table_add_primitive_with_arity(&ctx->bindings, bind_name, phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, scopes, ref_id, IDM_FRAME_ENV, arity, (uint32_t)primitive, NULL) ||
-               idm_error_oom(err, span);
+    IdmCallableContract primitive_contract;
+    bool has_primitive_contract = false;
+    memset(&primitive_contract, 0, sizeof(primitive_contract));
+    const IdmCallableContract *effective_contract = contract;
+    if (primitive_backed && !effective_contract && arity.kind != IDM_ARITY_UNKNOWN && arity.min == arity.max && idm_arity_accepts(&arity, arity.min)) {
+        if (!idm_primitive_contract(primitive, arity.min, &primitive_contract, &has_primitive_contract, err, span)) {
+            idm_callable_contract_destroy(&primitive_contract);
+            return false;
+        }
+        if (has_primitive_contract) effective_contract = &primitive_contract;
     }
-    return idm_binding_table_add_with_arity(&ctx->bindings, bind_name, phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, scopes, ref_id, IDM_FRAME_ENV, arity, NULL) ||
-           idm_error_oom(err, span);
+    IdmBindingId binding_id = 0;
+    bool ok = primitive_backed
+        ? idm_binding_table_add_primitive_with_arity(&ctx->bindings, bind_name, phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, scopes, ref_id, IDM_FRAME_ENV, arity, (uint32_t)primitive, &binding_id)
+        : idm_binding_table_add_with_arity(&ctx->bindings, bind_name, phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, scopes, ref_id, IDM_FRAME_ENV, arity, &binding_id);
+    if (ok && effective_contract) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, effective_contract);
+    if (has_primitive_contract) idm_callable_contract_destroy(&primitive_contract);
+    return ok || idm_error_oom(err, span);
 }
 
 bool install_artifact_runtime_slots(ExpandContext *ctx, const IdmArtifact *art, const char *primitive_home, IdmScopeId min_id, int64_t delta, bool once, IdmSpan span, IdmError *err) {
@@ -150,7 +164,7 @@ bool install_artifact_runtime_slots(ExpandContext *ctx, const IdmArtifact *art, 
             idm_scope_set_relocate(&scopes, min_id, delta);
             IdmPrimitive primitive = 0;
             bool primitive_backed = idm_primitive_lookup(primitive_home, slot->name, &primitive);
-            ok = bind_package_slot_ref(ctx, slot->name, primitive_backed ? IDM_PHASE_ANY : ctx->phase, &scopes, slot->arity, provider_key, slot->slot, primitive_backed, primitive, span, err);
+            ok = bind_package_slot_ref(ctx, slot->name, primitive_backed ? IDM_PHASE_ANY : ctx->phase, &scopes, slot->arity, slot->has_contract ? &slot->contract : NULL, provider_key, slot->slot, primitive_backed, primitive, span, err);
         }
         idm_scope_set_destroy(&scopes);
         if (!ok) return false;
@@ -231,7 +245,7 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
         IdmPrimitive primitive = 0;
         bool primitive_backed = idm_primitive_lookup(primitive_home, art->slots[i].name, &primitive);
         int phase = primitive_backed ? IDM_PHASE_ANY : ctx->phase;
-        ok = bind_package_slot_ref(ctx, bind_name, phase, &act_scopes, art->slots[i].arity, provider_key, art->slots[i].slot, primitive_backed, primitive, span, err);
+        ok = bind_package_slot_ref(ctx, bind_name, phase, &act_scopes, art->slots[i].arity, art->slots[i].has_contract ? &art->slots[i].contract : NULL, provider_key, art->slots[i].slot, primitive_backed, primitive, span, err);
         free(qualified);
     }
     for (size_t i = 0; qualifier && i < art->macro_count && ok; i++) {
@@ -672,7 +686,7 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
             IdmPrimitive primitive = 0;
             bool primitive_backed = idm_primitive_lookup("kernel", k->slots[i].name, &primitive);
             const IdmScopeSet *bind_scopes = k->slots[i].exported ? &ctx->empty_scopes : &k->slots[i].scopes;
-            if (!bind_package_slot_ref(ctx, k->slots[i].name, IDM_PHASE_ANY, bind_scopes, k->slots[i].arity, kernel_key, k->slots[i].slot, primitive_backed, primitive, idm_span_unknown(NULL), err)) return false;
+            if (!bind_package_slot_ref(ctx, k->slots[i].name, IDM_PHASE_ANY, bind_scopes, k->slots[i].arity, k->slots[i].has_contract ? &k->slots[i].contract : NULL, kernel_key, k->slots[i].slot, primitive_backed, primitive, idm_span_unknown(NULL), err)) return false;
         }
     }
     ctx->kernel_wrap = k->slot_count != 0;
@@ -863,18 +877,18 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
     for (size_t i = 0; i < count; i++) {
         const IdmPkgMethodImpl *src = &impls[i];
         const char *key = (src->impl_env && (!src->impl_env_key || !src->impl_env_key[0])) ? provider_key : src->impl_env_key;
-        uint32_t method_surface = 0;
-        if (!method_surface_index_by_identity(ctx, src->trait, src->method, &method_surface)) continue;
-        const MethodSurfaceDef *surface = method_surface_by_index(ctx, method_surface);
-        if (!surface) return idm_error_set(err, idm_span_unknown(NULL), "method implementation references missing surface");
+        uint32_t method_surface = UINT32_MAX;
+        (void)method_surface_index_by_identity(ctx, src->trait, src->method, &method_surface);
         bool updated = false;
         for (size_t j = 0; j < ctx->typed.method_impl_count; j++) {
             MethodImplDef *dst = &ctx->typed.method_impls[j];
-            if (!method_impl_matches_identity(ctx, dst, method_surface_trait_text(surface), method_surface_name_text(surface), src->type)) continue;
+            if (!method_impl_matches_identity(ctx, dst, src->trait, src->method, src->type)) continue;
             char *next_key = idm_strdup(key ? key : "");
             if (!next_key) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (method_surface != UINT32_MAX) dst->method_surface = method_surface;
             dst->arity = src->arity;
             dst->impl_env = src->impl_env;
+            dst->impl_frame = ctx->frame;
             dst->impl_slot = src->impl_slot;
             free(dst->impl_env_key);
             dst->impl_env_key = next_key;
@@ -890,9 +904,10 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
         dst->method_surface = method_surface;
         dst->arity = src->arity;
         dst->impl_env = src->impl_env;
+        dst->impl_frame = ctx->frame;
         dst->impl_env_key = idm_strdup(key ? key : "");
         dst->impl_slot = src->impl_slot;
-        if (!dst->impl_env_key || !method_impl_set_type(ctx, dst, src->type, err, idm_span_unknown(NULL))) {
+        if (!dst->impl_env_key || !method_impl_set_identity(ctx, dst, src->trait, src->method, src->type, err, idm_span_unknown(NULL))) {
             free(dst->impl_env_key);
             memset(dst, 0, sizeof(*dst));
             return false;
@@ -932,6 +947,24 @@ static bool install_artifact_type(ExpandContext *ctx, const IdmPkgType *entry, c
         free(qualified);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
+    if (entry->member_count != 0) {
+        t->members = calloc(entry->member_count, sizeof(*t->members));
+        if (!t->members) {
+            type_def_destroy(t);
+            surface_rollback(ctx, &checkpoint);
+            free(qualified);
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        t->member_count = entry->member_count;
+        for (size_t m = 0; m < entry->member_count; m++) {
+            if (!idm_type_term_copy(&t->members[m].term, &entry->members[m].term)) {
+                type_def_destroy(t);
+                surface_rollback(ctx, &checkpoint);
+                free(qualified);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+        }
+    }
     if (entry->field_count != 0) {
         t->fields = calloc(entry->field_count, sizeof(*t->fields));
         if (!t->fields) {
@@ -942,7 +975,8 @@ static bool install_artifact_type(ExpandContext *ctx, const IdmPkgType *entry, c
         }
         t->field_count = entry->field_count;
         for (size_t f = 0; f < entry->field_count; f++) {
-            if (!type_field_set(ctx, &t->fields[f], entry->fields[f].name, entry->fields[f].contract, err, idm_span_unknown(NULL))) {
+            const IdmTypeTerm *contract = entry->fields[f].has_contract ? &entry->fields[f].contract : NULL;
+            if (!type_field_set(ctx, &t->fields[f], entry->fields[f].name, contract, err, idm_span_unknown(NULL))) {
                 type_def_destroy(t);
                 surface_rollback(ctx, &checkpoint);
                 free(qualified);
@@ -1530,6 +1564,15 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                 slots[i].name = idm_strdup(ctx.package_slots[i].name);
                 slots[i].slot = ctx.package_slots[i].slot;
                 slots[i].arity = ctx.package_slots[i].arity;
+                slots[i].has_contract = false;
+                if (ctx.package_slots[i].has_contract) {
+                    if (!idm_callable_contract_copy(&slots[i].contract, &ctx.package_slots[i].contract)) {
+                        for (size_t j = 0; j <= i; j++) idm_pkg_slot_destroy(&slots[j]);
+                        copy_ok = false;
+                        break;
+                    }
+                    slots[i].has_contract = true;
+                }
                 slots[i].exported = ctx.package_slots[i].exported;
                 if (!slots[i].name || !idm_scope_set_copy(&slots[i].scopes, &ctx.package_slots[i].scopes)) {
                     for (size_t j = 0; j <= i; j++) idm_pkg_slot_destroy(&slots[j]);
@@ -1569,6 +1612,16 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                     type->name = idm_strdup(t->name);
                     type->identity = idm_strdup(type_def_identity_text(t));
                     if (!type->name || !type->identity || !idm_scope_set_copy(&type->scopes, &t->scopes)) copy_ok = false;
+                    if (copy_ok && t->member_count != 0) {
+                        type->members = calloc(t->member_count, sizeof(*type->members));
+                        if (!type->members) copy_ok = false;
+                        else {
+                            type->member_count = t->member_count;
+                            for (size_t m = 0; m < t->member_count; m++) {
+                                if (!idm_type_term_copy(&type->members[m].term, &t->members[m].term)) { copy_ok = false; break; }
+                            }
+                        }
+                    }
                     if (copy_ok && t->field_count != 0) {
                         type->fields = calloc(t->field_count, sizeof(*type->fields));
                         if (!type->fields) copy_ok = false;
@@ -1576,10 +1629,13 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                             type->field_count = t->field_count;
                             for (size_t f = 0; f < t->field_count; f++) {
                                 const char *name = type_field_name_text(&t->fields[f]);
-                                const char *contract = type_field_contract_text(&t->fields[f]);
                                 type->fields[f].name = idm_strdup(name);
-                                type->fields[f].contract = contract ? idm_strdup(contract) : NULL;
-                                if (!type->fields[f].name || (contract && !type->fields[f].contract)) { copy_ok = false; break; }
+                                if (!type->fields[f].name) { copy_ok = false; break; }
+                                const IdmTypeTerm *contract = type_field_contract_term(&t->fields[f]);
+                                if (contract) {
+                                    if (!idm_type_term_copy(&type->fields[f].contract, contract)) { copy_ok = false; break; }
+                                    type->fields[f].has_contract = true;
+                                }
                             }
                         }
                     }
@@ -1638,18 +1694,20 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             const MethodImplDef *src = &ctx.typed.method_impls[i];
             IdmPkgMethodImpl *dst = &pkg_method_impls[i];
             const MethodSurfaceDef *surface = method_surface_by_index(&ctx, src->method_surface);
-            if (!surface) {
-                copy_ok = false;
-                break;
-            }
             const char *type = method_impl_type_text(src);
-            if (!type) {
+            const char *trait = method_impl_trait_text(src);
+            const char *method = method_impl_name_text(src);
+            if (surface) {
+                trait = method_surface_trait_text(surface);
+                method = method_surface_name_text(surface);
+            }
+            if (!trait || !method || !type) {
                 copy_ok = false;
                 break;
             }
-            dst->trait = idm_strdup(method_surface_trait_text(surface));
+            dst->trait = idm_strdup(trait);
             dst->type = idm_strdup(type);
-            dst->method = idm_strdup(method_surface_name_text(surface));
+            dst->method = idm_strdup(method);
             dst->arity = src->arity;
             dst->impl_env = src->impl_env;
             dst->impl_env_key = idm_strdup(src->impl_env_key ? src->impl_env_key : "");

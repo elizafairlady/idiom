@@ -17,6 +17,18 @@ typedef struct {
     uint32_t arity;
 } FunctionClauseShape;
 static bool bind_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_rhs_start);
+typedef struct {
+    const IdmSyntax *name;
+    IdmScopeSet scopes;
+    IdmCallableContract contract;
+    bool used;
+} BodySignature;
+static bool signature_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_contract_start);
+static void body_signatures_destroy(BodySignature *signatures, size_t count);
+static bool body_signature_add(ExpandContext *ctx, BodySignature **signatures, size_t *count, size_t *cap, const IdmSyntax *form, IdmError *err);
+static bool body_signature_take_contract(const IdmSyntax *name, const IdmScopeSet *scopes, BodySignature *signatures, size_t signature_count, IdmCallableContract *out, bool *out_has, IdmError *err);
+static bool defn_group_take_signature(DefnGroup *group, BodySignature *signatures, size_t signature_count, IdmError *err);
+static bool body_signatures_all_used(const BodySignature *signatures, size_t count, IdmError *err);
 static bool definition_like_form(const IdmSyntax *form, const char **out_head);
 static bool for_syntax_form(const IdmSyntax *form, const IdmSyntax **out_body);
 static bool defn_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_param_start, bool *out_export);
@@ -42,7 +54,7 @@ static bool defn_form_clause_block(const IdmSyntax *def_form, size_t param_start
 static IdmCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, IdmSyntax *const *items, IdmError *err);
 static IdmCore *expand_match_clause(ExpandContext *ctx, const IdmSyntax *clause, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err);
 static bool body_is_clauses(const IdmSyntax *body, bool allow_empty_pattern);
-static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body, size_t clause_end, const char *debug_name, bool defn_style, IdmError *err);
+static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body, size_t clause_end, const char *debug_name, bool defn_style, const IdmCallableContract *contract, IdmError *err);
 static IdmCore *build_clause_fn(ExpandContext *ctx, const IdmSyntax *body, size_t clause_end, const char *debug_name, IdmError *err);
 
 IdmCore *literal_from_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
@@ -173,6 +185,12 @@ static bool syntax_pattern_note_local(ExpandContext *ctx, const IdmSyntax *name,
         return false;
     }
     return true;
+}
+
+static const IdmTypeTerm *current_function_arg_type(const ExpandContext *ctx, uint32_t arg_index) {
+    const IdmCallableContract *contract = ctx->function_contract;
+    if (!contract || arg_index >= contract->sigs[0].arg_count) return NULL;
+    return &contract->sigs[0].args[arg_index];
 }
 
 static IdmSyntaxPattern *syntax_pattern_hole(ExpandContext *ctx, const IdmSyntax *hole, IdmError *err) {
@@ -391,7 +409,11 @@ static IdmPattern *pattern_from_param_depth(ExpandContext *ctx, const IdmSyntax 
         }
         const IdmBinding *existing = resolve_default(ctx, syn, NULL);
         bool have = existing && existing->kind == IDM_BIND_ARG && existing->frame_id == ctx->frame;
-        if (!have && (!arg_push_slot(ctx, syn, arg_index) || !pattern_binder_note(ctx, syn))) {
+        if (!have && (!arg_push_slot_with_type(ctx, syn, arg_index, current_function_arg_type(ctx, arg_index)) || !pattern_binder_note(ctx, syn))) {
+            idm_error_oom(err, syn->span);
+            return NULL;
+        }
+        if (have && current_function_arg_type(ctx, arg_index) && !arg_push_slot_with_type(ctx, syn, arg_index, current_function_arg_type(ctx, arg_index))) {
             idm_error_oom(err, syn->span);
             return NULL;
         }
@@ -604,6 +626,195 @@ static bool bind_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, s
     *out_name = form->as.seq.items[1];
     *out_rhs_start = 3;
     return true;
+}
+
+static bool signature_form_parts(const IdmSyntax *form, const IdmSyntax **out_name, size_t *out_contract_start) {
+    if (!syn_is_form(form, "%-expr")) return false;
+    if (form->as.seq.count < 5u) return false;
+    if (!syn_is_word(form->as.seq.items[1], "spec")) return false;
+    if (form->as.seq.items[2]->kind != IDM_SYN_WORD) return false;
+    const char *op = surface_token_text(form->as.seq.items[3]);
+    if (!op || strcmp(op, "::") != 0) return false;
+    if (out_name) *out_name = form->as.seq.items[2];
+    if (out_contract_start) *out_contract_start = 4u;
+    return true;
+}
+
+static void body_signatures_destroy(BodySignature *signatures, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        idm_scope_set_destroy(&signatures[i].scopes);
+        idm_callable_contract_destroy(&signatures[i].contract);
+    }
+    free(signatures);
+}
+
+static bool body_signature_add(ExpandContext *ctx, BodySignature **signatures, size_t *count, size_t *cap, const IdmSyntax *form, IdmError *err) {
+    const IdmSyntax *name = NULL;
+    size_t contract_start = 0;
+    if (!signature_form_parts(form, &name, &contract_start)) return true;
+    IdmScopeSet scopes;
+    idm_scope_set_init(&scopes);
+    if (!syntax_scopes_copy(&scopes, name)) return idm_error_oom(err, name->span);
+    for (size_t i = 0; i < *count; i++) {
+        if (strcmp((*signatures)[i].name->as.text, name->as.text) == 0 && idm_scope_set_equal(&(*signatures)[i].scopes, &scopes)) {
+            idm_scope_set_destroy(&scopes);
+            IdmCallableContract extra;
+            if (!parse_callable_contract_parts(ctx, (IdmSyntax *const *)form->as.seq.items, contract_start, form->as.seq.count, &extra, err)) return false;
+            IdmCallableContract *base = &(*signatures)[i].contract;
+            bool ok = true;
+            for (size_t k = 0; ok && k < extra.sig_count; k++) {
+                if (idm_contract_sig_for(base, extra.sigs[k].arg_count)) {
+                    ok = idm_error_set(err, name->span, "duplicate signature arity %zu for '%s'", extra.sigs[k].arg_count, name->as.text);
+                    break;
+                }
+                IdmContractSig *dst = idm_contract_add_sig(base);
+                if (!dst || !idm_contract_sig_copy(dst, &extra.sigs[k])) ok = idm_error_oom(err, name->span);
+            }
+            for (size_t k = 0; ok && k < extra.quantified_count; k++) {
+                bool seen = false;
+                for (size_t q = 0; q < base->quantified_count; q++) {
+                    if (base->quantified[q] && extra.quantified[k] && strcmp(base->quantified[q], extra.quantified[k]) == 0) { seen = true; break; }
+                }
+                if (seen) continue;
+                char **nq = realloc(base->quantified, (base->quantified_count + 1u) * sizeof(*nq));
+                if (!nq) { ok = idm_error_oom(err, name->span); break; }
+                base->quantified = nq;
+                base->quantified[base->quantified_count] = idm_strdup(extra.quantified[k] ? extra.quantified[k] : "");
+                if (!base->quantified[base->quantified_count]) { ok = idm_error_oom(err, name->span); break; }
+                base->quantified_count++;
+            }
+            for (size_t k = 0; ok && k < extra.context_count; k++) {
+                bool seen = false;
+                for (size_t q = 0; q < base->context_count; q++) {
+                    const IdmConstraint *bc = &base->context[q];
+                    const IdmConstraint *ec = &extra.context[k];
+                    if (bc->kind == ec->kind && bc->trait && ec->trait && strcmp(bc->trait, ec->trait) == 0 && bc->lhs.name && ec->lhs.name && strcmp(bc->lhs.name, ec->lhs.name) == 0) { seen = true; break; }
+                }
+                if (seen) continue;
+                IdmConstraint *nc = realloc(base->context, (base->context_count + 1u) * sizeof(*nc));
+                if (!nc) { ok = idm_error_oom(err, name->span); break; }
+                base->context = nc;
+                memset(&base->context[base->context_count], 0, sizeof(base->context[base->context_count]));
+                if (!idm_constraint_copy(&base->context[base->context_count], &extra.context[k])) { ok = idm_error_oom(err, name->span); break; }
+                base->context_count++;
+            }
+            idm_callable_contract_destroy(&extra);
+            return ok;
+        }
+    }
+    if (*count == *cap) {
+        if (!idm_grow((void **)signatures, cap, sizeof(**signatures), 4u, *count + 1u)) {
+            idm_scope_set_destroy(&scopes);
+            return idm_error_oom(err, name->span);
+        }
+    }
+    BodySignature *sig = &(*signatures)[(*count)++];
+    memset(sig, 0, sizeof(*sig));
+    sig->name = name;
+    sig->scopes = scopes;
+    if (!parse_callable_contract_parts(ctx, (IdmSyntax *const *)form->as.seq.items, contract_start, form->as.seq.count, &sig->contract, err)) {
+        idm_scope_set_destroy(&sig->scopes);
+        (*count)--;
+        return false;
+    }
+    return true;
+}
+
+static bool defn_group_take_signature(DefnGroup *group, BodySignature *signatures, size_t signature_count, IdmError *err) {
+    if (group->has_contract) return true;
+    return body_signature_take_contract(group->name_syntax, &group->scopes, signatures, signature_count, &group->contract, &group->has_contract, err);
+}
+
+static bool body_signatures_all_used(const BodySignature *signatures, size_t count, IdmError *err) {
+    for (size_t i = 0; i < count; i++) {
+        if (!signatures[i].used) return idm_error_set(err, signatures[i].name->span, "signature for '%s' has no definition", signatures[i].name->as.text);
+    }
+    return true;
+}
+
+static bool body_signature_take_contract(const IdmSyntax *name, const IdmScopeSet *scopes, BodySignature *signatures, size_t signature_count, IdmCallableContract *out, bool *out_has, IdmError *err) {
+    *out_has = false;
+    memset(out, 0, sizeof(*out));
+    for (size_t i = 0; i < signature_count; i++) {
+        BodySignature *sig = &signatures[i];
+        if (strcmp(sig->name->as.text, name->as.text) != 0 || !idm_scope_set_equal(&sig->scopes, scopes)) continue;
+        if (sig->used) return idm_error_set(err, name->span, "duplicate signature use for '%s'", name->as.text);
+        if (!idm_callable_contract_copy(out, &sig->contract)) return idm_error_oom(err, name->span);
+        sig->used = true;
+        *out_has = true;
+        return true;
+    }
+    return true;
+}
+
+static bool contract_arity_expected(const IdmCallableContract *contract, IdmArity *out) {
+    *out = idm_arity_unknown();
+    for (size_t i = 0; i < contract->sig_count; i++) {
+        if (contract->sigs[i].arg_count > UINT32_MAX) return false;
+        if (!idm_arity_add_exact(out, (uint32_t)contract->sigs[i].arg_count)) return false;
+    }
+    return true;
+}
+
+static bool defn_group_validate_contract_arity(const DefnGroup *group, IdmError *err) {
+    if (!group->has_contract) return true;
+    IdmArity expected;
+    if (!contract_arity_expected(&group->contract, &expected)) {
+        return idm_error_set(err, group->name_syntax->span, "signature for '%s' has too many arguments", group->name);
+    }
+    if (idm_arity_equal(&group->arity, &expected)) return true;
+    bool covered = true;
+    for (size_t i = 0; covered && i < group->contract.sig_count; i++) {
+        covered = idm_arity_accepts(&group->arity, (uint32_t)group->contract.sigs[i].arg_count);
+    }
+    if (covered) return true;
+    IdmBuffer want;
+    IdmBuffer got;
+    idm_buf_init(&want);
+    idm_buf_init(&got);
+    bool ok = idm_arity_describe(&want, &expected) && idm_arity_describe(&got, &group->arity);
+    if (!ok) {
+        idm_buf_destroy(&want);
+        idm_buf_destroy(&got);
+        return idm_error_oom(err, group->name_syntax->span);
+    }
+    bool set = idm_error_set(err, group->name_syntax->span, "signature for '%s' expects arity %s, definition has %s", group->name, want.data ? want.data : "?", got.data ? got.data : "?");
+    idm_buf_destroy(&want);
+    idm_buf_destroy(&got);
+    return set;
+}
+
+static bool callable_contract_apply_value_arity(const IdmSyntax *name, const IdmCallableContract *contract, IdmArity *arity, IdmError *err) {
+    if (!contract || contract->sig_count == 0) return true;
+    if (contract->sig_count == 1 && contract->sigs[0].arg_count == 0u) return true;
+    IdmArity expected;
+    if (!contract_arity_expected(contract, &expected)) {
+        return idm_error_set(err, name->span, "signature for '%s' has too many arguments", name->as.text);
+    }
+    if (arity->kind == IDM_ARITY_UNKNOWN) {
+        *arity = expected;
+        return true;
+    }
+    if (idm_arity_equal(arity, &expected)) return true;
+    bool covered = true;
+    for (size_t i = 0; covered && i < contract->sig_count; i++) {
+        covered = idm_arity_accepts(arity, (uint32_t)contract->sigs[i].arg_count);
+    }
+    if (covered) return true;
+    IdmBuffer want;
+    IdmBuffer got;
+    idm_buf_init(&want);
+    idm_buf_init(&got);
+    bool ok = idm_arity_describe(&want, &expected) && idm_arity_describe(&got, arity);
+    if (!ok) {
+        idm_buf_destroy(&want);
+        idm_buf_destroy(&got);
+        return idm_error_oom(err, name->span);
+    }
+    bool set = idm_error_set(err, name->span, "signature for '%s' expects arity %s, value has %s", name->as.text, want.data ? want.data : "?", got.data ? got.data : "?");
+    idm_buf_destroy(&want);
+    idm_buf_destroy(&got);
+    return set;
 }
 
 static bool pattern_bind_form_parts(const IdmSyntax *form, const IdmSyntax **out_pattern, size_t *out_rhs_start) {
@@ -1021,6 +1232,7 @@ static void defn_groups_destroy(DefnGroup *groups, size_t count) {
     for (size_t i = 0; i < count; i++) {
         free(groups[i].indices);
         idm_scope_set_destroy(&groups[i].scopes);
+        if (groups[i].has_contract) idm_callable_contract_destroy(&groups[i].contract);
     }
     free(groups);
 }
@@ -1048,6 +1260,8 @@ static DefnGroup *find_or_add_group(DefnGroup **groups, size_t *count, size_t *c
     group->count = 0;
     group->cap = 0;
     group->exported = false;
+    group->has_contract = false;
+    memset(&group->contract, 0, sizeof(group->contract));
     return group;
 }
 
@@ -1059,11 +1273,19 @@ static bool group_add_index(DefnGroup *group, size_t index) {
     return true;
 }
 
-bool record_package_slot(ExpandContext *ctx, const char *name, uint32_t slot_id, const IdmScopeSet *scopes, IdmArity arity, bool exported) {
+bool record_package_slot(ExpandContext *ctx, const char *name, uint32_t slot_id, const IdmScopeSet *scopes, IdmArity arity, const IdmCallableContract *contract, bool exported) {
     if (!ctx->in_package) return true;
     for (size_t i = 0; i < ctx->package_slot_count; i++) {
         if (ctx->package_slots[i].slot == slot_id && strcmp(ctx->package_slots[i].name, name) == 0) {
             if (arity.kind != IDM_ARITY_UNKNOWN) ctx->package_slots[i].arity = arity;
+            if (contract) {
+                if (ctx->package_slots[i].has_contract) {
+                    idm_callable_contract_destroy(&ctx->package_slots[i].contract);
+                    ctx->package_slots[i].has_contract = false;
+                }
+                if (!idm_callable_contract_copy(&ctx->package_slots[i].contract, contract)) return false;
+                ctx->package_slots[i].has_contract = true;
+            }
             if (exported) ctx->package_slots[i].exported = true;
             return true;
         }
@@ -1076,6 +1298,16 @@ bool record_package_slot(ExpandContext *ctx, const char *name, uint32_t slot_id,
     if (!entry->name) return false;
     entry->slot = slot_id;
     entry->arity = arity;
+    entry->has_contract = false;
+    memset(&entry->contract, 0, sizeof(entry->contract));
+    if (contract) {
+        if (!idm_callable_contract_copy(&entry->contract, contract)) {
+            free(entry->name);
+            entry->name = NULL;
+            return false;
+        }
+        entry->has_contract = true;
+    }
     entry->exported = exported;
     if (!idm_scope_set_copy(&entry->scopes, scopes)) {
         free(entry->name);
@@ -1100,18 +1332,22 @@ static bool body_existing_env_binding(ExpandContext *ctx, const char *name, cons
     return false;
 }
 
-static bool body_env_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, bool reuse_existing, uint32_t *out_id, bool *out_created, IdmError *err) {
+static bool body_env_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, const IdmCallableContract *contract, bool reuse_existing, uint32_t *out_id, bool *out_created, IdmError *err) {
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return false;
     const IdmBinding *existing = NULL;
     if (reuse_existing && body_existing_env_binding(ctx, name, &scopes, &existing)) {
         if (out_id) *out_id = existing->payload;
         if (out_created) *out_created = false;
+        bool ok = true;
+        if (contract) ok = idm_binding_table_set_contract(&ctx->bindings, existing->id, contract);
         idm_scope_set_destroy(&scopes);
-        return true;
+        return ok || idm_error_oom(err, name_syntax->span);
     }
     uint32_t id = ctx->env_slot_seq++;
-    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ENV, &scopes, id, IDM_FRAME_ENV, arity, NULL);
+    IdmBindingId binding_id = 0;
+    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ENV, &scopes, id, IDM_FRAME_ENV, arity, &binding_id);
+    if (ok && contract) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, contract);
     idm_scope_set_destroy(&scopes);
     if (!ok) return idm_error_oom(err, name_syntax->span);
     if (out_id) *out_id = id;
@@ -1128,6 +1364,7 @@ static void body_recs_destroy(BodyRec *recs, size_t count) {
             free(recs[i].pattern_slots);
             free(recs[i].pattern_bindings);
         }
+        if (recs[i].kind == BODY_REC_BIND && recs[i].bind_has_contract) idm_callable_contract_destroy(&recs[i].bind_contract);
         idm_core_free(recs[i].core);
     }
     free(recs);
@@ -1194,6 +1431,20 @@ static bool rhs_callable_value_binding_info(ExpandContext *ctx, IdmSyntax *const
     return false;
 }
 
+static IdmCore *expand_value_rhs(ExpandContext *ctx, const BodyRec *rec, IdmError *err) {
+    IdmSyntax *const *items = rec->form->as.seq.items;
+    size_t end = rec->form->as.seq.count;
+    if (rec->bind_has_contract && rec->rhs_start < end && syn_is_word(items[rec->rhs_start], "fn")) {
+        return expand_function_literal_with_contract(ctx, "<lambda>", items[rec->rhs_start], items, rec->rhs_start + 1u, end, &rec->bind_contract, err);
+    }
+    return expand_parts(ctx, items, rec->rhs_start, end, err);
+}
+
+static bool infer_bind_value_contract(ExpandContext *ctx, BodyRec *rec, IdmError *err) {
+    if (rec->bind_has_contract || !rec->core) return true;
+    return expand_typecheck_infer_scheme(ctx, rec->core, rec->bind_name->as.text, &rec->bind_contract, &rec->bind_has_contract, err);
+}
+
 static bool pattern_bind_infos_walk(ExpandContext *ctx, const IdmSyntax *pattern, const IdmSyntax *rhs, CallableBindingInfo *bindings, size_t count, size_t *index, IdmError *err) {
     if (pattern->kind == IDM_SYN_WORD) {
         if (strcmp(pattern->as.text, "_") != 0 && *index < count) {
@@ -1226,31 +1477,34 @@ static size_t core_callable_capture_count(const IdmCore *core) {
     return 0;
 }
 
-static bool update_existing_env_binding(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, uint32_t slot, IdmArity arity) {
+static bool update_existing_env_binding(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, uint32_t slot, IdmArity arity, const IdmCallableContract *contract) {
     for (size_t i = 0; i < ctx->bindings.count; i++) {
         IdmBinding *binding = &ctx->bindings.items[i];
         if (binding->kind != IDM_BIND_ENV || binding->space != IDM_BIND_SPACE_DEFAULT || binding->payload != slot) continue;
         if (strcmp(binding->name, name) != 0 || !idm_scope_set_equal(&binding->scopes, scopes)) continue;
         binding->arity = arity;
+        if (contract && !idm_binding_table_set_contract(&ctx->bindings, binding->id, contract)) return false;
         return true;
     }
     return false;
 }
 
-static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, uint32_t slot, IdmArity arity, IdmError *err) {
+static bool push_bind_binder(ExpandContext *ctx, const IdmSyntax *name_syntax, uint32_t slot, IdmArity arity, const IdmCallableContract *contract, IdmError *err) {
     bool env_bind = body_bind_is_env(ctx);
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return false;
     const IdmBinding *existing = NULL;
     if (env_bind && body_existing_env_binding(ctx, name_syntax->as.text, &scopes, &existing)) {
         bool ok = existing->payload == slot;
-        if (ok) ok = update_existing_env_binding(ctx, name_syntax->as.text, &scopes, slot, arity);
-        if (ok && ctx->in_package) ok = record_package_slot(ctx, name_syntax->as.text, slot, &scopes, arity, false);
+        if (ok) ok = update_existing_env_binding(ctx, name_syntax->as.text, &scopes, slot, arity, contract);
+        if (ok && ctx->in_package) ok = record_package_slot(ctx, name_syntax->as.text, slot, &scopes, arity, contract, false);
         idm_scope_set_destroy(&scopes);
         return ok || idm_error_oom(err, name_syntax->span);
     }
-    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, env_bind ? IDM_BIND_ENV : IDM_BIND_LOCAL, &scopes, slot, env_bind ? IDM_FRAME_ENV : ctx->frame, arity, NULL);
-    if (ok && env_bind && ctx->in_package) ok = record_package_slot(ctx, name_syntax->as.text, slot, &scopes, arity, false);
+    IdmBindingId binding_id = 0;
+    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, env_bind ? IDM_BIND_ENV : IDM_BIND_LOCAL, &scopes, slot, env_bind ? IDM_FRAME_ENV : ctx->frame, arity, &binding_id);
+    if (ok && contract) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, contract);
+    if (ok && env_bind && ctx->in_package) ok = record_package_slot(ctx, name_syntax->as.text, slot, &scopes, arity, contract, false);
     idm_scope_set_destroy(&scopes);
     return ok || idm_error_oom(err, name_syntax->span);
 }
@@ -1459,6 +1713,7 @@ typedef enum {
     BODY_DECL_CORE_GRAMMAR,
     BODY_DECL_GRAMMAR,
     BODY_DECL_CORE_READER,
+    BODY_DECL_TYPE,
     BODY_DECL_RECORD,
     BODY_DECL_TRAIT,
     BODY_DECL_IMPLEMENT,
@@ -1501,7 +1756,8 @@ static const BodyDeclDesc BODY_DECLS[] = {
     { "core-grammar", BODY_DECL_CORE_GRAMMAR, 4, BODY_DECL_BOUNDARY | BODY_DECL_EXPORT_RANK, boundary_core_grammar_decl },
     { "grammar", BODY_DECL_GRAMMAR, 4, BODY_DECL_BOUNDARY | BODY_DECL_EXPORT_BOUNDARY | BODY_DECL_EXPORT_RANK, boundary_surface_grammar_decl },
     { "core-reader", BODY_DECL_CORE_READER, 4, BODY_DECL_BOUNDARY | BODY_DECL_EXPORT_RANK, boundary_core_reader_decl },
-    { "record", BODY_DECL_RECORD, 5, BODY_DECL_BOUNDARY | BODY_DECL_EXPORT_BOUNDARY | BODY_DECL_EXPORT_RANK, expand_record_decl },
+    { "type", BODY_DECL_TYPE, 5, BODY_DECL_BOUNDARY | BODY_DECL_EXPORT_BOUNDARY | BODY_DECL_EXPORT_RANK, expand_type_decl },
+    { "record", BODY_DECL_RECORD, 6, BODY_DECL_BOUNDARY | BODY_DECL_EXPORT_BOUNDARY | BODY_DECL_EXPORT_RANK, expand_record_decl },
     { "trait", BODY_DECL_TRAIT, 6, BODY_DECL_BOUNDARY | BODY_DECL_EXPORT_BOUNDARY | BODY_DECL_EXPORT_RANK, expand_trait_decl },
     { "implement", BODY_DECL_IMPLEMENT, 7, BODY_DECL_BOUNDARY, expand_implement_trait_decl },
     { "method", BODY_DECL_METHOD, 10, BODY_DECL_BOUNDARY, expand_method_decl },
@@ -1568,12 +1824,12 @@ static bool body_eval_for_syntax(ExpandContext *ctx, const IdmSyntax *form, cons
     return ran;
 }
 
-static bool package_note_value_slot(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t slot, IdmArity arity, bool exported, IdmError *err) {
+static bool package_note_value_slot(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t slot, IdmArity arity, const IdmCallableContract *contract, bool exported, IdmError *err) {
     if (!ctx->in_package || ctx->frame != IDM_FRAME_TOP) return true;
     IdmScopeSet scopes;
     idm_scope_set_init(&scopes);
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return idm_error_oom(err, name_syntax->span);
-    bool ok = record_package_slot(ctx, name, slot, &scopes, arity, exported);
+    bool ok = record_package_slot(ctx, name, slot, &scopes, arity, contract, exported);
     idm_scope_set_destroy(&scopes);
     return ok || idm_error_oom(err, name_syntax->span);
 }
@@ -1582,13 +1838,24 @@ static bool package_prepare_values(ExpandContext *ctx, IdmSyntax **work, size_t 
     DefnGroup *groups = NULL;
     size_t group_count = 0;
     size_t group_cap = 0;
+    BodySignature *signatures = NULL;
+    size_t signature_count = 0;
+    size_t signature_cap = 0;
     bool ok = true;
     for (size_t i = 0; i < work_count && ok; i++) {
+        if (signature_form_parts(work[i], NULL, NULL)) {
+            ok = body_signature_add(ctx, &signatures, &signature_count, &signature_cap, work[i], err);
+            continue;
+        }
         const IdmSyntax *def_name = NULL;
         size_t ignored_start = 0;
         bool exported = false;
         if (!defn_form_parts(work[i], &def_name, &ignored_start, &exported)) continue;
         DefnGroup *group = find_or_add_group(&groups, &group_count, &group_cap, def_name);
+        if (group && group->count == 0 && !defn_group_take_signature(group, signatures, signature_count, err)) {
+            ok = false;
+            break;
+        }
         if (!group || !group_add_index(group, i)) {
             ok = idm_error_oom(err, work[i]->span);
             break;
@@ -1600,28 +1867,59 @@ static bool package_prepare_values(ExpandContext *ctx, IdmSyntax **work, size_t 
             ok = false;
             break;
         }
+        if (!defn_group_validate_contract_arity(&groups[i], err)) {
+            ok = false;
+            break;
+        }
         bool created = false;
-        ok = body_env_def_binder_with_arity(ctx, groups[i].name, groups[i].name_syntax, groups[i].arity, true, &groups[i].slot, &created, err);
+        ok = body_env_def_binder_with_arity(ctx, groups[i].name, groups[i].name_syntax, groups[i].arity, groups[i].has_contract ? &groups[i].contract : NULL, true, &groups[i].slot, &created, err);
         if (!ok) break;
         if (created) {
             *changed = true;
         }
-        ok = package_note_value_slot(ctx, groups[i].name, groups[i].name_syntax, groups[i].slot, groups[i].arity, groups[i].exported, err);
+        ok = package_note_value_slot(ctx, groups[i].name, groups[i].name_syntax, groups[i].slot, groups[i].arity, groups[i].has_contract ? &groups[i].contract : NULL, groups[i].exported, err);
     }
     for (size_t i = 0; i < work_count && ok; i++) {
         const IdmSyntax *bind_name = NULL;
         size_t rhs_start = 0;
         if (!bind_form_parts(work[i], &bind_name, &rhs_start)) continue;
-        (void)rhs_start;
+        IdmArity bind_arity = idm_arity_unknown();
+        if (!rhs_callable_value_binding_info(ctx, work[i]->as.seq.items, rhs_start, work[i]->as.seq.count, &bind_arity, err) &&
+            err && err->present) {
+            ok = false;
+            break;
+        }
+        IdmCallableContract contract;
+        bool has_contract = false;
+        IdmScopeSet scopes;
+        idm_scope_set_init(&scopes);
+        if (!binder_scopes_pruned(ctx, bind_name, &scopes)) {
+            ok = idm_error_oom(err, bind_name->span);
+            break;
+        }
+        ok = body_signature_take_contract(bind_name, &scopes, signatures, signature_count, &contract, &has_contract, err);
+        idm_scope_set_destroy(&scopes);
+        if (!ok) break;
+        if (has_contract && !callable_contract_apply_value_arity(bind_name, &contract, &bind_arity, err)) {
+            idm_callable_contract_destroy(&contract);
+            ok = false;
+            break;
+        }
         uint32_t slot = 0;
         bool created = false;
-        ok = body_env_def_binder_with_arity(ctx, bind_name->as.text, bind_name, idm_arity_unknown(), true, &slot, &created, err);
-        if (!ok) break;
+        ok = body_env_def_binder_with_arity(ctx, bind_name->as.text, bind_name, bind_arity, has_contract ? &contract : NULL, true, &slot, &created, err);
+        if (!ok) {
+            if (has_contract) idm_callable_contract_destroy(&contract);
+            break;
+        }
         if (created) {
             *changed = true;
         }
-        ok = package_note_value_slot(ctx, bind_name->as.text, bind_name, slot, idm_arity_unknown(), false, err);
+        ok = package_note_value_slot(ctx, bind_name->as.text, bind_name, slot, bind_arity, has_contract ? &contract : NULL, false, err);
+        if (has_contract) idm_callable_contract_destroy(&contract);
     }
+    if (ok) ok = body_signatures_all_used(signatures, signature_count, err);
+    body_signatures_destroy(signatures, signature_count);
     defn_groups_destroy(groups, group_count);
     return ok;
 }
@@ -1629,6 +1927,7 @@ static bool package_prepare_values(ExpandContext *ctx, IdmSyntax **work, size_t 
 static int package_work_rank(const IdmSyntax *form) {
     const BodyDeclDesc *desc = body_decl_form(form, BODY_DECL_EXPORT_RANK);
     if (desc) return desc->rank;
+    if (signature_form_parts(form, NULL, NULL)) return 8;
     if (bind_form_parts(form, &(const IdmSyntax *){NULL}, &(size_t){0})) return 8;
     const char *definition_head = NULL;
     if (definition_like_form(form, &definition_head) && strcmp(definition_head, "defmacro") != 0) return 9;
@@ -1993,7 +2292,7 @@ static bool package_register_defmacro_at(ExpandContext *ctx, IdmSyntax **work, s
 static bool package_expand_macro_at(ExpandContext *ctx, IdmSyntax ***work, size_t *work_count, size_t *work_cap, IdmSyntax ***owned, size_t *owned_count, size_t *owned_cap, IdmScopeId package_scope, size_t index, bool *expanded_any, IdmError *err) {
     IdmSyntax *form = (*work)[index];
     if (!syn_is_form(form, "%-expr") || form->as.seq.count < 2u || form->as.seq.items[1]->kind != IDM_SYN_WORD) return true;
-    if (bind_form_parts(form, &(const IdmSyntax *){NULL}, &(size_t){0}) || definition_like_form(form, &(const char *){NULL}) || body_decl_form(form, BODY_DECL_EXPORT_BOUNDARY)) return true;
+    if (signature_form_parts(form, NULL, NULL) || bind_form_parts(form, &(const IdmSyntax *){NULL}, &(size_t){0}) || definition_like_form(form, &(const char *){NULL}) || body_decl_form(form, BODY_DECL_EXPORT_BOUNDARY)) return true;
     IdmSyntax *expanded = NULL;
     if (!expand_body_macro_form_to_syntax(ctx, form, &expanded, err)) return false;
     if (!expanded) return true;
@@ -2046,6 +2345,13 @@ static bool primitive_seed_exports(const char *home) {
     return !home || strcmp(home, "regex") != 0;
 }
 
+static bool primitive_contract_for_slot(IdmPrimitive primitive, IdmArity arity, IdmCallableContract *contract, bool *has_contract, IdmError *err, IdmSpan span) {
+    *has_contract = false;
+    memset(contract, 0, sizeof(*contract));
+    if (arity.kind == IDM_ARITY_UNKNOWN || arity.min != arity.max || !idm_arity_accepts(&arity, arity.min)) return true;
+    return idm_primitive_contract(primitive, arity.min, contract, has_contract, err, span);
+}
+
 static bool seed_virtual_package_primitives(ExpandContext *ctx, IdmSyntax *const *work, size_t work_count, IdmScopeId package_scope, PrimitiveSeed **out_seeds, size_t *out_count, IdmError *err) {
     *out_seeds = NULL;
     *out_count = 0;
@@ -2073,19 +2379,27 @@ static bool seed_virtual_package_primitives(ExpandContext *ctx, IdmSyntax *const
         IdmScopeSet scopes;
         idm_scope_set_init(&scopes);
         uint32_t slot = 0;
+        IdmBindingId binding_id = 0;
+        IdmCallableContract contract;
+        bool has_contract = false;
+        memset(&contract, 0, sizeof(contract));
         if (ok) ok = binder_scopes_pruned(ctx, name_syntax, &scopes);
+        if (ok) ok = primitive_contract_for_slot(primitive, arity, &contract, &has_contract, err, name_syntax->span);
         if (ok) {
             const IdmBinding *existing = NULL;
             if (body_existing_env_binding(ctx, info->name, &scopes, &existing)) {
                 slot = existing->payload;
+                binding_id = existing->id;
             } else {
                 slot = ctx->env_slot_seq++;
-                ok = idm_binding_table_add_primitive_with_arity(&ctx->bindings, info->name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ENV, &scopes, slot, IDM_FRAME_ENV, arity, (uint32_t)primitive, NULL);
+                ok = idm_binding_table_add_primitive_with_arity(&ctx->bindings, info->name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ENV, &scopes, slot, IDM_FRAME_ENV, arity, (uint32_t)primitive, &binding_id);
                 if (!ok) idm_error_oom(err, name_syntax->span);
             }
         }
-        if (ok) ok = record_package_slot(ctx, info->name, slot, &scopes, arity, primitive_seed_exports(home));
+        if (ok && has_contract) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, &contract);
+        if (ok) ok = record_package_slot(ctx, info->name, slot, &scopes, arity, has_contract ? &contract : NULL, primitive_seed_exports(home));
         if (ok) ok = primitive_seeds_push(&seeds, &seed_count, &seed_cap, info->name, primitive, arity, slot, err, name_syntax->span);
+        if (has_contract) idm_callable_contract_destroy(&contract);
         idm_scope_set_destroy(&scopes);
         idm_syn_free(name_syntax);
         if (!ok) {
@@ -2373,6 +2687,8 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         return (IdmCore *)(uintptr_t)idm_error_oom(err, items[index]->span);
     }
     const IdmScopeSet *saved_op_fallback = ctx->op_fallback;
+    uint32_t saved_body_depth = ctx->body_depth;
+    ctx->body_depth = saved_body_depth + 1u;
     ctx->op_fallback = &body_ctx_scopes;
     BodyRec *recs = NULL;
     size_t rec_count = 0;
@@ -2385,6 +2701,9 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     size_t boundary_index = 0;
     IdmScopeId definition_scope = 0;
     size_t i = 0;
+    BodySignature *signatures = NULL;
+    size_t signature_count = 0;
+    size_t signature_cap = 0;
 
     while (i < work_count && !failed && !boundary) {
         const IdmSyntax *form = work[i];
@@ -2399,6 +2718,14 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             const char *interned = idm_symbol_text(idm_intern(&ctx->rt->intern, IDM_SYMBOL_WORD, declared));
             if (!interned) { idm_error_oom(err, form->span); failed = true; break; }
             ctx->package_name = interned;
+            i++;
+            continue;
+        }
+        if (signature_form_parts(form, NULL, NULL)) {
+            if (!body_signature_add(ctx, &signatures, &signature_count, &signature_cap, form, err)) {
+                failed = true;
+                break;
+            }
             i++;
             continue;
         }
@@ -2419,12 +2746,12 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 const char *macro_name = form->as.seq.items[mbase + 1u]->as.text;
                 size_t temp_base = ctx->bindings.count;
                 for (size_t r = 0; r < rec_count && !failed; r++) {
-                    if (recs[r].kind == BODY_REC_BIND && !push_bind_binder(ctx, recs[r].bind_name, recs[r].bind_slot, recs[r].bind_arity, err)) {
+                    if (recs[r].kind == BODY_REC_BIND && !push_bind_binder(ctx, recs[r].bind_name, recs[r].bind_slot, recs[r].bind_arity, recs[r].bind_has_contract ? &recs[r].bind_contract : NULL, err)) {
                         failed = true;
                     } else if (recs[r].kind == BODY_REC_BIND_PATTERN) {
                         for (size_t n = 0; n < recs[r].pattern_name_count && !failed; n++) {
                             CallableBindingInfo info = recs[r].pattern_bindings ? recs[r].pattern_bindings[n] : (CallableBindingInfo){ idm_arity_unknown() };
-                            if (!push_bind_binder(ctx, recs[r].pattern_names[n], recs[r].pattern_slots[n], info.arity, err)) {
+                            if (!push_bind_binder(ctx, recs[r].pattern_names[n], recs[r].pattern_slots[n], info.arity, NULL, err)) {
                                 failed = true;
                             }
                         }
@@ -2484,6 +2811,11 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 bool form_export = false;
                 if (!defn_form_parts(work[j], &def_name, &ignored_start, &form_export)) break;
                 DefnGroup *group = find_or_add_group(&groups, &group_count, &group_cap, def_name);
+                if (group && group->count == 0 && !defn_group_take_signature(group, signatures, signature_count, err)) {
+                    defn_groups_destroy(groups, group_count);
+                    failed = true;
+                    break;
+                }
                 if (!group || !group_add_index(group, j)) {
                     defn_groups_destroy(groups, group_count);
                     idm_error_oom(err, work[j]->span);
@@ -2505,12 +2837,16 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     failed = true;
                     break;
                 }
+                if (!defn_group_validate_contract_arity(&groups[k], err)) {
+                    failed = true;
+                    break;
+                }
                 bool ok = true;
-                if (top_level && ctx->in_package) ok = body_env_def_binder_with_arity(ctx, groups[k].name, groups[k].name_syntax, groups[k].arity, true, &groups[k].slot, NULL, err);
-                else ok = top_level ? env_push_def_binder_with_arity(ctx, groups[k].name, groups[k].name_syntax, groups[k].arity, &groups[k].slot)
-                                    : local_push_def_binder_with_arity(ctx, groups[k].name, groups[k].name_syntax, groups[k].arity, &groups[k].slot);
+                if (top_level && ctx->in_package) ok = body_env_def_binder_with_arity(ctx, groups[k].name, groups[k].name_syntax, groups[k].arity, groups[k].has_contract ? &groups[k].contract : NULL, true, &groups[k].slot, NULL, err);
+                else ok = top_level ? env_push_def_binder_with_arity(ctx, groups[k].name, groups[k].name_syntax, groups[k].arity, groups[k].has_contract ? &groups[k].contract : NULL, &groups[k].slot)
+                                    : local_push_def_binder_with_arity(ctx, groups[k].name, groups[k].name_syntax, groups[k].arity, groups[k].has_contract ? &groups[k].contract : NULL, &groups[k].slot);
                 if (!ok) { idm_error_oom(err, form->span); failed = true; break; }
-                if (top_level && ctx->in_package && !record_package_slot(ctx, groups[k].name, groups[k].slot, &groups[k].scopes, groups[k].arity, groups[k].exported)) {
+                if (top_level && ctx->in_package && !record_package_slot(ctx, groups[k].name, groups[k].slot, &groups[k].scopes, groups[k].arity, groups[k].has_contract ? &groups[k].contract : NULL, groups[k].exported)) {
                     idm_error_oom(err, form->span);
                     failed = true;
                     break;
@@ -2563,11 +2899,35 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                 failed = true;
                 break;
             }
+            IdmScopeSet bind_scopes;
+            idm_scope_set_init(&bind_scopes);
+            if (!binder_scopes_pruned(ctx, bind_name, &bind_scopes)) {
+                idm_error_oom(err, bind_name->span);
+                failed = true;
+                break;
+            }
+            IdmCallableContract bind_contract;
+            bool bind_has_contract = false;
+            bool sig_ok = body_signature_take_contract(bind_name, &bind_scopes, signatures, signature_count, &bind_contract, &bind_has_contract, err);
+            idm_scope_set_destroy(&bind_scopes);
+            if (!sig_ok) {
+                failed = true;
+                break;
+            }
+            if (bind_has_contract && !callable_contract_apply_value_arity(bind_name, &bind_contract, &bind_arity, err)) {
+                idm_callable_contract_destroy(&bind_contract);
+                failed = true;
+                break;
+            }
             recs[rec_count].kind = BODY_REC_BIND;
             recs[rec_count].bind_name = bind_name;
             recs[rec_count].rhs_start = rhs_start;
+            recs[rec_count].bind_has_contract = bind_has_contract;
+            if (bind_has_contract) recs[rec_count].bind_contract = bind_contract;
             if (ctx->in_package && ctx->frame == IDM_FRAME_TOP) {
-                if (!body_env_def_binder_with_arity(ctx, bind_name->as.text, bind_name, bind_arity, true, &recs[rec_count].bind_slot, NULL, err)) {
+                if (!body_env_def_binder_with_arity(ctx, bind_name->as.text, bind_name, bind_arity, bind_has_contract ? &bind_contract : NULL, true, &recs[rec_count].bind_slot, NULL, err)) {
+                    if (bind_has_contract) idm_callable_contract_destroy(&bind_contract);
+                    recs[rec_count].bind_has_contract = false;
                     failed = true;
                     break;
                 }
@@ -2588,6 +2948,8 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         i++;
     }
 
+    if (!failed && !body_signatures_all_used(signatures, signature_count, err)) failed = true;
+
     bool prealloc_cells = ctx->frame != IDM_FRAME_TOP;
     if (prealloc_cells) {
         size_t group_recs = 0;
@@ -2600,7 +2962,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         if (rec->kind == BODY_REC_BIND) {
             bool saved_vc = ctx->value_context;
             ctx->value_context = true;
-            rec->core = expand_parts(ctx, rec->form->as.seq.items, rec->rhs_start, rec->form->as.seq.count, err);
+            rec->core = expand_value_rhs(ctx, rec, err);
             ctx->value_context = saved_vc;
             if (!rec->core) { failed = true; break; }
             rec->bind_arity = core_callable_arity(rec->core);
@@ -2613,7 +2975,19 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     break;
                 }
             }
-            if (!push_bind_binder(ctx, rec->bind_name, rec->bind_slot, rec->bind_arity, err)) {
+            if (rec->bind_has_contract && !callable_contract_apply_value_arity(rec->bind_name, &rec->bind_contract, &rec->bind_arity, err)) {
+                failed = true;
+                break;
+            }
+            if (!infer_bind_value_contract(ctx, rec, err)) {
+                failed = true;
+                break;
+            }
+            if (ctx->frame == IDM_FRAME_TOP && !expand_typecheck_value(ctx, rec->bind_name->as.text, rec->core, &rec->bind_contract, &rec->bind_has_contract, err)) {
+                failed = true;
+                break;
+            }
+            if (!push_bind_binder(ctx, rec->bind_name, rec->bind_slot, rec->bind_arity, rec->bind_has_contract ? &rec->bind_contract : NULL, err)) {
                 failed = true;
                 break;
             }
@@ -2631,7 +3005,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             if (!rec->core) { failed = true; break; }
             for (size_t n = 0; n < rec->pattern_name_count; n++) {
                 CallableBindingInfo info = rec->pattern_bindings ? rec->pattern_bindings[n] : (CallableBindingInfo){ idm_arity_unknown() };
-                if (!push_bind_binder(ctx, rec->pattern_names[n], rec->pattern_slots[n], info.arity, err)) {
+                if (!push_bind_binder(ctx, rec->pattern_names[n], rec->pattern_slots[n], info.arity, NULL, err)) {
                     failed = true;
                     break;
                 }
@@ -2643,17 +3017,39 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             if (!letrec) { idm_error_oom(err, rec->form->span); failed = true; break; }
             if (top_level) idm_core_letrec_set_env(letrec);
             else if (prealloc_cells) idm_core_letrec_set_fill_only(letrec);
+            IdmCore **values = rec->group_count == 0 ? NULL : calloc(rec->group_count, sizeof(*values));
+            if (rec->group_count != 0 && !values) {
+                idm_error_oom(err, rec->form->span);
+                idm_core_free(letrec);
+                failed = true;
+                break;
+            }
             for (size_t k = 0; k < rec->group_count; k++) {
-                IdmCore *value = expand_defn_group(ctx, &rec->groups[k], work, err);
-                if (!value || !idm_core_letrec_add(letrec, rec->groups[k].name, rec->groups[k].slot, value)) {
-                    if (value) idm_core_free(value);
+                values[k] = expand_defn_group(ctx, &rec->groups[k], work, err);
+                if (!values[k]) {
+                    idm_core_free(letrec);
+                    letrec = NULL;
+                    failed = true;
+                    break;
+                }
+            }
+            if (!failed && !expand_typecheck_defn_groups(ctx, rec->groups, values, rec->group_count, err)) {
+                idm_core_free(letrec);
+                letrec = NULL;
+                failed = true;
+            }
+            for (size_t k = 0; k < rec->group_count && !failed; k++) {
+                if (!idm_core_letrec_add(letrec, rec->groups[k].name, rec->groups[k].slot, values[k])) {
                     idm_core_free(letrec);
                     letrec = NULL;
                     if (err && !err->present) idm_error_oom(err, rec->form->span);
                     failed = true;
                     break;
                 }
+                values[k] = NULL;
             }
+            for (size_t k = 0; k < rec->group_count; k++) idm_core_free(values[k]);
+            free(values);
             rec->core = letrec;
         } else if (!rec->core) {
             rec->core = syn_is_form(rec->form, "%-expr")
@@ -2794,7 +3190,9 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
 
     ctx->def_ctx = def_ctx.prev;
     ctx->op_fallback = saved_op_fallback;
+    ctx->body_depth = saved_body_depth;
     idm_scope_set_destroy(&body_ctx_scopes);
+    body_signatures_destroy(signatures, signature_count);
     body_recs_destroy(recs, rec_count);
     for (size_t o = 0; o < owned_count; o++) idm_syn_free(owned[o]);
     free(owned);
@@ -2813,12 +3211,13 @@ IdmCore *expand_fn_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t sta
     return expand_function_literal(ctx, "<lambda>", items[start], items, start + 1u, end, err);
 }
 
-IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmError *err) {
+IdmCore *expand_function_literal_with_contract(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, const IdmCallableContract *contract, IdmError *err) {
     if (param_start + 1u == end && body_is_clauses(items[param_start], true)) {
-        return build_clause_fn_styled(ctx, items[param_start], items[param_start]->as.seq.count, debug_name, true, err);
+        return build_clause_fn_styled(ctx, items[param_start], items[param_start]->as.seq.count, debug_name, true, contract, err);
     }
     SavedFunctionContext saved;
     begin_function_context(ctx, &saved);
+    ctx->function_contract = contract;
 
     IdmPattern **patterns = NULL;
     uint32_t pattern_count = 0;
@@ -2856,6 +3255,10 @@ IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, con
     }
     end_function_context(ctx, &saved);
     return fn;
+}
+
+IdmCore *expand_function_literal(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmError *err) {
+    return expand_function_literal_with_contract(ctx, debug_name, head, items, param_start, end, NULL, err);
 }
 
 static bool parse_function_clause_shape(const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, bool allow_bodyless, FunctionClauseShape *out, IdmError *err) {
@@ -2942,6 +3345,72 @@ static bool parse_function_clause_shape(const IdmSyntax *head, IdmSyntax *const 
     return true;
 }
 
+static const char *guard_predicate_type(ExpandContext *ctx, const IdmCore *guard, uint32_t *out_slot) {
+    if (!guard) return NULL;
+    if (guard->kind == IDM_CORE_RECORD_IS && guard->as.record_is.value && guard->as.record_is.value->kind == IDM_CORE_ARG_REF) {
+        *out_slot = guard->as.record_is.value->as.slot_ref.slot;
+        return idm_symbol_text(guard->as.record_is.type);
+    }
+    if (guard->kind != IDM_CORE_CALL || guard->as.call.arg_count != 1) return NULL;
+    const IdmCore *arg = guard->as.call.args[0];
+    if (!arg || arg->kind != IDM_CORE_ARG_REF) return NULL;
+    const IdmCore *callee = guard->as.call.callee;
+    const char *pname = NULL;
+    if (callee) {
+        switch (callee->kind) {
+            case IDM_CORE_ARG_REF:
+            case IDM_CORE_LOCAL_REF:
+            case IDM_CORE_CAPTURE_REF:
+            case IDM_CORE_ENV_REF:
+                pname = callee->as.slot_ref.name;
+                break;
+            case IDM_CORE_PACKAGE_REF:
+                pname = callee->as.package_ref.name;
+                break;
+            default:
+                break;
+        }
+    }
+    if (!pname) return NULL;
+    size_t n = strcspn(pname, "#");
+    if (n < 2 || pname[n - 1u] != '?') return NULL;
+    static _Thread_local char base[96];
+    if (n - 1u >= sizeof(base)) return NULL;
+    memcpy(base, pname, n - 1u);
+    base[n - 1u] = '\0';
+    const TypeDef *td = type_def_lookup_name(ctx, base);
+    if (td) {
+        *out_slot = arg->as.slot_ref.slot;
+        const char *id = type_def_identity_text(td);
+        return id ? id : base;
+    }
+    if (idm_type_name_is_builtin(base)) {
+        *out_slot = arg->as.slot_ref.slot;
+        return base;
+    }
+    return NULL;
+}
+
+static bool clause_guard_refine(ExpandContext *ctx, const IdmCore *guard) {
+    uint32_t slot = 0;
+    const char *tname = guard_predicate_type(ctx, guard, &slot);
+    if (!tname) return true;
+    for (size_t i = ctx->bindings.count; i > 0; i--) {
+        IdmBinding *b = &ctx->bindings.items[i - 1u];
+        if (b->kind != IDM_BIND_ARG || b->frame_id != ctx->frame || b->payload != slot) continue;
+        if (b->has_contract) return true;
+        IdmTypeTerm con;
+        if (!idm_type_con(&con, tname)) return false;
+        IdmCallableContract contract;
+        bool ok = callable_contract_from_value_type(&con, &contract);
+        if (ok) ok = idm_binding_table_set_contract(&ctx->bindings, b->id, &contract);
+        idm_callable_contract_destroy(&contract);
+        idm_type_term_destroy(&con);
+        return ok;
+    }
+    return true;
+}
+
 static IdmCore *expand_function_clause(ExpandContext *ctx, const char *debug_name, const IdmSyntax *head, IdmSyntax *const *items, size_t param_start, size_t end, IdmPattern ***out_patterns, uint32_t *out_pattern_count, IdmPatternLocal **out_locals, uint32_t *out_local_count, IdmCore **out_guard, uint32_t *out_arity, IdmError *err) {
     FunctionClauseShape shape;
     if (!parse_function_clause_shape(head, items, param_start, end, false, &shape, err)) return NULL;
@@ -2978,6 +3447,13 @@ static IdmCore *expand_function_clause(ExpandContext *ctx, const char *debug_nam
             free(patterns);
             end_clause_context(ctx, &saved);
             return NULL;
+        }
+        if (!clause_guard_refine(ctx, guard)) {
+            idm_core_free(guard);
+            for (size_t i = 0; i < pattern_count; i++) idm_pat_free(patterns[i]);
+            free(patterns);
+            end_clause_context(ctx, &saved);
+            return (IdmCore *)(uintptr_t)idm_error_oom(err, head->span);
         }
     }
 
@@ -3081,6 +3557,7 @@ static IdmCore *expand_defn_group(ExpandContext *ctx, const DefnGroup *group, Id
     bool single = total_clauses == 1;
     SavedFunctionContext saved;
     begin_function_context(ctx, &saved);
+    ctx->function_contract = group->has_contract ? &group->contract : NULL;
     IdmCore *result = single ? NULL : idm_core_fn_multi(group->name, items[group->indices[0]]->span);
     if (!single && !result) {
         end_function_context(ctx, &saved);
@@ -3336,10 +3813,11 @@ IdmCore *expand_match_form(ExpandContext *ctx, const IdmSyntax *form, IdmError *
     return match;
 }
 
-static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body, size_t clause_end, const char *debug_name, bool defn_style, IdmError *err) {
+static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body, size_t clause_end, const char *debug_name, bool defn_style, const IdmCallableContract *contract, IdmError *err) {
     if (!syn_is_form(body, "%-body") || clause_end < 2u || body->as.seq.count < clause_end) return expand_error(err, body->span, "clause body requires at least one clause");
     SavedFunctionContext saved;
     begin_function_context(ctx, &saved);
+    ctx->function_contract = contract;
     IdmCore *multi = idm_core_fn_multi(debug_name, body->span);
     if (!multi) {
         end_function_context(ctx, &saved);
@@ -3385,7 +3863,7 @@ static IdmCore *build_clause_fn_styled(ExpandContext *ctx, const IdmSyntax *body
 }
 
 static IdmCore *build_clause_fn(ExpandContext *ctx, const IdmSyntax *body, size_t clause_end, const char *debug_name, IdmError *err) {
-    return build_clause_fn_styled(ctx, body, clause_end, debug_name, false, err);
+    return build_clause_fn_styled(ctx, body, clause_end, debug_name, false, NULL, err);
 }
 
 IdmCore *expand_receive_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {

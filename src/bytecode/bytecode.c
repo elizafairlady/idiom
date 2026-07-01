@@ -9,8 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IDM_IC_VERSION 46u
-#define IDM_IC_MIN_READ_VERSION 46u
+#define IDM_IC_VERSION 47u
+#define IDM_IC_MIN_READ_VERSION 47u
 
 static const IdmOpcodeInfo opcode_infos[IDM_OP_COUNT] = {
 #define IDM_OPCODE_INFO(name, fixed, count_index, repeat, roles, repeat_roles, reg_roles, reg_ranges, flow_kind, branch, tail) \
@@ -186,6 +186,9 @@ void idm_bc_init(IdmBytecodeModule *module) {
     module->constants = NULL;
     module->const_count = 0;
     module->const_cap = 0;
+    module->types = NULL;
+    module->type_count = 0;
+    module->type_cap = 0;
     module->functions = NULL;
     module->function_count = 0;
     module->function_cap = 0;
@@ -213,6 +216,8 @@ void idm_bc_destroy(IdmBytecodeModule *module) {
     if (!module) return;
     free(module->code);
     free(module->constants);
+    for (size_t i = 0; i < module->type_count; i++) idm_type_term_destroy(&module->types[i]);
+    free(module->types);
     for (size_t i = 0; i < module->span_file_count; i++) free(module->span_files[i]);
     free(module->span_files);
     free(module->spans);
@@ -238,6 +243,21 @@ bool idm_bc_add_const(IdmBytecodeModule *module, IdmValue value, uint32_t *out_i
     if (module->const_count > UINT32_MAX) return false;
     uint32_t index = (uint32_t)module->const_count;
     module->constants[module->const_count++] = value;
+    module_mutated(module);
+    if (out_index) *out_index = index;
+    return true;
+}
+
+bool idm_bc_add_type_term(IdmBytecodeModule *module, const IdmTypeTerm *term, uint32_t *out_index) {
+    if (!module || !term) return false;
+    if (module->type_count == module->type_cap) {
+        if (!idm_grow((void **)&module->types, &module->type_cap, sizeof(*module->types), 16u, module->type_count + 1u)) return false;
+    }
+    if (module->type_count > UINT32_MAX) return false;
+    uint32_t index = (uint32_t)module->type_count;
+    memset(&module->types[index], 0, sizeof(module->types[index]));
+    if (!idm_type_term_copy(&module->types[index], term)) return false;
+    module->type_count++;
     module_mutated(module);
     if (out_index) *out_index = index;
     return true;
@@ -663,6 +683,9 @@ static bool verify_reference_role(const IdmBytecodeModule *module, const IdmBcIn
         case 'c':
             if (word < module->const_count) return true;
             return idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", instr->info->name, word);
+        case 'T':
+            if (word == UINT32_MAX || word < module->type_count) return true;
+            return idm_error_set(err, idm_span_unknown(NULL), "%s type %u out of bounds", instr->info->name, word);
         case 'f':
             if (word < module->function_count) return true;
             return idm_error_set(err, idm_span_unknown(NULL), "%s function %u out of bounds", instr->info->name, word);
@@ -917,6 +940,8 @@ static bool append_disasm_operand(IdmBuffer *buf, const IdmBytecodeModule *modul
     switch (role) {
         case 'c':
             return idm_buf_appendf(buf, " const=%u", word);
+        case 'T':
+            return word == UINT32_MAX ? idm_buf_append(buf, " type=_") : idm_buf_appendf(buf, " type=%u", word);
         case 'f':
             return append_function_ref(buf, module, word);
         case 'j':
@@ -1180,6 +1205,8 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
     if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, IDM_IC_VERSION)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u32(out, (uint32_t)module->const_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->const_count; i++) if (!serialize_value(out, module->constants[i], 0u, err)) return false;
+    if (!idm_buf_put_u32(out, (uint32_t)module->type_count)) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < module->type_count; i++) if (!idm_type_term_serialize(out, &module->types[i], err)) return false;
     if (!idm_buf_put_u32(out, (uint32_t)module->function_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->function_count; i++) {
         const IdmBcFunction *f = &module->functions[i];
@@ -1221,6 +1248,7 @@ bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError 
         }
     }
     idm_profile_count("bytecode.serialize.constants", (uint64_t)module->const_count);
+    idm_profile_count("bytecode.serialize.types", (uint64_t)module->type_count);
     idm_profile_count("bytecode.serialize.functions", (uint64_t)module->function_count);
     idm_profile_count("bytecode.serialize.code_words", (uint64_t)module->code_count);
     idm_profile_scope_end(&prof);
@@ -1572,6 +1600,14 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
         if (!deserialize_value(rt, &r, &v, 0u, err)) { idm_bc_destroy(module); return false; }
         if (!idm_bc_add_const(module, v, NULL)) { idm_bc_destroy(module); return idm_error_oom(err, idm_span_unknown(NULL)); }
     }
+    uint32_t type_count = idm_rd_u32(&r);
+    for (uint32_t i = 0; i < type_count && r.ok; i++) {
+        IdmTypeTerm term;
+        if (!idm_type_term_deserialize(&r, &term, err)) { idm_bc_destroy(module); return false; }
+        bool added = idm_bc_add_type_term(module, &term, NULL);
+        idm_type_term_destroy(&term);
+        if (!added) { idm_bc_destroy(module); return idm_error_oom(err, idm_span_unknown(NULL)); }
+    }
     uint32_t function_count = idm_rd_u32(&r);
     uint32_t *deferred_guards = NULL;
     if (r.ok && function_count != 0) {
@@ -1720,6 +1756,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     if (!r.ok) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic module"); }
     if (!idm_bc_intern_literals(rt, module, err)) { idm_bc_destroy(module); return false; }
     idm_profile_count("bytecode.deserialize.bytes", (uint64_t)len);
+    idm_profile_count("bytecode.deserialize.types", (uint64_t)module->type_count);
     idm_profile_count("bytecode.deserialize.functions", (uint64_t)module->function_count);
     idm_profile_count("bytecode.deserialize.code_words", (uint64_t)module->code_count);
     idm_profile_scope_end(&prof);
@@ -1732,7 +1769,7 @@ static bool reloc_add(uint32_t value, uint32_t delta, const char *what, uint32_t
     return true;
 }
 
-static bool reloc_word(uint32_t word, char role, uint32_t const_off, uint32_t fn_off, uint32_t code_off, uint32_t *out, IdmError *err) {
+static bool reloc_word(uint32_t word, char role, uint32_t const_off, uint32_t type_off, uint32_t fn_off, uint32_t code_off, uint32_t *out, IdmError *err) {
     switch (role) {
         case 'r':
         case 'm':
@@ -1744,6 +1781,12 @@ static bool reloc_word(uint32_t word, char role, uint32_t const_off, uint32_t fn
             return true;
         case 'c':
             return reloc_add(word, const_off, "constant", out, err);
+        case 'T':
+            if (word == UINT32_MAX) {
+                *out = word;
+                return true;
+            }
+            return reloc_add(word, type_off, "type", out, err);
         case 'f':
             return reloc_add(word, fn_off, "function", out, err);
         case 'j':
@@ -1753,14 +1796,14 @@ static bool reloc_word(uint32_t word, char role, uint32_t const_off, uint32_t fn
     }
 }
 
-static bool reloc_emit_word(IdmBytecodeModule *dst, uint32_t word, char role, uint32_t const_off, uint32_t fn_off, uint32_t code_off, IdmError *err) {
+static bool reloc_emit_word(IdmBytecodeModule *dst, uint32_t word, char role, uint32_t const_off, uint32_t type_off, uint32_t fn_off, uint32_t code_off, IdmError *err) {
     uint32_t relocated = 0;
-    if (!reloc_word(word, role, const_off, fn_off, code_off, &relocated, err)) return false;
+    if (!reloc_word(word, role, const_off, type_off, fn_off, code_off, &relocated, err)) return false;
     if (!idm_bc_emit(dst, relocated, NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
     return true;
 }
 
-static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t const_off, uint32_t fn_off, uint32_t code_off, IdmError *err) {
+static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t const_off, uint32_t type_off, uint32_t fn_off, uint32_t code_off, IdmError *err) {
     size_t ip = 0;
     while (ip < src->code_count) {
         size_t offset = ip;
@@ -1774,12 +1817,12 @@ static bool reloc_emit(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uin
         for (uint8_t i = 0; i < info->fixed_operands; i++) {
             uint32_t word = src->code[ip++];
             if (info->count_operand == i) repeat_count = word;
-            if (!reloc_emit_word(dst, word, opcode_role_at(info->operand_roles, i), const_off, fn_off, code_off, err)) return false;
+            if (!reloc_emit_word(dst, word, opcode_role_at(info->operand_roles, i), const_off, type_off, fn_off, code_off, err)) return false;
         }
         if (info->count_operand != IDM_OPCODE_NO_COUNT) {
             for (uint32_t item = 0; item < repeat_count; item++) {
                 for (uint8_t part = 0; part < info->repeat_width; part++) {
-                    if (!reloc_emit_word(dst, src->code[ip++], opcode_role_at(info->repeat_roles, part), const_off, fn_off, code_off, err)) return false;
+                    if (!reloc_emit_word(dst, src->code[ip++], opcode_role_at(info->repeat_roles, part), const_off, type_off, fn_off, code_off, err)) return false;
                 }
             }
         }
@@ -1825,6 +1868,7 @@ bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t 
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "bytecode.link");
     uint32_t const_off = (uint32_t)dst->const_count;
+    uint32_t type_off = (uint32_t)dst->type_count;
     uint32_t fn_off = (uint32_t)dst->function_count;
     uint32_t code_off = (uint32_t)dst->code_count;
     IdmProfileScope spans_prof;
@@ -1835,6 +1879,10 @@ bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t 
     idm_profile_scope_begin(&consts_prof, "bytecode.link.constants_phase");
     for (size_t i = 0; i < src->const_count; i++) if (!idm_bc_add_const(dst, src->constants[i], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
     idm_profile_scope_end(&consts_prof);
+    IdmProfileScope types_prof;
+    idm_profile_scope_begin(&types_prof, "bytecode.link.types_phase");
+    for (size_t i = 0; i < src->type_count; i++) if (!idm_bc_add_type_term(dst, &src->types[i], NULL)) return idm_error_oom(err, idm_span_unknown(NULL));
+    idm_profile_scope_end(&types_prof);
     IdmProfileScope functions_prof;
     idm_profile_scope_begin(&functions_prof, "bytecode.link.functions_phase");
     for (size_t i = 0; i < src->function_count; i++) {
@@ -1881,7 +1929,7 @@ bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t 
     idm_profile_scope_end(&guards_prof);
     IdmProfileScope reloc_prof;
     idm_profile_scope_begin(&reloc_prof, "bytecode.link.reloc_emit");
-    if (!reloc_emit(dst, src, const_off, fn_off, code_off, err)) return false;
+    if (!reloc_emit(dst, src, const_off, type_off, fn_off, code_off, err)) return false;
     idm_profile_scope_end(&reloc_prof);
     IdmProfileScope names_prof;
     idm_profile_scope_begin(&names_prof, "bytecode.link.name_notes");
@@ -1891,6 +1939,7 @@ bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t 
     if (out_fn_offset) *out_fn_offset = fn_off;
     if (out_code_offset) *out_code_offset = code_off;
     idm_profile_count("bytecode.link.constants", (uint64_t)src->const_count);
+    idm_profile_count("bytecode.link.types", (uint64_t)src->type_count);
     idm_profile_count("bytecode.link.functions", (uint64_t)src->function_count);
     idm_profile_count("bytecode.link.code_words", (uint64_t)src->code_count);
     idm_profile_scope_end(&prof);

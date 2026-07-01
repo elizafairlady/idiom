@@ -113,6 +113,7 @@ defn run-filtered-repeat do
   end
 end
 
+spec run-test-suite-with-timeout :: Enum a => string a int -> atom
 export defn run-test-suite-with-timeout suite-name tests timeout-ms do
   v? = verbose?
   start = time-ms
@@ -173,6 +174,7 @@ defn run-bench-all do
   end
 end
 
+spec run-bench-suite :: Enum a => string a -> atom
 export defn run-bench-suite suite-name items do
   total = run-bench-all suite-name (items.to-list) (bench-count) 0
   cond (verbose?) (println "ok  #{total} benchmarks") :nil

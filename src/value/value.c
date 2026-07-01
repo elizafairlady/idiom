@@ -518,6 +518,27 @@ static IdmBuiltinType builtin_type_from_text(const char *text) {
     return IDM_BUILTIN_TYPE_NONE;
 }
 
+bool idm_type_name_is_builtin(const char *text) {
+    return text && builtin_type_from_text(text) != IDM_BUILTIN_TYPE_NONE;
+}
+
+size_t idm_builtin_overtype_members(const char *parent, const char *const **out_names) {
+    static const char *const list_members[] = { "empty-list", "pair" };
+    static const char *const int_members[] = { "fixnum", "bignum" };
+    *out_names = NULL;
+    if (!parent) return 0;
+    switch (builtin_type_from_text(parent)) {
+        case IDM_BUILTIN_TYPE_LIST:
+            *out_names = list_members;
+            return 2;
+        case IDM_BUILTIN_TYPE_INT:
+            *out_names = int_members;
+            return 2;
+        default:
+            return 0;
+    }
+}
+
 static bool intern_rehash(IdmIntern *intern, size_t new_count) {
     IdmSymbol **buckets = calloc(new_count, sizeof(*buckets));
     if (!buckets) return false;
@@ -1989,11 +2010,21 @@ bool idm_value_matches_builtin_type(IdmValue value, IdmBuiltinType type) {
     return false;
 }
 
+static bool idm_value_matches_type_name(IdmValue value, IdmSymbol *symbol, const char *name, bool allow_any) {
+    if (!name && symbol) name = idm_symbol_text(symbol);
+    if (!name) return false;
+    if (allow_any && strcmp(name, "Any") == 0) return true;
+    IdmBuiltinType builtin = symbol ? symbol->builtin_type : builtin_type_from_text(name);
+    if (builtin != IDM_BUILTIN_TYPE_NONE) return idm_value_matches_builtin_type(value, builtin);
+    if (idm_value_tag(value) != IDM_VAL_RECORD) return false;
+    IdmSymbol *record_type = idm_boxed_object(value)->as.record.shape->type;
+    if (symbol) return record_type == symbol;
+    const char *record_name = idm_symbol_text(record_type);
+    return record_name && strcmp(record_name, name) == 0;
+}
+
 bool idm_value_matches_type_symbol(IdmValue value, IdmSymbol *type) {
-    if (!type) return false;
-    if (type->builtin_type != IDM_BUILTIN_TYPE_NONE) return idm_value_matches_builtin_type(value, type->builtin_type);
-    IdmValueTag vt = idm_value_tag(value);
-    return vt == IDM_VAL_RECORD && idm_record_is_symbol(value, type);
+    return idm_value_matches_type_name(value, type, NULL, false);
 }
 
 bool idm_is_nil(IdmValue value) {
@@ -2877,4 +2908,22 @@ void idm_error_describe(IdmRuntime *rt, IdmValue reason, IdmBuffer *out) {
     }
     idm_buf_append(out, kind);
     if (n > 1) { idm_buf_append(out, ": "); describe_tail(out, detail, 1); }
+}
+
+bool idm_value_matches_type_term(IdmValue value, const IdmTypeTerm *term) {
+    if (!term) return false;
+    switch (term->kind) {
+        case IDM_TYPE_VAR: return true;
+        case IDM_TYPE_UNION:
+            for (size_t i = 0; i < term->arg_count; i++)
+                if (idm_value_matches_type_term(value, &term->args[i])) return true;
+            return false;
+        case IDM_TYPE_TUPLE: return idm_value_tag(value) == IDM_VAL_TUPLE;
+        case IDM_TYPE_VECTOR: return idm_value_tag(value) == IDM_VAL_VECTOR;
+        case IDM_TYPE_CON: {
+            if (!term->name) return false;
+            return idm_value_matches_type_name(value, NULL, term->name, true);
+        }
+    }
+    return false;
 }

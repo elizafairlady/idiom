@@ -46,7 +46,9 @@ LIB_SRCS := \
 	src/expand/expand_declarations.c \
 	src/expand/expand_packages.c \
 	src/expand/expand_quote.c \
-	src/expand/expand_surfaces.c
+	src/expand/expand_surfaces.c \
+	src/expand/expand_typecheck.c \
+	src/infer/infer.c
 
 CLI_SRCS := src/cli/main.c
 
@@ -60,6 +62,9 @@ UNIT_CASE_SRCS := \
 	tests/unit/intern.c \
 	tests/unit/pattern_selector.c \
 	tests/unit/primitive_registry.c \
+	tests/unit/signature_contract.c \
+	tests/unit/type_term.c \
+	tests/unit/infer.c \
 	tests/unit/reader_escape.c \
 	tests/unit/repl.c \
 	tests/unit/regex_set.c \
@@ -69,7 +74,7 @@ UNIT_CASE_SRCS := \
 UNIT_SRCS := $(UNIT_CASE_SRCS) tests/unit/runner.c
 
 LANG_TESTS := tests/lang
-PKG_TESTS := tests/pkg/bytecode_shape tests/pkg/reader_constructor_artifact tests/pkg/surface_macros
+PKG_TESTS := tests/pkg/bytecode_shape tests/pkg/cross_trait_order tests/pkg/reader_constructor_artifact tests/pkg/surface_macros
 REAL_TESTS := tests/real
 TEST_PATHS := $(LANG_TESTS) $(PKG_TESTS) $(REAL_TESTS)
 REAL_PROG := tests/real/actor_regex_port.id

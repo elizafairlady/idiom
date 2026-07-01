@@ -7,11 +7,36 @@ static void method_surface_def_destroy(MethodSurfaceDef *method);
 static void typed_entity_destroy(TypedEntity *entity);
 static void core_syntax_def_destroy(CoreSyntaxDef *core_syntax);
 static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap);
-static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity);
+static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity, const IdmCallableContract *contract);
 static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, const IdmBinding *b);
 static const IdmOperatorDef *op_lookup_capture(const ExpandContext *ctx, const IdmSyntax *syn, const char *capture);
 static const IdmBinding *resolve_surface_binding(const ExpandContext *ctx, const IdmSyntax *word, IdmBindingSpace space, IdmBindingKind kind, IdmResolveStatus *out_status);
 static void core_form_fn_free(void *data);
+
+static bool ctx_seed_builtin_types(ExpandContext *ctx) {
+    static const char *const parents[] = { "list", "int" };
+    IdmError err;
+    idm_error_init(&err);
+    for (size_t p = 0; p < sizeof(parents) / sizeof(parents[0]); p++) {
+        const char *const *member_names = NULL;
+        size_t member_count = idm_builtin_overtype_members(parents[p], &member_names);
+        if (member_count == 0) continue;
+        uint32_t index = 0;
+        TypeDef *type = typed_registry_add_type(ctx, &index, &err, idm_span_unknown(NULL));
+        if (!type) return false;
+        type->name = idm_strdup(parents[p]);
+        if (!type->name) return false;
+        if (!type_def_set_identity(ctx, type, parents[p], &err, idm_span_unknown(NULL))) return false;
+        type->exported = false;
+        type->members = calloc(member_count, sizeof(*type->members));
+        if (!type->members) return false;
+        for (size_t m = 0; m < member_count; m++) {
+            if (!idm_type_con(&type->members[m].term, member_names[m])) return false;
+            type->member_count++;
+        }
+    }
+    return true;
+}
 
 void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     memset(ctx, 0, sizeof(*ctx));
@@ -27,6 +52,7 @@ void ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     ctx->surface_phase = -1;
     ctx->unit = "<unit>";
     memcpy(ctx->unit_key, "0000000000000000", sizeof ctx->unit_key);
+    ctx->builtin_types_seeded = ctx_seed_builtin_types(ctx);
 }
 
 void ctx_set_unit(ExpandContext *ctx, const char *name, const unsigned char hash[32]) {
@@ -62,6 +88,7 @@ void hooks_restore(IdmRuntime *rt, const SavedHooks *saved) {
 
 static void capture_bindings_destroy(CaptureBinding *captures, size_t count) {
     for (size_t i = 0; i < count; i++) {
+        if (captures[i].has_contract) idm_callable_contract_destroy(&captures[i].contract);
         free(captures[i].name);
         idm_scope_set_destroy(&captures[i].scopes);
     }
@@ -144,6 +171,11 @@ void type_def_destroy(TypeDef *type) {
     if (!type) return;
     free(type->name);
     idm_scope_set_destroy(&type->scopes);
+    for (size_t i = 0; i < type->member_count; i++) idm_type_term_destroy(&type->members[i].term);
+    free(type->members);
+    for (size_t i = 0; i < type->field_count; i++) {
+        if (type->fields[i].has_contract) idm_type_term_destroy(&type->fields[i].contract);
+    }
     free(type->fields);
     memset(type, 0, sizeof(*type));
 }
@@ -344,6 +376,8 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->grammars);
     for (size_t i = 0; i < ctx->operator_count; i++) idm_operator_def_destroy(&ctx->operators[i]);
     free(ctx->operators);
+    for (size_t i = 0; i < ctx->field_selector_count; i++) free(ctx->field_selectors[i].name);
+    free(ctx->field_selectors);
     for (size_t i = 0; i < ctx->typed.entity_count; i++) typed_entity_destroy(&ctx->typed.entities[i]);
     free(ctx->typed.entities);
     for (size_t i = 0; i < ctx->typed.method_surface_count; i++) method_surface_def_destroy(&ctx->typed.method_surfaces[i]);
@@ -554,6 +588,161 @@ const char *trait_method_name_text(const TraitMethodDef *method) {
     return method && method->name ? idm_symbol_text(method->name) : NULL;
 }
 
+bool type_var_is_wildcard(const IdmTypeTerm *term) {
+    return term && term->kind == IDM_TYPE_VAR && (term->var_id == 0u || (term->name && strcmp(term->name, "_") == 0));
+}
+
+bool type_var_same(const IdmTypeTerm *a, const IdmTypeTerm *b) {
+    if (!a || !b || a->kind != IDM_TYPE_VAR || b->kind != IDM_TYPE_VAR) return false;
+    if (type_var_is_wildcard(a) || type_var_is_wildcard(b)) return true;
+    if (a->var_id != 0u || b->var_id != 0u) return a->var_id == b->var_id;
+    return a->name && b->name && strcmp(a->name, b->name) == 0;
+}
+
+static const TypeDef *typed_type_by_identity_or_name(const ExpandContext *ctx, const char *name);
+
+static bool nil_empty_list_same(const char *a, const char *b) {
+    return a && b &&
+           ((strcmp(a, "nil") == 0 && strcmp(b, "empty-list") == 0) ||
+            (strcmp(a, "empty-list") == 0 && strcmp(b, "nil") == 0));
+}
+
+bool type_name_same(const ExpandContext *ctx, const char *a, const char *b) {
+    if (!a || !b) return false;
+    if (strcmp(a, b) == 0) return true;
+    if (nil_empty_list_same(a, b)) return true;
+    IdmSymbol *as = typed_identity_lookup(ctx, a);
+    IdmSymbol *bs = typed_identity_lookup(ctx, b);
+    if (as && bs && as == bs) return true;
+    const TypeDef *ta = typed_type_by_identity_or_name(ctx, a);
+    const TypeDef *tb = typed_type_by_identity_or_name(ctx, b);
+    return ta && tb && ta == tb;
+}
+
+const TraitDef *trait_by_constraint_name(ExpandContext *ctx, const char *trait) {
+    const TraitDef *direct = typed_trait_by_identity(ctx, trait);
+    if (direct) return direct;
+    const IdmBinding *binding = NULL;
+    IdmResolveStatus status = resolve_scoped(ctx, trait, IDM_BIND_SPACE_TRAIT, &ctx->empty_scopes, NULL, &binding);
+    if (status == IDM_RESOLVE_OK && binding && binding->kind == IDM_BIND_TRAIT) return typed_trait_by_index(ctx, binding->payload);
+    const TraitDef *found = NULL;
+    size_t len = trait ? strlen(trait) : 0u;
+    for (size_t i = 0; trait && i < ctx->typed.entity_count; i++) {
+        const TypedEntity *entity = &ctx->typed.entities[i];
+        if (entity->kind != IDM_TYPED_ENTITY_TRAIT) continue;
+        const char *identity = trait_def_identity_text(&entity->as.trait);
+        if (!identity || strncmp(identity, trait, len) != 0 || identity[len] != '#') continue;
+        if (found) return NULL;
+        found = &entity->as.trait;
+    }
+    return found;
+}
+
+const char *typeclass_display_name(ExpandContext *ctx, const char *trait) {
+    const TraitDef *def = trait_by_constraint_name(ctx, trait);
+    if (!def) return trait;
+    for (size_t i = 0; i < ctx->bindings.count; i++) {
+        const IdmBinding *binding = &ctx->bindings.items[i];
+        if (binding->space == IDM_BIND_SPACE_TRAIT && binding->kind == IDM_BIND_TRAIT) {
+            const TraitDef *candidate = typed_trait_by_index(ctx, binding->payload);
+            if (candidate == def) return binding->name;
+        }
+    }
+    return trait;
+}
+
+bool typeclass_same_trait(ExpandContext *ctx, const char *a, const char *b) {
+    if (!a || !b) return false;
+    if (strcmp(a, b) == 0) return true;
+    const TraitDef *ta = trait_by_constraint_name(ctx, a);
+    const TraitDef *tb = trait_by_constraint_name(ctx, b);
+    return ta && tb && ta == tb;
+}
+
+static bool trait_requires_trait(ExpandContext *ctx, const TraitDef *source, const TraitDef *target, unsigned depth) {
+    if (!source || !target || depth > 64u) return false;
+    for (size_t i = 0; i < source->requirement_count; i++) {
+        const TraitDef *required = trait_by_constraint_name(ctx, source->requirements[i].name);
+        if (!required) continue;
+        if (required == target) return true;
+        if (trait_requires_trait(ctx, required, target, depth + 1u)) return true;
+    }
+    return false;
+}
+
+static bool typeclass_same_lhs(ExpandContext *ctx, const IdmTypeTerm *given, const IdmTypeTerm *wanted) {
+    if (!given || !wanted) return false;
+    if (given->kind == IDM_TYPE_VAR && wanted->kind == IDM_TYPE_VAR) return type_var_same(given, wanted);
+    if (given->kind == IDM_TYPE_CON && wanted->kind == IDM_TYPE_CON && type_name_same(ctx, given->name, wanted->name)) return true;
+    return idm_type_term_equal(given, wanted);
+}
+
+bool typeclass_given_matches(ExpandContext *ctx, const IdmConstraint *given, const char *trait, const IdmTypeTerm *lhs) {
+    if (!given || given->kind != IDM_CONSTR_CLASS || !trait || !given->trait || !typeclass_same_lhs(ctx, &given->lhs, lhs)) return false;
+    if (strcmp(given->trait, trait) == 0) return true;
+    const TraitDef *given_trait = trait_by_constraint_name(ctx, given->trait);
+    const TraitDef *wanted_trait = trait_by_constraint_name(ctx, trait);
+    if (!given_trait || !wanted_trait) return false;
+    return given_trait == wanted_trait || trait_requires_trait(ctx, given_trait, wanted_trait, 0u);
+}
+
+bool trait_impl_satisfies_type(const ExpandContext *ctx, const TraitDef *trait, const char *type) {
+    if (!ctx || !trait || !type) return false;
+    const char *trait_identity = trait_def_identity_text(trait);
+    if (!trait_identity) return false;
+    for (size_t m = 0; m < trait->method_count; m++) {
+        bool found = false;
+        const char *method = trait_method_name_text(&trait->methods[m]);
+        for (size_t i = 0; i < ctx->typed.method_impl_count; i++) {
+            if (method_impl_matches_identity(ctx, &ctx->typed.method_impls[i], trait_identity, method, type)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return trait->method_count != 0;
+}
+
+static const TypeDef *typed_type_by_identity_or_name(const ExpandContext *ctx, const char *name) {
+    if (!ctx || !name) return NULL;
+    for (size_t i = 0; i < ctx->typed.entity_count; i++) {
+        const TypedEntity *entity = &ctx->typed.entities[i];
+        if (entity->kind != IDM_TYPED_ENTITY_TYPE) continue;
+        const TypeDef *type = &entity->as.type;
+        const char *identity = type_def_identity_text(type);
+        if ((identity && strcmp(identity, name) == 0) || (type->name && strcmp(type->name, name) == 0)) return type;
+    }
+    return NULL;
+}
+
+const TypeDef *type_def_lookup_name(const ExpandContext *ctx, const char *name) {
+    return typed_type_by_identity_or_name(ctx, name);
+}
+
+bool trait_impl_satisfies_term(const ExpandContext *ctx, const TraitDef *trait, const IdmTypeTerm *lhs) {
+    if (!ctx || !trait || !lhs) return false;
+    if (lhs->kind == IDM_TYPE_UNION) {
+        for (size_t i = 0; i < lhs->arg_count; i++) {
+            if (!trait_impl_satisfies_term(ctx, trait, &lhs->args[i])) return false;
+        }
+        return true;
+    }
+    if (lhs->kind != IDM_TYPE_CON || !lhs->name) return false;
+    if (trait_impl_satisfies_type(ctx, trait, lhs->name)) return true;
+    const TypeDef *type = typed_type_by_identity_or_name(ctx, lhs->name);
+    if (type && type->member_count != 0) {
+        bool checked = false;
+        for (size_t i = 0; i < type->member_count; i++) {
+            if (idm_type_term_equal(&type->members[i].term, lhs)) continue;
+            checked = true;
+            if (!trait_impl_satisfies_term(ctx, trait, &type->members[i].term)) return false;
+        }
+        if (checked) return true;
+    }
+    return false;
+}
+
 bool trait_method_set_name(ExpandContext *ctx, TraitMethodDef *method, const char *name, IdmError *err, IdmSpan span) {
     if (!ctx || !method || !name) return idm_error_set(err, span, "method requires a name");
     IdmSymbol *sym = typed_atom_intern(ctx, name);
@@ -569,6 +758,7 @@ bool trait_method_matches_name(const ExpandContext *ctx, const TraitMethodDef *m
 
 void trait_method_def_destroy(TraitMethodDef *method) {
     if (!method) return;
+    if (method->has_contract) idm_callable_contract_destroy(&method->contract);
     idm_core_free(method->default_fn);
     idm_scope_set_destroy(&method->scopes);
     memset(method, 0, sizeof(*method));
@@ -599,13 +789,21 @@ bool trait_method_defs_copy(const TraitMethodDef *src, size_t count, TraitMethod
     for (size_t i = 0; i < count; i++) {
         methods[i].name = src[i].name;
         methods[i].arity = src[i].arity;
+        methods[i].has_contract = src[i].has_contract;
+        if (src[i].has_contract && !idm_callable_contract_copy(&methods[i].contract, &src[i].contract)) {
+            for (size_t j = 0; j <= i; j++) trait_method_def_destroy(&methods[j]);
+            free(methods);
+            return false;
+        }
         methods[i].has_default = src[i].has_default;
         methods[i].seen_decl = src[i].seen_decl;
         methods[i].exported = src[i].exported;
-        methods[i].dispatch_slot = src[i].dispatch_slot;
         methods[i].has_dispatch = src[i].has_dispatch;
+        methods[i].dispatch_slot = src[i].dispatch_slot;
         methods[i].default_slot = src[i].default_slot;
         methods[i].has_default_slot = src[i].has_default_slot;
+        methods[i].has_dispatch = src[i].has_dispatch;
+        methods[i].dispatch_slot = src[i].dispatch_slot;
         if (!methods[i].name || !idm_scope_set_copy(&methods[i].scopes, &src[i].scopes)) {
             for (size_t j = 0; j <= i; j++) trait_method_def_destroy(&methods[j]);
             free(methods);
@@ -628,13 +826,19 @@ bool trait_method_defs_import(ExpandContext *ctx, const IdmTraitMethodDef *src, 
             return false;
         }
         methods[i].arity = src[i].arity;
+        methods[i].has_contract = src[i].has_contract;
+        if (src[i].has_contract && !idm_callable_contract_copy(&methods[i].contract, &src[i].contract)) {
+            for (size_t j = 0; j <= i; j++) trait_method_def_destroy(&methods[j]);
+            free(methods);
+            return idm_error_oom(err, span);
+        }
         methods[i].has_default = src[i].has_default;
         methods[i].seen_decl = src[i].seen_decl;
         methods[i].exported = src[i].exported;
-        methods[i].dispatch_slot = src[i].dispatch_slot;
-        methods[i].has_dispatch = src[i].has_dispatch;
         methods[i].default_slot = src[i].default_slot;
         methods[i].has_default_slot = src[i].has_default_slot;
+        methods[i].has_dispatch = src[i].has_dispatch;
+        methods[i].dispatch_slot = src[i].dispatch_slot;
         if (!idm_scope_set_copy(&methods[i].scopes, &src[i].scopes)) {
             for (size_t j = 0; j <= i; j++) trait_method_def_destroy(&methods[j]);
             free(methods);
@@ -654,13 +858,19 @@ bool trait_method_defs_export(const TraitMethodDef *src, size_t count, IdmTraitM
         const char *name = trait_method_name_text(&src[i]);
         methods[i].name = idm_strdup(name);
         methods[i].arity = src[i].arity;
+        methods[i].has_contract = src[i].has_contract;
+        if (src[i].has_contract && !idm_callable_contract_copy(&methods[i].contract, &src[i].contract)) {
+            for (size_t j = 0; j <= i; j++) idm_trait_method_def_destroy(&methods[j]);
+            free(methods);
+            return false;
+        }
         methods[i].has_default = src[i].has_default;
         methods[i].seen_decl = src[i].seen_decl;
         methods[i].exported = src[i].exported;
-        methods[i].dispatch_slot = src[i].dispatch_slot;
-        methods[i].has_dispatch = src[i].has_dispatch;
         methods[i].default_slot = src[i].default_slot;
         methods[i].has_default_slot = src[i].has_default_slot;
+        methods[i].has_dispatch = src[i].has_dispatch;
+        methods[i].dispatch_slot = src[i].dispatch_slot;
         if (!methods[i].name || !idm_scope_set_copy(&methods[i].scopes, &src[i].scopes)) {
             for (size_t j = 0; j <= i; j++) idm_trait_method_def_destroy(&methods[j]);
             free(methods);
@@ -691,23 +901,336 @@ const char *type_field_name_text(const TypeFieldDef *field) {
     return field && field->name ? idm_symbol_text(field->name) : NULL;
 }
 
-const char *type_field_contract_text(const TypeFieldDef *field) {
-    return field && field->contract ? idm_symbol_text(field->contract) : NULL;
+const IdmTypeTerm *type_field_contract_term(const TypeFieldDef *field) {
+    return field && field->has_contract ? &field->contract : NULL;
 }
 
-bool type_field_set(ExpandContext *ctx, TypeFieldDef *field, const char *name, const char *contract, IdmError *err, IdmSpan span) {
+bool type_field_set(ExpandContext *ctx, TypeFieldDef *field, const char *name, const IdmTypeTerm *contract, IdmError *err, IdmSpan span) {
     if (!ctx || !field || !name || !*name) return idm_error_set(err, span, "record field must be a non-empty name");
     IdmSymbol *name_sym = typed_atom_intern(ctx, name);
-    IdmSymbol *contract_sym = contract ? typed_atom_intern(ctx, contract) : NULL;
-    if (!name_sym || (contract && !contract_sym)) return idm_error_oom(err, span);
+    if (!name_sym) return idm_error_oom(err, span);
     field->name = name_sym;
-    field->contract = contract_sym;
+    field->has_contract = false;
+    memset(&field->contract, 0, sizeof(field->contract));
+    if (contract) {
+        if (!idm_type_term_copy(&field->contract, contract)) return idm_error_oom(err, span);
+        field->has_contract = true;
+    }
     return true;
 }
 
 bool type_field_matches_name(const ExpandContext *ctx, const TypeFieldDef *field, const char *name) {
     IdmSymbol *sym = typed_identity_lookup(ctx, name);
     return field && field->name && sym && field->name == sym;
+}
+
+static bool syntax_is_comma(const IdmSyntax *syn) {
+    return syn && syn->kind == IDM_SYN_ATOM && strcmp(syn->as.text, "comma") == 0;
+}
+
+static bool syntax_text_is(const IdmSyntax *syn, const char *want) {
+    const char *got = surface_token_text(syn);
+    return got && strcmp(got, want) == 0;
+}
+
+static bool type_name_is_var(ExpandContext *ctx, const IdmSyntax *word) {
+    if (!word || word->kind != IDM_SYN_WORD || !word->as.text || !word->as.text[0]) return false;
+    if (strcmp(word->as.text, "_") == 0) return true;
+    IdmSymbol *sym = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, word->as.text);
+    if (sym && idm_value_builtin_type_symbol(sym)) return false;
+    IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
+    if (resolve_type_def(ctx, word, &status)) return false;
+    char ch = word->as.text[0];
+    return ch >= 'a' && ch <= 'z';
+}
+
+static bool contract_var_id(IdmCallableContract *contract, const char *name, uint32_t *out_id, IdmError *err, IdmSpan span) {
+    if (out_id) *out_id = 0u;
+    if (!name || !*name) return true;
+    if (strcmp(name, "_") == 0) return true;
+    for (size_t i = 0; i < contract->quantified_count; i++) {
+        if (strcmp(contract->quantified[i], name) == 0) {
+            if (i + 1u > UINT32_MAX) return idm_error_set(err, span, "too many quantified type variables");
+            if (out_id) *out_id = (uint32_t)(i + 1u);
+            return true;
+        }
+    }
+    if (contract->quantified_count >= UINT32_MAX) return idm_error_set(err, span, "too many quantified type variables");
+    char **items = realloc(contract->quantified, (contract->quantified_count + 1u) * sizeof(*items));
+    if (!items) return idm_error_oom(err, span);
+    contract->quantified = items;
+    contract->quantified[contract->quantified_count] = idm_strdup(name);
+    if (!contract->quantified[contract->quantified_count]) return idm_error_oom(err, span);
+    contract->quantified_count++;
+    if (out_id) *out_id = (uint32_t)contract->quantified_count;
+    return true;
+}
+
+static bool parse_type_term_range(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmCallableContract *owner, IdmTypeTerm *out, IdmError *err);
+
+static bool parse_type_atom(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, size_t *out_end, IdmCallableContract *owner, IdmTypeTerm *out, IdmError *err) {
+    memset(out, 0, sizeof(*out));
+    if (start >= end) return idm_error_set(err, idm_span_unknown(NULL), "expected type");
+    IdmSyntax *syn = items[start];
+    if (syn_is_form(syn, "%-group") || syn_is_form(syn, "%-layout-group")) {
+        if (syn->as.seq.count != 2u || !syn_is_form(syn->as.seq.items[1], "%-expr")) {
+            return idm_error_set(err, syn->span, "type group expects one expression");
+        }
+        IdmSyntax *inner = syn->as.seq.items[1];
+        if (!parse_type_term_range(ctx, inner->as.seq.items, 1u, inner->as.seq.count, owner, out, err)) return false;
+        *out_end = start + 1u;
+        return true;
+    }
+    if (syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE) {
+        IdmTypeTerm *args = syn->as.seq.count == 0 ? NULL : calloc(syn->as.seq.count, sizeof(*args));
+        if (syn->as.seq.count != 0 && !args) return idm_error_oom(err, syn->span);
+        for (size_t i = 0; i < syn->as.seq.count; i++) {
+            IdmSyntax *item = syn->as.seq.items[i];
+            IdmSyntax *one[] = { item };
+            if (!parse_type_term_range(ctx, one, 0u, 1u, owner, &args[i], err)) {
+                for (size_t j = 0; j < i; j++) idm_type_term_destroy(&args[j]);
+                free(args);
+                return false;
+            }
+        }
+        if (!idm_type_compound(out, syn->kind == IDM_SYN_VECTOR ? IDM_TYPE_VECTOR : IDM_TYPE_TUPLE, args, syn->as.seq.count)) {
+            for (size_t i = 0; i < syn->as.seq.count; i++) idm_type_term_destroy(&args[i]);
+            free(args);
+            return idm_error_oom(err, syn->span);
+        }
+        *out_end = start + 1u;
+        return true;
+    }
+    IdmSyntax *word = NULL;
+    size_t pos = start;
+    if (!try_qualified_word_at(items, start, end, &word, &pos, err)) return false;
+    if (!word) return idm_error_set(err, syn->span, "expected type name");
+    bool is_var = type_name_is_var(ctx, word);
+    uint32_t var_id = 0u;
+    bool ok = true;
+    if (is_var && owner) ok = contract_var_id(owner, word->as.text, &var_id, err, word->span);
+    const char *type_name = word->as.text;
+    if (ok && !is_var) {
+        IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
+        TypeDef *type = resolve_type_def(ctx, word, &status);
+        if (status == IDM_RESOLVE_AMBIGUOUS) {
+            IdmSpan span = word->span;
+            idm_syn_free(word);
+            return idm_error_set(err, span, "ambiguous type '%s'", type_name);
+        }
+        if (type) type_name = type_def_identity_text(type);
+    }
+    if (ok) ok = is_var ? idm_type_var(out, word->as.text, var_id, false) : idm_type_con(out, type_name);
+    IdmSpan span = word->span;
+    idm_syn_free(word);
+    if (!ok) return idm_error_oom(err, span);
+    *out_end = pos;
+    return true;
+}
+
+static bool parse_type_app(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmCallableContract *owner, IdmTypeTerm *out, IdmError *err) {
+    size_t pos = start;
+    if (!parse_type_atom(ctx, items, pos, end, &pos, owner, out, err)) return false;
+    IdmTypeTerm *args = NULL;
+    size_t arg_count = 0;
+    size_t arg_cap = 0;
+    while (pos < end) {
+        if (syntax_text_is(items[pos], "|") || syntax_text_is(items[pos], "->") || syntax_text_is(items[pos], "=>") || syntax_is_comma(items[pos])) break;
+        if (out->kind != IDM_TYPE_CON) {
+            idm_type_term_destroy(out);
+            return idm_error_set(err, items[pos]->span, "type application head must be a constructor");
+        }
+        if (arg_count == arg_cap) {
+            if (!idm_grow((void **)&args, &arg_cap, sizeof(*args), 2u, arg_count + 1u)) {
+                idm_type_term_destroy(out);
+                return idm_error_oom(err, items[pos]->span);
+            }
+        }
+        memset(&args[arg_count], 0, sizeof(args[arg_count]));
+        if (!parse_type_atom(ctx, items, pos, end, &pos, owner, &args[arg_count], err)) {
+            for (size_t i = 0; i < arg_count; i++) idm_type_term_destroy(&args[i]);
+            free(args);
+            idm_type_term_destroy(out);
+            return false;
+        }
+        arg_count++;
+    }
+    if (pos != end) {
+        for (size_t i = 0; i < arg_count; i++) idm_type_term_destroy(&args[i]);
+        free(args);
+        idm_type_term_destroy(out);
+        return idm_error_set(err, items[pos]->span, "unexpected token in type");
+    }
+    if (arg_count != 0) {
+        out->args = args;
+        out->arg_count = arg_count;
+    } else {
+        free(args);
+    }
+    return true;
+}
+
+static bool parse_type_term_range(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmCallableContract *owner, IdmTypeTerm *out, IdmError *err) {
+    memset(out, 0, sizeof(*out));
+    if (start >= end) return idm_error_set(err, idm_span_unknown(NULL), "expected type");
+    size_t parts = 1u;
+    for (size_t i = start; i < end; i++) if (syntax_text_is(items[i], "|")) parts++;
+    if (parts == 1u) return parse_type_app(ctx, items, start, end, owner, out, err);
+    IdmTypeTerm *args = calloc(parts, sizeof(*args));
+    if (!args) return idm_error_oom(err, items[start]->span);
+    size_t arg = 0;
+    size_t part_start = start;
+    for (size_t i = start; i <= end; i++) {
+        if (i != end && !syntax_text_is(items[i], "|")) continue;
+        if (i == part_start) {
+            for (size_t j = 0; j < arg; j++) idm_type_term_destroy(&args[j]);
+            free(args);
+            return idm_error_set(err, i < end ? items[i]->span : items[end - 1u]->span, "empty type union member");
+        }
+        if (!parse_type_app(ctx, items, part_start, i, owner, &args[arg], err)) {
+            for (size_t j = 0; j < arg; j++) idm_type_term_destroy(&args[j]);
+            free(args);
+            return false;
+        }
+        arg++;
+        part_start = i + 1u;
+    }
+    return idm_type_compound(out, IDM_TYPE_UNION, args, arg);
+}
+
+bool parse_type_term_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmTypeTerm *out, IdmError *err) {
+    IdmCallableContract owner;
+    memset(&owner, 0, sizeof(owner));
+    bool ok = parse_type_term_range(ctx, items, start, end, &owner, out, err);
+    idm_callable_contract_destroy(&owner);
+    return ok;
+}
+
+static bool callable_contract_add_arg(IdmCallableContract *contract, const IdmTypeTerm *arg, IdmError *err, IdmSpan span) {
+    if (contract->sig_count == 0 && !idm_contract_add_sig(contract)) return idm_error_oom(err, span);
+    IdmContractSig *sig = &contract->sigs[contract->sig_count - 1u];
+    IdmTypeTerm *items = realloc(sig->args, (sig->arg_count + 1u) * sizeof(*items));
+    if (!items) return idm_error_oom(err, span);
+    sig->args = items;
+    memset(&sig->args[sig->arg_count], 0, sizeof(sig->args[sig->arg_count]));
+    if (!idm_type_term_copy(&sig->args[sig->arg_count], arg)) return idm_error_oom(err, span);
+    sig->arg_count++;
+    return true;
+}
+
+static bool callable_contract_add_constraint(IdmCallableContract *contract, IdmConstraint *constraint, IdmError *err, IdmSpan span) {
+    IdmConstraint *items = realloc(contract->context, (contract->context_count + 1u) * sizeof(*items));
+    if (!items) return idm_error_oom(err, span);
+    contract->context = items;
+    memset(&contract->context[contract->context_count], 0, sizeof(contract->context[contract->context_count]));
+    if (!idm_constraint_copy(&contract->context[contract->context_count], constraint)) return idm_error_oom(err, span);
+    contract->context_count++;
+    return true;
+}
+
+static size_t contract_arg_field_end(IdmSyntax *const *items, size_t start, size_t end) {
+    size_t pos = start + 1u;
+    while (pos + 1u < end && syntax_text_is(items[pos], ".") && items[pos + 1u]->kind == IDM_SYN_WORD) pos += 2u;
+    return pos;
+}
+
+static bool parse_contract_arg_fields(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmCallableContract *out, IdmError *err) {
+    size_t pos = start;
+    while (pos < end) {
+        if (syntax_text_is(items[pos], "->")) return idm_error_set(err, items[pos]->span, "callable contract uses one '->' before the result type");
+        if (syntax_is_comma(items[pos])) return idm_error_set(err, items[pos]->span, "callable contract fields use spaces, not comma");
+        size_t field_end = contract_arg_field_end(items, pos, end);
+        IdmTypeTerm term;
+        if (!parse_type_term_range(ctx, items, pos, field_end, out, &term, err)) return false;
+        if (!callable_contract_add_arg(out, &term, err, items[pos]->span)) {
+            idm_type_term_destroy(&term);
+            return false;
+        }
+        idm_type_term_destroy(&term);
+        pos = field_end;
+    }
+    return true;
+}
+
+static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmCallableContract *out, IdmError *err) {
+    size_t pos = start;
+    while (pos < end) {
+        if (syntax_is_comma(items[pos])) return idm_error_set(err, items[pos]->span, "typeclass constraints use spaces, not comma");
+        IdmSyntax *trait = NULL;
+        size_t trait_end = pos;
+        if (!try_qualified_word_at(items, pos, end, &trait, &trait_end, err)) return false;
+        if (!trait) return idm_error_set(err, items[pos]->span, "typeclass constraint expects a trait name");
+        size_t arg_end = trait_end < end ? contract_arg_field_end(items, trait_end, end) : trait_end;
+        if (arg_end == trait_end) {
+            IdmSpan span = trait->span;
+            idm_syn_free(trait);
+            return idm_error_set(err, span, "typeclass constraint expects an argument type");
+        }
+        IdmConstraint constraint;
+        memset(&constraint, 0, sizeof(constraint));
+        constraint.kind = IDM_CONSTR_CLASS;
+        const char *trait_name = trait->as.text;
+        IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
+        TraitDef *trait_def = resolve_trait_def(ctx, trait, &status);
+        if (status == IDM_RESOLVE_AMBIGUOUS) {
+            IdmSpan span = trait->span;
+            idm_syn_free(trait);
+            return idm_error_set(err, span, "ambiguous trait '%s'", trait_name);
+        }
+        if (trait_def) trait_name = trait_def_identity_text(trait_def);
+        else if (ctx->trait_name && ctx->trait_key &&
+                 (strcmp(trait_name, ctx->trait_key) == 0 || strcmp(trait_name, ctx->trait_name) == 0)) {
+            trait_name = ctx->trait_name;
+        }
+        constraint.trait = idm_strdup(trait_name);
+        IdmSpan span = trait->span;
+        idm_syn_free(trait);
+        if (!constraint.trait) return idm_error_oom(err, span);
+        bool ok = parse_type_term_range(ctx, items, trait_end, arg_end, out, &constraint.lhs, err) &&
+                  callable_contract_add_constraint(out, &constraint, err, span);
+        idm_constraint_destroy(&constraint);
+        if (!ok) return false;
+        pos = arg_end;
+    }
+    return true;
+}
+
+bool parse_callable_contract_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmCallableContract *out, IdmError *err) {
+    memset(out, 0, sizeof(*out));
+    size_t body_start = start;
+    for (size_t i = start; i < end; i++) {
+        if (!syntax_text_is(items[i], "=>")) continue;
+        if (!parse_contract_context(ctx, items, start, i, out, err)) goto fail;
+        body_start = i + 1u;
+        break;
+    }
+    if (body_start >= end) {
+        idm_error_set(err, start < end ? items[start]->span : idm_span_unknown(NULL), "callable contract expects a type");
+        goto fail;
+    }
+    size_t result_arrow = SIZE_MAX;
+    for (size_t i = body_start; i < end; i++) {
+        if (syntax_text_is(items[i], "->")) result_arrow = i;
+    }
+    if (result_arrow == SIZE_MAX) {
+        if (out->sig_count == 0 && !idm_contract_add_sig(out)) { idm_error_oom(err, idm_span_unknown(NULL)); goto fail; }
+        if (!parse_type_term_range(ctx, items, body_start, end, out, &out->sigs[out->sig_count - 1u].result, err)) goto fail;
+        out->sigs[out->sig_count - 1u].has_result = true;
+        return true;
+    }
+    if (result_arrow == body_start || result_arrow + 1u >= end) {
+        idm_error_set(err, items[result_arrow]->span, "callable contract expects argument types before '->' and a result type after it");
+        goto fail;
+    }
+    if (!parse_contract_arg_fields(ctx, items, body_start, result_arrow, out, err)) goto fail;
+    if (out->sig_count == 0 && !idm_contract_add_sig(out)) { idm_error_oom(err, idm_span_unknown(NULL)); goto fail; }
+    if (!parse_type_term_range(ctx, items, result_arrow + 1u, end, out, &out->sigs[out->sig_count - 1u].result, err)) goto fail;
+    out->sigs[out->sig_count - 1u].has_result = true;
+    return true;
+
+fail:
+    idm_callable_contract_destroy(out);
+    return false;
 }
 
 bool register_operator(ExpandContext *ctx, const char *name, const char *capture, uint8_t precedence, IdmOpAssoc assoc, const char *target_name, const IdmScopeSet *scopes, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, bool exported, IdmError *err) {
@@ -826,6 +1349,26 @@ const char *method_impl_type_text(const MethodImplDef *impl) {
     return impl && impl->type ? idm_symbol_text(impl->type) : NULL;
 }
 
+const char *method_impl_trait_text(const MethodImplDef *impl) {
+    return impl && impl->trait ? idm_symbol_text(impl->trait) : NULL;
+}
+
+const char *method_impl_name_text(const MethodImplDef *impl) {
+    return impl && impl->name ? idm_symbol_text(impl->name) : NULL;
+}
+
+bool method_impl_set_identity(ExpandContext *ctx, MethodImplDef *impl, const char *trait, const char *name, const char *type, IdmError *err, IdmSpan span) {
+    if (!ctx || !impl || !trait || !name || !type) return idm_error_set(err, span, "method implementation requires trait, method, and receiver type");
+    IdmSymbol *trait_sym = typed_atom_intern(ctx, trait);
+    IdmSymbol *name_sym = typed_atom_intern(ctx, name);
+    IdmSymbol *type_sym = typed_atom_intern(ctx, type);
+    if (!trait_sym || !name_sym || !type_sym) return idm_error_oom(err, span);
+    impl->trait = trait_sym;
+    impl->name = name_sym;
+    impl->type = type_sym;
+    return true;
+}
+
 bool method_impl_set_type(ExpandContext *ctx, MethodImplDef *impl, const char *type, IdmError *err, IdmSpan span) {
     if (!ctx || !impl || !type) return idm_error_set(err, span, "method implementation requires a receiver type");
     IdmSymbol *sym = typed_atom_intern(ctx, type);
@@ -834,9 +1377,104 @@ bool method_impl_set_type(ExpandContext *ctx, MethodImplDef *impl, const char *t
     return true;
 }
 
+bool structural_head_parse(const char *head, const char **out_field, size_t *out_field_len, const char **out_type) {
+    if (!head || head[0] != '_' || head[1] != '.') return false;
+    const char *f = head + 2;
+    const char *sep = strstr(f, "::");
+    *out_field = f;
+    *out_field_len = sep ? (size_t)(sep - f) : strlen(f);
+    *out_type = sep ? sep + 2 : NULL;
+    return *out_field_len != 0;
+}
+
+static bool field_term_satisfies_name(const ExpandContext *ctx, const char *expected, const IdmTypeTerm *t) {
+    if (!expected) return true;
+    if (!t) return false;
+    if (t->kind == IDM_TYPE_UNION) {
+        for (size_t i = 0; i < t->arg_count; i++) {
+            if (!field_term_satisfies_name(ctx, expected, &t->args[i])) return false;
+        }
+        return t->arg_count != 0;
+    }
+    if (t->kind != IDM_TYPE_CON || !t->name) return false;
+    if (type_name_same(ctx, expected, t->name)) return true;
+    const TypeDef *td = typed_type_by_identity_or_name(ctx, expected);
+    if (td) {
+        for (size_t i = 0; i < td->member_count; i++) {
+            const IdmTypeTerm *m = &td->members[i].term;
+            if (m->kind == IDM_TYPE_CON && m->name && type_name_same(ctx, m->name, t->name)) return true;
+        }
+    }
+    return false;
+}
+
+bool type_satisfies_structural_head(const ExpandContext *ctx, const char *head, const char *type_name) {
+    const char *field = NULL;
+    size_t flen = 0;
+    const char *ftype = NULL;
+    if (!structural_head_parse(head, &field, &flen, &ftype)) return false;
+    const TypeDef *td = typed_type_by_identity_or_name(ctx, type_name);
+    if (!td) return false;
+    if (td->field_count) {
+        for (size_t i = 0; i < td->field_count; i++) {
+            const char *fname = td->fields[i].name ? idm_symbol_text(td->fields[i].name) : NULL;
+            if (!fname || strncmp(fname, field, flen) != 0 || fname[flen] != '\0') continue;
+            if (!ftype) return true;
+            return td->fields[i].has_contract && field_term_satisfies_name(ctx, ftype, &td->fields[i].contract);
+        }
+        return false;
+    }
+    if (td->member_count) {
+        for (size_t i = 0; i < td->member_count; i++) {
+            const IdmTypeTerm *m = &td->members[i].term;
+            if (m->kind != IDM_TYPE_CON || !m->name) return false;
+            if (!type_satisfies_structural_head(ctx, head, m->name)) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+FieldSelectorDef *field_selector_lookup(ExpandContext *ctx, const char *name) {
+    for (size_t i = 0; i < ctx->field_selector_count; i++) {
+        if (strcmp(ctx->field_selectors[i].name, name) == 0) return &ctx->field_selectors[i];
+    }
+    return NULL;
+}
+
+FieldSelectorDef *field_selector_ensure(ExpandContext *ctx, const char *name, IdmError *err) {
+    FieldSelectorDef *found = field_selector_lookup(ctx, name);
+    if (found) return found;
+    if (ctx->field_selector_count == ctx->field_selector_cap &&
+        !idm_grow((void **)&ctx->field_selectors, &ctx->field_selector_cap, sizeof(*ctx->field_selectors), 8u, ctx->field_selector_count + 1u)) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return NULL;
+    }
+    FieldSelectorDef *sel = &ctx->field_selectors[ctx->field_selector_count];
+    memset(sel, 0, sizeof(*sel));
+    sel->name = idm_strdup(name);
+    if (!sel->name) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return NULL;
+    }
+    sel->env = ctx->frame == IDM_FRAME_TOP;
+    sel->slot = sel->env ? ctx->env_slot_seq++ : ctx->next_slot++;
+    ctx->field_selector_count++;
+    return &ctx->field_selectors[ctx->field_selector_count - 1u];
+}
+
 bool method_impl_matches_type(const ExpandContext *ctx, const MethodImplDef *impl, const char *type) {
-    IdmSymbol *sym = typed_identity_lookup(ctx, type);
-    return impl && impl->type && sym && impl->type == sym;
+    if (!impl || !impl->type) return false;
+    const char *impl_type = method_impl_type_text(impl);
+    if (impl_type && impl_type[0] == '_' && impl_type[1] == '.') return type && type_satisfies_structural_head(ctx, impl_type, type);
+    return type_name_same(ctx, impl_type, type);
+}
+
+bool method_impl_matches_trait(const ExpandContext *ctx, const MethodImplDef *impl, const char *trait) {
+    IdmSymbol *sym = typed_identity_lookup(ctx, trait);
+    if (impl && impl->trait && sym) return impl->trait == sym;
+    const MethodSurfaceDef *surface = method_surface_by_index(ctx, impl ? impl->method_surface : UINT32_MAX);
+    return method_surface_matches_trait(ctx, surface, trait);
 }
 
 bool method_impl_same_type(const MethodImplDef *a, const MethodImplDef *b) {
@@ -845,8 +1483,20 @@ bool method_impl_same_type(const MethodImplDef *a, const MethodImplDef *b) {
 
 bool method_impl_matches_identity(const ExpandContext *ctx, const MethodImplDef *impl, const char *trait, const char *name, const char *type) {
     if (!impl || (type && !method_impl_matches_type(ctx, impl, type))) return false;
+    IdmSymbol *trait_sym = typed_identity_lookup(ctx, trait);
+    IdmSymbol *name_sym = typed_identity_lookup(ctx, name);
+    if (impl->trait && impl->name && trait_sym && name_sym) return impl->trait == trait_sym && impl->name == name_sym;
     const MethodSurfaceDef *surface = method_surface_by_index(ctx, impl->method_surface);
     return method_surface_matches_identity(ctx, surface, trait, name);
+}
+
+static void refresh_method_impl_surface_cache(ExpandContext *ctx, const char *trait, const char *name, uint32_t method_surface) {
+    if (!ctx || !trait || !name || method_surface == UINT32_MAX) return;
+    if (ctx->suppress_method_impl_surface_refresh) return;
+    for (size_t i = 0; i < ctx->typed.method_impl_count; i++) {
+        MethodImplDef *impl = &ctx->typed.method_impls[i];
+        if (method_impl_matches_identity(ctx, impl, trait, name, NULL)) impl->method_surface = method_surface;
+    }
 }
 
 bool install_method_surface(ExpandContext *ctx, const char *trait, const char *trait_key, const char *name, IdmArity arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, bool has_dispatch, bool dispatch_env, const char *dispatch_env_key, uint32_t dispatch_slot, IdmError *err) {
@@ -862,7 +1512,7 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *t
         }
     }
     for (size_t i = 0; i < ctx->typed.method_surface_count; i++) {
-        const MethodSurfaceDef *e = &ctx->typed.method_surfaces[i];
+        MethodSurfaceDef *e = &ctx->typed.method_surfaces[i];
         if (!method_surface_matches_identity(ctx, e, trait, name) || !idm_scope_set_equal(&e->scopes, check_scopes)) continue;
         {
             if (!idm_arity_equal(&e->arity, &arity)) {
@@ -872,7 +1522,20 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *t
             const char *e_provider_key = e->provider_key ? e->provider_key : "";
             const char *new_provider = provider ? provider : "";
             const char *new_provider_key = provider_key ? provider_key : "";
-            if (strcmp(e_provider, new_provider) == 0 && strcmp(e_provider_key, new_provider_key) == 0) return true;
+            if (strcmp(e_provider, new_provider) == 0 && strcmp(e_provider_key, new_provider_key) == 0) {
+                if (has_dispatch && !e->has_dispatch) {
+                    char *next_key = idm_strdup(dispatch_env_key ? dispatch_env_key : "");
+                    if (!next_key) return idm_error_oom(err, idm_span_unknown(NULL));
+                    free(e->dispatch_env_key);
+                    e->dispatch_env_key = next_key;
+                    e->has_dispatch = true;
+                    e->dispatch_env = dispatch_env;
+                    e->dispatch_frame = ctx->frame;
+                    e->dispatch_slot = dispatch_slot;
+                }
+                refresh_method_impl_surface_cache(ctx, trait, name, (uint32_t)i);
+                return true;
+            }
         }
     }
     if (ctx->typed.method_surface_count == ctx->typed.method_surface_cap) {
@@ -899,6 +1562,7 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *t
         method_surface_def_destroy(method);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
+    refresh_method_impl_surface_cache(ctx, trait, name, (uint32_t)ctx->typed.method_surface_count);
     ctx->typed.method_surface_count++;
     return true;
 }
@@ -929,6 +1593,7 @@ bool install_field_surfaces(ExpandContext *ctx, const TypeDef *type, uint32_t ty
         if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_FIELD, IDM_BIND_FIELD, check_scopes, type_index, ctx->frame, NULL)) {
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
+        if (!field_selector_ensure(ctx, name, err)) return false;
     }
     return true;
 }
@@ -1045,11 +1710,13 @@ bool surface_decl_scopes_pruned(ExpandContext *ctx, const IdmSyntax *name_syntax
     return scopes_pruned_for_binding(ctx, name_syntax, out);
 }
 
-bool local_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, uint32_t *out_slot) {
+bool local_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, const IdmCallableContract *contract, uint32_t *out_slot) {
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return false;
     uint32_t slot = ctx->next_slot++;
-    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_LOCAL, &scopes, slot, ctx->frame, arity, NULL);
+    IdmBindingId binding_id = 0;
+    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_LOCAL, &scopes, slot, ctx->frame, arity, &binding_id);
+    if (ok && contract) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, contract);
     idm_scope_set_destroy(&scopes);
     if (!ok) return false;
     if (out_slot) *out_slot = slot;
@@ -1057,14 +1724,16 @@ bool local_push_def_binder_with_arity(ExpandContext *ctx, const char *name, cons
 }
 
 bool local_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_slot) {
-    return local_push_def_binder_with_arity(ctx, name, name_syntax, idm_arity_unknown(), out_slot);
+    return local_push_def_binder_with_arity(ctx, name, name_syntax, idm_arity_unknown(), NULL, out_slot);
 }
 
-bool env_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, uint32_t *out_id) {
+bool env_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, const IdmCallableContract *contract, uint32_t *out_id) {
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return false;
     uint32_t id = ctx->env_slot_seq++;
-    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ENV, &scopes, id, IDM_FRAME_ENV, arity, NULL);
+    IdmBindingId binding_id = 0;
+    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ENV, &scopes, id, IDM_FRAME_ENV, arity, &binding_id);
+    if (ok && contract) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, contract);
     idm_scope_set_destroy(&scopes);
     if (!ok) return false;
     if (out_id) *out_id = id;
@@ -1072,7 +1741,7 @@ bool env_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const 
 }
 
 bool env_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_id) {
-    return env_push_def_binder_with_arity(ctx, name, name_syntax, idm_arity_unknown(), out_id);
+    return env_push_def_binder_with_arity(ctx, name, name_syntax, idm_arity_unknown(), NULL, out_id);
 }
 
 bool package_slot_ref_add(ExpandContext *ctx, const char *env_key, uint32_t slot, uint32_t *out_id) {
@@ -1108,14 +1777,42 @@ void local_pop_to(ExpandContext *ctx, size_t table_base, uint32_t next_slot) {
     ctx->next_slot = next_slot;
 }
 
-bool arg_push_slot(ExpandContext *ctx, const IdmSyntax *word, uint32_t slot) {
+bool callable_contract_from_value_type(const IdmTypeTerm *type, IdmCallableContract *out) {
+    memset(out, 0, sizeof(*out));
+    if (!type) return true;
+    IdmContractSig *sig = idm_contract_add_sig(out);
+    if (!sig) return false;
+    if (!idm_type_term_copy(&sig->result, type)) return false;
+    sig->has_result = true;
+    return true;
+}
+
+bool arg_push_slot_with_type(ExpandContext *ctx, const IdmSyntax *word, uint32_t slot, const IdmTypeTerm *type) {
     const IdmBinding *existing = resolve_default(ctx, word, NULL);
-    if (existing && existing->kind == IDM_BIND_ARG && existing->frame_id == ctx->frame) return true;
+    if (existing && existing->kind == IDM_BIND_ARG && existing->frame_id == ctx->frame) {
+        if (!type || existing->has_contract) return true;
+        IdmCallableContract contract;
+        if (!callable_contract_from_value_type(type, &contract)) return false;
+        bool ok = idm_binding_table_set_contract(&ctx->bindings, existing->id, &contract);
+        idm_callable_contract_destroy(&contract);
+        return ok;
+    }
     IdmScopeSet scopes;
     if (!syntax_scopes_copy(&scopes, word)) return false;
-    bool ok = idm_binding_table_add(&ctx->bindings, word->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ARG, &scopes, slot, ctx->frame, NULL);
+    IdmBindingId binding_id = 0;
+    bool ok = idm_binding_table_add(&ctx->bindings, word->as.text, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ARG, &scopes, slot, ctx->frame, &binding_id);
+    if (ok && type) {
+        IdmCallableContract contract;
+        ok = callable_contract_from_value_type(type, &contract);
+        if (ok) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, &contract);
+        idm_callable_contract_destroy(&contract);
+    }
     idm_scope_set_destroy(&scopes);
     return ok;
+}
+
+bool arg_push_slot(ExpandContext *ctx, const IdmSyntax *word, uint32_t slot) {
+    return arg_push_slot_with_type(ctx, word, slot, NULL);
 }
 
 static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap) {
@@ -1123,9 +1820,10 @@ static bool capture_array_grow(CaptureBinding **arr, size_t *count, size_t *cap)
     return idm_grow((void **)arr, cap, sizeof(**arr), 4u, *count + 1u);
 }
 
-static int capture_append_name(CaptureBinding **arr, size_t *count, size_t *cap, const char *name, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity) {
+static int capture_append_name(CaptureBinding **arr, size_t *count, size_t *cap, const char *name, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity, const IdmCallableContract *contract) {
     if (!capture_array_grow(arr, count, cap)) return -1;
     CaptureBinding *c = &(*arr)[*count];
+    memset(c, 0, sizeof(*c));
     c->name = idm_strdup(name);
     if (!c->name) return -1;
     if (!idm_scope_set_copy(&c->scopes, scopes)) {
@@ -1136,12 +1834,20 @@ static int capture_append_name(CaptureBinding **arr, size_t *count, size_t *cap,
     c->source_index = source_index;
     c->capture_index = (uint32_t)*count;
     c->arity = arity;
+    if (contract) {
+        if (!idm_callable_contract_copy(&c->contract, contract)) {
+            free(c->name);
+            idm_scope_set_destroy(&c->scopes);
+            return -1;
+        }
+        c->has_contract = true;
+    }
     (*count)++;
     return (int)c->capture_index;
 }
 
-static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity) {
-    return capture_append_name(arr, count, cap, word->as.text, scopes, kind, source_index, arity);
+static int capture_append(CaptureBinding **arr, size_t *count, size_t *cap, const IdmSyntax *word, const IdmScopeSet *scopes, IdmCaptureKind kind, uint32_t source_index, IdmArity arity, const IdmCallableContract *contract) {
+    return capture_append_name(arr, count, cap, word->as.text, scopes, kind, source_index, arity, contract);
 }
 
 static const CaptureBinding *capture_lookup_existing_name(const CaptureBinding *captures, size_t count, const char *name, const IdmScopeSet *scopes) {
@@ -1166,21 +1872,21 @@ static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, con
     if (!g->prev) return -1;
     if (g->prev->frame == b->frame_id) {
         IdmCaptureKind kind = b->kind == IDM_BIND_ARG ? IDM_CAP_ARG : IDM_CAP_LOCAL;
-        return capture_append(&g->captures, &g->capture_count, &g->capture_cap, word, &b->scopes, kind, b->payload, b->arity);
+        return capture_append(&g->captures, &g->capture_count, &g->capture_cap, word, &b->scopes, kind, b->payload, b->arity, b->has_contract ? &b->contract : NULL);
     }
     int parent = saved_materialize(g->prev, word, b);
     if (parent < 0) return -1;
-    return capture_append(&g->captures, &g->capture_count, &g->capture_cap, word, &b->scopes, IDM_CAP_UPVALUE, (uint32_t)parent, b->arity);
+    return capture_append(&g->captures, &g->capture_count, &g->capture_cap, word, &b->scopes, IDM_CAP_UPVALUE, (uint32_t)parent, b->arity, b->has_contract ? &b->contract : NULL);
 }
 
 static int saved_materialize_slot(SavedFunctionContext *g, const char *name, const IdmScopeSet *scopes, uint32_t frame_id, uint32_t slot, IdmArity arity) {
     const CaptureBinding *existing = capture_lookup_existing_name(g->captures, g->capture_count, name, scopes);
     if (existing) return (int)existing->capture_index;
     if (!g->prev) return -1;
-    if (g->prev->frame == frame_id) return capture_append_name(&g->captures, &g->capture_count, &g->capture_cap, name, scopes, IDM_CAP_LOCAL, slot, arity);
+    if (g->prev->frame == frame_id) return capture_append_name(&g->captures, &g->capture_count, &g->capture_cap, name, scopes, IDM_CAP_LOCAL, slot, arity, NULL);
     int parent = saved_materialize_slot(g->prev, name, scopes, frame_id, slot, arity);
     if (parent < 0) return -1;
-    return capture_append_name(&g->captures, &g->capture_count, &g->capture_cap, name, scopes, IDM_CAP_UPVALUE, (uint32_t)parent, arity);
+    return capture_append_name(&g->captures, &g->capture_count, &g->capture_cap, name, scopes, IDM_CAP_UPVALUE, (uint32_t)parent, arity, NULL);
 }
 
 bool materialize_capture(ExpandContext *ctx, const IdmSyntax *word, const IdmBinding *b, uint32_t *out) {
@@ -1188,11 +1894,11 @@ bool materialize_capture(ExpandContext *ctx, const IdmSyntax *word, const IdmBin
     int idx;
     if (ctx->enclosing->frame == b->frame_id) {
         IdmCaptureKind kind = b->kind == IDM_BIND_ARG ? IDM_CAP_ARG : IDM_CAP_LOCAL;
-        idx = capture_append(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, word, &b->scopes, kind, b->payload, b->arity);
+        idx = capture_append(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, word, &b->scopes, kind, b->payload, b->arity, b->has_contract ? &b->contract : NULL);
     } else {
         int parent = saved_materialize(ctx->enclosing, word, b);
         if (parent < 0) return false;
-        idx = capture_append(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, word, &b->scopes, IDM_CAP_UPVALUE, (uint32_t)parent, b->arity);
+        idx = capture_append(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, word, &b->scopes, IDM_CAP_UPVALUE, (uint32_t)parent, b->arity, b->has_contract ? &b->contract : NULL);
     }
     if (idx < 0) return false;
     *out = (uint32_t)idx;
@@ -1208,11 +1914,11 @@ bool materialize_slot_capture(ExpandContext *ctx, const char *name, const IdmSco
     if (!ctx->enclosing) return false;
     int idx;
     if (ctx->enclosing->frame == frame_id) {
-        idx = capture_append_name(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, name, scopes, IDM_CAP_LOCAL, slot, arity);
+        idx = capture_append_name(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, name, scopes, IDM_CAP_LOCAL, slot, arity, NULL);
     } else {
         int parent = saved_materialize_slot(ctx->enclosing, name, scopes, frame_id, slot, arity);
         if (parent < 0) return false;
-        idx = capture_append_name(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, name, scopes, IDM_CAP_UPVALUE, (uint32_t)parent, arity);
+        idx = capture_append_name(&ctx->captures, &ctx->capture_count, &ctx->capture_cap, name, scopes, IDM_CAP_UPVALUE, (uint32_t)parent, arity, NULL);
     }
     if (idx < 0) return false;
     *out = (uint32_t)idx;
@@ -1228,6 +1934,7 @@ void begin_function_context(ExpandContext *ctx, SavedFunctionContext *saved) {
     saved->capture_count = ctx->capture_count;
     saved->capture_cap = ctx->capture_cap;
     saved->prev = ctx->enclosing;
+    saved->function_contract = ctx->function_contract;
     ctx->enclosing = saved;
     ctx->frame = ++ctx->frame_seq;
     ctx->next_slot = 0;
@@ -1235,6 +1942,7 @@ void begin_function_context(ExpandContext *ctx, SavedFunctionContext *saved) {
     ctx->captures = NULL;
     ctx->capture_count = 0;
     ctx->capture_cap = 0;
+    ctx->function_contract = NULL;
 }
 
 void end_function_context(ExpandContext *ctx, SavedFunctionContext *saved) {
@@ -1247,6 +1955,7 @@ void end_function_context(ExpandContext *ctx, SavedFunctionContext *saved) {
     ctx->captures = saved->captures;
     ctx->capture_count = saved->capture_count;
     ctx->capture_cap = saved->capture_cap;
+    ctx->function_contract = saved->function_contract;
 }
 
 void begin_clause_context(ExpandContext *ctx, SavedClauseContext *saved) {
