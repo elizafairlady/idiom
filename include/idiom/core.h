@@ -153,6 +153,7 @@ typedef enum {
     X(FILE_REMOVE, "remove", 1, 1, "file", 0) \
     X(ARGS, "args", 0, 0, "system", 0) \
     X(TIME_MS, "time-ms", 0, 0, "system", 0) \
+    X(TIME_NS, "time-ns", 0, 0, "system", 0) \
     X(RANDOM, "random", 1, 1, "system", 0) \
     X(DICT_GET, "dict-get", 3, 3, "kernel", 1) \
     X(DICT_PUT, "dict-put", 3, 3, "kernel", 1) \

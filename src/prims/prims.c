@@ -1481,6 +1481,14 @@ static bool prim_time_ms(IdmRuntime *rt, const IdmValue *args, IdmValue *out, Id
     return true;
 }
 
+static bool prim_time_ns(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)rt; (void)args; (void)err;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    *out = idm_int((int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec);
+    return true;
+}
+
 static bool prim_random(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     int64_t bound = 0;
     if (!value_to_i64(args[0], &bound) || bound <= 0) return idm_primitive_type_error(rt, err, "random", args[0], "a positive integer bound");
@@ -2227,6 +2235,7 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
         case IDM_PRIM_FILE_REMOVE: return prim_file_remove(rt, args, out, err);
         case IDM_PRIM_ARGS: return prim_args(rt, args, out, err);
         case IDM_PRIM_TIME_MS: return prim_time_ms(rt, args, out, err);
+        case IDM_PRIM_TIME_NS: return prim_time_ns(rt, args, out, err);
         case IDM_PRIM_RANDOM: return prim_random(rt, args, out, err);
         case IDM_PRIM_DICT_GET: return prim_dict_get(rt, args, out, err);
         case IDM_PRIM_DICT_PUT: return prim_dict_put(rt, args, out, err);

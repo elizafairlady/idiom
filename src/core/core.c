@@ -1825,6 +1825,7 @@ bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableCont
         case IDM_PRIM_SYNTAX_INT_VALUE:
         case IDM_PRIM_REGEX_GROUP_COUNT:
         case IDM_PRIM_TIME_MS:
+        case IDM_PRIM_TIME_NS:
         case IDM_PRIM_RANDOM:
         case IDM_PRIM_DICT_SIZE:
         case IDM_PRIM_COMPARE:

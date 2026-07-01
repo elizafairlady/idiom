@@ -3,7 +3,7 @@ package test
 use std/enum
 use std/string
 use std/compile with [expand-check]
-use std/system with [env-get time-ms]
+use std/system with [env-get time-ms time-ns]
 
 defn verbose? -> neq? (env-get "IDIOM_TEST_VERBOSE") :nil
 
@@ -148,8 +148,9 @@ export defn bench-report suite-name name meta result elapsed do
   expected = dict-get meta :expect :nil
   n = dict-get meta :n 0
   full-name = suite-item-name suite-name name
+  per-op = cond (gt? n 0) (div elapsed n) elapsed
   if (eq? result expected) do
-    println "bench name=#{full-name} suite=#{suite-name} n=#{n} ms=#{elapsed} result=#{inspect result} expect=#{inspect expected}"
+    println "bench name=#{full-name} suite=#{suite-name} n=#{n} ns=#{elapsed} ns/op=#{per-op} result=#{inspect result} expect=#{inspect expected}"
     result
   else do
     error {:bench-mismatch :name full-name :suite suite-name :n n :got result :want expected}
@@ -158,9 +159,9 @@ end
 
 defn run-bench-one do
   suite-name n {:bench name meta runner} -> do
-    start = time-ms
+    start = time-ns
     result = runner n
-    bench-report suite-name name (dict-put meta :n n) result (time-ms - start)
+    bench-report suite-name name (dict-put meta :n n) result (time-ns - start)
   end
 end
 
