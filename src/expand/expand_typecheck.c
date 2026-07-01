@@ -1517,9 +1517,14 @@ bool expand_core_static_type_term(ExpandContext *ctx, const IdmCore *core, IdmTy
 
 bool expand_typecheck_value(ExpandContext *ctx, const char *name, IdmCore *value, IdmCallableContract *contract, bool *has_contract, IdmError *err) {
     if (!value || !has_contract) return true;
-    if (*has_contract) return check_fn(ctx, value, contract, name, err);
+    if (*has_contract) {
+        if (!check_fn(ctx, value, contract, name, err)) return false;
+        contract->pure = expand_typecheck_core_pure(ctx, value);
+        return true;
+    }
     if (!infer_scheme(ctx, value, name, contract, has_contract, err)) return false;
     if (!*has_contract) return check_fn(ctx, value, NULL, name, err);
+    contract->pure = expand_typecheck_core_pure(ctx, value);
     return true;
 }
 
@@ -1788,9 +1793,160 @@ static void group_topo_order(const DefnGroup *groups, IdmCore **values, size_t c
     free(placed);
 }
 
+static bool core_reaches_effect(const ExpandContext *ctx, const IdmCore *core, const DefnGroup *groups, const bool *member_pure, size_t count);
+
+static bool callee_reaches_effect(const ExpandContext *ctx, const IdmCore *callee, const DefnGroup *groups, const bool *member_pure, size_t count) {
+    if (!callee) return true;
+    switch (callee->kind) {
+        case IDM_CORE_FN_MULTI:
+            if (callee->as.fn_multi.count == 1u && callee->as.fn_multi.clauses[0].primitive_backed) {
+                return !idm_primitive_pure(callee->as.fn_multi.clauses[0].primitive);
+            }
+            return core_reaches_effect(ctx, callee, groups, member_pure, count);
+        case IDM_CORE_FN:
+            return core_reaches_effect(ctx, callee, groups, member_pure, count);
+        case IDM_CORE_LOCAL_REF:
+        case IDM_CORE_ENV_REF:
+        case IDM_CORE_PACKAGE_REF: {
+            const char *name = callee->kind == IDM_CORE_PACKAGE_REF ? callee->as.package_ref.name : callee->as.slot_ref.name;
+            uint32_t slot = callee->kind == IDM_CORE_PACKAGE_REF ? callee->as.package_ref.slot : callee->as.slot_ref.slot;
+            for (size_t i = 0; i < count; i++) {
+                if (groups[i].slot == slot && groups[i].name && name && strcmp(groups[i].name, name) == 0) return !member_pure[i];
+            }
+            const IdmCallableContract *c = core_ref_contract(callee);
+            if (!c && callee->kind == IDM_CORE_ENV_REF) {
+                const IdmBinding *b = binding_by_env_slot(ctx, callee->as.slot_ref.name, callee->as.slot_ref.slot);
+                if (b && b->has_contract) c = &b->contract;
+            }
+            return !c || !c->pure;
+        }
+        default:
+            return true;
+    }
+}
+
+static bool core_reaches_effect(const ExpandContext *ctx, const IdmCore *core, const DefnGroup *groups, const bool *member_pure, size_t count) {
+    if (!core) return false;
+    switch (core->kind) {
+        case IDM_CORE_LITERAL:
+        case IDM_CORE_ARG_REF:
+        case IDM_CORE_LOCAL_REF:
+        case IDM_CORE_CAPTURE_REF:
+        case IDM_CORE_ENV_REF:
+        case IDM_CORE_PACKAGE_REF:
+            return false;
+        case IDM_CORE_RECEIVE:
+        case IDM_CORE_GUARD:
+        case IDM_CORE_USE_PACKAGE:
+            return true;
+        case IDM_CORE_CALL:
+            if (callee_reaches_effect(ctx, core->as.call.callee, groups, member_pure, count)) return true;
+            for (size_t i = 0; i < core->as.call.arg_count; i++) {
+                if (core_reaches_effect(ctx, core->as.call.args[i], groups, member_pure, count)) return true;
+            }
+            return false;
+        case IDM_CORE_LIST_CONS:
+        case IDM_CORE_LIST_APPEND:
+            return core_reaches_effect(ctx, core->as.list_pair.head, groups, member_pure, count) ||
+                   core_reaches_effect(ctx, core->as.list_pair.tail, groups, member_pure, count);
+        case IDM_CORE_VALUE_SEQUENCE:
+            for (size_t i = 0; i < core->as.value_sequence.count; i++) {
+                if (core_reaches_effect(ctx, core->as.value_sequence.items[i], groups, member_pure, count)) return true;
+            }
+            return false;
+        case IDM_CORE_SYNTAX_BUILD:
+            return core_reaches_effect(ctx, core->as.syntax_build.ctx, groups, member_pure, count) ||
+                   core_reaches_effect(ctx, core->as.syntax_build.payload, groups, member_pure, count);
+        case IDM_CORE_STRING_CONCAT:
+            for (size_t i = 0; i < core->as.string_concat.count; i++) {
+                if (core_reaches_effect(ctx, core->as.string_concat.items[i], groups, member_pure, count)) return true;
+            }
+            return false;
+        case IDM_CORE_COND:
+            return core_reaches_effect(ctx, core->as.cond_expr.cond, groups, member_pure, count) ||
+                   core_reaches_effect(ctx, core->as.cond_expr.then_branch, groups, member_pure, count) ||
+                   core_reaches_effect(ctx, core->as.cond_expr.else_branch, groups, member_pure, count);
+        case IDM_CORE_MATCH:
+            for (size_t i = 0; i < core->as.match_expr.scrutinee_count; i++) {
+                if (core_reaches_effect(ctx, core->as.match_expr.scrutinees[i], groups, member_pure, count)) return true;
+            }
+            for (size_t i = 0; i < core->as.match_expr.count; i++) {
+                if (core_reaches_effect(ctx, core->as.match_expr.clauses[i].guard, groups, member_pure, count)) return true;
+                if (core_reaches_effect(ctx, core->as.match_expr.clauses[i].body, groups, member_pure, count)) return true;
+            }
+            return false;
+        case IDM_CORE_DO:
+            for (size_t i = 0; i < core->as.do_expr.count; i++) {
+                if (core_reaches_effect(ctx, core->as.do_expr.items[i], groups, member_pure, count)) return true;
+            }
+            return false;
+        case IDM_CORE_BIND_LOCAL:
+            return core_reaches_effect(ctx, core->as.bind_local.value, groups, member_pure, count) ||
+                   core_reaches_effect(ctx, core->as.bind_local.body, groups, member_pure, count);
+        case IDM_CORE_FN:
+            return core_reaches_effect(ctx, core->as.fn.guard, groups, member_pure, count) ||
+                   core_reaches_effect(ctx, core->as.fn.body, groups, member_pure, count);
+        case IDM_CORE_FN_MULTI:
+            if (core->as.fn_multi.count == 1u && core->as.fn_multi.clauses[0].primitive_backed) {
+                return !idm_primitive_pure(core->as.fn_multi.clauses[0].primitive);
+            }
+            for (size_t i = 0; i < core->as.fn_multi.count; i++) {
+                if (core_reaches_effect(ctx, core->as.fn_multi.clauses[i].guard, groups, member_pure, count)) return true;
+                if (core_reaches_effect(ctx, core->as.fn_multi.clauses[i].body, groups, member_pure, count)) return true;
+            }
+            return false;
+        case IDM_CORE_LETREC:
+            for (size_t i = 0; i < core->as.letrec.count; i++) {
+                if (core_reaches_effect(ctx, core->as.letrec.bindings[i].value, groups, member_pure, count)) return true;
+            }
+            return core_reaches_effect(ctx, core->as.letrec.body, groups, member_pure, count);
+        case IDM_CORE_RECORD_CONSTRUCT:
+            for (size_t i = 0; i < core->as.record_construct.count; i++) {
+                if (core_reaches_effect(ctx, core->as.record_construct.field_values[i], groups, member_pure, count)) return true;
+            }
+            return false;
+        case IDM_CORE_RECORD_FIELD:
+            return core_reaches_effect(ctx, core->as.record_field.receiver, groups, member_pure, count);
+        case IDM_CORE_RECORD_IS:
+            return core_reaches_effect(ctx, core->as.record_is.value, groups, member_pure, count);
+        default:
+            return true;
+    }
+}
+
+bool expand_typecheck_core_pure(ExpandContext *ctx, const IdmCore *core) {
+    return !core_reaches_effect(ctx, core, NULL, NULL, 0u);
+}
+
+bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, bool *out_pure) {
+    for (size_t i = 0; i < count; i++) out_pure[i] = true;
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (size_t i = 0; i < count; i++) {
+            if (!out_pure[i]) continue;
+            if (core_reaches_effect(ctx, values[i], groups, out_pure, count)) {
+                out_pure[i] = false;
+                changed = true;
+            }
+        }
+    }
+    return true;
+}
+
 bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, IdmError *err) {
+    bool *purity = count ? calloc(count, sizeof(*purity)) : NULL;
+    if (count && !purity) return idm_error_oom(err, idm_span_unknown(NULL));
+    expand_typecheck_purity(ctx, groups, values, count, purity);
     for (size_t i = 0; i < count; i++) {
-        if (groups[i].has_contract && !check_fn(ctx, values[i], &groups[i].contract, groups[i].name, err)) return false;
+        if (!groups[i].has_contract) continue;
+        if (!check_fn(ctx, values[i], &groups[i].contract, groups[i].name, err)) { free(purity); return false; }
+        IdmCallableContract annotated;
+        if (!idm_callable_contract_copy(&annotated, &groups[i].contract)) { free(purity); return idm_error_oom(err, idm_span_unknown(NULL)); }
+        annotated.pure = purity[i];
+        bool pok = publish_inferred_contract(ctx, &groups[i], &annotated, err);
+        idm_callable_contract_destroy(&annotated);
+        if (!pok) { free(purity); return false; }
     }
     size_t unannotated = 0;
     for (size_t i = 0; i < count; i++) {
@@ -1882,6 +2038,7 @@ bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, I
         }
         IdmCallableContract inferred;
         ok = generalize_contract_sigs(&g, inputs, input_count, &residual, &inferred, err);
+        if (ok) inferred.pure = purity[i];
         if (ok) ok = publish_inferred_contract(ctx, &groups[i], &inferred, err);
         idm_callable_contract_destroy(&inferred);
     }
@@ -1895,6 +2052,7 @@ bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, I
     free(members);
     free(sibs);
     free(order);
+    free(purity);
     gen_ctx_destroy(&g);
     return ok;
 }

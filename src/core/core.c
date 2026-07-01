@@ -1346,16 +1346,21 @@ static bool compile_function_code(CompileModuleCtx *module_ctx, IdmBytecodeModul
 }
 
 static const IdmPrimitiveInfo PRIMITIVES[] = {
-#define IDM_PRIMITIVE_INFO(id, name, min_arity, max_arity, home) [IDM_PRIM_##id] = {name, min_arity, max_arity},
+#define IDM_PRIMITIVE_INFO(id, name, min_arity, max_arity, home, pure) [IDM_PRIM_##id] = {name, min_arity, max_arity, pure},
     IDM_PRIMITIVE_LIST(IDM_PRIMITIVE_INFO)
 #undef IDM_PRIMITIVE_INFO
 };
 
 static const char *const PRIMITIVE_HOMES[] = {
-#define IDM_PRIMITIVE_HOME(id, name, min_arity, max_arity, home) [IDM_PRIM_##id] = home,
+#define IDM_PRIMITIVE_HOME(id, name, min_arity, max_arity, home, pure) [IDM_PRIM_##id] = home,
     IDM_PRIMITIVE_LIST(IDM_PRIMITIVE_HOME)
 #undef IDM_PRIMITIVE_HOME
 };
+
+bool idm_primitive_pure(IdmPrimitive primitive) {
+    if ((size_t)primitive >= sizeof(PRIMITIVES) / sizeof(PRIMITIVES[0])) return false;
+    return PRIMITIVES[primitive].pure;
+}
 
 size_t idm_primitive_count(void) {
     return sizeof(PRIMITIVES) / sizeof(PRIMITIVES[0]);
@@ -1611,6 +1616,7 @@ bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableCont
     IdmArity arity = idm_primitive_arity(primitive);
     if (!idm_arity_accepts(&arity, (uint32_t)argc)) return true;
     if (!primitive_contract_args(out, argc, err, span)) return false;
+    out->pure = idm_primitive_pure(primitive);
     bool ok = true;
     switch (primitive) {
         case IDM_PRIM_ADD:

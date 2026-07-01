@@ -1440,6 +1440,25 @@ static IdmCore *expand_value_rhs(ExpandContext *ctx, const BodyRec *rec, IdmErro
     return expand_parts(ctx, items, rec->rhs_start, end, err);
 }
 
+static bool typecheck_macro_transformer(ExpandContext *ctx, const char *name, IdmCore *fn, IdmError *err) {
+    IdmCallableContract contract;
+    memset(&contract, 0, sizeof(contract));
+    IdmContractSig *sig = idm_contract_add_sig(&contract);
+    if (!sig) return idm_error_oom(err, idm_span_unknown(NULL));
+    sig->args = calloc(1u, sizeof(*sig->args));
+    if (!sig->args) { idm_callable_contract_destroy(&contract); return idm_error_oom(err, idm_span_unknown(NULL)); }
+    sig->arg_count = 1u;
+    if (!idm_type_con(&sig->args[0], "syntax") || !idm_type_con(&sig->result, "syntax")) {
+        idm_callable_contract_destroy(&contract);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    sig->has_result = true;
+    bool has = true;
+    bool ok = expand_typecheck_value(ctx, name, fn, &contract, &has, err);
+    idm_callable_contract_destroy(&contract);
+    return ok;
+}
+
 static bool infer_bind_value_contract(ExpandContext *ctx, BodyRec *rec, IdmError *err) {
     if (rec->bind_has_contract || !rec->core) return true;
     return expand_typecheck_infer_scheme(ctx, rec->core, rec->bind_name->as.text, &rec->bind_contract, &rec->bind_has_contract, err);
@@ -2282,6 +2301,10 @@ static bool package_register_defmacro_at(ExpandContext *ctx, IdmSyntax **work, s
         idm_core_free(fn);
         return idm_error_set(err, form->span, "package defmacro '%s' cannot capture for-syntax locals during package preparation", macro_name);
     }
+    if (!typecheck_macro_transformer(ctx, macro_name, fn, err)) {
+        idm_core_free(fn);
+        return false;
+    }
     bool ok = register_macro(ctx, form->as.seq.items[mbase + 1u], fn, form->span, mbase == 2u, err);
     idm_core_free(fn);
     if (!ok) return false;
@@ -2785,6 +2808,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
                     i++;
                     continue;
                 }
+                if (!typecheck_macro_transformer(ctx, form->as.seq.items[mbase + 1u]->as.text, fn, err)) { idm_core_free(fn); failed = true; break; }
                 bool ok = register_macro(ctx, form->as.seq.items[mbase + 1u], fn, form->span, mbase == 2u, err);
                 idm_core_free(fn);
                 if (!ok) { failed = true; break; }

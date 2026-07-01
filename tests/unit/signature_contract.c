@@ -930,6 +930,41 @@ int idm_unit_signature_contract(void) {
     remove_package_dir(dir);
     free(dir);
 
+    const char *purity_source =
+        "package purity_signature_contract\n"
+        "\n"
+        "export defn calm x -> add x 1\n"
+        "\n"
+        "export defn chatty x -> do\n"
+        "  println x\n"
+        "  x\n"
+        "end\n"
+        "\n"
+        "export defn relay x -> chatty x\n"
+        "\n"
+        "export defn croaky x -> cond (lt? x 0) (raise :neg) x\n"
+        "\n"
+        "export defn stacked x -> calm (calm x)\n";
+    dir = write_package_dir(purity_source, &err);
+    idm_buf_init(&wire);
+    check_ok(idm_expand_package_artifact_serialize(&rt, dir, &wire, &err), &err, "purity package compiles");
+    IdmArtifact pur_art;
+    check_ok(idm_artifact_deserialize(&rt, (const unsigned char *)(wire.data ? wire.data : ""), wire.len, &pur_art, &err), &err, "purity artifact");
+    const IdmPkgSlot *calm = find_slot(&pur_art, "calm");
+    check(calm && calm->has_contract && calm->contract.pure, "calm is pure");
+    const IdmPkgSlot *chatty = find_slot(&pur_art, "chatty");
+    check(chatty && chatty->has_contract && !chatty->contract.pure, "chatty is impure");
+    const IdmPkgSlot *relay = find_slot(&pur_art, "relay");
+    check(relay && relay->has_contract && !relay->contract.pure, "relay impurity is transitive");
+    const IdmPkgSlot *croaky = find_slot(&pur_art, "croaky");
+    check(croaky && croaky->has_contract && !croaky->contract.pure, "croaky crash home is impure");
+    const IdmPkgSlot *stacked = find_slot(&pur_art, "stacked");
+    check(stacked && stacked->has_contract && stacked->contract.pure, "stacked purity is transitive");
+    idm_artifact_destroy(&pur_art);
+    idm_buf_destroy(&wire);
+    remove_package_dir(dir);
+    free(dir);
+
     const char *match_dead_source =
         "package match_dead_signature_contract\n"
         "\n"
