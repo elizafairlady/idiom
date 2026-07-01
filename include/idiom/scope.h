@@ -94,6 +94,7 @@ typedef struct {
     size_t arg_count;
     IdmTypeTerm result;
     bool has_result;
+    uint64_t invoked_mask;
 } IdmContractSig;
 
 typedef struct {

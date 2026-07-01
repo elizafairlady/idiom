@@ -1519,12 +1519,16 @@ bool expand_typecheck_value(ExpandContext *ctx, const char *name, IdmCore *value
     if (!value || !has_contract) return true;
     if (*has_contract) {
         if (!check_fn(ctx, value, contract, name, err)) return false;
-        contract->purity = expand_typecheck_core_purity(ctx, value);
+        uint64_t vmask = 0;
+        contract->purity = expand_typecheck_core_purity(ctx, value, &vmask);
+        for (size_t k = 0; k < contract->sig_count; k++) contract->sigs[k].invoked_mask = vmask;
         return true;
     }
     if (!infer_scheme(ctx, value, name, contract, has_contract, err)) return false;
     if (!*has_contract) return check_fn(ctx, value, NULL, name, err);
-    contract->purity = expand_typecheck_core_purity(ctx, value);
+    uint64_t vmask = 0;
+    contract->purity = expand_typecheck_core_purity(ctx, value, &vmask);
+    for (size_t k = 0; k < contract->sig_count; k++) contract->sigs[k].invoked_mask = vmask;
     return true;
 }
 
@@ -1793,25 +1797,31 @@ static void group_topo_order(const DefnGroup *groups, IdmCore **values, size_t c
     free(placed);
 }
 
-static uint8_t core_purity_level(const ExpandContext *ctx, const IdmCore *core, const DefnGroup *groups, const uint8_t *member_purity, size_t count);
+static uint8_t core_purity_level(const ExpandContext *ctx, const IdmCore *core, const DefnGroup *groups, const PurityFx *fx, size_t count, uint64_t *self_mask);
 
 static uint8_t purity_join(uint8_t a, uint8_t b) {
     return a < b ? a : b;
 }
 
-static uint8_t callee_purity_level(const ExpandContext *ctx, const IdmCore *callee, const DefnGroup *groups, const uint8_t *member_purity, size_t count, bool *out_prim) {
+static uint8_t callee_purity_level(const ExpandContext *ctx, const IdmCore *callee, const DefnGroup *groups, const PurityFx *fx, size_t count, uint64_t *self_mask, bool *out_prim, uint64_t *out_mask, bool *out_has_mask) {
     *out_prim = false;
+    *out_mask = ~0ull;
+    *out_has_mask = false;
     if (!callee) return IDM_PURITY_IMPURE;
     switch (callee->kind) {
         case IDM_CORE_FN_MULTI:
             if (callee->as.fn_multi.count == 1u && callee->as.fn_multi.clauses[0].primitive_backed) {
                 *out_prim = true;
+                *out_mask = 0;
+                *out_has_mask = true;
                 return idm_primitive_pure(callee->as.fn_multi.clauses[0].primitive) ? IDM_PURITY_PURE : IDM_PURITY_IMPURE;
             }
-            return core_purity_level(ctx, callee, groups, member_purity, count);
+            return core_purity_level(ctx, callee, groups, fx, count, self_mask);
         case IDM_CORE_FN:
-            return core_purity_level(ctx, callee, groups, member_purity, count);
+            return core_purity_level(ctx, callee, groups, fx, count, self_mask);
         case IDM_CORE_ARG_REF:
+            if (self_mask && callee->as.slot_ref.slot < 64u) *self_mask |= 1ull << callee->as.slot_ref.slot;
+            return IDM_PURITY_ARGS;
         case IDM_CORE_CAPTURE_REF:
             return IDM_PURITY_ARGS;
         case IDM_CORE_LOCAL_REF:
@@ -1820,46 +1830,67 @@ static uint8_t callee_purity_level(const ExpandContext *ctx, const IdmCore *call
             const char *name = callee->kind == IDM_CORE_PACKAGE_REF ? callee->as.package_ref.name : callee->as.slot_ref.name;
             uint32_t slot = callee->kind == IDM_CORE_PACKAGE_REF ? callee->as.package_ref.slot : callee->as.slot_ref.slot;
             for (size_t i = 0; i < count; i++) {
-                if (groups[i].slot == slot && groups[i].name && name && strcmp(groups[i].name, name) == 0) return member_purity[i];
+                if (groups[i].slot == slot && groups[i].name && name && strcmp(groups[i].name, name) == 0) {
+                    *out_mask = fx[i].mask;
+                    *out_has_mask = true;
+                    return fx[i].level;
+                }
             }
             const IdmCallableContract *c = core_ref_contract(callee);
             if (!c && callee->kind == IDM_CORE_ENV_REF) {
                 const IdmBinding *b = binding_by_env_slot(ctx, callee->as.slot_ref.name, callee->as.slot_ref.slot);
                 if (b && b->has_contract) c = &b->contract;
             }
-            return c ? c->purity : IDM_PURITY_IMPURE;
+            if (!c) return IDM_PURITY_IMPURE;
+            uint64_t mask = 0;
+            for (size_t k = 0; k < c->sig_count; k++) mask |= c->sigs[k].invoked_mask;
+            *out_mask = mask;
+            *out_has_mask = true;
+            return c->purity;
         }
         default:
             return IDM_PURITY_IMPURE;
     }
 }
 
-static uint8_t call_purity_level(const ExpandContext *ctx, const IdmCore *core, const DefnGroup *groups, const uint8_t *member_purity, size_t count) {
+static uint8_t call_purity_level(const ExpandContext *ctx, const IdmCore *core, const DefnGroup *groups, const PurityFx *fx, size_t count, uint64_t *self_mask) {
     bool prim = false;
-    uint8_t callee_level = callee_purity_level(ctx, core->as.call.callee, groups, member_purity, count, &prim);
+    uint64_t callee_mask = ~0ull;
+    bool has_mask = false;
+    uint8_t callee_level = callee_purity_level(ctx, core->as.call.callee, groups, fx, count, self_mask, &prim, &callee_mask, &has_mask);
     if (callee_level == IDM_PURITY_IMPURE) return IDM_PURITY_IMPURE;
     bool invokes_args = callee_level == IDM_PURITY_ARGS;
     uint8_t level = IDM_PURITY_PURE;
     for (size_t i = 0; i < core->as.call.arg_count; i++) {
         const IdmCore *arg = core->as.call.args[i];
         if (!arg) continue;
-        if (arg->kind == IDM_CORE_ARG_REF || arg->kind == IDM_CORE_CAPTURE_REF || arg->kind == IDM_CORE_LOCAL_REF) {
-            if (invokes_args) level = purity_join(level, IDM_PURITY_ARGS);
-            continue;
-        }
-        if (arg->kind == IDM_CORE_ENV_REF || arg->kind == IDM_CORE_PACKAGE_REF) {
-            if (invokes_args) {
-                bool aprim = false;
-                level = purity_join(level, callee_purity_level(ctx, arg, groups, member_purity, count, &aprim));
+        bool invoked_here = invokes_args && (i >= 64u || (callee_mask & (1ull << i)) != 0);
+        if (arg->kind == IDM_CORE_ARG_REF) {
+            if (invoked_here) {
+                if (self_mask && arg->as.slot_ref.slot < 64u) *self_mask |= 1ull << arg->as.slot_ref.slot;
+                level = purity_join(level, IDM_PURITY_ARGS);
             }
             continue;
         }
-        level = purity_join(level, core_purity_level(ctx, arg, groups, member_purity, count));
+        if (arg->kind == IDM_CORE_CAPTURE_REF || arg->kind == IDM_CORE_LOCAL_REF) {
+            if (invoked_here) level = purity_join(level, IDM_PURITY_ARGS);
+            continue;
+        }
+        if (arg->kind == IDM_CORE_ENV_REF || arg->kind == IDM_CORE_PACKAGE_REF) {
+            if (invoked_here) {
+                bool aprim = false;
+                uint64_t amask = ~0ull;
+                bool ahas = false;
+                level = purity_join(level, callee_purity_level(ctx, arg, groups, fx, count, self_mask, &aprim, &amask, &ahas));
+            }
+            continue;
+        }
+        level = purity_join(level, core_purity_level(ctx, arg, groups, fx, count, self_mask));
     }
     return level;
 }
 
-static uint8_t core_purity_level(const ExpandContext *ctx, const IdmCore *core, const DefnGroup *groups, const uint8_t *member_purity, size_t count) {
+static uint8_t core_purity_level(const ExpandContext *ctx, const IdmCore *core, const DefnGroup *groups, const PurityFx *fx, size_t count, uint64_t *self_mask) {
     if (!core) return IDM_PURITY_PURE;
     switch (core->kind) {
         case IDM_CORE_LITERAL:
@@ -1874,103 +1905,111 @@ static uint8_t core_purity_level(const ExpandContext *ctx, const IdmCore *core, 
         case IDM_CORE_USE_PACKAGE:
             return IDM_PURITY_IMPURE;
         case IDM_CORE_CALL:
-            return call_purity_level(ctx, core, groups, member_purity, count);
+            return call_purity_level(ctx, core, groups, fx, count, self_mask);
         case IDM_CORE_LIST_CONS:
         case IDM_CORE_LIST_APPEND:
-            return purity_join(core_purity_level(ctx, core->as.list_pair.head, groups, member_purity, count),
-                               core_purity_level(ctx, core->as.list_pair.tail, groups, member_purity, count));
+            return purity_join(core_purity_level(ctx, core->as.list_pair.head, groups, fx, count, self_mask),
+                               core_purity_level(ctx, core->as.list_pair.tail, groups, fx, count, self_mask));
         case IDM_CORE_VALUE_SEQUENCE: {
             uint8_t level = IDM_PURITY_PURE;
             for (size_t i = 0; i < core->as.value_sequence.count; i++) {
-                level = purity_join(level, core_purity_level(ctx, core->as.value_sequence.items[i], groups, member_purity, count));
+                level = purity_join(level, core_purity_level(ctx, core->as.value_sequence.items[i], groups, fx, count, self_mask));
             }
             return level;
         }
         case IDM_CORE_SYNTAX_BUILD:
-            return purity_join(core_purity_level(ctx, core->as.syntax_build.ctx, groups, member_purity, count),
-                               core_purity_level(ctx, core->as.syntax_build.payload, groups, member_purity, count));
+            return purity_join(core_purity_level(ctx, core->as.syntax_build.ctx, groups, fx, count, self_mask),
+                               core_purity_level(ctx, core->as.syntax_build.payload, groups, fx, count, self_mask));
         case IDM_CORE_STRING_CONCAT: {
             uint8_t level = IDM_PURITY_PURE;
             for (size_t i = 0; i < core->as.string_concat.count; i++) {
-                level = purity_join(level, core_purity_level(ctx, core->as.string_concat.items[i], groups, member_purity, count));
+                level = purity_join(level, core_purity_level(ctx, core->as.string_concat.items[i], groups, fx, count, self_mask));
             }
             return level;
         }
         case IDM_CORE_COND:
-            return purity_join(core_purity_level(ctx, core->as.cond_expr.cond, groups, member_purity, count),
-                   purity_join(core_purity_level(ctx, core->as.cond_expr.then_branch, groups, member_purity, count),
-                               core_purity_level(ctx, core->as.cond_expr.else_branch, groups, member_purity, count)));
+            return purity_join(core_purity_level(ctx, core->as.cond_expr.cond, groups, fx, count, self_mask),
+                   purity_join(core_purity_level(ctx, core->as.cond_expr.then_branch, groups, fx, count, self_mask),
+                               core_purity_level(ctx, core->as.cond_expr.else_branch, groups, fx, count, self_mask)));
         case IDM_CORE_MATCH: {
             uint8_t level = IDM_PURITY_PURE;
             for (size_t i = 0; i < core->as.match_expr.scrutinee_count; i++) {
-                level = purity_join(level, core_purity_level(ctx, core->as.match_expr.scrutinees[i], groups, member_purity, count));
+                level = purity_join(level, core_purity_level(ctx, core->as.match_expr.scrutinees[i], groups, fx, count, self_mask));
             }
             for (size_t i = 0; i < core->as.match_expr.count; i++) {
-                level = purity_join(level, core_purity_level(ctx, core->as.match_expr.clauses[i].guard, groups, member_purity, count));
-                level = purity_join(level, core_purity_level(ctx, core->as.match_expr.clauses[i].body, groups, member_purity, count));
+                level = purity_join(level, core_purity_level(ctx, core->as.match_expr.clauses[i].guard, groups, fx, count, self_mask));
+                level = purity_join(level, core_purity_level(ctx, core->as.match_expr.clauses[i].body, groups, fx, count, self_mask));
             }
             return level;
         }
         case IDM_CORE_DO: {
             uint8_t level = IDM_PURITY_PURE;
             for (size_t i = 0; i < core->as.do_expr.count; i++) {
-                level = purity_join(level, core_purity_level(ctx, core->as.do_expr.items[i], groups, member_purity, count));
+                level = purity_join(level, core_purity_level(ctx, core->as.do_expr.items[i], groups, fx, count, self_mask));
             }
             return level;
         }
         case IDM_CORE_BIND_LOCAL:
-            return purity_join(core_purity_level(ctx, core->as.bind_local.value, groups, member_purity, count),
-                               core_purity_level(ctx, core->as.bind_local.body, groups, member_purity, count));
+            return purity_join(core_purity_level(ctx, core->as.bind_local.value, groups, fx, count, self_mask),
+                               core_purity_level(ctx, core->as.bind_local.body, groups, fx, count, self_mask));
         case IDM_CORE_FN:
-            return purity_join(core_purity_level(ctx, core->as.fn.guard, groups, member_purity, count),
-                               core_purity_level(ctx, core->as.fn.body, groups, member_purity, count));
+            return purity_join(core_purity_level(ctx, core->as.fn.guard, groups, fx, count, NULL),
+                               core_purity_level(ctx, core->as.fn.body, groups, fx, count, NULL));
         case IDM_CORE_FN_MULTI: {
             if (core->as.fn_multi.count == 1u && core->as.fn_multi.clauses[0].primitive_backed) {
                 return idm_primitive_pure(core->as.fn_multi.clauses[0].primitive) ? IDM_PURITY_PURE : IDM_PURITY_IMPURE;
             }
             uint8_t level = IDM_PURITY_PURE;
             for (size_t i = 0; i < core->as.fn_multi.count; i++) {
-                level = purity_join(level, core_purity_level(ctx, core->as.fn_multi.clauses[i].guard, groups, member_purity, count));
-                level = purity_join(level, core_purity_level(ctx, core->as.fn_multi.clauses[i].body, groups, member_purity, count));
+                level = purity_join(level, core_purity_level(ctx, core->as.fn_multi.clauses[i].guard, groups, fx, count, self_mask));
+                level = purity_join(level, core_purity_level(ctx, core->as.fn_multi.clauses[i].body, groups, fx, count, self_mask));
             }
             return level;
         }
         case IDM_CORE_LETREC: {
             uint8_t level = IDM_PURITY_PURE;
             for (size_t i = 0; i < core->as.letrec.count; i++) {
-                level = purity_join(level, core_purity_level(ctx, core->as.letrec.bindings[i].value, groups, member_purity, count));
+                level = purity_join(level, core_purity_level(ctx, core->as.letrec.bindings[i].value, groups, fx, count, self_mask));
             }
-            return purity_join(level, core_purity_level(ctx, core->as.letrec.body, groups, member_purity, count));
+            return purity_join(level, core_purity_level(ctx, core->as.letrec.body, groups, fx, count, self_mask));
         }
         case IDM_CORE_RECORD_CONSTRUCT: {
             uint8_t level = IDM_PURITY_PURE;
             for (size_t i = 0; i < core->as.record_construct.count; i++) {
-                level = purity_join(level, core_purity_level(ctx, core->as.record_construct.field_values[i], groups, member_purity, count));
+                level = purity_join(level, core_purity_level(ctx, core->as.record_construct.field_values[i], groups, fx, count, self_mask));
             }
             return level;
         }
         case IDM_CORE_RECORD_FIELD:
-            return core_purity_level(ctx, core->as.record_field.receiver, groups, member_purity, count);
+            return core_purity_level(ctx, core->as.record_field.receiver, groups, fx, count, self_mask);
         case IDM_CORE_RECORD_IS:
-            return core_purity_level(ctx, core->as.record_is.value, groups, member_purity, count);
+            return core_purity_level(ctx, core->as.record_is.value, groups, fx, count, self_mask);
         default:
             return IDM_PURITY_IMPURE;
     }
 }
 
-uint8_t expand_typecheck_core_purity(ExpandContext *ctx, const IdmCore *core) {
-    return core_purity_level(ctx, core, NULL, NULL, 0u);
+uint8_t expand_typecheck_core_purity(ExpandContext *ctx, const IdmCore *core, uint64_t *out_mask) {
+    uint64_t mask = 0;
+    uint8_t level = core_purity_level(ctx, core, NULL, NULL, 0u, &mask);
+    if (out_mask) *out_mask = mask;
+    return level;
 }
 
-bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, uint8_t *out_purity) {
-    for (size_t i = 0; i < count; i++) out_purity[i] = IDM_PURITY_PURE;
+bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, PurityFx *out_fx) {
+    for (size_t i = 0; i < count; i++) {
+        out_fx[i].level = IDM_PURITY_PURE;
+        out_fx[i].mask = 0;
+    }
     bool changed = true;
     while (changed) {
         changed = false;
         for (size_t i = 0; i < count; i++) {
-            uint8_t level = core_purity_level(ctx, values[i], groups, out_purity, count);
-            if (level < out_purity[i]) {
-                out_purity[i] = level;
+            uint64_t mask = out_fx[i].mask;
+            uint8_t level = core_purity_level(ctx, values[i], groups, out_fx, count, &mask);
+            if (level < out_fx[i].level || mask != out_fx[i].mask) {
+                if (level < out_fx[i].level) out_fx[i].level = level;
+                out_fx[i].mask |= mask;
                 changed = true;
             }
         }
@@ -1979,7 +2018,7 @@ bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCor
 }
 
 bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, IdmError *err) {
-    uint8_t *purity = count ? calloc(count, sizeof(*purity)) : NULL;
+    PurityFx *purity = count ? calloc(count, sizeof(*purity)) : NULL;
     if (count && !purity) return idm_error_oom(err, idm_span_unknown(NULL));
     expand_typecheck_purity(ctx, groups, values, count, purity);
     for (size_t i = 0; i < count; i++) {
@@ -1987,10 +2026,12 @@ bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, I
         if (!check_fn(ctx, values[i], &groups[i].contract, groups[i].name, err)) { free(purity); return false; }
         IdmCallableContract annotated;
         if (!idm_callable_contract_copy(&annotated, &groups[i].contract)) { free(purity); return idm_error_oom(err, idm_span_unknown(NULL)); }
-        annotated.purity = purity[i];
+        annotated.purity = purity[i].level;
+        for (size_t k = 0; k < annotated.sig_count; k++) annotated.sigs[k].invoked_mask = purity[i].mask;
         bool pok = publish_inferred_contract(ctx, &groups[i], &annotated, err);
         idm_callable_contract_destroy(&annotated);
         if (!pok) { free(purity); return false; }
+        if (purity[i].level == IDM_PURITY_PURE && !foldable_register(ctx, groups[i].name, groups[i].slot, values[i])) { free(purity); return idm_error_oom(err, idm_span_unknown(NULL)); }
     }
     size_t unannotated = 0;
     for (size_t i = 0; i < count; i++) {
@@ -2082,9 +2123,13 @@ bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, I
         }
         IdmCallableContract inferred;
         ok = generalize_contract_sigs(&g, inputs, input_count, &residual, &inferred, err);
-        if (ok) inferred.purity = purity[i];
+        if (ok) {
+            inferred.purity = purity[i].level;
+            for (size_t k = 0; k < inferred.sig_count; k++) inferred.sigs[k].invoked_mask = purity[i].mask;
+        }
         if (ok) ok = publish_inferred_contract(ctx, &groups[i], &inferred, err);
         idm_callable_contract_destroy(&inferred);
+        if (ok && purity[i].level == IDM_PURITY_PURE && !foldable_register(ctx, groups[i].name, groups[i].slot, values[i])) ok = idm_error_oom(err, idm_span_unknown(NULL));
     }
     idm_constraint_set_destroy(&residual);
     for (size_t i = 0; ok && i < count; i++) {

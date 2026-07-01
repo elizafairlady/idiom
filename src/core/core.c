@@ -680,10 +680,58 @@ static bool normalize_cond(IdmRuntime *rt, IdmCore **slot, IdmError *err) {
     return true;
 }
 
+static bool core_statement_discardable(const IdmCore *core) {
+    if (!core) return true;
+    switch (core->kind) {
+        case IDM_CORE_LITERAL:
+        case IDM_CORE_ARG_REF:
+        case IDM_CORE_LOCAL_REF:
+        case IDM_CORE_CAPTURE_REF:
+        case IDM_CORE_ENV_REF:
+        case IDM_CORE_PACKAGE_REF:
+            return true;
+        case IDM_CORE_RECORD_IS:
+            return core_statement_discardable(core->as.record_is.value);
+        case IDM_CORE_RECORD_FIELD:
+            return core_statement_discardable(core->as.record_field.receiver);
+        case IDM_CORE_LIST_CONS:
+        case IDM_CORE_LIST_APPEND:
+            return core_statement_discardable(core->as.list_pair.head) && core_statement_discardable(core->as.list_pair.tail);
+        case IDM_CORE_VALUE_SEQUENCE:
+            for (size_t i = 0; i < core->as.value_sequence.count; i++) {
+                if (!core_statement_discardable(core->as.value_sequence.items[i])) return false;
+            }
+            return true;
+        case IDM_CORE_STRING_CONCAT:
+            for (size_t i = 0; i < core->as.string_concat.count; i++) {
+                if (!core_statement_discardable(core->as.string_concat.items[i])) return false;
+            }
+            return true;
+        case IDM_CORE_COND:
+            return core_statement_discardable(core->as.cond_expr.cond) &&
+                   core_statement_discardable(core->as.cond_expr.then_branch) &&
+                   core_statement_discardable(core->as.cond_expr.else_branch);
+        default:
+            return false;
+    }
+}
+
 static bool normalize_do(IdmRuntime *rt, IdmCore **slot, IdmError *err) {
     IdmCore *core = *slot;
     for (size_t i = 0; i < core->as.do_expr.count; i++) {
         if (!normalize_core(rt, &core->as.do_expr.items[i], err)) return false;
+    }
+    if (core->as.do_expr.count > 1) {
+        size_t keep = 0;
+        for (size_t i = 0; i < core->as.do_expr.count; i++) {
+            IdmCore *item = core->as.do_expr.items[i];
+            if (i + 1u < core->as.do_expr.count && core_statement_discardable(item)) {
+                idm_core_free(item);
+                continue;
+            }
+            core->as.do_expr.items[keep++] = item;
+        }
+        core->as.do_expr.count = keep;
     }
     if (core->as.do_expr.count == 0) {
         IdmCore *nil_lit = idm_core_literal(idm_nil(), core->span);

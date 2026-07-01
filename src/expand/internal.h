@@ -238,6 +238,12 @@ typedef struct {
     char *env_key;
 } FieldSelectorDef;
 typedef struct {
+    char *name;
+    uint32_t slot;
+    uint32_t arity;
+    IdmCore *body;
+} FoldableFnDef;
+typedef struct {
     IdmRuntime *rt;
     IdmBindingTable bindings;
     IdmScopeSet empty_scopes;
@@ -284,6 +290,9 @@ typedef struct {
     FieldSelectorDef *field_selectors;
     size_t field_selector_count;
     size_t field_selector_cap;
+    FoldableFnDef *foldables;
+    size_t foldable_count;
+    size_t foldable_cap;
     struct { char *name; char *provider; char *provider_key; IdmSpan span; } *activations;
     size_t activation_count;
     size_t activation_cap;
@@ -530,8 +539,15 @@ bool expand_core_static_type_term(ExpandContext *ctx, const IdmCore *core, IdmTy
 bool expand_typecheck_value(ExpandContext *ctx, const char *name, IdmCore *value, IdmCallableContract *contract, bool *has_contract, IdmError *err);
 bool expand_typecheck_infer_scheme(ExpandContext *ctx, const IdmCore *value, const char *name, IdmCallableContract *out, bool *out_has, IdmError *err);
 bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, IdmError *err);
-bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, uint8_t *out_purity);
-uint8_t expand_typecheck_core_purity(ExpandContext *ctx, const IdmCore *core);
+typedef struct {
+    uint8_t level;
+    uint64_t mask;
+} PurityFx;
+bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, PurityFx *out_fx);
+uint8_t expand_typecheck_core_purity(ExpandContext *ctx, const IdmCore *core, uint64_t *out_mask);
+bool foldable_register(ExpandContext *ctx, const char *name, uint32_t slot, const IdmCore *fn);
+const FoldableFnDef *foldable_lookup(const ExpandContext *ctx, const char *name, uint32_t slot);
+bool foldable_eval(const ExpandContext *ctx, const IdmCore *core, const IdmValue *argv, uint32_t argc, uint32_t *fuel, IdmValue *out);
 IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const TypeDef *type, uint32_t field_index, IdmSpan span, IdmError *err);
 bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err);
 IdmCore *literal_from_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);

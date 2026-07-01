@@ -439,6 +439,40 @@ int idm_unit_signature_contract(void) {
     idm_buf_destroy(&fold_dump);
     idm_core_free(fold_core);
 
+    const char *user_fold_source =
+        "defn triple x -> mul x 3\n"
+        "defn fact n -> cond (lte? n 1) 1 (mul n (fact (sub n 1)))\n"
+        "a = triple 7\n"
+        "b = fact 6\n"
+        "b\n";
+    IdmCore *uf_core = NULL;
+    check_ok(idm_expand_source_string(&rt, "<userfold>", user_fold_source, &uf_core, &err), &err, "user fold expand");
+    IdmBuffer uf_dump;
+    idm_buf_init(&uf_dump);
+    check(idm_core_dump(&uf_dump, uf_core), "user fold dump");
+    check(uf_dump.data && strstr(uf_dump.data, "21") != NULL, "user fold simple literal");
+    check(uf_dump.data && strstr(uf_dump.data, "720") != NULL, "user fold recursive literal");
+    idm_buf_destroy(&uf_dump);
+    idm_core_free(uf_core);
+
+    const char *dead_source =
+        "defn keepy x -> do\n"
+        "  x\n"
+        "  \"discard\"\n"
+        "  mul x 2\n"
+        "end\n"
+        "keepy 4\n";
+    IdmCore *dead_core = NULL;
+    check_ok(idm_expand_source_string(&rt, "<dead>", dead_source, &dead_core, &err), &err, "dead expand");
+    check_ok(idm_core_normalize(&rt, &dead_core, &err), &err, "dead normalize");
+    IdmBuffer dead_dump;
+    idm_buf_init(&dead_dump);
+    check(idm_core_dump(&dead_dump, dead_core), "dead dump");
+    check(!dead_dump.data || strstr(dead_dump.data, "discard") == NULL, "dead literal statement eliminated");
+    check(dead_dump.data && strstr(dead_dump.data, "primitive mul") != NULL, "dead keeps result expression");
+    idm_buf_destroy(&dead_dump);
+    idm_core_free(dead_core);
+
     const char *generic_method_source =
         "package generic_method_signature_contract\n"
         "\n"
@@ -970,7 +1004,14 @@ int idm_unit_signature_contract(void) {
         "export defn tainted x -> twice (fn v -> do\n"
         "  println v\n"
         "  v\n"
-        "end) x\n";
+        "end) x\n"
+        "\n"
+        "export defn mapish do\n"
+        "  '() _f -> '()\n"
+        "  '(h . t) f -> cons (f &h) (mapish t f)\n"
+        "end\n"
+        "\n"
+        "export defn doubled xs -> mapish xs (fn v -> mul v 2)\n";
     dir = write_package_dir(purity_source, &err);
     idm_buf_init(&wire);
     check_ok(idm_expand_package_artifact_serialize(&rt, dir, &wire, &err), &err, "purity package compiles");
@@ -992,6 +1033,11 @@ int idm_unit_signature_contract(void) {
     check(resolved && resolved->has_contract && resolved->contract.purity >= IDM_PURITY_ARGS, "resolved higher-order call is not impure");
     const IdmPkgSlot *tainted = find_slot(&pur_art, "tainted");
     check(tainted && tainted->has_contract && tainted->contract.purity == IDM_PURITY_IMPURE, "tainted higher-order call is impure");
+    const IdmPkgSlot *mapish = find_slot(&pur_art, "mapish");
+    check(mapish && mapish->has_contract && mapish->contract.purity == IDM_PURITY_ARGS, "mapish is args-pure");
+    check(mapish->contract.sig_count && (mapish->contract.sigs[0].invoked_mask & 1ull) == 0 && (mapish->contract.sigs[0].invoked_mask & 2ull) != 0, "mapish invokes f not xs");
+    const IdmPkgSlot *doubled = find_slot(&pur_art, "doubled");
+    check(doubled && doubled->has_contract && doubled->contract.purity == IDM_PURITY_PURE, "doubled with pure lambda is fully pure");
     idm_artifact_destroy(&pur_art);
     idm_buf_destroy(&wire);
     remove_package_dir(dir);

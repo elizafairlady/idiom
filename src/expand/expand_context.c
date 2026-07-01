@@ -376,6 +376,8 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->grammars);
     for (size_t i = 0; i < ctx->operator_count; i++) idm_operator_def_destroy(&ctx->operators[i]);
     free(ctx->operators);
+    for (size_t i = 0; i < ctx->foldable_count; i++) { free(ctx->foldables[i].name); idm_core_free(ctx->foldables[i].body); }
+    free(ctx->foldables);
     for (size_t i = 0; i < ctx->field_selector_count; i++) { free(ctx->field_selectors[i].name); free(ctx->field_selectors[i].env_key); }
     free(ctx->field_selectors);
     for (size_t i = 0; i < ctx->typed.entity_count; i++) typed_entity_destroy(&ctx->typed.entities[i]);
@@ -1462,6 +1464,195 @@ FieldSelectorDef *field_selector_ensure(ExpandContext *ctx, const char *name, Id
     sel->slot = sel->env ? ctx->env_slot_seq++ : ctx->next_slot++;
     ctx->field_selector_count++;
     return &ctx->field_selectors[ctx->field_selector_count - 1u];
+}
+
+static bool foldable_core_ok(const IdmCore *core, uint32_t arity, size_t *budget) {
+    if (!core) return false;
+    if (*budget == 0) return false;
+    (*budget)--;
+    switch (core->kind) {
+        case IDM_CORE_LITERAL:
+            return true;
+        case IDM_CORE_ARG_REF:
+            return core->as.slot_ref.slot < arity;
+        case IDM_CORE_CALL: {
+            const IdmCore *callee = core->as.call.callee;
+            bool prim_ok = callee && callee->kind == IDM_CORE_FN_MULTI && callee->as.fn_multi.count == 1u &&
+                           callee->as.fn_multi.clauses[0].primitive_backed &&
+                           idm_primitive_pure(callee->as.fn_multi.clauses[0].primitive);
+            bool ref_ok = callee && (callee->kind == IDM_CORE_ENV_REF || callee->kind == IDM_CORE_PACKAGE_REF || callee->kind == IDM_CORE_LOCAL_REF);
+            if (!prim_ok && !ref_ok) return false;
+            for (size_t i = 0; i < core->as.call.arg_count; i++) {
+                if (!foldable_core_ok(core->as.call.args[i], arity, budget)) return false;
+            }
+            return true;
+        }
+        case IDM_CORE_COND:
+            return foldable_core_ok(core->as.cond_expr.cond, arity, budget) &&
+                   foldable_core_ok(core->as.cond_expr.then_branch, arity, budget) &&
+                   foldable_core_ok(core->as.cond_expr.else_branch, arity, budget);
+        default:
+            return false;
+    }
+}
+
+static IdmCore *foldable_core_clone(const IdmCore *core) {
+    switch (core->kind) {
+        case IDM_CORE_LITERAL:
+            return idm_core_literal(core->as.literal, core->span);
+        case IDM_CORE_ARG_REF:
+            return idm_core_arg_ref(core->as.slot_ref.name, core->as.slot_ref.slot, core->span);
+        case IDM_CORE_ENV_REF:
+            return idm_core_env_ref(core->as.slot_ref.name, core->as.slot_ref.slot, core->span);
+        case IDM_CORE_LOCAL_REF:
+            return idm_core_local_ref(core->as.slot_ref.name, core->as.slot_ref.slot, core->span);
+        case IDM_CORE_PACKAGE_REF:
+            return idm_core_package_ref(core->as.package_ref.name, core->as.package_ref.env_key, core->as.package_ref.slot, core->span);
+        case IDM_CORE_FN_MULTI: {
+            if (core->as.fn_multi.count != 1u || !core->as.fn_multi.clauses[0].primitive_backed) return NULL;
+            return idm_core_primitive_backed_fn(core->as.fn_multi.name, core->as.fn_multi.clauses[0].primitive, core->as.fn_multi.clauses[0].call_arity, core->span);
+        }
+        case IDM_CORE_CALL: {
+            IdmCore *callee = foldable_core_clone(core->as.call.callee);
+            IdmCore *call = callee ? idm_core_call(callee, core->span) : NULL;
+            if (!call) {
+                idm_core_free(callee);
+                return NULL;
+            }
+            for (size_t i = 0; i < core->as.call.arg_count; i++) {
+                IdmCore *arg = foldable_core_clone(core->as.call.args[i]);
+                if (!arg || !idm_core_call_add_arg(call, arg)) {
+                    idm_core_free(arg);
+                    idm_core_free(call);
+                    return NULL;
+                }
+            }
+            return call;
+        }
+        case IDM_CORE_COND: {
+            IdmCore *c = foldable_core_clone(core->as.cond_expr.cond);
+            IdmCore *t = c ? foldable_core_clone(core->as.cond_expr.then_branch) : NULL;
+            IdmCore *e = t ? foldable_core_clone(core->as.cond_expr.else_branch) : NULL;
+            IdmCore *out = e ? idm_core_cond(c, t, e, core->span) : NULL;
+            if (!out) {
+                idm_core_free(c);
+                idm_core_free(t);
+                idm_core_free(e);
+            }
+            return out;
+        }
+        default:
+            return NULL;
+    }
+}
+
+bool foldable_register(ExpandContext *ctx, const char *name, uint32_t slot, const IdmCore *fn) {
+    if (!fn || !name) return true;
+    const IdmCore *body = NULL;
+    uint32_t arity = 0;
+    if (fn->kind == IDM_CORE_FN && !fn->as.fn.guard && fn->as.fn.capture_count == 0) {
+        bool plain = true;
+        for (uint32_t i = 0; i < fn->as.fn.pattern_count; i++) {
+            const IdmPattern *p = fn->as.fn.param_patterns[i];
+            if (p && p->kind != IDM_PAT_BIND && p->kind != IDM_PAT_WILDCARD) { plain = false; break; }
+        }
+        if (!plain) return true;
+        body = fn->as.fn.body;
+        arity = fn->as.fn.arity;
+    } else if (fn->kind == IDM_CORE_FN_MULTI && fn->as.fn_multi.count == 1u && fn->as.fn_multi.capture_count == 0) {
+        const IdmFnClause *cl = &fn->as.fn_multi.clauses[0];
+        if (cl->guard || cl->primitive_backed) return true;
+        bool plain = true;
+        for (uint32_t i = 0; i < cl->pattern_count; i++) {
+            const IdmPattern *p = cl->param_patterns[i];
+            if (p && p->kind != IDM_PAT_BIND && p->kind != IDM_PAT_WILDCARD) { plain = false; break; }
+        }
+        if (!plain) return true;
+        body = cl->body;
+        arity = cl->arity;
+    } else {
+        return true;
+    }
+    if (arity > 8u) return true;
+    size_t budget = 64u;
+    if (!foldable_core_ok(body, arity, &budget)) {
+        return true;
+    }
+    IdmCore *clone = foldable_core_clone(body);
+    if (!clone) {
+        return true;
+    }
+    if (ctx->foldable_count == ctx->foldable_cap &&
+        !idm_grow((void **)&ctx->foldables, &ctx->foldable_cap, sizeof(*ctx->foldables), 8u, ctx->foldable_count + 1u)) {
+        idm_core_free(clone);
+        return false;
+    }
+    FoldableFnDef *def = &ctx->foldables[ctx->foldable_count];
+    memset(def, 0, sizeof(*def));
+    def->name = idm_strdup(name);
+    if (!def->name) {
+        idm_core_free(clone);
+        return false;
+    }
+    def->slot = slot;
+    def->arity = arity;
+    def->body = clone;
+    ctx->foldable_count++;
+    return true;
+}
+
+const FoldableFnDef *foldable_lookup(const ExpandContext *ctx, const char *name, uint32_t slot) {
+    for (size_t i = 0; i < ctx->foldable_count; i++) {
+        if (ctx->foldables[i].slot == slot && strcmp(ctx->foldables[i].name, name) == 0) return &ctx->foldables[i];
+    }
+    return NULL;
+}
+
+bool foldable_eval(const ExpandContext *ctx, const IdmCore *core, const IdmValue *argv, uint32_t argc, uint32_t *fuel, IdmValue *out) {
+    if (!core || *fuel == 0) return false;
+    (*fuel)--;
+    switch (core->kind) {
+        case IDM_CORE_LITERAL:
+            *out = core->as.literal;
+            return true;
+        case IDM_CORE_ARG_REF:
+            if (core->as.slot_ref.slot >= argc) return false;
+            *out = argv[core->as.slot_ref.slot];
+            return true;
+        case IDM_CORE_COND: {
+            IdmValue cv = idm_nil();
+            if (!foldable_eval(ctx, core->as.cond_expr.cond, argv, argc, fuel, &cv)) return false;
+            return foldable_eval(ctx, idm_value_ok(cv) ? core->as.cond_expr.then_branch : core->as.cond_expr.else_branch, argv, argc, fuel, out);
+        }
+        case IDM_CORE_CALL: {
+            const IdmCore *callee = core->as.call.callee;
+            if (core->as.call.arg_count > 8u) return false;
+            IdmValue vals[8];
+            for (size_t i = 0; i < core->as.call.arg_count; i++) {
+                if (!foldable_eval(ctx, core->as.call.args[i], argv, argc, fuel, &vals[i])) return false;
+            }
+            if (callee && callee->kind == IDM_CORE_FN_MULTI && callee->as.fn_multi.count == 1u && callee->as.fn_multi.clauses[0].primitive_backed) {
+                IdmError probe;
+                idm_error_init(&probe);
+                bool ok = idm_prim_invoke(ctx->rt, callee->as.fn_multi.clauses[0].primitive, vals, (uint32_t)core->as.call.arg_count, out, &probe);
+                if (!ok || probe.present) {
+                    idm_error_clear(&probe);
+                    return false;
+                }
+                return true;
+            }
+            if (callee && (callee->kind == IDM_CORE_ENV_REF || callee->kind == IDM_CORE_PACKAGE_REF || callee->kind == IDM_CORE_LOCAL_REF)) {
+                const char *cname = callee->kind == IDM_CORE_PACKAGE_REF ? callee->as.package_ref.name : callee->as.slot_ref.name;
+                uint32_t cslot = callee->kind == IDM_CORE_PACKAGE_REF ? callee->as.package_ref.slot : callee->as.slot_ref.slot;
+                const FoldableFnDef *def = cname ? foldable_lookup(ctx, cname, cslot) : NULL;
+                if (!def || def->arity != core->as.call.arg_count) return false;
+                return foldable_eval(ctx, def->body, vals, def->arity, fuel, out);
+            }
+            return false;
+        }
+        default:
+            return false;
+    }
 }
 
 bool method_impl_matches_type(const ExpandContext *ctx, const MethodImplDef *impl, const char *type) {

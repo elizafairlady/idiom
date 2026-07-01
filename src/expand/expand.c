@@ -18,6 +18,7 @@ static IdmCore *expand_try_parts(ExpandContext *ctx, IdmSyntax *const *items, si
 static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 static IdmCore *rewrite_is_a_call(ExpandContext *ctx, IdmCore *call, IdmError *err);
 static IdmCore *fold_pure_primitive_call(ExpandContext *ctx, IdmCore *call);
+static IdmCore *fold_pure_user_call(ExpandContext *ctx, IdmCore *call);
 static bool syn_is_dot(const IdmSyntax *s);
 static bool qualified_word_resolves(ExpandContext *ctx, const IdmSyntax *word);
 typedef struct {
@@ -1606,6 +1607,7 @@ static IdmCore *application_surface_call_from(ExpandContext *ctx, FieldSurfaceGr
     call = rewrite_is_a_call(ctx, call, err);
     if (!call) return NULL;
     call = fold_pure_primitive_call(ctx, call);
+    call = fold_pure_user_call(ctx, call);
     return parse_dot_tail(ctx, items, pos, end, stop_at_operator, call, err);
 }
 
@@ -1664,6 +1666,39 @@ static IdmCore *fold_pure_primitive_call(ExpandContext *ctx, IdmCore *call) {
         idm_error_clear(&probe);
         return call;
     }
+    IdmCore *lit = idm_core_literal(out, call->span);
+    if (!lit) return call;
+    idm_core_free(call);
+    return lit;
+}
+
+static IdmCore *fold_pure_user_call(ExpandContext *ctx, IdmCore *call) {
+    if (!call || call->kind != IDM_CORE_CALL || call->as.call.arg_count > 8u) return call;
+    const IdmCore *callee = call->as.call.callee;
+    if (!callee) return call;
+    const char *name = NULL;
+    uint32_t slot = 0;
+    if (callee->kind == IDM_CORE_ENV_REF || callee->kind == IDM_CORE_LOCAL_REF) {
+        name = callee->as.slot_ref.name;
+        slot = callee->as.slot_ref.slot;
+    } else if (callee->kind == IDM_CORE_PACKAGE_REF) {
+        name = callee->as.package_ref.name;
+        slot = callee->as.package_ref.slot;
+    } else {
+        return call;
+    }
+    if (!name) return call;
+    const FoldableFnDef *def = foldable_lookup(ctx, name, slot);
+    if (!def || def->arity != call->as.call.arg_count) return call;
+    IdmValue args[8];
+    for (size_t i = 0; i < call->as.call.arg_count; i++) {
+        const IdmCore *arg = call->as.call.args[i];
+        if (!arg || arg->kind != IDM_CORE_LITERAL) return call;
+        args[i] = arg->as.literal;
+    }
+    uint32_t fuel = 512u;
+    IdmValue out = idm_nil();
+    if (!foldable_eval(ctx, def->body, args, def->arity, &fuel, &out)) return call;
     IdmCore *lit = idm_core_literal(out, call->span);
     if (!lit) return call;
     idm_core_free(call);
@@ -1781,6 +1816,7 @@ static IdmCore *application_call_from(ExpandContext *ctx, IdmCore *callee, IdmSy
     call = rewrite_is_a_call(ctx, call, err);
     if (!call) return NULL;
     call = fold_pure_primitive_call(ctx, call);
+    call = fold_pure_user_call(ctx, call);
     return parse_dot_tail(ctx, items, pos, end, stop_at_operator, call, err);
 }
 

@@ -763,6 +763,7 @@ bool idm_contract_sig_copy(IdmContractSig *dst, const IdmContractSig *src) {
         }
     }
     dst->has_result = src->has_result;
+    dst->invoked_mask = src->invoked_mask;
     if (src->has_result && !idm_type_term_copy(&dst->result, &src->result)) { idm_contract_sig_destroy(dst); return false; }
     return true;
 }
@@ -852,6 +853,7 @@ bool idm_callable_contract_serialize(IdmBuffer *out, const IdmCallableContract *
         }
         if (!idm_buf_put_u8(out, sig->has_result ? 1u : 0u)) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
         if (sig->has_result && !idm_type_term_serialize(out, &sig->result, err)) return false;
+        if (!idm_buf_put_u64(out, sig->invoked_mask)) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
     }
     return idm_buf_put_u8(out, contract->purity) || (err ? idm_error_oom(err, idm_span_unknown(NULL)) : false);
 }
@@ -916,6 +918,11 @@ bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *co
             if (sig->has_result && !idm_type_term_deserialize(r, &sig->result, err)) {
                 idm_callable_contract_destroy(contract);
                 return false;
+            }
+            sig->invoked_mask = idm_rd_u64(r);
+            if (!r->ok) {
+                idm_callable_contract_destroy(contract);
+                return idm_error_set(err, idm_span_unknown(NULL), "truncated callable contract invocation mask");
             }
         }
     }
