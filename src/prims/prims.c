@@ -682,67 +682,35 @@ static bool dict_collect_entries(IdmValue d, IdmDictEntry *out, size_t n) {
     return i == n;
 }
 
-static bool dict_min_unused(const IdmDictEntry *entries, const bool *used, size_t n, size_t *out_index) {
-    bool have = false;
-    IdmValue best_key = idm_nil();
-    size_t best = 0;
-    for (size_t i = 0; i < n; i++) {
-        if (used[i]) continue;
-        if (!have || cmp_value_total(entries[i].key, best_key) < 0) {
-            have = true;
-            best = i;
-            best_key = entries[i].key;
-        }
-    }
-    if (!have) return false;
-    *out_index = best;
-    return true;
+static int cmp_dict_entry(const void *pa, const void *pb) {
+    const IdmDictEntry *x = pa;
+    const IdmDictEntry *y = pb;
+    int r = cmp_value_total(x->key, y->key);
+    return r != 0 ? r : cmp_value_total(x->value, y->value);
 }
 
 static int cmp_dict_total(IdmValue a, IdmValue b) {
     size_t ac = idm_dict_count(a);
     size_t bc = idm_dict_count(b);
-    bool *a_used = ac ? calloc(ac, sizeof(*a_used)) : NULL;
-    bool *b_used = bc ? calloc(bc, sizeof(*b_used)) : NULL;
     IdmDictEntry *a_entries = ac ? calloc(ac, sizeof(*a_entries)) : NULL;
     IdmDictEntry *b_entries = bc ? calloc(bc, sizeof(*b_entries)) : NULL;
-    if ((ac && (!a_used || !a_entries || !dict_collect_entries(a, a_entries, ac))) ||
-        (bc && (!b_used || !b_entries || !dict_collect_entries(b, b_entries, bc)))) {
-        free(a_used);
-        free(b_used);
+    int r = 0;
+    if ((ac && (!a_entries || !dict_collect_entries(a, a_entries, ac))) ||
+        (bc && (!b_entries || !dict_collect_entries(b, b_entries, bc)))) {
         free(a_entries);
         free(b_entries);
         return cmp_size(ac, bc);
     }
+    qsort(a_entries, ac, sizeof(*a_entries), cmp_dict_entry);
+    qsort(b_entries, bc, sizeof(*b_entries), cmp_dict_entry);
     size_t n = ac < bc ? ac : bc;
-    for (size_t i = 0; i < n; i++) {
-        size_t ai = 0, bi = 0;
-        if (!dict_min_unused(a_entries, a_used, ac, &ai) || !dict_min_unused(b_entries, b_used, bc, &bi)) break;
-        a_used[ai] = true;
-        b_used[bi] = true;
-        IdmValue ak = a_entries[ai].key, av = a_entries[ai].value, bk = b_entries[bi].key, bv = b_entries[bi].value;
-        int r = cmp_value_total(ak, bk);
-        if (r != 0) {
-            free(a_used);
-            free(b_used);
-            free(a_entries);
-            free(b_entries);
-            return r;
-        }
-        r = cmp_value_total(av, bv);
-        if (r != 0) {
-            free(a_used);
-            free(b_used);
-            free(a_entries);
-            free(b_entries);
-            return r;
-        }
+    for (size_t i = 0; r == 0 && i < n; i++) {
+        r = cmp_value_total(a_entries[i].key, b_entries[i].key);
+        if (r == 0) r = cmp_value_total(a_entries[i].value, b_entries[i].value);
     }
-    free(a_used);
-    free(b_used);
     free(a_entries);
     free(b_entries);
-    return cmp_size(ac, bc);
+    return r != 0 ? r : cmp_size(ac, bc);
 }
 
 static int cmp_sequence_total(IdmValue a, IdmValue b) {
