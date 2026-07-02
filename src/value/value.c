@@ -16,6 +16,7 @@ typedef enum {
     IDM_OBJ_TUPLE,
     IDM_OBJ_VECTOR,
     IDM_OBJ_DICT,
+    IDM_OBJ_DICT_NODE,
     IDM_OBJ_SYNTAX,
     IDM_OBJ_CELL,
     IDM_OBJ_CLOSURE,
@@ -42,9 +43,16 @@ typedef struct {
 } IdmSequenceObj;
 
 typedef struct {
-    IdmDictEntry *entries;
     size_t count;
+    IdmValue root;
 } IdmDictObj;
+
+typedef struct {
+    uint32_t datamap;
+    uint32_t nodemap;
+    uint16_t collision_count;
+    IdmValue *slots;
+} IdmDictNodeObj;
 
 typedef struct {
     const IdmBytecodeModule *module;
@@ -93,6 +101,7 @@ struct IdmObject {
         IdmPairObj pair;
         IdmSequenceObj sequence;
         IdmDictObj dict;
+        IdmDictNodeObj dict_node;
         IdmSyntax *syntax;
         IdmCellObj cell;
         IdmClosureObj closure;
@@ -220,7 +229,7 @@ static void object_free(IdmObject *obj) {
     if (!obj) return;
     if (obj->kind == IDM_OBJ_STRING) free(obj->as.string.bytes);
     if (obj->kind == IDM_OBJ_TUPLE || obj->kind == IDM_OBJ_VECTOR) free(obj->as.sequence.items);
-    if (obj->kind == IDM_OBJ_DICT && object_payload_external(obj, obj->as.dict.entries)) free(obj->as.dict.entries);
+    if (obj->kind == IDM_OBJ_DICT_NODE && object_payload_external(obj, obj->as.dict_node.slots)) free(obj->as.dict_node.slots);
     if (obj->kind == IDM_OBJ_SYNTAX) idm_syn_free(obj->as.syntax);
     if (obj->kind == IDM_OBJ_CLOSURE) {
         idm_pattern_selector_free(obj->as.closure.selector);
@@ -657,6 +666,7 @@ IdmValueTag idm_boxed_value_tag(IdmValue value) {
         case IDM_OBJ_TUPLE: return IDM_VAL_TUPLE;
         case IDM_OBJ_VECTOR: return IDM_VAL_VECTOR;
         case IDM_OBJ_DICT: return IDM_VAL_DICT;
+        case IDM_OBJ_DICT_NODE: return IDM_VAL_DICT;
         case IDM_OBJ_SYNTAX: return IDM_VAL_SYNTAX;
         case IDM_OBJ_CELL: return IDM_VAL_CELL;
         case IDM_OBJ_CLOSURE: return IDM_VAL_CLOSURE;
@@ -704,7 +714,11 @@ static size_t gc_object_child_count(const IdmObject *obj) {
         case IDM_OBJ_VECTOR:
             return obj->as.sequence.count;
         case IDM_OBJ_DICT:
-            return obj->as.dict.count > SIZE_MAX / 2u ? SIZE_MAX : obj->as.dict.count * 2u;
+            return 1u;
+        case IDM_OBJ_DICT_NODE:
+            return obj->as.dict_node.collision_count != 0
+                ? (size_t)obj->as.dict_node.collision_count * 2u
+                : (size_t)__builtin_popcount(obj->as.dict_node.datamap) * 2u + (size_t)__builtin_popcount(obj->as.dict_node.nodemap);
         case IDM_OBJ_CELL:
             return 1u;
         case IDM_OBJ_CLOSURE:
@@ -721,10 +735,8 @@ static size_t gc_object_child_count(const IdmObject *obj) {
 static IdmValue gc_object_child_at(const IdmObject *obj, size_t index) {
     if (obj->kind == IDM_OBJ_PAIR) return index == 0 ? obj->as.pair.car : obj->as.pair.cdr;
     if (obj->kind == IDM_OBJ_TUPLE || obj->kind == IDM_OBJ_VECTOR) return obj->as.sequence.items[index];
-    if (obj->kind == IDM_OBJ_DICT) {
-        size_t entry = index / 2u;
-        return (index & 1u) == 0 ? obj->as.dict.entries[entry].key : obj->as.dict.entries[entry].value;
-    }
+    if (obj->kind == IDM_OBJ_DICT) return obj->as.dict.root;
+    if (obj->kind == IDM_OBJ_DICT_NODE) return obj->as.dict_node.slots[index];
     if (obj->kind == IDM_OBJ_CELL) return obj->as.cell.value;
     if (obj->kind == IDM_OBJ_CLOSURE) return obj->as.closure.captures[index];
     if (obj->kind == IDM_OBJ_RECORD) return obj->as.record.field_values[index];
@@ -1419,24 +1431,7 @@ IdmValue idm_vector(IdmRuntime *rt, const IdmValue *items, size_t count, IdmErro
     return sequence_value(rt, items, count, IDM_OBJ_VECTOR, err);
 }
 
-static IdmValue dict_value_with_cap(IdmRuntime *rt, size_t cap, IdmError *err) {
-    size_t extra = 0;
-    if (cap > SIZE_MAX / sizeof(IdmDictEntry)) {
-        idm_error_oom(err, idm_span_unknown(NULL));
-        return idm_nil();
-    }
-    extra = cap * sizeof(IdmDictEntry);
-    IdmObject *obj = heap_alloc_extra(idm_active_heap(rt), IDM_OBJ_DICT, extra);
-    if (!obj) {
-        idm_error_oom(err, idm_span_unknown(NULL));
-        return idm_nil();
-    }
-    obj->as.dict.count = 0;
-    obj->as.dict.entries = cap == 0 ? NULL : (IdmDictEntry *)(obj + 1);
-    IdmValue v;
-    v = idm_from_boxed(obj);
-    return v;
-}
+static bool dict_key_equal(IdmValue a, IdmValue b);
 
 static bool dict_key_equal(IdmValue a, IdmValue b) {
     IdmValueTag ta = idm_value_tag(a), tb = idm_value_tag(b);
@@ -1470,26 +1465,341 @@ static bool dict_key_equal(IdmValue a, IdmValue b) {
     }
 }
 
-IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, IdmError *err) {
-    IdmValue v = dict_value_with_cap(rt, count, err);
-    if (idm_value_tag(v) != IDM_VAL_DICT) return v;
-    IdmObject *obj = idm_boxed_object(v);
-    if (count != 0) {
-        for (size_t i = 0; i < count; i++) {
-            bool replaced = false;
-            for (size_t j = 0; j < obj->as.dict.count; j++) {
-                if (dict_key_equal(obj->as.dict.entries[j].key, entries[i].key)) {
-                    obj->as.dict.entries[j].value = entries[i].value;
-                    replaced = true;
-                    break;
-                }
+static uint32_t dict_hash_mix(uint32_t h, uint32_t v) {
+    h ^= v;
+    h *= 0x9e3779b1u;
+    h ^= h >> 15;
+    return h;
+}
+
+static uint32_t dict_key_hash_depth(IdmValue v, unsigned fuel) {
+    if (fuel == 0) return 0xa5a5a5a5u;
+    if (idm_value_is_int(v)) {
+        int64_t iv = 0;
+        if (idm_int_to_i64(v, &iv)) return dict_hash_mix(0x811c9dc5u, (uint32_t)iv ^ (uint32_t)((uint64_t)iv >> 32));
+        const IdmBignumObj *bn = &idm_boxed_object(v)->as.bignum;
+        uint32_t h = dict_hash_mix(0x811c9dc5u, (uint32_t)bn->sign);
+        for (uint32_t i = 0; i < bn->count; i++) h = dict_hash_mix(h, bn->limbs[i]);
+        return h;
+    }
+    IdmValueTag t = idm_value_tag(v);
+    switch (t) {
+        case IDM_VAL_NIL:
+            return 0x27d4eb2fu;
+        case IDM_VAL_ATOM:
+        case IDM_VAL_WORD:
+            return dict_hash_mix(0x165667b1u, idm_value_symbol(v)->hash);
+        case IDM_VAL_FLOAT: {
+            double d = idm_float_value(v);
+            uint64_t bits;
+            memcpy(&bits, &d, sizeof(bits));
+            return dict_hash_mix(0x85ebca77u, (uint32_t)bits ^ (uint32_t)(bits >> 32));
+        }
+        case IDM_VAL_STRING: {
+            const IdmStringObj *str = &idm_boxed_object(v)->as.string;
+            uint32_t h = 0x811c9dc5u;
+            for (size_t i = 0; i < str->len; i++) {
+                h ^= (unsigned char)str->bytes[i];
+                h *= 16777619u;
             }
-            if (!replaced) {
-                obj->as.dict.entries[obj->as.dict.count++] = entries[i];
+            return h;
+        }
+        case IDM_VAL_SYNTAX:
+        case IDM_VAL_CELL:
+        case IDM_VAL_CLOSURE:
+        case IDM_VAL_REGEX:
+        case IDM_VAL_REGEX_RESULT: {
+            uintptr_t p = (uintptr_t)idm_boxed_object(v);
+            return dict_hash_mix(0xc2b2ae3du, (uint32_t)p ^ (uint32_t)((uint64_t)p >> 32));
+        }
+        case IDM_VAL_PID:
+        case IDM_VAL_REF:
+        case IDM_VAL_PORT: {
+            uint64_t id = idm_value_id(v);
+            return dict_hash_mix(0x94d049bbu, (uint32_t)id ^ (uint32_t)(id >> 32));
+        }
+        case IDM_VAL_PAIR: {
+            uint32_t h = 0x2545f491u;
+            IdmValue cur = v;
+            unsigned steps = fuel;
+            while (idm_is_pair(cur) && steps-- > 0) {
+                h = dict_hash_mix(h, dict_key_hash_depth(idm_car(cur, NULL), fuel - 1u));
+                cur = idm_cdr(cur, NULL);
+            }
+            return dict_hash_mix(h, dict_key_hash_depth(cur, fuel - 1u));
+        }
+        case IDM_VAL_TUPLE:
+        case IDM_VAL_VECTOR: {
+            const IdmSequenceObj *seq = &idm_boxed_object(v)->as.sequence;
+            uint32_t h = t == IDM_VAL_TUPLE ? 0x3c6ef372u : 0xdaa66d2bu;
+            for (size_t i = 0; i < seq->count; i++) h = dict_hash_mix(h, dict_key_hash_depth(seq->items[i], fuel - 1u));
+            return h;
+        }
+        case IDM_VAL_RECORD: {
+            const IdmRecordObj *rec = &idm_boxed_object(v)->as.record;
+            uint32_t h = dict_hash_mix(0x6a09e667u, rec->shape ? rec->shape->type->hash : 0u);
+            size_t n = rec->shape ? rec->shape->field_count : 0u;
+            for (size_t i = 0; i < n; i++) h = dict_hash_mix(h, dict_key_hash_depth(rec->field_values[i], fuel - 1u));
+            return h;
+        }
+        case IDM_VAL_DICT: {
+            uint32_t h = 0xbb67ae85u;
+            h = dict_hash_mix(h, (uint32_t)idm_boxed_object(v)->as.dict.count);
+            return h;
+        }
+        default:
+            return 0x510e527fu;
+    }
+}
+
+static uint32_t dict_key_hash(IdmValue v) {
+    return dict_key_hash_depth(v, 16u);
+}
+
+static size_t dict_node_slot_count(const IdmObject *node) {
+    if (node->as.dict_node.collision_count != 0) return (size_t)node->as.dict_node.collision_count * 2u;
+    return (size_t)__builtin_popcount(node->as.dict_node.datamap) * 2u + (size_t)__builtin_popcount(node->as.dict_node.nodemap);
+}
+
+static IdmObject *dict_node_alloc(IdmRuntime *rt, uint32_t datamap, uint32_t nodemap, uint16_t collisions, size_t slot_count, IdmError *err) {
+    if (slot_count > SIZE_MAX / sizeof(IdmValue)) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return NULL;
+    }
+    IdmObject *obj = heap_alloc_extra(idm_active_heap(rt), IDM_OBJ_DICT_NODE, slot_count * sizeof(IdmValue));
+    if (!obj) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return NULL;
+    }
+    obj->as.dict_node.datamap = datamap;
+    obj->as.dict_node.nodemap = nodemap;
+    obj->as.dict_node.collision_count = collisions;
+    obj->as.dict_node.slots = slot_count == 0 ? NULL : (IdmValue *)(obj + 1);
+    for (size_t i = 0; i < slot_count; i++) obj->as.dict_node.slots[i] = idm_nil();
+    return obj;
+}
+
+static IdmValue dict_empty(IdmRuntime *rt, IdmError *err) {
+    IdmObject *obj = heap_alloc_extra(idm_active_heap(rt), IDM_OBJ_DICT, 0);
+    if (!obj) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return idm_nil();
+    }
+    obj->as.dict.count = 0;
+    obj->as.dict.root = idm_nil();
+    return idm_from_boxed(obj);
+}
+
+static bool dict_node_get(const IdmObject *node, IdmValue key, uint32_t hash, unsigned shift, IdmValue *out) {
+    if (node->as.dict_node.collision_count != 0) {
+        for (uint16_t i = 0; i < node->as.dict_node.collision_count; i++) {
+            if (dict_key_equal(node->as.dict_node.slots[2u * i], key)) {
+                *out = node->as.dict_node.slots[2u * i + 1u];
+                return true;
             }
         }
+        return false;
     }
-    return v;
+    uint32_t bit = 1u << ((hash >> shift) & 31u);
+    if (node->as.dict_node.datamap & bit) {
+        size_t di = (size_t)__builtin_popcount(node->as.dict_node.datamap & (bit - 1u));
+        if (!dict_key_equal(node->as.dict_node.slots[2u * di], key)) return false;
+        *out = node->as.dict_node.slots[2u * di + 1u];
+        return true;
+    }
+    if (node->as.dict_node.nodemap & bit) {
+        size_t base = (size_t)__builtin_popcount(node->as.dict_node.datamap) * 2u;
+        size_t ni = (size_t)__builtin_popcount(node->as.dict_node.nodemap & (bit - 1u));
+        return dict_node_get(idm_boxed_object(node->as.dict_node.slots[base + ni]), key, hash, shift + 5u, out);
+    }
+    return false;
+}
+
+static IdmObject *dict_node_pair(IdmRuntime *rt, IdmValue k1, IdmValue v1, uint32_t h1, IdmValue k2, IdmValue v2, uint32_t h2, unsigned shift, IdmError *err) {
+    if (shift >= 30u) {
+        IdmObject *node = dict_node_alloc(rt, 0, 0, 2u, 4u, err);
+        if (!node) return NULL;
+        node->as.dict_node.slots[0] = k1;
+        node->as.dict_node.slots[1] = v1;
+        node->as.dict_node.slots[2] = k2;
+        node->as.dict_node.slots[3] = v2;
+        return node;
+    }
+    uint32_t b1 = 1u << ((h1 >> shift) & 31u);
+    uint32_t b2 = 1u << ((h2 >> shift) & 31u);
+    if (b1 == b2) {
+        IdmObject *child = dict_node_pair(rt, k1, v1, h1, k2, v2, h2, shift + 5u, err);
+        if (!child) return NULL;
+        IdmObject *node = dict_node_alloc(rt, 0, b1, 0, 1u, err);
+        if (!node) return NULL;
+        node->as.dict_node.slots[0] = idm_from_boxed(child);
+        return node;
+    }
+    IdmObject *node = dict_node_alloc(rt, b1 | b2, 0, 0, 4u, err);
+    if (!node) return NULL;
+    if (b1 < b2) {
+        node->as.dict_node.slots[0] = k1;
+        node->as.dict_node.slots[1] = v1;
+        node->as.dict_node.slots[2] = k2;
+        node->as.dict_node.slots[3] = v2;
+    } else {
+        node->as.dict_node.slots[0] = k2;
+        node->as.dict_node.slots[1] = v2;
+        node->as.dict_node.slots[2] = k1;
+        node->as.dict_node.slots[3] = v1;
+    }
+    return node;
+}
+
+static IdmObject *dict_node_put(IdmRuntime *rt, const IdmObject *node, IdmValue key, IdmValue value, uint32_t hash, unsigned shift, bool *added, IdmError *err) {
+    size_t slot_count = dict_node_slot_count(node);
+    if (node->as.dict_node.collision_count != 0) {
+        for (uint16_t i = 0; i < node->as.dict_node.collision_count; i++) {
+            if (dict_key_equal(node->as.dict_node.slots[2u * i], key)) {
+                IdmObject *copy = dict_node_alloc(rt, 0, 0, node->as.dict_node.collision_count, slot_count, err);
+                if (!copy) return NULL;
+                memcpy(copy->as.dict_node.slots, node->as.dict_node.slots, slot_count * sizeof(IdmValue));
+                copy->as.dict_node.slots[2u * i + 1u] = value;
+                *added = false;
+                return copy;
+            }
+        }
+        if (node->as.dict_node.collision_count >= UINT16_MAX) {
+            idm_error_oom(err, idm_span_unknown(NULL));
+            return NULL;
+        }
+        IdmObject *copy = dict_node_alloc(rt, 0, 0, (uint16_t)(node->as.dict_node.collision_count + 1u), slot_count + 2u, err);
+        if (!copy) return NULL;
+        memcpy(copy->as.dict_node.slots, node->as.dict_node.slots, slot_count * sizeof(IdmValue));
+        copy->as.dict_node.slots[slot_count] = key;
+        copy->as.dict_node.slots[slot_count + 1u] = value;
+        *added = true;
+        return copy;
+    }
+    uint32_t bit = 1u << ((hash >> shift) & 31u);
+    size_t data_slots = (size_t)__builtin_popcount(node->as.dict_node.datamap) * 2u;
+    if (node->as.dict_node.datamap & bit) {
+        size_t di = (size_t)__builtin_popcount(node->as.dict_node.datamap & (bit - 1u));
+        if (dict_key_equal(node->as.dict_node.slots[2u * di], key)) {
+            IdmObject *copy = dict_node_alloc(rt, node->as.dict_node.datamap, node->as.dict_node.nodemap, 0, slot_count, err);
+            if (!copy) return NULL;
+            memcpy(copy->as.dict_node.slots, node->as.dict_node.slots, slot_count * sizeof(IdmValue));
+            copy->as.dict_node.slots[2u * di + 1u] = value;
+            *added = false;
+            return copy;
+        }
+        IdmValue ek = node->as.dict_node.slots[2u * di];
+        IdmValue ev = node->as.dict_node.slots[2u * di + 1u];
+        IdmObject *child = dict_node_pair(rt, ek, ev, dict_key_hash(ek), key, value, hash, shift + 5u, err);
+        if (!child) return NULL;
+        size_t ni = (size_t)__builtin_popcount(node->as.dict_node.nodemap & (bit - 1u));
+        IdmObject *copy = dict_node_alloc(rt, node->as.dict_node.datamap & ~bit, node->as.dict_node.nodemap | bit, 0, slot_count - 1u, err);
+        if (!copy) return NULL;
+        size_t w = 0;
+        for (size_t i = 0; i < data_slots; i += 2u) {
+            if (i == 2u * di) continue;
+            copy->as.dict_node.slots[w++] = node->as.dict_node.slots[i];
+            copy->as.dict_node.slots[w++] = node->as.dict_node.slots[i + 1u];
+        }
+        size_t old_nodes = (size_t)__builtin_popcount(node->as.dict_node.nodemap);
+        for (size_t i = 0; i < old_nodes; i++) {
+            if (i == ni) copy->as.dict_node.slots[w++] = idm_from_boxed(child);
+            copy->as.dict_node.slots[w++] = node->as.dict_node.slots[data_slots + i];
+        }
+        if (ni == old_nodes) copy->as.dict_node.slots[w++] = idm_from_boxed(child);
+        *added = true;
+        return copy;
+    }
+    if (node->as.dict_node.nodemap & bit) {
+        size_t ni = (size_t)__builtin_popcount(node->as.dict_node.nodemap & (bit - 1u));
+        IdmObject *child = dict_node_put(rt, idm_boxed_object(node->as.dict_node.slots[data_slots + ni]), key, value, hash, shift + 5u, added, err);
+        if (!child) return NULL;
+        IdmObject *copy = dict_node_alloc(rt, node->as.dict_node.datamap, node->as.dict_node.nodemap, 0, slot_count, err);
+        if (!copy) return NULL;
+        memcpy(copy->as.dict_node.slots, node->as.dict_node.slots, slot_count * sizeof(IdmValue));
+        copy->as.dict_node.slots[data_slots + ni] = idm_from_boxed(child);
+        return copy;
+    }
+    size_t di = (size_t)__builtin_popcount(node->as.dict_node.datamap & (bit - 1u));
+    IdmObject *copy = dict_node_alloc(rt, node->as.dict_node.datamap | bit, node->as.dict_node.nodemap, 0, slot_count + 2u, err);
+    if (!copy) return NULL;
+    memcpy(copy->as.dict_node.slots, node->as.dict_node.slots, 2u * di * sizeof(IdmValue));
+    copy->as.dict_node.slots[2u * di] = key;
+    copy->as.dict_node.slots[2u * di + 1u] = value;
+    memcpy(copy->as.dict_node.slots + 2u * di + 2u, node->as.dict_node.slots + 2u * di, (slot_count - 2u * di) * sizeof(IdmValue));
+    *added = true;
+    return copy;
+}
+
+static IdmObject *dict_node_del(IdmRuntime *rt, const IdmObject *node, IdmValue key, uint32_t hash, unsigned shift, bool *removed, bool *emptied, IdmError *err) {
+    size_t slot_count = dict_node_slot_count(node);
+    *emptied = false;
+    if (node->as.dict_node.collision_count != 0) {
+        for (uint16_t i = 0; i < node->as.dict_node.collision_count; i++) {
+            if (dict_key_equal(node->as.dict_node.slots[2u * i], key)) {
+                *removed = true;
+                if (node->as.dict_node.collision_count == 1u) {
+                    *emptied = true;
+                    return (IdmObject *)node;
+                }
+                IdmObject *copy = dict_node_alloc(rt, 0, 0, (uint16_t)(node->as.dict_node.collision_count - 1u), slot_count - 2u, err);
+                if (!copy) return NULL;
+                size_t w = 0;
+                for (uint16_t j = 0; j < node->as.dict_node.collision_count; j++) {
+                    if (j == i) continue;
+                    copy->as.dict_node.slots[w++] = node->as.dict_node.slots[2u * j];
+                    copy->as.dict_node.slots[w++] = node->as.dict_node.slots[2u * j + 1u];
+                }
+                return copy;
+            }
+        }
+        *removed = false;
+        return (IdmObject *)node;
+    }
+    uint32_t bit = 1u << ((hash >> shift) & 31u);
+    size_t data_slots = (size_t)__builtin_popcount(node->as.dict_node.datamap) * 2u;
+    if (node->as.dict_node.datamap & bit) {
+        size_t di = (size_t)__builtin_popcount(node->as.dict_node.datamap & (bit - 1u));
+        if (!dict_key_equal(node->as.dict_node.slots[2u * di], key)) {
+            *removed = false;
+            return (IdmObject *)node;
+        }
+        *removed = true;
+        if (slot_count == 2u) {
+            *emptied = true;
+            return (IdmObject *)node;
+        }
+        IdmObject *copy = dict_node_alloc(rt, node->as.dict_node.datamap & ~bit, node->as.dict_node.nodemap, 0, slot_count - 2u, err);
+        if (!copy) return NULL;
+        memcpy(copy->as.dict_node.slots, node->as.dict_node.slots, 2u * di * sizeof(IdmValue));
+        memcpy(copy->as.dict_node.slots + 2u * di, node->as.dict_node.slots + 2u * di + 2u, (slot_count - 2u * di - 2u) * sizeof(IdmValue));
+        return copy;
+    }
+    if (node->as.dict_node.nodemap & bit) {
+        size_t ni = (size_t)__builtin_popcount(node->as.dict_node.nodemap & (bit - 1u));
+        bool child_emptied = false;
+        IdmObject *child = dict_node_del(rt, idm_boxed_object(node->as.dict_node.slots[data_slots + ni]), key, hash, shift + 5u, removed, &child_emptied, err);
+        if (!child) return NULL;
+        if (!*removed) return (IdmObject *)node;
+        if (child_emptied) {
+            if (slot_count == 1u) {
+                *emptied = true;
+                return (IdmObject *)node;
+            }
+            IdmObject *copy = dict_node_alloc(rt, node->as.dict_node.datamap, node->as.dict_node.nodemap & ~bit, 0, slot_count - 1u, err);
+            if (!copy) return NULL;
+            memcpy(copy->as.dict_node.slots, node->as.dict_node.slots, (data_slots + ni) * sizeof(IdmValue));
+            memcpy(copy->as.dict_node.slots + data_slots + ni, node->as.dict_node.slots + data_slots + ni + 1u, (slot_count - data_slots - ni - 1u) * sizeof(IdmValue));
+            return copy;
+        }
+        IdmObject *copy = dict_node_alloc(rt, node->as.dict_node.datamap, node->as.dict_node.nodemap, 0, slot_count, err);
+        if (!copy) return NULL;
+        memcpy(copy->as.dict_node.slots, node->as.dict_node.slots, slot_count * sizeof(IdmValue));
+        copy->as.dict_node.slots[data_slots + ni] = idm_from_boxed(child);
+        return copy;
+    }
+    *removed = false;
+    return (IdmObject *)node;
 }
 
 IdmValue idm_syntax_value(IdmRuntime *rt, const IdmSyntax *syntax, IdmError *err) {
@@ -2343,20 +2653,47 @@ size_t idm_dict_count(IdmValue value) {
 
 bool idm_dict_get(IdmValue dict, IdmValue key, IdmValue *out) {
     if (idm_value_tag(dict) != IDM_VAL_DICT) return false;
-    for (size_t i = 0; i < idm_boxed_object(dict)->as.dict.count; i++) {
-        if (dict_key_equal(idm_boxed_object(dict)->as.dict.entries[i].key, key)) {
-            *out = idm_boxed_object(dict)->as.dict.entries[i].value;
-            return true;
-        }
-    }
-    return false;
+    const IdmObject *obj = idm_boxed_object(dict);
+    if (obj->as.dict.count == 0) return false;
+    return dict_node_get(idm_boxed_object(obj->as.dict.root), key, dict_key_hash(key), 0u, out);
 }
 
-bool idm_dict_entry(IdmValue dict, size_t index, IdmValue *out_key, IdmValue *out_value) {
-    if (idm_value_tag(dict) != IDM_VAL_DICT || index >= idm_boxed_object(dict)->as.dict.count) return false;
-    *out_key = idm_boxed_object(dict)->as.dict.entries[index].key;
-    *out_value = idm_boxed_object(dict)->as.dict.entries[index].value;
+bool idm_dict_iter_init(IdmValue dict, IdmDictIter *it) {
+    memset(it, 0, sizeof(*it));
+    if (idm_value_tag(dict) != IDM_VAL_DICT) return false;
+    const IdmObject *obj = idm_boxed_object(dict);
+    if (obj->as.dict.count == 0) return true;
+    it->stack[0] = idm_boxed_object(obj->as.dict.root);
+    it->cursor[0] = 0;
+    it->depth = 1;
     return true;
+}
+
+bool idm_dict_iter_next(IdmDictIter *it, IdmValue *out_key, IdmValue *out_value) {
+    while (it->depth > 0) {
+        const IdmObject *node = it->stack[it->depth - 1];
+        size_t cur = it->cursor[it->depth - 1];
+        size_t data_slots = node->as.dict_node.collision_count != 0
+            ? (size_t)node->as.dict_node.collision_count * 2u
+            : (size_t)__builtin_popcount(node->as.dict_node.datamap) * 2u;
+        size_t total = data_slots + (node->as.dict_node.collision_count != 0 ? 0u : (size_t)__builtin_popcount(node->as.dict_node.nodemap));
+        if (cur >= total) {
+            it->depth--;
+            continue;
+        }
+        if (cur < data_slots) {
+            *out_key = node->as.dict_node.slots[cur];
+            *out_value = node->as.dict_node.slots[cur + 1u];
+            it->cursor[it->depth - 1] = cur + 2u;
+            return true;
+        }
+        it->cursor[it->depth - 1] = cur + 1u;
+        if (it->depth >= (int)(sizeof(it->stack) / sizeof(it->stack[0]))) return false;
+        it->stack[it->depth] = idm_boxed_object(node->as.dict_node.slots[cur]);
+        it->cursor[it->depth] = 0;
+        it->depth++;
+    }
+    return false;
 }
 
 IdmValue idm_dict_put(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmValue value, IdmError *err) {
@@ -2364,24 +2701,24 @@ IdmValue idm_dict_put(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmValue valu
         idm_error_set(err, idm_span_unknown(NULL), "dict-put expects a dict");
         return idm_nil();
     }
-    size_t n = idm_boxed_object(dict)->as.dict.count;
-    IdmValue out = dict_value_with_cap(rt, n + 1u, err);
+    const IdmObject *src = idm_boxed_object(dict);
+    uint32_t hash = dict_key_hash(key);
+    IdmObject *new_root = NULL;
+    bool added = false;
+    if (src->as.dict.count == 0) {
+        new_root = dict_node_alloc(rt, 1u << (hash & 31u), 0, 0, 2u, err);
+        if (!new_root) return idm_nil();
+        new_root->as.dict_node.slots[0] = key;
+        new_root->as.dict_node.slots[1] = value;
+        added = true;
+    } else {
+        new_root = dict_node_put(rt, idm_boxed_object(src->as.dict.root), key, value, hash, 0u, &added, err);
+        if (!new_root) return idm_nil();
+    }
+    IdmValue out = dict_empty(rt, err);
     if (idm_value_tag(out) != IDM_VAL_DICT) return out;
-    IdmObject *obj = idm_boxed_object(out);
-    bool replaced = false;
-    for (size_t i = 0; i < n; i++) {
-        IdmDictEntry entry = idm_boxed_object(dict)->as.dict.entries[i];
-        if (dict_key_equal(entry.key, key)) {
-            entry.value = value;
-            replaced = true;
-        }
-        obj->as.dict.entries[obj->as.dict.count++] = entry;
-    }
-    if (!replaced) {
-        obj->as.dict.entries[obj->as.dict.count].key = key;
-        obj->as.dict.entries[obj->as.dict.count].value = value;
-        obj->as.dict.count++;
-    }
+    idm_boxed_object(out)->as.dict.count = src->as.dict.count + (added ? 1u : 0u);
+    idm_boxed_object(out)->as.dict.root = idm_from_boxed(new_root);
     return out;
 }
 
@@ -2390,15 +2727,28 @@ IdmValue idm_dict_del(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmError *err
         idm_error_set(err, idm_span_unknown(NULL), "dict-del expects a dict");
         return idm_nil();
     }
-    size_t n = idm_boxed_object(dict)->as.dict.count;
-    IdmValue out = dict_value_with_cap(rt, n, err);
+    const IdmObject *src = idm_boxed_object(dict);
+    if (src->as.dict.count == 0) return dict;
+    bool removed = false;
+    bool emptied = false;
+    IdmObject *new_root = dict_node_del(rt, idm_boxed_object(src->as.dict.root), key, dict_key_hash(key), 0u, &removed, &emptied, err);
+    if (!new_root) return idm_nil();
+    if (!removed) return dict;
+    IdmValue out = dict_empty(rt, err);
     if (idm_value_tag(out) != IDM_VAL_DICT) return out;
-    IdmObject *obj = idm_boxed_object(out);
-    for (size_t i = 0; i < n; i++) {
-        IdmDictEntry entry = idm_boxed_object(dict)->as.dict.entries[i];
-        if (!dict_key_equal(entry.key, key)) obj->as.dict.entries[obj->as.dict.count++] = entry;
-    }
+    idm_boxed_object(out)->as.dict.count = src->as.dict.count - 1u;
+    idm_boxed_object(out)->as.dict.root = emptied ? idm_nil() : idm_from_boxed(new_root);
     return out;
+}
+
+IdmValue idm_dict(IdmRuntime *rt, const IdmDictEntry *entries, size_t count, IdmError *err) {
+    IdmValue v = dict_empty(rt, err);
+    if (idm_value_tag(v) != IDM_VAL_DICT) return v;
+    for (size_t i = 0; i < count; i++) {
+        v = idm_dict_put(rt, v, entries[i].key, entries[i].value, err);
+        if (idm_value_tag(v) != IDM_VAL_DICT) return v;
+    }
+    return v;
 }
 
 const IdmSyntax *idm_syntax_get(IdmValue value, IdmError *err) {
@@ -2444,14 +2794,18 @@ bool idm_value_equal(IdmValue a, IdmValue b) {
                 if (!idm_value_equal(idm_boxed_object(a)->as.sequence.items[i], idm_boxed_object(b)->as.sequence.items[i])) return false;
             }
             return true;
-        case IDM_VAL_DICT:
+        case IDM_VAL_DICT: {
             if (idm_boxed_object(a)->as.dict.count != idm_boxed_object(b)->as.dict.count) return false;
-            for (size_t i = 0; i < idm_boxed_object(a)->as.dict.count; i++) {
+            IdmDictIter it;
+            IdmValue k, v;
+            idm_dict_iter_init(a, &it);
+            while (idm_dict_iter_next(&it, &k, &v)) {
                 IdmValue other;
-                if (!idm_dict_get(b, idm_boxed_object(a)->as.dict.entries[i].key, &other)) return false;
-                if (!idm_value_equal(idm_boxed_object(a)->as.dict.entries[i].value, other)) return false;
+                if (!idm_dict_get(b, k, &other)) return false;
+                if (!idm_value_equal(v, other)) return false;
             }
             return true;
+        }
         case IDM_VAL_SYNTAX:
             return idm_boxed_object(a) == idm_boxed_object(b);
         case IDM_VAL_CELL:
@@ -2483,12 +2837,7 @@ static bool write_sequence_item(IdmBuffer *buf, size_t index, void *user) {
     return idm_value_write(buf, obj->as.sequence.items[index]);
 }
 
-static bool write_dict_item(IdmBuffer *buf, size_t index, void *user) {
-    IdmObject *obj = user;
-    return idm_value_write(buf, obj->as.dict.entries[index].key) &&
-           idm_buf_append_char(buf, ' ') &&
-           idm_value_write(buf, obj->as.dict.entries[index].value);
-}
+
 
 bool idm_value_write(IdmBuffer *buf, IdmValue value) {
     switch (idm_value_tag(value)) {
@@ -2523,8 +2872,17 @@ bool idm_value_write(IdmBuffer *buf, IdmValue value) {
             return idm_surface_write_sequence(buf, open, close, obj->as.sequence.count, write_sequence_item, obj);
         }
         case IDM_VAL_DICT: {
-            IdmObject *obj = idm_boxed_object(value);
-            return idm_surface_write_sequence(buf, "%{", "}", obj->as.dict.count, write_dict_item, obj);
+            if (!idm_buf_append(buf, "%{")) return false;
+            IdmDictIter it;
+            IdmValue k, v;
+            idm_dict_iter_init(value, &it);
+            bool first = true;
+            while (idm_dict_iter_next(&it, &k, &v)) {
+                if (!first && !idm_buf_append_char(buf, ' ')) return false;
+                first = false;
+                if (!idm_value_write(buf, k) || !idm_buf_append_char(buf, ' ') || !idm_value_write(buf, v)) return false;
+            }
+            return idm_buf_append_char(buf, '}');
         }
         case IDM_VAL_SYNTAX: return idm_buf_append(buf, "#<syntax>");
         case IDM_VAL_CELL: return idm_buf_append(buf, "#<cell>");
@@ -2662,17 +3020,24 @@ static bool copy_fill(IdmRuntime *rt, IdmHeap *target, IdmObject *src, IdmObject
             return true;
         }
         case IDM_OBJ_DICT: {
-            size_t n = src->as.dict.count;
-            dst->as.dict.count = n;
-            dst->as.dict.entries = NULL;
+            dst->as.dict.count = src->as.dict.count;
+            dst->as.dict.root = idm_nil();
+            if (src->as.dict.count != 0 && !copy_intern(rt, target, src->as.dict.root, &dst->as.dict.root, map, stack, err)) return false;
+            return true;
+        }
+        case IDM_OBJ_DICT_NODE: {
+            size_t n = dict_node_slot_count(src);
+            dst->as.dict_node.datamap = src->as.dict_node.datamap;
+            dst->as.dict_node.nodemap = src->as.dict_node.nodemap;
+            dst->as.dict_node.collision_count = src->as.dict_node.collision_count;
+            dst->as.dict_node.slots = NULL;
             if (n != 0) {
-                dst->as.dict.entries = malloc(n * sizeof(IdmDictEntry));
-                if (!dst->as.dict.entries) return idm_error_oom(err, idm_span_unknown(NULL));
-                for (size_t i = 0; i < n; i++) { dst->as.dict.entries[i].key = idm_nil(); dst->as.dict.entries[i].value = idm_nil(); }
-                heap_account_unlocked(target, dst, n * sizeof(IdmDictEntry));
+                dst->as.dict_node.slots = malloc(n * sizeof(IdmValue));
+                if (!dst->as.dict_node.slots) return idm_error_oom(err, idm_span_unknown(NULL));
+                for (size_t i = 0; i < n; i++) dst->as.dict_node.slots[i] = idm_nil();
+                heap_account_unlocked(target, dst, n * sizeof(IdmValue));
                 for (size_t i = 0; i < n; i++) {
-                    if (!copy_intern(rt, target, src->as.dict.entries[i].key, &dst->as.dict.entries[i].key, map, stack, err)) return false;
-                    if (!copy_intern(rt, target, src->as.dict.entries[i].value, &dst->as.dict.entries[i].value, map, stack, err)) return false;
+                    if (!copy_intern(rt, target, src->as.dict_node.slots[i], &dst->as.dict_node.slots[i], map, stack, err)) return false;
                 }
             }
             return true;

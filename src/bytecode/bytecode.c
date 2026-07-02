@@ -1062,11 +1062,13 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
         case IDM_VAL_DICT: {
             size_t n = idm_dict_count(v);
             if (!idm_buf_put_u8(out, 9u) || !idm_buf_put_u32(out, (uint32_t)n)) return idm_error_oom(err, idm_span_unknown(NULL));
-            for (size_t i = 0; i < n; i++) {
-                IdmValue key, val;
-                if (!idm_dict_entry(v, i, &key, &val)) return idm_error_set(err, idm_span_unknown(NULL), "dict entry serialization failed");
+            IdmDictIter it;
+            IdmValue key, val;
+            idm_dict_iter_init(v, &it);
+            while (idm_dict_iter_next(&it, &key, &val)) {
                 if (!serialize_value(out, key, depth + 1u, err) || !serialize_value(out, val, depth + 1u, err)) return false;
             }
+            (void)n;
             return true;
         }
         case IDM_VAL_RECORD: {
@@ -2004,12 +2006,10 @@ static bool value_relocate_syntax(IdmRuntime *rt, IdmValue v, IdmScopeId min_id,
             IdmDictEntry *entries = n == 0 ? NULL : calloc(n, sizeof(*entries));
             if (n != 0 && !entries) return idm_error_oom(err, idm_span_unknown(NULL));
             bool child_changed = false;
-            for (size_t i = 0; i < n; i++) {
-                IdmValue key, val;
-                if (!idm_dict_entry(v, i, &key, &val)) {
-                    free(entries);
-                    return idm_error_set(err, idm_span_unknown(NULL), "dict entry walk failed");
-                }
+            IdmDictIter it;
+            IdmValue key, val;
+            idm_dict_iter_init(v, &it);
+            for (size_t i = 0; i < n && idm_dict_iter_next(&it, &key, &val); i++) {
                 if (!value_relocate_syntax(rt, key, min_id, delta, &entries[i].key, &child_changed, err) ||
                     !value_relocate_syntax(rt, val, min_id, delta, &entries[i].value, &child_changed, err)) {
                     free(entries);

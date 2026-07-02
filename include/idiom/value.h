@@ -105,6 +105,15 @@ typedef struct {
     IdmValue value;
 } IdmDictEntry;
 
+typedef struct {
+    const struct IdmObject *stack[16];
+    size_t cursor[16];
+    int depth;
+} IdmDictIter;
+
+bool idm_dict_iter_init(IdmValue dict, IdmDictIter *it);
+bool idm_dict_iter_next(IdmDictIter *it, IdmValue *out_key, IdmValue *out_value);
+
 typedef enum {
     IDM_VALUE_SEQ_VECTOR,
     IDM_VALUE_SEQ_TUPLE,
@@ -359,7 +368,6 @@ bool idm_value_is_error(IdmValue value);
 bool idm_value_ok(IdmValue value);
 size_t idm_dict_count(IdmValue value);
 bool idm_dict_get(IdmValue dict, IdmValue key, IdmValue *out);
-bool idm_dict_entry(IdmValue dict, size_t index, IdmValue *out_key, IdmValue *out_value);
 IdmValue idm_dict_put(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmValue value, IdmError *err);
 IdmValue idm_dict_del(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmError *err);
 const IdmSyntax *idm_syntax_get(IdmValue value, IdmError *err);

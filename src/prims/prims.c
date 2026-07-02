@@ -239,12 +239,12 @@ static bool prim_tuple_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *o
 static bool prim_dict_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
     if (!idm_is_dict(v)) return idm_primitive_type_error(rt, err, "dict-to-list", v, "a dict");
-    size_t count = idm_dict_count(v);
     IdmValue result = idm_empty_list();
-    for (size_t i = count; i > 0; i--) {
-        IdmValue key;
-        IdmValue val;
-        if (!idm_dict_entry(v, i - 1u, &key, &val)) return idm_error_set(err, idm_span_unknown(NULL), "dict-to-list iteration failed");
+    IdmDictIter it;
+    IdmValue key;
+    IdmValue val;
+    idm_dict_iter_init(v, &it);
+    while (idm_dict_iter_next(&it, &key, &val)) {
         IdmValue pair_items[2] = {key, val};
         IdmValue pair = idm_tuple(rt, pair_items, 2u, err);
         if (err && err->present) return false;
@@ -669,18 +669,29 @@ static int cmp_ptr(const void *a, const void *b) {
 
 static int cmp_value_total(IdmValue a, IdmValue b);
 
-static bool dict_min_unused(IdmValue d, bool *used, size_t n, size_t *out_index) {
+static bool dict_collect_entries(IdmValue d, IdmDictEntry *out, size_t n) {
+    IdmDictIter it;
+    IdmValue key, val;
+    idm_dict_iter_init(d, &it);
+    size_t i = 0;
+    while (i < n && idm_dict_iter_next(&it, &key, &val)) {
+        out[i].key = key;
+        out[i].value = val;
+        i++;
+    }
+    return i == n;
+}
+
+static bool dict_min_unused(const IdmDictEntry *entries, const bool *used, size_t n, size_t *out_index) {
     bool have = false;
     IdmValue best_key = idm_nil();
     size_t best = 0;
     for (size_t i = 0; i < n; i++) {
         if (used[i]) continue;
-        IdmValue key, val;
-        if (!idm_dict_entry(d, i, &key, &val)) return false;
-        if (!have || cmp_value_total(key, best_key) < 0) {
+        if (!have || cmp_value_total(entries[i].key, best_key) < 0) {
             have = true;
             best = i;
-            best_key = key;
+            best_key = entries[i].key;
         }
     }
     if (!have) return false;
@@ -693,34 +704,44 @@ static int cmp_dict_total(IdmValue a, IdmValue b) {
     size_t bc = idm_dict_count(b);
     bool *a_used = ac ? calloc(ac, sizeof(*a_used)) : NULL;
     bool *b_used = bc ? calloc(bc, sizeof(*b_used)) : NULL;
-    if ((ac && !a_used) || (bc && !b_used)) {
+    IdmDictEntry *a_entries = ac ? calloc(ac, sizeof(*a_entries)) : NULL;
+    IdmDictEntry *b_entries = bc ? calloc(bc, sizeof(*b_entries)) : NULL;
+    if ((ac && (!a_used || !a_entries || !dict_collect_entries(a, a_entries, ac))) ||
+        (bc && (!b_used || !b_entries || !dict_collect_entries(b, b_entries, bc)))) {
         free(a_used);
         free(b_used);
+        free(a_entries);
+        free(b_entries);
         return cmp_size(ac, bc);
     }
     size_t n = ac < bc ? ac : bc;
     for (size_t i = 0; i < n; i++) {
         size_t ai = 0, bi = 0;
-        if (!dict_min_unused(a, a_used, ac, &ai) || !dict_min_unused(b, b_used, bc, &bi)) break;
+        if (!dict_min_unused(a_entries, a_used, ac, &ai) || !dict_min_unused(b_entries, b_used, bc, &bi)) break;
         a_used[ai] = true;
         b_used[bi] = true;
-        IdmValue ak, av, bk, bv;
-        if (!idm_dict_entry(a, ai, &ak, &av) || !idm_dict_entry(b, bi, &bk, &bv)) break;
+        IdmValue ak = a_entries[ai].key, av = a_entries[ai].value, bk = b_entries[bi].key, bv = b_entries[bi].value;
         int r = cmp_value_total(ak, bk);
         if (r != 0) {
             free(a_used);
             free(b_used);
+            free(a_entries);
+            free(b_entries);
             return r;
         }
         r = cmp_value_total(av, bv);
         if (r != 0) {
             free(a_used);
             free(b_used);
+            free(a_entries);
+            free(b_entries);
             return r;
         }
     }
     free(a_used);
     free(b_used);
+    free(a_entries);
+    free(b_entries);
     return cmp_size(ac, bc);
 }
 
@@ -1523,9 +1544,10 @@ static bool prim_dict_del(IdmRuntime *rt, const IdmValue *args, IdmValue *out, I
 static bool prim_dict_keys(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_dict(rt, "dict-keys", args[0], err)) return false;
     IdmValue acc = idm_empty_list();
-    for (size_t i = idm_dict_count(args[0]); i > 0; i--) {
-        IdmValue k, v;
-        if (!idm_dict_entry(args[0], i - 1u, &k, &v)) continue;
+    IdmDictIter it;
+    IdmValue k, v;
+    idm_dict_iter_init(args[0], &it);
+    while (idm_dict_iter_next(&it, &k, &v)) {
         acc = idm_cons(rt, k, acc, err);
         if (err && err->present) return false;
     }
@@ -1536,9 +1558,10 @@ static bool prim_dict_keys(IdmRuntime *rt, const IdmValue *args, IdmValue *out, 
 static bool prim_dict_vals(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     if (!require_dict(rt, "dict-vals", args[0], err)) return false;
     IdmValue acc = idm_empty_list();
-    for (size_t i = idm_dict_count(args[0]); i > 0; i--) {
-        IdmValue k, v;
-        if (!idm_dict_entry(args[0], i - 1u, &k, &v)) continue;
+    IdmDictIter it;
+    IdmValue k, v;
+    idm_dict_iter_init(args[0], &it);
+    while (idm_dict_iter_next(&it, &k, &v)) {
         acc = idm_cons(rt, v, acc, err);
         if (err && err->present) return false;
     }

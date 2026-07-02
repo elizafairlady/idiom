@@ -145,8 +145,10 @@ bool value_from_literal_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmValu
                 idm_error_oom(err, syn->span);
                 return false;
             }
+            IdmDictIter tail_it;
+            idm_dict_iter_init(tail, &tail_it);
             for (size_t i = 0; i < tail_count; i++) {
-                if (!idm_dict_entry(tail, i, &entries[i].key, &entries[i].value)) {
+                if (!idm_dict_iter_next(&tail_it, &entries[i].key, &entries[i].value)) {
                     free(entries);
                     return idm_error_set(err, syn->span, "dict rest literal conversion failed");
                 }

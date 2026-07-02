@@ -710,13 +710,11 @@ static bool sel_dict_rest_value(IdmRuntime *rt, IdmValue value, const SelDictEnt
     IdmDictEntry *rest = n == 0 ? NULL : calloc(n, sizeof(*rest));
     if (n != 0 && !rest) return idm_error_oom(err, span);
     size_t rest_count = 0;
-    for (size_t i = 0; i < n; i++) {
-        IdmValue key = idm_nil();
-        IdmValue val = idm_nil();
-        if (!idm_dict_entry(value, i, &key, &val)) {
-            free(rest);
-            return idm_error_set(err, span, "dict rest pattern failed to read entry");
-        }
+    IdmDictIter it;
+    IdmValue key = idm_nil();
+    IdmValue val = idm_nil();
+    idm_dict_iter_init(value, &it);
+    while (idm_dict_iter_next(&it, &key, &val)) {
         if (sel_dict_key_in_entries(key, entries, count)) continue;
         rest[rest_count].key = key;
         rest[rest_count].value = val;

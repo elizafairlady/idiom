@@ -1,12 +1,29 @@
 use std/enum
 use std/string
 use std/test
+use std/system with [time-ns]
 import std/list as L
 import std/map as Map
 import std/range as Range
 activate Test
 
 xs = Range.exclusive 0 400 |> Range.to-list
+
+defn build-dict do
+  acc 0 -> acc
+  acc n -> build-dict (dict-put acc n n) (sub n 1)
+end
+
+small-dict = build-dict %{} 64
+big-dict = build-dict %{} 640
+
+defn loop-get do
+  _d _i 0 -> :done
+  d i n -> do
+    dict-get d (add (mod i 64) 1) :nil
+    loop-get d (add i 1) (sub n 1)
+  end
+end
 
 suite "collections" do
   bench "range/reduce" expect: 19900 do
@@ -23,6 +40,20 @@ suite "collections" do
 
   bench "map/put-get" expect: 2 do
     %{} |> Map.put 1 2 |> Map.get-or 1 0
+  end
+
+  bench "dict/scaling-get" expect: :true do
+    t-small = do
+      s0 = time-ns
+      loop-get small-dict 0 300
+      (time-ns - s0)
+    end
+    t-big = do
+      s0 = time-ns
+      loop-get big-dict 0 300
+      (time-ns - s0)
+    end
+    lt? t-big (mul (add t-small 30000) 6)
   end
 
   bench "string/trim-split-join-reverse" expect: 44 do

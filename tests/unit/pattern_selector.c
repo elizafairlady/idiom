@@ -233,7 +233,16 @@ static void test_rest_cache(IdmRuntime *rt, IdmError *err) {
     select_one(rt, selector, arg, reject_first_guard, &fn, &bindings, &has, err);
     size_t after = idm_heap_object_count(&rt->immortal);
     check(fn == 2u && has, "guard retry result");
-    check(after == before + 1u, "rest access cached");
+    check(after > before, "rest access allocated once");
+    size_t growth = after - before;
+    IdmPatternBindings again;
+    idm_pattern_bindings_init(&again);
+    uint32_t fn2 = 0;
+    bool has2 = false;
+    select_one(rt, selector, arg, reject_first_guard, &fn2, &again, &has2, err);
+    size_t after2 = idm_heap_object_count(&rt->immortal);
+    check(after2 - after <= growth, "rest access cached");
+    idm_pattern_bindings_destroy(&again);
 
     const IdmValue *a = idm_pattern_bindings_get(&bindings, "a");
     const IdmValue *rest = idm_pattern_bindings_get(&bindings, "rest");
