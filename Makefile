@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := build
 
 CC ?= cc
-VERSION := 0.47.0-dev
+VERSION := 0.72.0-dev
 BUILD := build
 
 CPPFLAGS ?= -D_POSIX_C_SOURCE=200809L -DIDM_VERSION=\"$(VERSION)\" -Iinclude

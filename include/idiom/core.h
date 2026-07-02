@@ -34,229 +34,229 @@ typedef enum {
 } IdmCoreKind;
 
 #define IDM_PRIMITIVE_LIST(X) \
-    X(ADD, "add", 2, 2, "kernel", 1) \
-    X(SUB, "sub", 2, 2, "kernel", 1) \
-    X(MUL, "mul", 2, 2, "kernel", 1) \
-    X(DIV, "div", 2, 2, "kernel", 1) \
-    X(MOD, "mod", 2, 2, "kernel", 1) \
-    X(POW, "pow", 2, 2, "kernel", 1) \
-    X(NEG, "neg", 1, 1, "kernel", 1) \
-    X(EQ, "eq?", 2, 2, "kernel", 1) \
-    X(NEQ, "neq?", 2, 2, "kernel", 1) \
-    X(LT, "lt?", 2, 2, "kernel", 1) \
-    X(GT, "gt?", 2, 2, "kernel", 1) \
-    X(LTE, "lte?", 2, 2, "kernel", 1) \
-    X(GTE, "gte?", 2, 2, "kernel", 1) \
-    X(COND, "cond", 2, 3, "kernel", 1) \
-    X(OK, "ok?", 1, 1, "result", 1) \
-    X(CONS, "cons", 2, 2, "kernel", 1) \
-    X(FIRST, "first", 1, 1, "kernel", 1) \
-    X(REST, "rest", 1, 1, "kernel", 1) \
-    X(LIST, "list", 0, UINT32_MAX, "kernel", 1) \
-    X(TUPLE, "tuple", 0, UINT32_MAX, "kernel", 1) \
-    X(VECTOR, "vector", 0, UINT32_MAX, "kernel", 1) \
-    X(DICT, "dict", 0, UINT32_MAX, "kernel", 1) \
-    X(TUPLE_GET, "tuple-get", 2, 2, "kernel", 1) \
-    X(APPEND, "append", 2, 2, "kernel", 1) \
-    X(STR_TO_LIST, "str-to-list", 1, 1, "kernel", 1) \
-    X(DICT_TO_LIST, "dict-to-list", 1, 1, "kernel", 1) \
-    X(VECTOR_TO_LIST, "vector-to-list", 1, 1, "kernel", 1) \
-    X(TUPLE_TO_LIST, "tuple-to-list", 1, 1, "kernel", 1) \
-    X(APPLY, "apply", 2, 2, "kernel", 0) \
-    X(SYNTAX_KIND, "syntax-kind", 1, 1, "kernel", 1) \
-    X(SYNTAX_PROPERTY, "syntax-property", 2, 2, "kernel", 1) \
-    X(SYNTAX_SET_PROPERTY, "syntax-set-property", 3, 3, "kernel", 1) \
-    X(SYNTAX_ORIGIN, "syntax-origin", 1, 1, "kernel", 1) \
-    X(SYNTAX_LIST_PRED, "syntax-list?", 1, 1, "kernel", 1) \
-    X(SYNTAX_LENGTH, "syntax-length", 1, 1, "kernel", 1) \
-    X(SYNTAX_NTH, "syntax-nth", 2, 2, "kernel", 1) \
-    X(SYNTAX_SLICE, "syntax-slice", 3, 3, "kernel", 1) \
-    X(SYNTAX_WORD_PRED, "syntax-word?", 1, 1, "kernel", 1) \
-    X(SYNTAX_WORD_TEXT, "syntax-word-text", 1, 1, "kernel", 1) \
-    X(SYNTAX_ATOM_PRED, "syntax-atom?", 1, 1, "kernel", 1) \
-    X(SYNTAX_ATOM_TEXT, "syntax-atom-text", 1, 1, "kernel", 1) \
-    X(SYNTAX_INT_PRED, "syntax-int?", 1, 1, "kernel", 1) \
-    X(SYNTAX_INT_VALUE, "syntax-int-value", 1, 1, "kernel", 1) \
-    X(MAKE_SYNTAX_WORD, "make-syntax-word", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_ATOM, "make-syntax-atom", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_INT, "make-syntax-int", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_STRING, "make-syntax-string", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_LIST, "make-syntax-list", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_VECTOR, "make-syntax-vector", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_TUPLE, "make-syntax-tuple", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_DICT, "make-syntax-dict", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_EXPR, "make-syntax-expr", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_BODY, "make-syntax-body", 2, 2, "kernel", 1) \
-    X(MAKE_SYNTAX_GROUP, "make-syntax-group", 2, 2, "kernel", 1) \
-    X(SYNTAX_ERROR, "syntax-error", 2, 2, "kernel", 0) \
-    X(LOCAL_EXPAND, "local-expand", 1, 1, "kernel", 0) \
-    X(FREE_IDENTIFIER_EQ, "free-identifier=?", 2, 2, "kernel", 1) \
-    X(BOUND_IDENTIFIER_EQ, "bound-identifier=?", 2, 2, "kernel", 1) \
-    X(BIND_BANG, "bind!", 2, 2, "kernel", 0) \
-    X(SELF, "self", 0, 0, "kernel", 0) \
-    X(SPAWN, "spawn", 1, 1, "kernel", 0) \
-    X(SEND, "send", 2, 2, "kernel", 0) \
-    X(EXIT, "exit", 0, 2, "kernel", 0) \
-    X(LINK, "link", 1, 1, "kernel", 0) \
-    X(UNLINK, "unlink", 1, 1, "kernel", 0) \
-    X(MONITOR, "monitor", 1, 1, "kernel", 0) \
-    X(DEMONITOR, "demonitor", 1, 1, "kernel", 0) \
-    X(TRAP_EXIT, "trap-exit", 1, 1, "kernel", 0) \
-    X(STR, "str", 1, UINT32_MAX, "kernel", 1) \
-    X(CHOMP, "chomp", 1, 1, "string", 1) \
-    X(PRINT, "print", 0, UINT32_MAX, "kernel", 0) \
-    X(PRINTLN, "println", 0, UINT32_MAX, "kernel", 0) \
-    X(CD, "cd", 1, 1, "system", 0) \
-    X(CHDIR, "chdir", 1, 1, "system", 0) \
-    X(PWD, "pwd", 0, 0, "system", 0) \
-    X(ENV_GET, "env-get", 1, 1, "system", 0) \
-    X(ENV_SET, "env-set", 2, 2, "system", 0) \
-    X(SYNTAX_ADJACENT_PRED, "syntax-adjacent?", 1, 1, "kernel", 1) \
-    X(SYNTAX_STRING_TEXT, "syntax-string-text", 1, 1, "kernel", 1) \
-    X(STR_CONTAINS, "contains?", 2, 2, "string", 1) \
-    X(INTERNAL_REGISTER_MACRO, "internal-register-macro", 2, 2, "", 0) \
-    X(EXPAND_CHECK, "expand-check", 1, 1, "compile", 0) \
-    X(INSPECT, "inspect", 1, 1, "kernel", 1) \
-    X(STR_LEN, "len", 1, 1, "string", 1) \
-    X(STR_SLICE, "slice", 3, 3, "string", 1) \
-    X(STR_FIND, "find", 3, 3, "string", 1) \
-    X(STR_BYTE, "byte", 2, 2, "string", 1) \
-    X(BYTE_STR, "byte-str", 1, 1, "string", 1) \
-    X(REGEX_COMPILE, "raw-compile", 2, 2, "regex", 1) \
-    X(REGEX_PRED, "raw-regex?", 1, 1, "regex", 1) \
-    X(REGEX_SOURCE, "raw-source", 1, 1, "regex", 1) \
-    X(REGEX_OPTIONS, "raw-options", 1, 1, "regex", 1) \
-    X(REGEX_GROUP_COUNT, "raw-group-count", 1, 1, "regex", 1) \
-    X(REGEX_GROUP_NAMES, "raw-group-names", 1, 1, "regex", 1) \
-    X(REGEX_RESULT_PRED, "raw-result?", 1, 1, "regex", 1) \
-    X(REGEX_SCAN_AT, "raw-scan-at", 3, 3, "regex", 1) \
-    X(REGEX_SCAN_FROM, "raw-scan-from", 3, 3, "regex", 1) \
-    X(REGEX_SCAN_FULL, "raw-scan-full", 2, 2, "regex", 1) \
-    X(REGEX_TEST, "raw-test?", 2, 2, "regex", 1) \
-    X(REGEX_RESULT_START, "raw-result-start", 1, 1, "regex", 1) \
-    X(REGEX_RESULT_END, "raw-result-end", 1, 1, "regex", 1) \
-    X(REGEX_RESULT_TEXT, "raw-result-text", 1, 1, "regex", 1) \
-    X(REGEX_CAPTURE, "raw-capture", 2, 2, "regex", 1) \
-    X(REGEX_CAPTURE_RANGE, "raw-capture-range", 2, 2, "regex", 1) \
-    X(REGEX_CAPTURE_NAMED, "raw-capture-named", 2, 2, "regex", 1) \
-    X(REGEX_CAPTURES, "raw-captures", 1, 1, "regex", 1) \
-    X(REGEX_SCAN_ALL, "raw-scan-all", 2, 2, "regex", 1) \
-    X(REGEX_REPLACE, "raw-replace", 3, 3, "regex", 1) \
-    X(REGEX_REPLACE_ALL, "raw-replace-all", 3, 3, "regex", 1) \
-    X(REGEX_SPLIT_ON, "raw-split-on", 2, 2, "regex", 1) \
-    X(REGEX_ESCAPE, "raw-escape", 1, 1, "regex", 1) \
-    X(FILE_READ, "read", 1, 1, "file", 0) \
-    X(FILE_WRITE, "write", 2, 2, "file", 0) \
-    X(FILE_EXISTS, "exists?", 1, 1, "file", 0) \
-    X(FILE_STAT, "stat", 1, 1, "file", 0) \
-    X(FILE_LIST, "list", 1, 1, "file", 0) \
-    X(FILE_REMOVE, "remove", 1, 1, "file", 0) \
-    X(ARGS, "args", 0, 0, "system", 0) \
-    X(TIME_MS, "time-ms", 0, 0, "system", 0) \
-    X(TIME_NS, "time-ns", 0, 0, "system", 0) \
-    X(RANDOM, "random", 1, 1, "system", 0) \
-    X(DICT_GET, "dict-get", 3, 3, "kernel", 1) \
-    X(DICT_PUT, "dict-put", 3, 3, "kernel", 1) \
-    X(DICT_DEL, "dict-del", 2, 2, "kernel", 1) \
-    X(DICT_KEYS, "dict-keys", 1, 1, "kernel", 1) \
-    X(DICT_VALS, "dict-vals", 1, 1, "kernel", 1) \
-    X(DICT_HAS, "dict-has?", 2, 2, "kernel", 1) \
-    X(DICT_SIZE, "dict-size", 1, 1, "kernel", 1) \
-    X(ABS, "abs", 1, 1, "math", 1) \
-    X(FLOOR, "floor", 1, 1, "math", 1) \
-    X(ROUND, "round", 1, 1, "math", 1) \
-    X(SQRT, "sqrt", 1, 1, "math", 1) \
-    X(FLOOR_DIV, "floor-div", 2, 2, "kernel", 1) \
-    X(FLOOR_MOD, "floor-mod", 2, 2, "kernel", 1) \
-    X(PARSE_INT, "parse-int", 1, 1, "string", 1) \
-    X(PARSE_FLOAT, "parse-float", 1, 1, "string", 1) \
-    X(FILE_MKDIR, "mkdir", 1, 1, "file", 0) \
-    X(FILE_APPEND, "append", 2, 2, "file", 0) \
-    X(ORD_STR, "ord->str", 1, 1, "string", 1) \
-    X(STR_ORD, "str->ord", 1, 1, "string", 1) \
-    X(FROM_RUNES, "from-runes", 1, 1, "string", 1) \
-    X(REPL_COMPILE, "repl-compile", 1, 1, "kernel", 0) \
-    X(REPL_ABORT, "repl-abort", 1, 1, "kernel", 0) \
-    X(REPL_SPAWN, "repl-spawn", 1, 1, "kernel", 0) \
-    X(REPL_DIAGNOSTIC, "repl-diagnostic", 0, 0, "kernel", 0) \
-    X(ISH_SESSION, "ish-session", 0, 0, "kernel", 0) \
-    X(TTY_PRED, "tty?", 0, 0, "term", 0) \
-    X(TTY_RAW, "tty-raw!", 0, 0, "term", 0) \
-    X(TTY_RESTORE, "tty-restore!", 0, 0, "term", 0) \
-    X(TTY_READ, "tty-read", 1, 1, "term", 0) \
-    X(TTY_READ_LINE, "tty-read-line", 0, 0, "term", 0) \
-    X(TTY_WRITE, "tty-write", 1, 1, "term", 0) \
-    X(TTY_SIZE, "tty-size", 0, 0, "term", 0) \
-    X(EPRINTLN, "eprintln", 0, UINT32_MAX, "kernel", 0) \
-    X(PORT_STATUS, "port-status", 1, 1, "port", 0) \
-    X(JOB_RESUME, "job-resume", 2, 2, "kernel", 0) \
-    X(JOB_SIGNAL, "job-signal", 2, 2, "kernel", 0) \
-    X(ERROR_MESSAGE, "error-message", 1, 1, "kernel", 1) \
-    X(MAKE_ERROR, "make-error", 1, 1, "kernel", 1) \
-    X(SPAWN_LINK, "spawn-link", 1, 1, "kernel", 0) \
-    X(SPAWN_MONITOR, "spawn-monitor", 1, 1, "kernel", 0) \
-    X(PORT_READ, "port-read", 3, 3, "port", 0) \
-    X(PORT_WRITE, "port-write", 2, 2, "port", 0) \
-    X(PORT_CLOSE_INPUT, "port-close-input", 1, 1, "port", 0) \
-    X(RAISE, "raise", 1, 1, "kernel", 0) \
-    X(IS_A_P, "is-a?", 2, 2, "kernel", 1) \
-    X(NIL_P, "nil?", 1, 1, "kernel", 1) \
-    X(ATOM_P, "atom?", 1, 1, "kernel", 1) \
-    X(WORD_P, "word?", 1, 1, "kernel", 1) \
-    X(INT_P, "int?", 1, 1, "kernel", 1) \
-    X(FLOAT_P, "float?", 1, 1, "kernel", 1) \
-    X(STRING_P, "string?", 1, 1, "kernel", 1) \
-    X(PAIR_P, "pair?", 1, 1, "kernel", 1) \
-    X(EMPTY_LIST_P, "empty-list?", 1, 1, "kernel", 1) \
-    X(LIST_P, "list?", 1, 1, "kernel", 1) \
-    X(TUPLE_P, "tuple?", 1, 1, "kernel", 1) \
-    X(VECTOR_P, "vector?", 1, 1, "kernel", 1) \
-    X(DICT_P, "dict?", 1, 1, "kernel", 1) \
-    X(SYNTAX_P, "syntax?", 1, 1, "kernel", 1) \
-    X(CELL_P, "cell?", 1, 1, "kernel", 1) \
-    X(CLOSURE_P, "closure?", 1, 1, "kernel", 1) \
-    X(PID_P, "pid?", 1, 1, "kernel", 1) \
-    X(REF_P, "ref?", 1, 1, "kernel", 1) \
-    X(PORT_P, "port?", 1, 1, "kernel", 1) \
-    X(REGEX_P, "regex?", 1, 1, "kernel", 1) \
-    X(REGEX_RESULT_P, "regex-result?", 1, 1, "kernel", 1) \
-    X(COMPARE, "compare", 2, 2, "kernel", 1) \
-    X(CEIL, "ceil", 1, 1, "math", 1) \
-    X(TRUNCATE, "truncate", 1, 1, "math", 1) \
-    X(SIN, "sin", 1, 1, "math", 1) \
-    X(COS, "cos", 1, 1, "math", 1) \
-    X(TAN, "tan", 1, 1, "math", 1) \
-    X(ASIN, "asin", 1, 1, "math", 1) \
-    X(ACOS, "acos", 1, 1, "math", 1) \
-    X(ATAN, "atan", 1, 1, "math", 1) \
-    X(ATAN2, "atan2", 2, 2, "math", 1) \
-    X(EXP, "exp", 1, 1, "math", 1) \
-    X(LOG, "log", 1, 1, "math", 1) \
-    X(LOG2, "log2", 1, 1, "math", 1) \
-    X(LOG10, "log10", 1, 1, "math", 1) \
-    X(HYPOT, "hypot", 2, 2, "math", 1) \
-    X(NAN_P, "nan?", 1, 1, "math", 1) \
-    X(FINITE_P, "finite?", 1, 1, "math", 1) \
-    X(INFINITE_P, "infinite?", 1, 1, "math", 1) \
-    X(NAN, "nan", 0, 0, "math", 1) \
-    X(INF, "inf", 0, 0, "math", 1) \
-    X(DIVMOD, "divmod", 2, 2, "math", 1) \
-    X(BIT_AND, "bit-and", 2, 2, "math", 1) \
-    X(BIT_OR, "bit-or", 2, 2, "math", 1) \
-    X(BIT_XOR, "bit-xor", 2, 2, "math", 1) \
-    X(BIT_NOT, "bit-not", 1, 1, "math", 1) \
-    X(SHIFT_LEFT, "shift-left", 2, 2, "math", 1) \
-    X(SHIFT_RIGHT, "shift-right", 2, 2, "math", 1) \
-    X(BIT_COUNT, "bit-count", 1, 1, "math", 1) \
-    X(BIT_LENGTH, "bit-length", 1, 1, "math", 1) \
-    X(TO_INT, "to-int", 1, 1, "math", 1) \
-    X(TO_FLOAT, "to-float", 1, 1, "math", 1) \
-    X(FILE_OPEN, "open", 2, 2, "file", 0) \
-    X(SYNTAX_FLOAT_VALUE, "syntax-float-value", 1, 1, "kernel", 1) \
-    X(MAKE_SYNTAX_NIL, "make-syntax-nil", 1, 1, "kernel", 1)
+    X(ADD, "add", 2, 2, "kernel", 1, 0) \
+    X(SUB, "sub", 2, 2, "kernel", 1, 0) \
+    X(MUL, "mul", 2, 2, "kernel", 1, 0) \
+    X(DIV, "div", 2, 2, "kernel", 1, 0) \
+    X(MOD, "mod", 2, 2, "kernel", 1, 0) \
+    X(POW, "pow", 2, 2, "kernel", 1, 0) \
+    X(NEG, "neg", 1, 1, "kernel", 1, 0) \
+    X(EQ, "eq?", 2, 2, "kernel", 1, 1) \
+    X(NEQ, "neq?", 2, 2, "kernel", 1, 1) \
+    X(LT, "lt?", 2, 2, "kernel", 1, 0) \
+    X(GT, "gt?", 2, 2, "kernel", 1, 0) \
+    X(LTE, "lte?", 2, 2, "kernel", 1, 0) \
+    X(GTE, "gte?", 2, 2, "kernel", 1, 0) \
+    X(COND, "cond", 2, 3, "kernel", 1, 1) \
+    X(OK, "ok?", 1, 1, "result", 1, 1) \
+    X(CONS, "cons", 2, 2, "kernel", 1, 0) \
+    X(FIRST, "first", 1, 1, "kernel", 1, 0) \
+    X(REST, "rest", 1, 1, "kernel", 1, 0) \
+    X(LIST, "list", 0, UINT32_MAX, "kernel", 1, 0) \
+    X(TUPLE, "tuple", 0, UINT32_MAX, "kernel", 1, 0) \
+    X(VECTOR, "vector", 0, UINT32_MAX, "kernel", 1, 0) \
+    X(DICT, "dict", 0, UINT32_MAX, "kernel", 1, 0) \
+    X(TUPLE_GET, "tuple-get", 2, 2, "kernel", 1, 0) \
+    X(APPEND, "append", 2, 2, "kernel", 1, 0) \
+    X(STR_TO_LIST, "str-to-list", 1, 1, "kernel", 1, 0) \
+    X(DICT_TO_LIST, "dict-to-list", 1, 1, "kernel", 1, 0) \
+    X(VECTOR_TO_LIST, "vector-to-list", 1, 1, "kernel", 1, 0) \
+    X(TUPLE_TO_LIST, "tuple-to-list", 1, 1, "kernel", 1, 0) \
+    X(APPLY, "apply", 2, 2, "kernel", 0, 0) \
+    X(SYNTAX_KIND, "syntax-kind", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_PROPERTY, "syntax-property", 2, 2, "kernel", 1, 0) \
+    X(SYNTAX_SET_PROPERTY, "syntax-set-property", 3, 3, "kernel", 1, 0) \
+    X(SYNTAX_ORIGIN, "syntax-origin", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_LIST_PRED, "syntax-list?", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_LENGTH, "syntax-length", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_NTH, "syntax-nth", 2, 2, "kernel", 1, 0) \
+    X(SYNTAX_SLICE, "syntax-slice", 3, 3, "kernel", 1, 0) \
+    X(SYNTAX_WORD_PRED, "syntax-word?", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_WORD_TEXT, "syntax-word-text", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_ATOM_PRED, "syntax-atom?", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_ATOM_TEXT, "syntax-atom-text", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_INT_PRED, "syntax-int?", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_INT_VALUE, "syntax-int-value", 1, 1, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_WORD, "make-syntax-word", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_ATOM, "make-syntax-atom", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_INT, "make-syntax-int", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_STRING, "make-syntax-string", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_LIST, "make-syntax-list", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_VECTOR, "make-syntax-vector", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_TUPLE, "make-syntax-tuple", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_DICT, "make-syntax-dict", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_EXPR, "make-syntax-expr", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_BODY, "make-syntax-body", 2, 2, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_GROUP, "make-syntax-group", 2, 2, "kernel", 1, 0) \
+    X(SYNTAX_ERROR, "syntax-error", 2, 2, "kernel", 0, 0) \
+    X(LOCAL_EXPAND, "local-expand", 1, 1, "kernel", 0, 0) \
+    X(FREE_IDENTIFIER_EQ, "free-identifier=?", 2, 2, "kernel", 1, 0) \
+    X(BOUND_IDENTIFIER_EQ, "bound-identifier=?", 2, 2, "kernel", 1, 0) \
+    X(BIND_BANG, "bind!", 2, 2, "kernel", 0, 0) \
+    X(SELF, "self", 0, 0, "kernel", 0, 0) \
+    X(SPAWN, "spawn", 1, 1, "kernel", 0, 0) \
+    X(SEND, "send", 2, 2, "kernel", 0, 0) \
+    X(EXIT, "exit", 0, 2, "kernel", 0, 0) \
+    X(LINK, "link", 1, 1, "kernel", 0, 0) \
+    X(UNLINK, "unlink", 1, 1, "kernel", 0, 0) \
+    X(MONITOR, "monitor", 1, 1, "kernel", 0, 0) \
+    X(DEMONITOR, "demonitor", 1, 1, "kernel", 0, 0) \
+    X(TRAP_EXIT, "trap-exit", 1, 1, "kernel", 0, 0) \
+    X(STR, "str", 1, UINT32_MAX, "kernel", 1, 0) \
+    X(CHOMP, "chomp", 1, 1, "string", 1, 0) \
+    X(PRINT, "print", 0, UINT32_MAX, "kernel", 0, 0) \
+    X(PRINTLN, "println", 0, UINT32_MAX, "kernel", 0, 0) \
+    X(CD, "cd", 1, 1, "system", 0, 0) \
+    X(CHDIR, "chdir", 1, 1, "system", 0, 0) \
+    X(PWD, "pwd", 0, 0, "system", 0, 0) \
+    X(ENV_GET, "env-get", 1, 1, "system", 0, 0) \
+    X(ENV_SET, "env-set", 2, 2, "system", 0, 0) \
+    X(SYNTAX_ADJACENT_PRED, "syntax-adjacent?", 1, 1, "kernel", 1, 0) \
+    X(SYNTAX_STRING_TEXT, "syntax-string-text", 1, 1, "kernel", 1, 0) \
+    X(STR_CONTAINS, "contains?", 2, 2, "string", 1, 0) \
+    X(INTERNAL_REGISTER_MACRO, "internal-register-macro", 2, 2, "", 0, 0) \
+    X(EXPAND_CHECK, "expand-check", 1, 1, "compile", 0, 0) \
+    X(INSPECT, "inspect", 1, 1, "kernel", 1, 0) \
+    X(STR_LEN, "len", 1, 1, "string", 1, 0) \
+    X(STR_SLICE, "slice", 3, 3, "string", 1, 0) \
+    X(STR_FIND, "find", 3, 3, "string", 1, 0) \
+    X(STR_BYTE, "byte", 2, 2, "string", 1, 0) \
+    X(BYTE_STR, "byte-str", 1, 1, "string", 1, 0) \
+    X(REGEX_COMPILE, "raw-compile", 2, 2, "regex", 1, 0) \
+    X(REGEX_PRED, "raw-regex?", 1, 1, "regex", 1, 1) \
+    X(REGEX_SOURCE, "raw-source", 1, 1, "regex", 1, 0) \
+    X(REGEX_OPTIONS, "raw-options", 1, 1, "regex", 1, 0) \
+    X(REGEX_GROUP_COUNT, "raw-group-count", 1, 1, "regex", 1, 0) \
+    X(REGEX_GROUP_NAMES, "raw-group-names", 1, 1, "regex", 1, 0) \
+    X(REGEX_RESULT_PRED, "raw-result?", 1, 1, "regex", 1, 1) \
+    X(REGEX_SCAN_AT, "raw-scan-at", 3, 3, "regex", 1, 0) \
+    X(REGEX_SCAN_FROM, "raw-scan-from", 3, 3, "regex", 1, 0) \
+    X(REGEX_SCAN_FULL, "raw-scan-full", 2, 2, "regex", 1, 0) \
+    X(REGEX_TEST, "raw-test?", 2, 2, "regex", 1, 0) \
+    X(REGEX_RESULT_START, "raw-result-start", 1, 1, "regex", 1, 0) \
+    X(REGEX_RESULT_END, "raw-result-end", 1, 1, "regex", 1, 0) \
+    X(REGEX_RESULT_TEXT, "raw-result-text", 1, 1, "regex", 1, 0) \
+    X(REGEX_CAPTURE, "raw-capture", 2, 2, "regex", 1, 0) \
+    X(REGEX_CAPTURE_RANGE, "raw-capture-range", 2, 2, "regex", 1, 0) \
+    X(REGEX_CAPTURE_NAMED, "raw-capture-named", 2, 2, "regex", 1, 0) \
+    X(REGEX_CAPTURES, "raw-captures", 1, 1, "regex", 1, 0) \
+    X(REGEX_SCAN_ALL, "raw-scan-all", 2, 2, "regex", 1, 0) \
+    X(REGEX_REPLACE, "raw-replace", 3, 3, "regex", 1, 0) \
+    X(REGEX_REPLACE_ALL, "raw-replace-all", 3, 3, "regex", 1, 0) \
+    X(REGEX_SPLIT_ON, "raw-split-on", 2, 2, "regex", 1, 0) \
+    X(REGEX_ESCAPE, "raw-escape", 1, 1, "regex", 1, 0) \
+    X(FILE_READ, "read", 1, 1, "file", 0, 0) \
+    X(FILE_WRITE, "write", 2, 2, "file", 0, 0) \
+    X(FILE_EXISTS, "exists?", 1, 1, "file", 0, 0) \
+    X(FILE_STAT, "stat", 1, 1, "file", 0, 0) \
+    X(FILE_LIST, "list", 1, 1, "file", 0, 0) \
+    X(FILE_REMOVE, "remove", 1, 1, "file", 0, 0) \
+    X(ARGS, "args", 0, 0, "system", 0, 0) \
+    X(TIME_MS, "time-ms", 0, 0, "system", 0, 0) \
+    X(TIME_NS, "time-ns", 0, 0, "system", 0, 0) \
+    X(RANDOM, "random", 1, 1, "system", 0, 0) \
+    X(DICT_GET, "dict-get", 3, 3, "kernel", 1, 0) \
+    X(DICT_PUT, "dict-put", 3, 3, "kernel", 1, 0) \
+    X(DICT_DEL, "dict-del", 2, 2, "kernel", 1, 0) \
+    X(DICT_KEYS, "dict-keys", 1, 1, "kernel", 1, 0) \
+    X(DICT_VALS, "dict-vals", 1, 1, "kernel", 1, 0) \
+    X(DICT_HAS, "dict-has?", 2, 2, "kernel", 1, 0) \
+    X(DICT_SIZE, "dict-size", 1, 1, "kernel", 1, 0) \
+    X(ABS, "abs", 1, 1, "math", 1, 0) \
+    X(FLOOR, "floor", 1, 1, "math", 1, 0) \
+    X(ROUND, "round", 1, 1, "math", 1, 0) \
+    X(SQRT, "sqrt", 1, 1, "math", 1, 0) \
+    X(FLOOR_DIV, "floor-div", 2, 2, "kernel", 1, 0) \
+    X(FLOOR_MOD, "floor-mod", 2, 2, "kernel", 1, 0) \
+    X(PARSE_INT, "parse-int", 1, 1, "string", 1, 0) \
+    X(PARSE_FLOAT, "parse-float", 1, 1, "string", 1, 0) \
+    X(FILE_MKDIR, "mkdir", 1, 1, "file", 0, 0) \
+    X(FILE_APPEND, "append", 2, 2, "file", 0, 0) \
+    X(ORD_STR, "ord->str", 1, 1, "string", 1, 0) \
+    X(STR_ORD, "str->ord", 1, 1, "string", 1, 0) \
+    X(FROM_RUNES, "from-runes", 1, 1, "string", 1, 0) \
+    X(REPL_COMPILE, "repl-compile", 1, 1, "kernel", 0, 0) \
+    X(REPL_ABORT, "repl-abort", 1, 1, "kernel", 0, 0) \
+    X(REPL_SPAWN, "repl-spawn", 1, 1, "kernel", 0, 0) \
+    X(REPL_DIAGNOSTIC, "repl-diagnostic", 0, 0, "kernel", 0, 0) \
+    X(ISH_SESSION, "ish-session", 0, 0, "kernel", 0, 0) \
+    X(TTY_PRED, "tty?", 0, 0, "term", 0, 0) \
+    X(TTY_RAW, "tty-raw!", 0, 0, "term", 0, 0) \
+    X(TTY_RESTORE, "tty-restore!", 0, 0, "term", 0, 0) \
+    X(TTY_READ, "tty-read", 1, 1, "term", 0, 0) \
+    X(TTY_READ_LINE, "tty-read-line", 0, 0, "term", 0, 0) \
+    X(TTY_WRITE, "tty-write", 1, 1, "term", 0, 0) \
+    X(TTY_SIZE, "tty-size", 0, 0, "term", 0, 0) \
+    X(EPRINTLN, "eprintln", 0, UINT32_MAX, "kernel", 0, 0) \
+    X(PORT_STATUS, "port-status", 1, 1, "port", 0, 0) \
+    X(JOB_RESUME, "job-resume", 2, 2, "kernel", 0, 0) \
+    X(JOB_SIGNAL, "job-signal", 2, 2, "kernel", 0, 0) \
+    X(ERROR_MESSAGE, "error-message", 1, 1, "kernel", 1, 0) \
+    X(MAKE_ERROR, "make-error", 1, 1, "kernel", 1, 0) \
+    X(SPAWN_LINK, "spawn-link", 1, 1, "kernel", 0, 0) \
+    X(SPAWN_MONITOR, "spawn-monitor", 1, 1, "kernel", 0, 0) \
+    X(PORT_READ, "port-read", 3, 3, "port", 0, 0) \
+    X(PORT_WRITE, "port-write", 2, 2, "port", 0, 0) \
+    X(PORT_CLOSE_INPUT, "port-close-input", 1, 1, "port", 0, 0) \
+    X(RAISE, "raise", 1, 1, "kernel", 0, 0) \
+    X(IS_A_P, "is-a?", 2, 2, "kernel", 1, 0) \
+    X(NIL_P, "nil?", 1, 1, "kernel", 1, 1) \
+    X(ATOM_P, "atom?", 1, 1, "kernel", 1, 1) \
+    X(WORD_P, "word?", 1, 1, "kernel", 1, 1) \
+    X(INT_P, "int?", 1, 1, "kernel", 1, 1) \
+    X(FLOAT_P, "float?", 1, 1, "kernel", 1, 1) \
+    X(STRING_P, "string?", 1, 1, "kernel", 1, 1) \
+    X(PAIR_P, "pair?", 1, 1, "kernel", 1, 1) \
+    X(EMPTY_LIST_P, "empty-list?", 1, 1, "kernel", 1, 1) \
+    X(LIST_P, "list?", 1, 1, "kernel", 1, 1) \
+    X(TUPLE_P, "tuple?", 1, 1, "kernel", 1, 1) \
+    X(VECTOR_P, "vector?", 1, 1, "kernel", 1, 1) \
+    X(DICT_P, "dict?", 1, 1, "kernel", 1, 1) \
+    X(SYNTAX_P, "syntax?", 1, 1, "kernel", 1, 1) \
+    X(CELL_P, "cell?", 1, 1, "kernel", 1, 1) \
+    X(CLOSURE_P, "closure?", 1, 1, "kernel", 1, 1) \
+    X(PID_P, "pid?", 1, 1, "kernel", 1, 1) \
+    X(REF_P, "ref?", 1, 1, "kernel", 1, 1) \
+    X(PORT_P, "port?", 1, 1, "kernel", 1, 1) \
+    X(REGEX_P, "regex?", 1, 1, "kernel", 1, 1) \
+    X(REGEX_RESULT_P, "regex-result?", 1, 1, "kernel", 1, 1) \
+    X(COMPARE, "compare", 2, 2, "kernel", 1, 1) \
+    X(CEIL, "ceil", 1, 1, "math", 1, 0) \
+    X(TRUNCATE, "truncate", 1, 1, "math", 1, 0) \
+    X(SIN, "sin", 1, 1, "math", 1, 0) \
+    X(COS, "cos", 1, 1, "math", 1, 0) \
+    X(TAN, "tan", 1, 1, "math", 1, 0) \
+    X(ASIN, "asin", 1, 1, "math", 1, 0) \
+    X(ACOS, "acos", 1, 1, "math", 1, 0) \
+    X(ATAN, "atan", 1, 1, "math", 1, 0) \
+    X(ATAN2, "atan2", 2, 2, "math", 1, 0) \
+    X(EXP, "exp", 1, 1, "math", 1, 0) \
+    X(LOG, "log", 1, 1, "math", 1, 0) \
+    X(LOG2, "log2", 1, 1, "math", 1, 0) \
+    X(LOG10, "log10", 1, 1, "math", 1, 0) \
+    X(HYPOT, "hypot", 2, 2, "math", 1, 0) \
+    X(NAN_P, "nan?", 1, 1, "math", 1, 0) \
+    X(FINITE_P, "finite?", 1, 1, "math", 1, 0) \
+    X(INFINITE_P, "infinite?", 1, 1, "math", 1, 0) \
+    X(NAN, "nan", 0, 0, "math", 1, 1) \
+    X(INF, "inf", 0, 0, "math", 1, 1) \
+    X(DIVMOD, "divmod", 2, 2, "math", 1, 0) \
+    X(BIT_AND, "bit-and", 2, 2, "math", 1, 0) \
+    X(BIT_OR, "bit-or", 2, 2, "math", 1, 0) \
+    X(BIT_XOR, "bit-xor", 2, 2, "math", 1, 0) \
+    X(BIT_NOT, "bit-not", 1, 1, "math", 1, 0) \
+    X(SHIFT_LEFT, "shift-left", 2, 2, "math", 1, 0) \
+    X(SHIFT_RIGHT, "shift-right", 2, 2, "math", 1, 0) \
+    X(BIT_COUNT, "bit-count", 1, 1, "math", 1, 0) \
+    X(BIT_LENGTH, "bit-length", 1, 1, "math", 1, 0) \
+    X(TO_INT, "to-int", 1, 1, "math", 1, 0) \
+    X(TO_FLOAT, "to-float", 1, 1, "math", 1, 0) \
+    X(FILE_OPEN, "open", 2, 2, "file", 0, 0) \
+    X(SYNTAX_FLOAT_VALUE, "syntax-float-value", 1, 1, "kernel", 1, 0) \
+    X(MAKE_SYNTAX_NIL, "make-syntax-nil", 1, 1, "kernel", 1, 0)
 
 typedef enum {
-#define IDM_PRIMITIVE_ENUM(id, name, min_arity, max_arity, home, pure) IDM_PRIM_##id,
+#define IDM_PRIMITIVE_ENUM(id, name, min_arity, max_arity, home, pure, total) IDM_PRIM_##id,
     IDM_PRIMITIVE_LIST(IDM_PRIMITIVE_ENUM)
 #undef IDM_PRIMITIVE_ENUM
 } IdmPrimitive;
@@ -266,6 +266,7 @@ typedef struct {
     uint32_t min_arity;
     uint32_t max_arity;
     bool pure;
+    bool total;
 } IdmPrimitiveInfo;
 
 typedef struct IdmCore IdmCore;
@@ -509,6 +510,7 @@ bool idm_core_dump(IdmBuffer *buf, const IdmCore *core);
 bool idm_core_dump_pretty(IdmBuffer *buf, const IdmCore *core);
 const char *idm_primitive_name(IdmPrimitive primitive);
 bool idm_primitive_pure(IdmPrimitive primitive);
+bool idm_primitive_total(IdmPrimitive primitive);
 bool idm_checked_add(int64_t a, int64_t b, int64_t *out);
 bool idm_checked_sub(int64_t a, int64_t b, int64_t *out);
 bool idm_checked_mul(int64_t a, int64_t b, int64_t *out);

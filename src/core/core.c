@@ -711,6 +711,19 @@ static bool core_statement_discardable(const IdmCore *core) {
             return core_statement_discardable(core->as.cond_expr.cond) &&
                    core_statement_discardable(core->as.cond_expr.then_branch) &&
                    core_statement_discardable(core->as.cond_expr.else_branch);
+        case IDM_CORE_CALL: {
+            const IdmCore *callee = core->as.call.callee;
+            if (!callee || callee->kind != IDM_CORE_FN_MULTI || callee->as.fn_multi.count != 1u) return false;
+            if (!callee->as.fn_multi.clauses[0].primitive_backed) return false;
+            IdmPrimitive prim = callee->as.fn_multi.clauses[0].primitive;
+            if (!idm_primitive_pure(prim) || !idm_primitive_total(prim)) return false;
+            const IdmPrimitiveInfo *info = idm_primitive_info(prim);
+            if (!info || core->as.call.arg_count < info->min_arity || core->as.call.arg_count > info->max_arity) return false;
+            for (size_t i = 0; i < core->as.call.arg_count; i++) {
+                if (!core_statement_discardable(core->as.call.args[i])) return false;
+            }
+            return true;
+        }
         default:
             return false;
     }
@@ -1394,13 +1407,13 @@ static bool compile_function_code(CompileModuleCtx *module_ctx, IdmBytecodeModul
 }
 
 static const IdmPrimitiveInfo PRIMITIVES[] = {
-#define IDM_PRIMITIVE_INFO(id, name, min_arity, max_arity, home, pure) [IDM_PRIM_##id] = {name, min_arity, max_arity, pure},
+#define IDM_PRIMITIVE_INFO(id, name, min_arity, max_arity, home, pure, total) [IDM_PRIM_##id] = {name, min_arity, max_arity, pure, total},
     IDM_PRIMITIVE_LIST(IDM_PRIMITIVE_INFO)
 #undef IDM_PRIMITIVE_INFO
 };
 
 static const char *const PRIMITIVE_HOMES[] = {
-#define IDM_PRIMITIVE_HOME(id, name, min_arity, max_arity, home, pure) [IDM_PRIM_##id] = home,
+#define IDM_PRIMITIVE_HOME(id, name, min_arity, max_arity, home, pure, total) [IDM_PRIM_##id] = home,
     IDM_PRIMITIVE_LIST(IDM_PRIMITIVE_HOME)
 #undef IDM_PRIMITIVE_HOME
 };
@@ -1408,6 +1421,11 @@ static const char *const PRIMITIVE_HOMES[] = {
 bool idm_primitive_pure(IdmPrimitive primitive) {
     if ((size_t)primitive >= sizeof(PRIMITIVES) / sizeof(PRIMITIVES[0])) return false;
     return PRIMITIVES[primitive].pure;
+}
+
+bool idm_primitive_total(IdmPrimitive primitive) {
+    if ((size_t)primitive >= sizeof(PRIMITIVES) / sizeof(PRIMITIVES[0])) return false;
+    return PRIMITIVES[primitive].total;
 }
 
 size_t idm_primitive_count(void) {

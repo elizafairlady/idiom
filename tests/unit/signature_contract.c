@@ -425,6 +425,7 @@ int idm_unit_signature_contract(void) {
     const char *fold_source =
         "a = add 2 3\n"
         "b = mul (add 1 2) (sub 10 4)\n"
+        "c = div 84 4\n"
         "d = div 1 0\n"
         "b\n";
     IdmCore *fold_core = NULL;
@@ -434,6 +435,7 @@ int idm_unit_signature_contract(void) {
     check(idm_core_dump(&fold_dump, fold_core), "fold core dump");
     check(fold_dump.data && strstr(fold_dump.data, "5") != NULL, "fold add literal");
     check(fold_dump.data && strstr(fold_dump.data, "18") != NULL, "fold nested literal");
+    check(fold_dump.data && strstr(fold_dump.data, "21") != NULL, "fold partial prim with safe literal args");
     check(fold_dump.data && strstr(fold_dump.data, "primitive div") != NULL, "fold preserves crashing call");
     check(!fold_dump.data || strstr(fold_dump.data, "primitive add") == NULL, "fold erased pure add");
     idm_buf_destroy(&fold_dump);
@@ -472,6 +474,24 @@ int idm_unit_signature_contract(void) {
     check(dead_dump.data && strstr(dead_dump.data, "primitive mul") != NULL, "dead keeps result expression");
     idm_buf_destroy(&dead_dump);
     idm_core_free(dead_core);
+
+    const char *dead_call_source =
+        "defn quiet x -> do\n"
+        "  int? x\n"
+        "  div x 0\n"
+        "  mul x 2\n"
+        "end\n"
+        "quiet 4\n";
+    IdmCore *dc_core = NULL;
+    check_ok(idm_expand_source_string(&rt, "<deadcall>", dead_call_source, &dc_core, &err), &err, "dead call expand");
+    check_ok(idm_core_normalize(&rt, &dc_core, &err), &err, "dead call normalize");
+    IdmBuffer dc_dump;
+    idm_buf_init(&dc_dump);
+    check(idm_core_dump(&dc_dump, dc_core), "dead call dump");
+    check(!dc_dump.data || strstr(dc_dump.data, "primitive int?") == NULL, "total prim statement eliminated");
+    check(dc_dump.data && strstr(dc_dump.data, "primitive div") != NULL, "partial prim statement kept");
+    idm_buf_destroy(&dc_dump);
+    idm_core_free(dc_core);
 
     const char *generic_method_source =
         "package generic_method_signature_contract\n"
