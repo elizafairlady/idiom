@@ -272,6 +272,14 @@ typedef struct {
     IdmArtifact *art;
 } IdmPkgProtocol;
 
+typedef struct {
+    char *name;
+    char *env_key;
+    uint32_t slot;
+    uint32_t arity;
+    IdmCore *body;
+} IdmPkgFoldable;
+
 typedef enum {
     IDM_TYPED_ENTITY_PROTOCOL,
     IDM_TYPED_ENTITY_TRAIT,
@@ -302,6 +310,8 @@ struct IdmArtifact {
     size_t slot_count;
     struct { char *name; char *env_key; uint32_t slot; } *field_selectors;
     size_t field_selector_count;
+    IdmPkgFoldable *foldables;
+    size_t foldable_count;
     IdmPkgMacro *macros;
     size_t macro_count;
     IdmOperatorDef *operators;
@@ -363,6 +373,7 @@ void idm_artifact_destroy(IdmArtifact *art);
 
 bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_src, const char **out_label, IdmSpan span, IdmError *err);
 
+bool idm_foldable_body_serialize(IdmBuffer *out, const IdmCore *body, IdmError *err);
 bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *err);
 bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, IdmArtifact *out, IdmError *err);
 const char *idm_grammar_mode_name(uint8_t mode);

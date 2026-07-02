@@ -239,8 +239,10 @@ typedef struct {
 } FieldSelectorDef;
 typedef struct {
     char *name;
+    char *env_key;
     uint32_t slot;
     uint32_t arity;
+    bool env;
     IdmCore *body;
 } FoldableFnDef;
 typedef struct {
@@ -546,8 +548,10 @@ typedef struct {
 bool expand_typecheck_purity(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, PurityFx *out_fx);
 uint8_t expand_typecheck_core_purity(ExpandContext *ctx, const IdmCore *core, uint64_t *out_mask);
 bool foldable_register(ExpandContext *ctx, const char *name, uint32_t slot, const IdmCore *fn);
-const FoldableFnDef *foldable_lookup(const ExpandContext *ctx, const char *name, uint32_t slot);
-bool foldable_eval(const ExpandContext *ctx, const IdmCore *core, const IdmValue *argv, uint32_t argc, uint32_t *fuel, IdmValue *out);
+bool foldable_install(ExpandContext *ctx, const char *name, const char *env_key, uint32_t slot, uint32_t arity, const IdmCore *body);
+const FoldableFnDef *foldable_lookup(const ExpandContext *ctx, const char *name, const char *env_key, bool env, uint32_t slot);
+bool foldable_eval(const ExpandContext *ctx, const char *home_key, const IdmCore *core, const IdmValue *argv, uint32_t argc, uint32_t *fuel, IdmValue *out);
+IdmCore *foldable_core_clone(const IdmCore *core);
 IdmCore *expand_record_field_core(ExpandContext *ctx, IdmCore *receiver, const TypeDef *type, uint32_t field_index, IdmSpan span, IdmError *err);
 bool invoke_macro_to_syntax(ExpandContext *ctx, const IdmSyntax *use_syntax, const IdmSyntax *head, uint32_t payload, IdmSyntax **out_syntax, IdmError *err);
 IdmCore *literal_from_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);

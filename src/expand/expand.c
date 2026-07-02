@@ -1677,18 +1677,25 @@ static IdmCore *fold_pure_user_call(ExpandContext *ctx, IdmCore *call) {
     const IdmCore *callee = call->as.call.callee;
     if (!callee) return call;
     const char *name = NULL;
+    const char *key = NULL;
+    bool env = true;
     uint32_t slot = 0;
     if (callee->kind == IDM_CORE_ENV_REF || callee->kind == IDM_CORE_LOCAL_REF) {
         name = callee->as.slot_ref.name;
         slot = callee->as.slot_ref.slot;
+        env = callee->kind == IDM_CORE_ENV_REF;
     } else if (callee->kind == IDM_CORE_PACKAGE_REF) {
         name = callee->as.package_ref.name;
         slot = callee->as.package_ref.slot;
+        IdmValue kv = callee->as.package_ref.env_key;
+        IdmValueTag kt = idm_value_tag(kv);
+        key = kt == IDM_VAL_ATOM || kt == IDM_VAL_WORD ? idm_symbol_text(idm_value_symbol(kv)) : NULL;
+        if (!key) return call;
     } else {
         return call;
     }
     if (!name) return call;
-    const FoldableFnDef *def = foldable_lookup(ctx, name, slot);
+    const FoldableFnDef *def = foldable_lookup(ctx, name, key, env, slot);
     if (!def || def->arity != call->as.call.arg_count) return call;
     IdmValue args[8];
     for (size_t i = 0; i < call->as.call.arg_count; i++) {
@@ -1698,7 +1705,7 @@ static IdmCore *fold_pure_user_call(ExpandContext *ctx, IdmCore *call) {
     }
     uint32_t fuel = 512u;
     IdmValue out = idm_nil();
-    if (!foldable_eval(ctx, def->body, args, def->arity, &fuel, &out)) return call;
+    if (!foldable_eval(ctx, def->env_key, def->body, args, def->arity, &fuel, &out)) return call;
     IdmCore *lit = idm_core_literal(out, call->span);
     if (!lit) return call;
     idm_core_free(call);

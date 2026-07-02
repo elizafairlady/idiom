@@ -402,6 +402,54 @@ int idm_unit_signature_contract(void) {
     free(old_idiompath_owned);
     free(root_owned);
 
+    char fold_root_template[] = "/tmp/idiom_signature_crossfold_XXXXXX";
+    char *fold_root = mkdtemp(fold_root_template);
+    if (!fold_root) fail("mkdtemp crossfold");
+    char *fold_root_owned = idm_strdup(fold_root);
+    if (!fold_root_owned) fail("crossfold root copy");
+    const char *fold_old_path = getenv("IDIOMPATH");
+    char *fold_old_path_owned = fold_old_path ? idm_strdup(fold_old_path) : NULL;
+    if (fold_old_path && !fold_old_path_owned) fail("crossfold IDIOMPATH copy");
+    if (setenv("IDIOMPATH", fold_root_owned, 1) != 0) fail("crossfold setenv IDIOMPATH");
+    char *provider_dir = write_package_subdir(fold_root_owned, "crossfold",
+        "package crossfold\n"
+        "\n"
+        "export defn quad x -> mul (twice x) 2\n"
+        "\n"
+        "defn twice x -> mul x 2\n", &err);
+    idm_buf_init(&wire);
+    check_ok(idm_expand_package_artifact_serialize(&rt, provider_dir, &wire, &err), &err, "crossfold provider compiles");
+    IdmArtifact fold_art;
+    memset(&fold_art, 0, sizeof(fold_art));
+    check_ok(idm_artifact_deserialize(&rt, (const unsigned char *)wire.data, wire.len, &fold_art, &err), &err, "crossfold artifact deserialize");
+    check(fold_art.foldable_count == 2u, "crossfold artifact carries both foldables");
+    for (size_t i = 0; i < fold_art.foldable_count; i++) {
+        check(fold_art.foldables[i].env_key && fold_art.foldables[i].env_key[0], "crossfold foldable env key");
+        check(fold_art.foldables[i].arity == 1u, "crossfold foldable arity");
+        check(fold_art.foldables[i].body != NULL, "crossfold foldable body");
+    }
+    idm_artifact_destroy(&fold_art);
+    idm_buf_destroy(&wire);
+    IdmCore *cf_core = NULL;
+    check_ok(idm_expand_source_string(&rt, "<crossfold>", "use crossfold\ngot = quad 5\ngot\n", &cf_core, &err), &err, "crossfold consumer expand");
+    IdmBuffer cf_dump;
+    idm_buf_init(&cf_dump);
+    check(idm_core_dump(&cf_dump, cf_core), "crossfold dump");
+    check(cf_dump.data && strstr(cf_dump.data, "20") != NULL, "cross-package fold literal");
+    check(!cf_dump.data || strstr(cf_dump.data, "quad") == NULL, "cross-package call erased");
+    idm_buf_destroy(&cf_dump);
+    idm_core_free(cf_core);
+    remove_package_dir(provider_dir);
+    if (fold_old_path_owned) {
+        if (setenv("IDIOMPATH", fold_old_path_owned, 1) != 0) fail("crossfold restore IDIOMPATH");
+    } else {
+        unsetenv("IDIOMPATH");
+    }
+    rmdir(fold_root_owned);
+    free(provider_dir);
+    free(fold_old_path_owned);
+    free(fold_root_owned);
+
     const char *implements_static_source =
         "trait FoldProbe do\n"
         "  method fold-probe x -> x\n"

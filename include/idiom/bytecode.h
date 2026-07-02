@@ -166,6 +166,8 @@ bool idm_bc_instruction_width(const IdmBytecodeModule *module, size_t offset, si
 bool idm_bc_disassemble(IdmBuffer *buf, const IdmBytecodeModule *module);
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err);
 bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, IdmBytecodeModule *module, IdmError *err);
+bool idm_value_serialize(IdmBuffer *out, IdmValue value, IdmError *err);
+bool idm_value_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, IdmError *err);
 bool idm_bc_link(IdmBytecodeModule *dst, const IdmBytecodeModule *src, uint32_t *out_const_offset, uint32_t *out_fn_offset, uint32_t *out_code_offset, IdmError *err);
 bool idm_bc_relocate_syntax_scopes(IdmRuntime *rt, IdmBytecodeModule *module, IdmScopeId min_id, int64_t delta, IdmError *err);
 

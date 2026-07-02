@@ -354,6 +354,14 @@ void idm_artifact_destroy(IdmArtifact *art) {
         for (size_t i = 0; i < art->field_selector_count; i++) { free(art->field_selectors[i].name); free(art->field_selectors[i].env_key); }
         free(art->field_selectors);
     }
+    if (art->foldables) {
+        for (size_t i = 0; i < art->foldable_count; i++) {
+            free(art->foldables[i].name);
+            free(art->foldables[i].env_key);
+            idm_core_free(art->foldables[i].body);
+        }
+        free(art->foldables);
+    }
     if (art->operators) {
         for (size_t i = 0; i < art->operator_count; i++) idm_operator_def_destroy(&art->operators[i]);
         free(art->operators);
@@ -500,7 +508,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 85u
+#define IDM_ARTIFACT_VERSION 86u
 
 const char *idm_grammar_mode_name(uint8_t mode) {
     switch ((IdmGrammarMode)mode) {
@@ -1229,6 +1237,166 @@ bool idm_reader_program_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmReaderP
     return true;
 }
 
+static bool foldable_core_write(IdmBuffer *out, const IdmCore *core, unsigned depth, IdmError *err) {
+    if (!core || depth > 64u) return idm_error_set(err, idm_span_unknown(NULL), "foldable body cannot be serialized");
+    switch (core->kind) {
+        case IDM_CORE_LITERAL:
+            return idm_buf_put_u8(out, 1u) && idm_value_serialize(out, core->as.literal, err);
+        case IDM_CORE_ARG_REF:
+            return idm_buf_put_u8(out, 2u) &&
+                   idm_buf_put_opt_str(out, core->as.slot_ref.name) &&
+                   idm_buf_put_u32(out, core->as.slot_ref.slot);
+        case IDM_CORE_ENV_REF:
+            return idm_buf_put_u8(out, 3u) &&
+                   idm_buf_put_opt_str(out, core->as.slot_ref.name) &&
+                   idm_buf_put_u32(out, core->as.slot_ref.slot);
+        case IDM_CORE_PACKAGE_REF: {
+            IdmValue kv = core->as.package_ref.env_key;
+            IdmValueTag kt = idm_value_tag(kv);
+            const char *key = kt == IDM_VAL_ATOM || kt == IDM_VAL_WORD ? idm_symbol_text(idm_value_symbol(kv)) : NULL;
+            if (!key || !core->as.package_ref.name) return idm_error_set(err, idm_span_unknown(NULL), "foldable body cannot be serialized");
+            return idm_buf_put_u8(out, 4u) &&
+                   idm_buf_put_str(out, core->as.package_ref.name, strlen(core->as.package_ref.name)) &&
+                   idm_buf_put_str(out, key, strlen(key)) &&
+                   idm_buf_put_u32(out, core->as.package_ref.slot);
+        }
+        case IDM_CORE_FN_MULTI: {
+            if (core->as.fn_multi.count != 1u || !core->as.fn_multi.clauses[0].primitive_backed) {
+                return idm_error_set(err, idm_span_unknown(NULL), "foldable body cannot be serialized");
+            }
+            IdmPrimitive prim = core->as.fn_multi.clauses[0].primitive;
+            const char *home = idm_primitive_home(prim);
+            const char *pname = idm_primitive_name(prim);
+            return idm_buf_put_u8(out, 5u) &&
+                   idm_buf_put_opt_str(out, core->as.fn_multi.name) &&
+                   idm_buf_put_str(out, home, strlen(home)) &&
+                   idm_buf_put_str(out, pname, strlen(pname)) &&
+                   idm_arity_serialize(out, core->as.fn_multi.clauses[0].call_arity, err);
+        }
+        case IDM_CORE_CALL: {
+            if (!idm_buf_put_u8(out, 6u) || !idm_buf_put_u32(out, (uint32_t)core->as.call.arg_count)) {
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
+            if (!foldable_core_write(out, core->as.call.callee, depth + 1u, err)) return false;
+            for (size_t i = 0; i < core->as.call.arg_count; i++) {
+                if (!foldable_core_write(out, core->as.call.args[i], depth + 1u, err)) return false;
+            }
+            return true;
+        }
+        case IDM_CORE_COND:
+            return idm_buf_put_u8(out, 7u) &&
+                   foldable_core_write(out, core->as.cond_expr.cond, depth + 1u, err) &&
+                   foldable_core_write(out, core->as.cond_expr.then_branch, depth + 1u, err) &&
+                   foldable_core_write(out, core->as.cond_expr.else_branch, depth + 1u, err);
+        default:
+            return idm_error_set(err, idm_span_unknown(NULL), "foldable body cannot be serialized");
+    }
+}
+
+bool idm_foldable_body_serialize(IdmBuffer *out, const IdmCore *body, IdmError *err) {
+    return foldable_core_write(out, body, 0u, err);
+}
+
+static IdmCore *foldable_core_read(IdmRuntime *rt, IdmByteReader *r, unsigned depth, IdmError *err) {
+    if (depth > 64u) {
+        idm_error_set(err, idm_span_unknown(NULL), "foldable body nested too deeply");
+        return NULL;
+    }
+    uint8_t tag = idm_rd_u8(r);
+    if (!r->ok) {
+        idm_error_set(err, idm_span_unknown(NULL), "truncated foldable body");
+        return NULL;
+    }
+    IdmSpan span = idm_span_unknown(NULL);
+    switch (tag) {
+        case 1u: {
+            IdmValue v = idm_nil();
+            if (!idm_value_deserialize(rt, r, &v, err)) return NULL;
+            return idm_core_literal(v, span);
+        }
+        case 2u:
+        case 3u: {
+            char *name = NULL;
+            if (!idm_rd_opt_str(r, &name, err)) return NULL;
+            uint32_t slot = idm_rd_u32(r);
+            IdmCore *out = r->ok ? (tag == 2u ? idm_core_arg_ref(name, slot, span) : idm_core_env_ref(name, slot, span)) : NULL;
+            free(name);
+            return out;
+        }
+        case 4u: {
+            char *name = NULL;
+            char *key = NULL;
+            IdmCore *out = NULL;
+            if (artifact_read_str(r, &name, err) && artifact_read_str(r, &key, err)) {
+                uint32_t slot = idm_rd_u32(r);
+                if (r->ok) out = idm_core_package_ref(name, idm_atom(rt, key), slot, span);
+            }
+            free(name);
+            free(key);
+            return out;
+        }
+        case 5u: {
+            char *name = NULL;
+            char *home = NULL;
+            char *pname = NULL;
+            IdmCore *out = NULL;
+            IdmArity arity = idm_arity_unknown();
+            IdmPrimitive prim;
+            if (idm_rd_opt_str(r, &name, err) &&
+                artifact_read_str(r, &home, err) &&
+                artifact_read_str(r, &pname, err) &&
+                idm_arity_deserialize(r, &arity, err)) {
+                if (idm_primitive_lookup(home, pname, &prim)) {
+                    out = idm_core_primitive_backed_fn(name, prim, arity, span);
+                } else {
+                    idm_error_set(err, span, "foldable body names unknown primitive '%s/%s'", home, pname);
+                }
+            }
+            free(name);
+            free(home);
+            free(pname);
+            return out;
+        }
+        case 6u: {
+            uint32_t argc = idm_rd_u32(r);
+            if (!r->ok || argc > 8u) {
+                idm_error_set(err, span, "truncated foldable body");
+                return NULL;
+            }
+            IdmCore *callee = foldable_core_read(rt, r, depth + 1u, err);
+            IdmCore *call = callee ? idm_core_call(callee, span) : NULL;
+            if (!call) {
+                idm_core_free(callee);
+                return NULL;
+            }
+            for (uint32_t i = 0; i < argc; i++) {
+                IdmCore *arg = foldable_core_read(rt, r, depth + 1u, err);
+                if (!arg || !idm_core_call_add_arg(call, arg)) {
+                    idm_core_free(arg);
+                    idm_core_free(call);
+                    return NULL;
+                }
+            }
+            return call;
+        }
+        case 7u: {
+            IdmCore *c = foldable_core_read(rt, r, depth + 1u, err);
+            IdmCore *t = c ? foldable_core_read(rt, r, depth + 1u, err) : NULL;
+            IdmCore *e = t ? foldable_core_read(rt, r, depth + 1u, err) : NULL;
+            IdmCore *out = e ? idm_core_cond(c, t, e, span) : NULL;
+            if (!out) {
+                idm_core_free(c);
+                idm_core_free(t);
+                idm_core_free(e);
+            }
+            return out;
+        }
+        default:
+            idm_error_set(err, span, "foldable body has unknown node tag %u", (unsigned)tag);
+            return NULL;
+    }
+}
+
 bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *err) {
     bool ok = idm_buf_append_n(out, "IDMA", 4u) && idm_buf_put_u32(out, IDM_ARTIFACT_VERSION);
     ok = ok && idm_buf_append_n(out, (const char *)art->src_hash, 32u);
@@ -1261,6 +1429,15 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
         ok = idm_buf_put_str(out, art->field_selectors[i].name, strlen(art->field_selectors[i].name)) &&
              idm_buf_put_str(out, art->field_selectors[i].env_key ? art->field_selectors[i].env_key : "", strlen(art->field_selectors[i].env_key ? art->field_selectors[i].env_key : "")) &&
              idm_buf_put_u32(out, art->field_selectors[i].slot);
+    }
+    ok = ok && idm_buf_put_u32(out, (uint32_t)art->foldable_count);
+    for (size_t i = 0; ok && i < art->foldable_count; i++) {
+        const IdmPkgFoldable *f = &art->foldables[i];
+        ok = idm_buf_put_str(out, f->name, strlen(f->name)) &&
+             idm_buf_put_str(out, f->env_key ? f->env_key : "", strlen(f->env_key ? f->env_key : "")) &&
+             idm_buf_put_u32(out, f->slot) &&
+             idm_buf_put_u32(out, f->arity);
+        if (ok && !idm_foldable_body_serialize(out, f->body, err)) return false;
     }
     ok = ok && idm_buf_put_u32(out, (uint32_t)art->operator_count);
     for (size_t i = 0; ok && i < art->operator_count; i++) {
@@ -1467,6 +1644,24 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             if (ok) ok = artifact_read_str(&r, &out->field_selectors[i].env_key, err);
             out->field_selectors[i].slot = ok ? idm_rd_u32(&r) : 0;
             if (ok && !r.ok) ok = false;
+        }
+    }
+    uint32_t foldable_count = ok ? idm_rd_u32(&r) : 0;
+    if (ok && !r.ok) ok = false;
+    if (ok && foldable_count != 0) {
+        out->foldables = calloc(foldable_count, sizeof(*out->foldables));
+        if (!out->foldables) ok = false;
+        for (uint32_t i = 0; ok && i < foldable_count; i++) {
+            out->foldable_count = i + 1u;
+            ok = artifact_read_str(&r, &out->foldables[i].name, err);
+            if (ok) ok = artifact_read_str(&r, &out->foldables[i].env_key, err);
+            out->foldables[i].slot = ok ? idm_rd_u32(&r) : 0;
+            out->foldables[i].arity = ok ? idm_rd_u32(&r) : 0;
+            if (ok && !r.ok) ok = false;
+            if (ok) {
+                out->foldables[i].body = foldable_core_read(rt, &r, 0u, err);
+                if (!out->foldables[i].body) ok = false;
+            }
         }
     }
     uint32_t operator_count = ok ? idm_rd_u32(&r) : 0;

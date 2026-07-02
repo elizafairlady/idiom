@@ -1201,6 +1201,10 @@ static bool serialize_code(IdmBuffer *out, const IdmBytecodeModule *module, IdmE
     return true;
 }
 
+bool idm_value_serialize(IdmBuffer *out, IdmValue value, IdmError *err) {
+    return serialize_value(out, value, 0u, err);
+}
+
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err) {
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "bytecode.serialize");
@@ -1585,6 +1589,10 @@ static bool deserialize_code(IdmBytecodeModule *module, IdmByteReader *r, uint64
     if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated .ic code");
     if (module->code_count != code_count) return idm_error_set(err, idm_span_unknown(NULL), "corrupt .ic code length");
     return true;
+}
+
+bool idm_value_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, IdmError *err) {
+    return deserialize_value(rt, r, out, 0u, err);
 }
 
 bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, IdmBytecodeModule *module, IdmError *err) {

@@ -97,8 +97,19 @@ static bool install_artifact_field_selectors(ExpandContext *ctx, const IdmArtifa
     return true;
 }
 
+static bool install_artifact_foldables(ExpandContext *ctx, const IdmArtifact *art, const char *provider_key, IdmError *err) {
+    for (size_t i = 0; i < art->foldable_count; i++) {
+        const IdmPkgFoldable *f = &art->foldables[i];
+        const char *key = provider_key && provider_key[0] ? provider_key : f->env_key;
+        if (!f->name || !key || !key[0]) continue;
+        if (!foldable_install(ctx, f->name, key, f->slot, f->arity, f->body)) return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
+}
+
 static bool install_artifact_typed_registry(ExpandContext *ctx, const IdmArtifact *art, UseSelection *selection, const IdmScopeSet *scopes, const char *qualifier, const char *provider, const char *provider_key, IdmError *err) {
     return install_artifact_field_selectors(ctx, art, provider_key, err) &&
+           install_artifact_foldables(ctx, art, provider_key, err) &&
            install_artifact_typed_entities(ctx, art, selection, scopes, qualifier, provider, provider_key, err) &&
            install_artifact_method_impls(ctx, art->typed.method_impls, art->typed.method_impl_count, provider_key, err);
 }
@@ -1861,6 +1872,39 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                 out->field_selectors[out->field_selector_count].env_key = idm_strdup(ctx.unit_key);
                 out->field_selectors[out->field_selector_count].slot = ctx.field_selectors[i].slot;
                 out->field_selector_count++;
+            }
+        }
+    }
+    if (ctx.foldable_count != 0) {
+        out->foldables = calloc(ctx.foldable_count, sizeof(*out->foldables));
+        if (out->foldables) {
+            for (size_t i = 0; i < ctx.foldable_count; i++) {
+                const FoldableFnDef *f = &ctx.foldables[i];
+                if (!f->env || f->env_key) continue;
+                IdmBuffer probe_buf;
+                idm_buf_init(&probe_buf);
+                IdmError probe;
+                idm_error_init(&probe);
+                bool serializable = idm_foldable_body_serialize(&probe_buf, f->body, &probe);
+                idm_buf_destroy(&probe_buf);
+                idm_error_clear(&probe);
+                if (!serializable) continue;
+                IdmCore *clone = foldable_core_clone(f->body);
+                if (!clone) continue;
+                IdmPkgFoldable *pf = &out->foldables[out->foldable_count];
+                pf->name = idm_strdup(f->name);
+                pf->env_key = idm_strdup(ctx.unit_key);
+                if (!pf->name || !pf->env_key) {
+                    free(pf->name);
+                    free(pf->env_key);
+                    memset(pf, 0, sizeof(*pf));
+                    idm_core_free(clone);
+                    continue;
+                }
+                pf->slot = f->slot;
+                pf->arity = f->arity;
+                pf->body = clone;
+                out->foldable_count++;
             }
         }
     }
