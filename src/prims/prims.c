@@ -210,30 +210,45 @@ static size_t utf8_encode(int64_t cp, char buf[4]) {
     return 4u;
 }
 
-static bool sequence_to_list(IdmRuntime *rt, IdmValue v, const char *name, IdmValue *out, IdmError *err) {
-    if (!idm_is_vector(v) && !idm_is_tuple(v)) return idm_primitive_type_error(rt, err, name, v, "a vector or tuple");
-    size_t count = idm_sequence_count(v);
-    IdmValue result = idm_empty_list();
-    for (size_t i = count; i > 0; i--) {
-        IdmValue item = idm_sequence_item(v, i - 1u, err);
-        if (err && err->present) return false;
-        result = idm_cons(rt, item, result, err);
-        if (err && err->present) return false;
+static bool prim_seq_count(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
+    IdmValue v = args[0];
+    size_t count = 0;
+    if (idm_is_vector(v) || idm_is_tuple(v)) {
+        count = idm_sequence_count(v);
+    } else if (idm_is_dict(v)) {
+        count = idm_dict_count(v);
+    } else if (idm_is_string(v)) {
+        count = idm_string_length(v);
+    } else if (idm_is_empty_list(v) || idm_is_pair(v)) {
+        IdmValue cur = v;
+        while (idm_is_pair(cur)) {
+            count++;
+            cur = idm_cdr(cur, err);
+            if (err && err->present) return false;
+        }
+        if (!idm_is_empty_list(cur)) return idm_primitive_type_error(rt, err, "seq-count", v, "a proper list, vector, tuple, dict, or string");
+    } else {
+        return idm_primitive_type_error(rt, err, "seq-count", v, "a proper list, vector, tuple, dict, or string");
     }
-    *out = result;
-    return true;
+    *out = idm_int_promote(rt, (int64_t)count, err);
+    return !(err && err->present);
 }
 
-static bool prim_vector_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
+static bool prim_seq_nth(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
-    if (!idm_is_vector(v)) return idm_primitive_type_error(rt, err, "vector-to-list", v, "a vector");
-    return sequence_to_list(rt, v, "vector-to-list", out, err);
-}
-
-static bool prim_tuple_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    IdmValue v = args[0];
-    if (!idm_is_tuple(v)) return idm_primitive_type_error(rt, err, "tuple-to-list", v, "a tuple");
-    return sequence_to_list(rt, v, "tuple-to-list", out, err);
+    int64_t index = 0;
+    if (!idm_int_to_i64(args[1], &index) || index < 0) return idm_primitive_type_error(rt, err, "seq-nth", args[1], "a non-negative machine integer");
+    if (idm_is_vector(v) || idm_is_tuple(v)) {
+        if ((uint64_t)index >= idm_sequence_count(v)) return idm_primitive_type_error(rt, err, "seq-nth", args[1], "an index inside the sequence");
+        *out = idm_sequence_item(v, (size_t)index, err);
+        return !(err && err->present);
+    }
+    if (idm_is_string(v)) {
+        if ((uint64_t)index >= idm_string_length(v)) return idm_primitive_type_error(rt, err, "seq-nth", args[1], "an index inside the string");
+        *out = idm_int((int64_t)(unsigned char)idm_string_bytes(v)[index]);
+        return true;
+    }
+    return idm_primitive_type_error(rt, err, "seq-nth", v, "a vector, tuple, or string");
 }
 
 static bool prim_dict_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
@@ -257,7 +272,7 @@ static bool prim_dict_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *ou
 
 static bool prim_str_to_list(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmValue v = args[0];
-    if (!idm_is_string(v)) return idm_primitive_type_error(rt, err, "str-to-list", v, "a string");
+    if (!idm_is_string(v)) return idm_primitive_type_error(rt, err, "runes-lossy", v, "a string");
     const unsigned char *bytes = (const unsigned char *)idm_string_bytes(v);
     size_t len = idm_string_length(v);
     IdmValue runes = idm_empty_list();
@@ -1946,19 +1961,9 @@ static bool prim_ord_str(IdmRuntime *rt, const IdmValue *args, IdmValue *out, Id
     char buf[4];
     int64_t cp = 0;
     size_t n = value_to_i64(args[0], &cp) ? utf8_encode(cp, buf) : 0u;
-    if (n == 0u) return idm_primitive_type_error(rt, err, "ord->str", args[0], "a Unicode codepoint");
+    if (n == 0u) return idm_primitive_type_error(rt, err, "rune-str", args[0], "a Unicode codepoint");
     *out = idm_string_n(rt, buf, n, err);
     return !(err && err->present);
-}
-
-static bool prim_str_ord(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
-    const char *s; size_t len;
-    if (!idm_primitive_require_string_arg(rt, args[0], &s, &len, "str->ord", err)) return false;
-    if (len == 0) { *out = idm_nil(); return true; }
-    int32_t cp;
-    utf8_decode((const unsigned char *)s, len, &cp);
-    *out = idm_int((int64_t)cp);
-    return true;
 }
 
 static bool prim_from_runes(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
@@ -2169,8 +2174,8 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
         case IDM_PRIM_APPEND: return prim_append(rt, args, out, err);
         case IDM_PRIM_STR_TO_LIST: return prim_str_to_list(rt, args, out, err);
         case IDM_PRIM_DICT_TO_LIST: return prim_dict_to_list(rt, args, out, err);
-        case IDM_PRIM_VECTOR_TO_LIST: return prim_vector_to_list(rt, args, out, err);
-        case IDM_PRIM_TUPLE_TO_LIST: return prim_tuple_to_list(rt, args, out, err);
+        case IDM_PRIM_SEQ_COUNT: return prim_seq_count(rt, args, out, err);
+        case IDM_PRIM_SEQ_NTH: return prim_seq_nth(rt, args, out, err);
         case IDM_PRIM_SYNTAX_KIND: return prim_syntax_kind(rt, args, out, err);
         case IDM_PRIM_SYNTAX_PROPERTY: return prim_syntax_property(rt, args, out, err);
         case IDM_PRIM_SYNTAX_SET_PROPERTY: return prim_syntax_set_property(rt, args, out, err);
@@ -2361,7 +2366,6 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
         case IDM_PRIM_FILE_APPEND: return prim_file_append(rt, args, out, err);
         case IDM_PRIM_FILE_OPEN: return prim_file_open(rt, args, out, err);
         case IDM_PRIM_ORD_STR: return prim_ord_str(rt, args, out, err);
-        case IDM_PRIM_STR_ORD: return prim_str_ord(rt, args, out, err);
         case IDM_PRIM_FROM_RUNES: return prim_from_runes(rt, args, out, err);
         case IDM_PRIM_REPL_COMPILE: return prim_repl_compile(rt, args, out, err);
         case IDM_PRIM_REPL_ABORT: return prim_repl_abort(rt, args, out, err);

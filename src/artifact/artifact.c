@@ -508,7 +508,7 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 86u
+#define IDM_ARTIFACT_VERSION 87u
 
 const char *idm_grammar_mode_name(uint8_t mode) {
     switch ((IdmGrammarMode)mode) {

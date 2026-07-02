@@ -1,5 +1,7 @@
 package runes
 
+use std/string with [runes-lossy]
+
 # Sorted closed intervals for zero-width combining/format code points.
 # TODO: replace this legacy snapshot with a generated, Unicode-versioned table.
 combining-ranges = {
@@ -89,4 +91,4 @@ defn width-runes do
 end
 
 spec width :: string -> int
-export defn width s -> width-runes (str-to-list s) 0
+export defn width s -> width-runes (runes-lossy s) 0

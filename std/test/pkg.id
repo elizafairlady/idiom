@@ -75,7 +75,7 @@ defn name-match? do
   _name :nil -> :true
   _name "" -> :true
   _name "." -> :true
-  name pat -> neq? (find name pat 0) :nil
+  name pat -> neq? (byte-find name pat 0) :nil
 end
 
 defn suite-item-name do

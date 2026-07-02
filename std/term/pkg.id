@@ -34,7 +34,7 @@ export defn skip-back do
 end
 
 export defn skip-fwd do
-  b i pred when (and (lt? i (len b)) (pred (byte b i))) -> skip-fwd b (add i 1) pred
+  b i pred when (and (lt? i (byte-len b)) (pred (byte b i))) -> skip-fwd b (add i 1) pred
   _b i _pred -> i
 end
 
@@ -45,7 +45,7 @@ export defn line-start do
 end
 
 export defn line-stop do
-  b i when (eq? i (len b)) -> i
+  b i when (eq? i (byte-len b)) -> i
   b i when (eq? (byte b i) 10) -> i
   b i -> line-stop b (add i 1)
 end
@@ -65,24 +65,24 @@ export defn rune-back do
 end
 
 defn rune-fwd-next do
-  b i when (gte? i (len b)) -> i
+  b i when (gte? i (byte-len b)) -> i
   b i when (cont-byte? (byte b i)) -> rune-fwd-next b (add i 1)
   _b i -> i
 end
 
 export defn rune-fwd do
-  b i when (gte? i (len b)) -> len b
+  b i when (gte? i (byte-len b)) -> byte-len b
   b i -> rune-fwd-next b (add i 1)
 end
 
 defn skip-csi-bytes do
-  s i when (eq? i (len s)) -> i
+  s i when (eq? i (byte-len s)) -> i
   s i when (and (gte? (byte s i) 64) (lte? (byte s i) 126)) -> add i 1
   s i -> skip-csi-bytes s (add i 1)
 end
 
 export defn strip-csi do
-  s i acc when (eq? i (len s)) -> acc
+  s i acc when (eq? i (byte-len s)) -> acc
   s i acc when (and (eq? (byte s i) 27) (eq? (byte s (add i 1)) 91)) -> strip-csi s (skip-csi-bytes s (add i 2)) acc
   s i acc -> strip-csi s (add i 1) "${acc}#{byte-str (byte s i)}"
 end

@@ -60,7 +60,7 @@ suite "collections" do
     s = " alpha,beta,gamma,delta "
     parts = s |> trim |> split ","
     out = parts |> join "|"
-    (len out) + (len (reverse out))
+    (byte-len out) + (byte-len (reverse-runes out))
   end
 end
 :ok

@@ -11,7 +11,7 @@ export defn join do
   a b -> "${a}/${b}"
 end
 
-defn last-slash p -> scan-slash p (len p)
+defn last-slash p -> scan-slash p (byte-len p)
 
 defn basename-start p -> match (last-slash p) do
   :nil -> 0
@@ -27,14 +27,14 @@ export defn dirname do
   p -> match (last-slash p) do
     :nil -> "."
     0 -> "/"
-    i -> slice p 0 i
+    i -> byte-slice p 0 i
   end
 end
 
 export defn basename do
   p -> match (last-slash p) do
     :nil -> p
-    i -> slice p (add i 1) (len p)
+    i -> byte-slice p (add i 1) (byte-len p)
   end
 end
 
@@ -55,10 +55,10 @@ end
 export defn extname do
   p -> do
     start = basename-start p
-    match (last-dot p (len p)) do
+    match (last-dot p (byte-len p)) do
       :nil -> ""
       i when (lte? i start) -> ""
-      i -> slice p i (len p)
+      i -> byte-slice p i (byte-len p)
     end
   end
 end

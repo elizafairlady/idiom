@@ -1833,12 +1833,12 @@ bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableCont
             break;
         case IDM_PRIM_STR_FIND:
         case IDM_PRIM_STR_BYTE:
-        case IDM_PRIM_STR_ORD:
         case IDM_PRIM_REGEX_RESULT_START:
         case IDM_PRIM_REGEX_RESULT_END:
             ok = primitive_contract_result_union_cons(out, "int", "nil", err, span);
             break;
         case IDM_PRIM_STR_LEN:
+        case IDM_PRIM_SEQ_COUNT:
         case IDM_PRIM_SYNTAX_LENGTH:
         case IDM_PRIM_SYNTAX_INT_VALUE:
         case IDM_PRIM_REGEX_GROUP_COUNT:
@@ -1855,8 +1855,6 @@ bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableCont
         case IDM_PRIM_LIST:
         case IDM_PRIM_STR_TO_LIST:
         case IDM_PRIM_DICT_TO_LIST:
-        case IDM_PRIM_VECTOR_TO_LIST:
-        case IDM_PRIM_TUPLE_TO_LIST:
         case IDM_PRIM_SYNTAX_ORIGIN:
         case IDM_PRIM_SYNTAX_SLICE:
         case IDM_PRIM_REGEX_OPTIONS:
@@ -1910,6 +1908,11 @@ bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableCont
             ok = primitive_contract_arg_con(out, 0u, "tuple", err, span) &&
                  primitive_contract_arg_con(out, 1u, "int", err, span) &&
                  primitive_contract_result_var(out, "a", 1u, err, span);
+            break;
+        case IDM_PRIM_SEQ_NTH:
+            ok = primitive_contract_arg_var(out, 0u, "s", 1u, err, span) &&
+                 primitive_contract_arg_con(out, 1u, "int", err, span) &&
+                 primitive_contract_result_var(out, "a", 2u, err, span);
             break;
         case IDM_PRIM_DICT_GET:
             ok = primitive_contract_arg_con(out, 0u, "dict", err, span) &&

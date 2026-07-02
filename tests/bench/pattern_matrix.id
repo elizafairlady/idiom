@@ -9,12 +9,12 @@ defn list-shape do
 end
 
 defn vector-shape do
-  [a b c . rest] -> a + b + c + (L.length (vector-to-list rest))
+  [a b c . rest] -> a + b + c + (seq-count rest)
   _ -> 0
 end
 
 defn tuple-shape do
-  {a b c . rest} -> a + b + c + (L.length (tuple-to-list rest))
+  {a b c . rest} -> a + b + c + (seq-count rest)
   _ -> 0
 end
 

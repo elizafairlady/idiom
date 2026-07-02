@@ -7,6 +7,11 @@ export trait Iter do
   method fold xs acc f -> xs.foldl acc f
 end
 
+defn foldl-indexed do
+  _xs i n acc _f when (eq? i n) -> &acc
+  xs i n acc f -> foldl-indexed xs (add i 1) n (f (seq-nth xs i) &acc) f
+end
+
 implement Iter on empty-list do
   method foldl _xs acc _f -> &acc
 end
@@ -16,11 +21,11 @@ implement Iter on pair do
 end
 
 implement Iter on vector do
-  method foldl xs acc f -> xs |> vector-to-list |> List.foldl acc f
+  method foldl xs acc f -> foldl-indexed xs 0 (seq-count xs) acc f
 end
 
 implement Iter on tuple do
-  method foldl xs acc f -> xs |> tuple-to-list |> List.foldl acc f
+  method foldl xs acc f -> foldl-indexed xs 0 (seq-count xs) acc f
 end
 
 implement Iter on dict do
@@ -28,7 +33,7 @@ implement Iter on dict do
 end
 
 implement Iter on string do
-  method foldl xs acc f -> xs |> str-to-list |> List.foldl acc f
+  method foldl xs acc f -> foldl-indexed xs 0 (seq-count xs) acc f
 end
 
 export trait Enum do

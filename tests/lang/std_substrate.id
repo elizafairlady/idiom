@@ -45,10 +45,10 @@ suite do
   end
 
   test "string rune operations use list helpers" do
-    "héllo" |> reverse |> assert-eq "olléh"
-    "héllo" |> take 2 |> assert-eq "hé"
-    "héllo" |> drop 2 |> assert-eq "llo"
-    "héllo" |> last |> assert-eq 111
+    "héllo" |> reverse-runes |> assert-eq "olléh"
+    "héllo" |> take-runes 2 |> assert-eq "hé"
+    "héllo" |> drop-runes 2 |> assert-eq "llo"
+    "héllo" |> last-rune |> assert-eq 111
     (list "a" "b" "c") |> join "-" |> assert-eq "a-b-c"
     "  x\n" |> trim |> assert-eq "x"
     " \t\n" |> blank? |> assert-eq :true

@@ -81,7 +81,7 @@ end
 
 defn write-port-all-from do
   port data offset len when (gte? offset len) -> {:ok offset}
-  port data offset len -> match (write-port port (slice data offset len)) do
+  port data offset len -> match (write-port port (byte-slice data offset len)) do
     {:ok count} when (gt? count 0) -> write-port-all-from port data (add offset count) len
     {:ok _count} -> {:error :short-write}
     :closed -> {:error :closed}
@@ -91,7 +91,7 @@ defn write-port-all-from do
   end
 end
 
-export defn write-port-all port data -> write-port-all-from port data 0 (len data)
+export defn write-port-all port data -> write-port-all-from port data 0 (byte-len data)
 
 export defn write-port-all! do
   port data -> match (write-port-all port data) do

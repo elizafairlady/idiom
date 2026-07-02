@@ -58,10 +58,10 @@ typedef enum {
     X(DICT, "dict", 0, UINT32_MAX, "kernel", 1, 0) \
     X(TUPLE_GET, "tuple-get", 2, 2, "kernel", 1, 0) \
     X(APPEND, "append", 2, 2, "kernel", 1, 0) \
-    X(STR_TO_LIST, "str-to-list", 1, 1, "kernel", 1, 0) \
+    X(STR_TO_LIST, "runes-lossy", 1, 1, "string", 1, 0) \
     X(DICT_TO_LIST, "dict-to-list", 1, 1, "kernel", 1, 0) \
-    X(VECTOR_TO_LIST, "vector-to-list", 1, 1, "kernel", 1, 0) \
-    X(TUPLE_TO_LIST, "tuple-to-list", 1, 1, "kernel", 1, 0) \
+    X(SEQ_COUNT, "seq-count", 1, 1, "kernel", 1, 0) \
+    X(SEQ_NTH, "seq-nth", 2, 2, "kernel", 1, 0) \
     X(APPLY, "apply", 2, 2, "kernel", 0, 0) \
     X(SYNTAX_KIND, "syntax-kind", 1, 1, "kernel", 1, 0) \
     X(SYNTAX_PROPERTY, "syntax-property", 2, 2, "kernel", 1, 0) \
@@ -117,9 +117,9 @@ typedef enum {
     X(INTERNAL_REGISTER_MACRO, "internal-register-macro", 2, 2, "", 0, 0) \
     X(EXPAND_CHECK, "expand-check", 1, 1, "compile", 0, 0) \
     X(INSPECT, "inspect", 1, 1, "kernel", 1, 0) \
-    X(STR_LEN, "len", 1, 1, "string", 1, 0) \
-    X(STR_SLICE, "slice", 3, 3, "string", 1, 0) \
-    X(STR_FIND, "find", 3, 3, "string", 1, 0) \
+    X(STR_LEN, "byte-len", 1, 1, "string", 1, 0) \
+    X(STR_SLICE, "byte-slice", 3, 3, "string", 1, 0) \
+    X(STR_FIND, "byte-find", 3, 3, "string", 1, 0) \
     X(STR_BYTE, "byte", 2, 2, "string", 1, 0) \
     X(BYTE_STR, "byte-str", 1, 1, "string", 1, 0) \
     X(REGEX_COMPILE, "raw-compile", 2, 2, "regex", 1, 0) \
@@ -172,8 +172,7 @@ typedef enum {
     X(PARSE_FLOAT, "parse-float", 1, 1, "string", 1, 0) \
     X(FILE_MKDIR, "mkdir", 1, 1, "file", 0, 0) \
     X(FILE_APPEND, "append", 2, 2, "file", 0, 0) \
-    X(ORD_STR, "ord->str", 1, 1, "string", 1, 0) \
-    X(STR_ORD, "str->ord", 1, 1, "string", 1, 0) \
+    X(ORD_STR, "rune-str", 1, 1, "string", 1, 0) \
     X(FROM_RUNES, "from-runes", 1, 1, "string", 1, 0) \
     X(REPL_COMPILE, "repl-compile", 1, 1, "kernel", 0, 0) \
     X(REPL_ABORT, "repl-abort", 1, 1, "kernel", 0, 0) \

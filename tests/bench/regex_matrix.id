@@ -25,7 +25,7 @@ suite "regex" do
   end
 
   bench "replace/capture-expand" expect: 7 do
-    len (capture-rx.sub "abc-123" "$1:$2")
+    byte-len (capture-rx.sub "abc-123" "$1:$2")
   end
 
   bench "split/separator" expect: 4 do

@@ -11,7 +11,7 @@ end
 
 defn drain-stdout do
   p acc -> match (port-read p :stdout 8192) do
-    {:data chunk} -> drain-stdout p (acc + (len chunk))
+    {:data chunk} -> drain-stdout p (acc + (byte-len chunk))
     :eof -> acc
     value -> value
   end
