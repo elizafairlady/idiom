@@ -1163,6 +1163,27 @@ static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, 
         size_t trait_end = pos;
         if (!try_qualified_word_at(items, pos, end, &trait, &trait_end, err)) return false;
         if (!trait) return idm_error_set(err, items[pos]->span, "typeclass constraint expects a trait name");
+        if (trait->as.text[0] == '_' && trait->as.text[1] == '.') {
+            IdmSpan span = trait->span;
+            char *head_text = structural_head_join(trait->as.text, items, end, &trait_end);
+            idm_syn_free(trait);
+            if (!head_text) return idm_error_oom(err, span);
+            size_t arg_end = trait_end < end ? contract_arg_field_end(items, trait_end, end) : trait_end;
+            if (arg_end == trait_end) {
+                free(head_text);
+                return idm_error_set(err, span, "structural constraint expects an argument type");
+            }
+            IdmConstraint constraint;
+            memset(&constraint, 0, sizeof(constraint));
+            constraint.kind = IDM_CONSTR_CLASS;
+            constraint.trait = head_text;
+            bool sok = parse_type_term_range(ctx, items, trait_end, arg_end, out, &constraint.lhs, err) &&
+                       callable_contract_add_constraint(out, &constraint, err, span);
+            idm_constraint_destroy(&constraint);
+            if (!sok) return false;
+            pos = arg_end;
+            continue;
+        }
         size_t arg_end = trait_end < end ? contract_arg_field_end(items, trait_end, end) : trait_end;
         if (arg_end == trait_end) {
             IdmSpan span = trait->span;
@@ -1378,6 +1399,24 @@ bool method_impl_set_type(ExpandContext *ctx, MethodImplDef *impl, const char *t
     if (!sym) return idm_error_oom(err, span);
     impl->type = sym;
     return true;
+}
+
+char *structural_head_join(const char *head, IdmSyntax *const *items, size_t count, size_t *inout_pos) {
+    if (!head || head[0] != '_' || head[1] != '.') return NULL;
+    size_t pos = *inout_pos;
+    const char *field_type = pos + 1u < count && syntax_text_is(items[pos], "::") ? surface_token_text(items[pos + 1u]) : NULL;
+    IdmBuffer joined;
+    idm_buf_init(&joined);
+    bool ok = idm_buf_append(&joined, head);
+    if (ok && field_type) {
+        ok = idm_buf_append(&joined, "::") && idm_buf_append(&joined, field_type);
+        pos += 2u;
+    }
+    char *text = ok ? idm_strdup(joined.data) : NULL;
+    idm_buf_destroy(&joined);
+    if (!text) return NULL;
+    *inout_pos = pos;
+    return text;
 }
 
 bool structural_head_parse(const char *head, const char **out_field, size_t *out_field_len, const char **out_type) {

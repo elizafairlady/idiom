@@ -1049,6 +1049,51 @@ int idm_unit_signature_contract(void) {
     remove_package_dir(dir);
     free(dir);
 
+    const char *structural_ctx_source =
+        "package structural_ctx_signature_contract\n"
+        "\n"
+        "record CBox do\n"
+        "  field size :: int\n"
+        "end\n"
+        "\n"
+        "spec sizeof :: _.size :: int a => a -> int\n"
+        "defn sizeof x -> x.size\n"
+        "\n"
+        "spec wrap :: _.size :: int a => a -> int\n"
+        "defn wrap x -> sizeof x\n"
+        "\n"
+        "spec got :: int\n"
+        "got = sizeof (CBox 3)\n"
+        "\n"
+        "spec got2 :: int\n"
+        "got2 = wrap (CBox 4)\n";
+    dir = write_package_dir(structural_ctx_source, &err);
+    idm_buf_init(&wire);
+    check_ok(idm_expand_package_artifact_serialize(&rt, dir, &wire, &err), &err, "structural spec constraint compiles");
+    idm_buf_destroy(&wire);
+    remove_package_dir(dir);
+    free(dir);
+
+    const char *structural_ctx_bad_source =
+        "package structural_ctx_bad_signature_contract\n"
+        "\n"
+        "record CName do\n"
+        "  field label :: string\n"
+        "end\n"
+        "\n"
+        "spec sizeof :: _.size :: int a => a -> int\n"
+        "defn sizeof x -> 0\n"
+        "\n"
+        "bad = sizeof (CName \"no\")\n";
+    dir = write_package_dir(structural_ctx_bad_source, &err);
+    idm_buf_init(&wire);
+    check(!idm_expand_package_artifact_serialize(&rt, dir, &wire, &err), "structural spec constraint rejects");
+    check(err.present && err.message && strstr(err.message, "structural constraint '_.size::int' is not satisfied by") != NULL, "structural spec constraint message");
+    idm_error_clear(&err);
+    idm_buf_destroy(&wire);
+    remove_package_dir(dir);
+    free(dir);
+
     const char *purity_source =
         "package purity_signature_contract\n"
         "\n"

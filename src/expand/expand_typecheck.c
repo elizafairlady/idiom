@@ -144,6 +144,10 @@ static bool type_from_literal(GenCtx *g, IdmValue value, IdmTypeTerm *out, IdmEr
 static IdmInstanceResult ctx_instance_oracle(void *user, const char *trait, const IdmTypeTerm *ty) {
     ExpandContext *ctx = user;
     if (ty && ty->kind == IDM_TYPE_CON && ty->name && strcmp(ty->name, "Any") == 0) return IDM_INST_YES;
+    if (trait && trait[0] == '_' && trait[1] == '.') {
+        if (!ty || ty->kind != IDM_TYPE_CON || !ty->name) return IDM_INST_UNKNOWN;
+        return type_satisfies_structural_head(ctx, trait, ty->name) ? IDM_INST_YES : IDM_INST_NO;
+    }
     const TraitDef *td = trait_by_constraint_name(ctx, trait);
     if (!td) return IDM_INST_UNKNOWN;
     return trait_impl_satisfies_term(ctx, td, ty) ? IDM_INST_YES : IDM_INST_NO;

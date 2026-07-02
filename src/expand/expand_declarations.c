@@ -1604,31 +1604,30 @@ IdmCore *expand_implement_trait_decl(ExpandContext *ctx, const IdmSyntax *form, 
         return NULL;
     }
     pos = parse_end;
-    if (type->kind == IDM_SYN_WORD && type->as.text[0] == '_' && type->as.text[1] == '.' && pos + 1u < form->as.seq.count && syn_is_word(form->as.seq.items[pos], "::") && form->as.seq.items[pos + 1u]->kind == IDM_SYN_WORD) {
-        const IdmSyntax *cname = form->as.seq.items[pos + 1u];
-        IdmBuffer joined;
-        idm_buf_init(&joined);
-        if (!idm_buf_append(&joined, type->as.text) || !idm_buf_append(&joined, "::") || !idm_buf_append(&joined, cname->as.text)) {
-            idm_buf_destroy(&joined);
+    if (type->kind == IDM_SYN_WORD && type->as.text[0] == '_' && type->as.text[1] == '.') {
+        size_t jpos = pos;
+        char *joined_text = structural_head_join(type->as.text, (IdmSyntax *const *)form->as.seq.items, form->as.seq.count, &jpos);
+        if (!joined_text) {
             idm_syn_free(type);
             idm_syn_free(trait);
             return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
         }
-        IdmSyntax *joined_word = idm_syn_clone(type);
-        char *joined_text = joined_word ? idm_strdup(joined.data) : NULL;
-        idm_buf_destroy(&joined);
-        if (!joined_word || !joined_text) {
+        if (jpos == pos) {
             free(joined_text);
-            idm_syn_free(joined_word);
+        } else {
+            IdmSyntax *joined_word = idm_syn_clone(type);
+            if (!joined_word) {
+                free(joined_text);
+                idm_syn_free(type);
+                idm_syn_free(trait);
+                return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
+            }
+            free(joined_word->as.text);
+            joined_word->as.text = joined_text;
             idm_syn_free(type);
-            idm_syn_free(trait);
-            return (IdmCore *)(uintptr_t)idm_error_oom(err, form->span);
+            type = joined_word;
+            pos = jpos;
         }
-        free(joined_word->as.text);
-        joined_word->as.text = joined_text;
-        idm_syn_free(type);
-        type = joined_word;
-        pos += 2u;
     }
     const IdmSyntax *body = NULL;
     if (pos < form->as.seq.count) {

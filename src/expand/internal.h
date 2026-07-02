@@ -485,6 +485,7 @@ const char *method_impl_type_text(const MethodImplDef *impl);
 bool method_impl_set_identity(ExpandContext *ctx, MethodImplDef *impl, const char *trait, const char *name, const char *type, IdmError *err, IdmSpan span);
 bool method_impl_set_type(ExpandContext *ctx, MethodImplDef *impl, const char *type, IdmError *err, IdmSpan span);
 bool method_impl_matches_type(const ExpandContext *ctx, const MethodImplDef *impl, const char *type);
+char *structural_head_join(const char *head, IdmSyntax *const *items, size_t count, size_t *inout_pos);
 bool structural_head_parse(const char *head, const char **out_field, size_t *out_field_len, const char **out_type);
 bool type_satisfies_structural_head(const ExpandContext *ctx, const char *head, const char *type_name);
 FieldSelectorDef *field_selector_lookup(ExpandContext *ctx, const char *name);
