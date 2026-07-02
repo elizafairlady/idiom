@@ -29,7 +29,6 @@ size_t idm_regex_set_group_count(const IdmRegexSet *set, size_t item_index);
 const char *idm_regex_set_group_name(const IdmRegexSet *set, size_t item_index, size_t group_index);
 bool idm_regex_set_matches_empty(const IdmRegexSet *set, bool *out, IdmError *err);
 bool idm_regex_set_serialize(IdmBuffer *out, const IdmRegexSet *set, IdmError *err);
-bool idm_regex_set_deserialize(IdmByteReader *r, IdmRegexSet **out, IdmError *err);
 
 void idm_regex_result_free(IdmRegexResult *result);
 IdmRegexResult *idm_regex_result_clone(const IdmRegexResult *result);

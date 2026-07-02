@@ -9,8 +9,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define IDM_IC_VERSION 47u
-#define IDM_IC_MIN_READ_VERSION 47u
 
 static const IdmOpcodeInfo opcode_infos[IDM_OP_COUNT] = {
 #define IDM_OPCODE_INFO(name, fixed, count_index, repeat, roles, repeat_roles, reg_roles, reg_ranges, flow_kind, branch, tail) \
@@ -1208,7 +1206,6 @@ bool idm_value_serialize(IdmBuffer *out, IdmValue value, IdmError *err) {
 bool idm_ic_serialize(const IdmBytecodeModule *module, IdmBuffer *out, IdmError *err) {
     IdmProfileScope prof;
     idm_profile_scope_begin(&prof, "bytecode.serialize");
-    if (!idm_buf_append_n(out, "IDMC", 4u) || !idm_buf_put_u32(out, IDM_IC_VERSION)) return idm_error_oom(err, idm_span_unknown(NULL));
     if (!idm_buf_put_u32(out, (uint32_t)module->const_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < module->const_count; i++) if (!serialize_value(out, module->constants[i], 0u, err)) return false;
     if (!idm_buf_put_u32(out, (uint32_t)module->type_count)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1600,10 +1597,6 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     idm_profile_scope_begin(&prof, "bytecode.deserialize");
     idm_bc_init(module);
     IdmByteReader r = { data, len, 0u, true };
-    if (len < 8u || memcmp(data, "IDMC", 4u) != 0) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), "not an .ic module"); }
-    r.pos = 4u;
-    uint32_t version = idm_rd_u32(&r);
-    if (version < IDM_IC_MIN_READ_VERSION || version > IDM_IC_VERSION) { idm_bc_destroy(module); return idm_error_set(err, idm_span_unknown(NULL), ".ic version %u unsupported", version); }
     uint32_t const_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < const_count && r.ok; i++) {
         IdmValue v;

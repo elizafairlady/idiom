@@ -103,6 +103,19 @@ bool idm_rd_opt_str(IdmByteReader *r, char **out, IdmError *err);
 void idm_sha256(const void *data, size_t len, unsigned char out[32]);
 void idm_sha256_hex(const void *data, size_t len, char out[65]);
 
+#define IDM_WIRE_MAGIC "IDMW"
+#define IDM_WIRE_SECTION_BYTECODE 1u
+#define IDM_WIRE_SECTION_PACKAGE 2u
+#define IDM_WIRE_SECTION_MAIN 3u
+#define IDM_WIRE_SECTION_PACKAGE_PATH 4u
+
+uint32_t idm_wire_version(void);
+bool idm_wire_begin(IdmBuffer *out, uint32_t section_count, IdmError *err);
+bool idm_wire_section(IdmBuffer *out, uint32_t kind, const void *payload, size_t len, IdmError *err);
+bool idm_wire_open(IdmByteReader *r, const unsigned char *data, size_t len, uint32_t *out_section_count, IdmError *err);
+bool idm_wire_next(IdmByteReader *r, uint32_t *out_kind, const unsigned char **out_payload, size_t *out_len, IdmError *err);
+bool idm_wire_find(const unsigned char *data, size_t len, uint32_t kind, const unsigned char **out_payload, size_t *out_len, IdmError *err);
+
 char *idm_strdup(const char *s);
 char *idm_strndup(const char *s, size_t n);
 bool idm_next_capacity(size_t current, size_t seed, size_t needed, size_t *out);

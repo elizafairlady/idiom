@@ -607,3 +607,76 @@ bool idm_read_file(const char *path, char **out, size_t *out_len, IdmError *err)
     idm_profile_scope_end(&prof);
     return ok;
 }
+
+#ifndef IDM_VERSION_MAJOR
+#define IDM_VERSION_MAJOR 0
+#endif
+#ifndef IDM_VERSION_MINOR
+#define IDM_VERSION_MINOR 0
+#endif
+
+uint32_t idm_wire_version(void) {
+    return ((uint32_t)IDM_VERSION_MAJOR << 16) | (uint32_t)IDM_VERSION_MINOR;
+}
+
+bool idm_wire_begin(IdmBuffer *out, uint32_t section_count, IdmError *err) {
+    if (!idm_buf_append_n(out, IDM_WIRE_MAGIC, 4u) ||
+        !idm_buf_put_u32(out, idm_wire_version()) ||
+        !idm_buf_put_u32(out, section_count)) {
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
+}
+
+bool idm_wire_section(IdmBuffer *out, uint32_t kind, const void *payload, size_t len, IdmError *err) {
+    if (!idm_buf_put_u32(out, kind) ||
+        !idm_buf_put_u64(out, (uint64_t)len) ||
+        (len != 0 && !idm_buf_append_n(out, payload, len))) {
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    return true;
+}
+
+bool idm_wire_open(IdmByteReader *r, const unsigned char *data, size_t len, uint32_t *out_section_count, IdmError *err) {
+    idm_byte_reader_init(r, data, len);
+    if (len < 12u || memcmp(data, IDM_WIRE_MAGIC, 4u) != 0) return idm_error_set(err, idm_span_unknown(NULL), "not an idiom wire container");
+    r->pos = 4u;
+    uint32_t version = idm_rd_u32(r);
+    uint32_t count = idm_rd_u32(r);
+    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated wire container");
+    if (version != idm_wire_version()) {
+        return idm_error_set(err, idm_span_unknown(NULL), "wire version %u.%u unsupported (this build is %u.%u)",
+                             version >> 16, version & 0xFFFFu, idm_wire_version() >> 16, idm_wire_version() & 0xFFFFu);
+    }
+    if (out_section_count) *out_section_count = count;
+    return true;
+}
+
+bool idm_wire_next(IdmByteReader *r, uint32_t *out_kind, const unsigned char **out_payload, size_t *out_len, IdmError *err) {
+    uint32_t kind = idm_rd_u32(r);
+    uint64_t len = idm_rd_u64(r);
+    if (!r->ok || len > (uint64_t)(r->len - r->pos)) return idm_error_set(err, idm_span_unknown(NULL), "truncated wire section");
+    *out_kind = kind;
+    *out_payload = r->data + r->pos;
+    *out_len = (size_t)len;
+    r->pos += (size_t)len;
+    return true;
+}
+
+bool idm_wire_find(const unsigned char *data, size_t len, uint32_t kind, const unsigned char **out_payload, size_t *out_len, IdmError *err) {
+    IdmByteReader r;
+    uint32_t count = 0;
+    if (!idm_wire_open(&r, data, len, &count, err)) return false;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t k = 0;
+        const unsigned char *payload = NULL;
+        size_t plen = 0;
+        if (!idm_wire_next(&r, &k, &payload, &plen, err)) return false;
+        if (k == kind) {
+            *out_payload = payload;
+            *out_len = plen;
+            return true;
+        }
+    }
+    return idm_error_set(err, idm_span_unknown(NULL), "wire container has no section of kind %u", kind);
+}

@@ -322,7 +322,7 @@ static int run_file(const char *path) {
         while (remaining > 0 && *p != '\n') { p++; remaining--; }
         if (remaining > 0) { p++; remaining--; }
     }
-    if (remaining >= 20 && memcmp(p, "IDMX", 4u) == 0) {
+    if (remaining >= 12 && memcmp(p, IDM_WIRE_MAGIC, 4u) == 0) {
         int status = run_sealed(path, p, remaining);
         free(source);
         return status;
@@ -747,36 +747,43 @@ static int run_sealed(const char *file, const unsigned char *data, size_t len) {
     IdmRepl *repl = NULL;
     IdmScheduler *direct_sched = NULL;
     char *package_path = NULL;
-    IdmByteReader r = { data, len, 0u, true };
-    r.pos = 4u;
-    uint32_t version = idm_rd_u32(&r);
-    uint32_t main_fn = idm_rd_u32(&r);
-    uint64_t blob_len = idm_rd_u64(&r);
-    uint64_t package_len = 0;
-    uint64_t artifact_len = 0;
-    if (version == 2u) {
-        package_len = idm_rd_u64(&r);
-        artifact_len = idm_rd_u64(&r);
+    IdmByteReader r;
+    uint32_t section_count = 0;
+    if (!idm_wire_open(&r, data, len, &section_count, &err)) goto done;
+    const unsigned char *main_data = NULL;
+    size_t main_len = 0;
+    const unsigned char *blob_data = NULL;
+    size_t blob_len = 0;
+    const unsigned char *package_data = NULL;
+    size_t package_len = 0;
+    const unsigned char *artifact_data = NULL;
+    size_t artifact_len = 0;
+    for (uint32_t i = 0; i < section_count; i++) {
+        uint32_t kind = 0;
+        const unsigned char *payload = NULL;
+        size_t plen = 0;
+        if (!idm_wire_next(&r, &kind, &payload, &plen, &err)) goto done;
+        switch (kind) {
+            case IDM_WIRE_SECTION_MAIN: main_data = payload; main_len = plen; break;
+            case IDM_WIRE_SECTION_BYTECODE: blob_data = payload; blob_len = plen; break;
+            case IDM_WIRE_SECTION_PACKAGE_PATH: package_data = payload; package_len = plen; break;
+            case IDM_WIRE_SECTION_PACKAGE: artifact_data = payload; artifact_len = plen; break;
+            default: break;
+        }
     }
-    if (!r.ok || (version != 1u && version != 2u) || blob_len > (uint64_t)(len - r.pos)) {
-        idm_error_set(&err, idm_span_unknown(file), "corrupt sealed program header");
+    if (!main_data || main_len != 4u || !blob_data) {
+        idm_error_set(&err, idm_span_unknown(file), "sealed program is missing its main or bytecode section");
         goto done;
     }
-    const unsigned char *blob_data = data + r.pos;
-    r.pos += (size_t)blob_len;
-    if (version == 2u && (package_len > (uint64_t)(len - r.pos) || artifact_len > (uint64_t)(len - r.pos - (size_t)package_len))) {
-        idm_error_set(&err, idm_span_unknown(file), "corrupt sealed program header");
-        goto done;
-    }
-    const unsigned char *package_data = data + r.pos;
-    r.pos += (size_t)package_len;
-    const unsigned char *artifact_data = data + r.pos;
-    if (!idm_ic_deserialize(&rt, blob_data, (size_t)blob_len, &module, &err)) goto done;
+    IdmByteReader mr = { main_data, main_len, 0u, true };
+    uint32_t main_fn = idm_rd_u32(&mr);
+    bool package_mode = package_data != NULL;
+    if (!idm_ic_deserialize(&rt, blob_data, blob_len, &module, &err)) goto done;
     if (main_fn >= module.function_count) {
         idm_error_set(&err, idm_span_unknown(file), "sealed program main function is out of bounds");
         goto done;
     }
-    if (version == 1u) {
+    if (!package_mode) {
         direct_sched = idm_sched_create(&rt, &module, &err);
         if (!direct_sched) goto done;
         IdmValue thunk = idm_closure_in_module(&rt, &module, main_fn, NULL, 0, rt.main_env, &err);
@@ -789,15 +796,15 @@ static int run_sealed(const char *file, const unsigned char *data, size_t len) {
     }
     repl = idm_repl_create(&rt, &err);
     if (!repl) goto done;
-    if (version == 2u && package_len != 0u) {
-        package_path = malloc((size_t)package_len + 1u);
+    if (package_mode && package_len != 0u) {
+        package_path = malloc(package_len + 1u);
         if (!package_path) {
             idm_error_oom(&err, idm_span_unknown(file));
             goto done;
         }
-        memcpy(package_path, package_data, (size_t)package_len);
+        memcpy(package_path, package_data, package_len);
         package_path[package_len] = '\0';
-        if (!idm_expand_preload_package_artifact(&rt, package_path, artifact_data, (size_t)artifact_len, &err)) goto done;
+        if (!idm_expand_preload_package_artifact(&rt, package_path, artifact_data, artifact_len, &err)) goto done;
         IdmBuffer seed;
         idm_buf_init(&seed);
         bool seed_ok = idm_buf_append(&seed, "use ") && idm_buf_append(&seed, package_path) && idm_buf_append(&seed, "\n");
@@ -879,25 +886,19 @@ static int build_sealed(const char *src_path, const char *out_path) {
     if (!idm_core_compile_main(&rt, core, &module, &main_fn, &err)) goto done;
     if (!idm_ic_serialize(&module, &blob, &err)) goto done;
     if (package_entry && !idm_expand_package_artifact_serialize(&rt, src_path, &artifact_blob, &err)) goto done;
-    uint32_t sealed_version = package_entry ? 2u : 1u;
-    if (!idm_buf_append(&out, "#!/usr/bin/env idiomc\n") ||
-        !idm_buf_append_n(&out, "IDMX", 4u) ||
-        !idm_buf_put_u32(&out, sealed_version) ||
-        !idm_buf_put_u32(&out, main_fn) ||
-        !idm_buf_put_u64(&out, (uint64_t)blob.len)) {
-        idm_error_oom(&err, idm_span_unknown(src_path));
-        goto done;
-    }
-    if (package_entry &&
-        (!idm_buf_put_u64(&out, (uint64_t)strlen(src_path)) ||
-         !idm_buf_put_u64(&out, (uint64_t)artifact_blob.len))) {
-        idm_error_oom(&err, idm_span_unknown(src_path));
-        goto done;
-    }
-    if (!idm_buf_append_n(&out, blob.data, blob.len) ||
-        (package_entry && (!idm_buf_append_n(&out, src_path, strlen(src_path)) ||
-                           !idm_buf_append_n(&out, artifact_blob.data, artifact_blob.len)))) {
-        idm_error_oom(&err, idm_span_unknown(src_path));
+    IdmBuffer main_meta;
+    idm_buf_init(&main_meta);
+    bool sealed_ok = idm_buf_put_u32(&main_meta, main_fn) &&
+                     idm_buf_append(&out, "#!/usr/bin/env idiomc\n") &&
+                     idm_wire_begin(&out, package_entry ? 4u : 2u, &err) &&
+                     idm_wire_section(&out, IDM_WIRE_SECTION_MAIN, main_meta.data, main_meta.len, &err) &&
+                     idm_wire_section(&out, IDM_WIRE_SECTION_BYTECODE, blob.data, blob.len, &err) &&
+                     (!package_entry ||
+                      (idm_wire_section(&out, IDM_WIRE_SECTION_PACKAGE_PATH, src_path, strlen(src_path), &err) &&
+                       idm_wire_section(&out, IDM_WIRE_SECTION_PACKAGE, artifact_blob.data, artifact_blob.len, &err)));
+    idm_buf_destroy(&main_meta);
+    if (!sealed_ok) {
+        if (!err.present) idm_error_oom(&err, idm_span_unknown(src_path));
         goto done;
     }
     FILE *f = fopen(out_path, "wb");

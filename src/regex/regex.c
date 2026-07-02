@@ -1033,15 +1033,6 @@ static bool compile_regex_program(IdmRegex *rx, IdmError *err) {
     return build_byteprog(rx->root, rx->flags, rx->group_count + 1u, &rx->byteprog, err);
 }
 
-static bool rx_read_bytes(IdmByteReader *r, void *dst, size_t len, IdmError *err, const char *what) {
-    if (len > r->len - r->pos) {
-        r->ok = false;
-        return idm_error_set(err, idm_span_unknown(NULL), "truncated %s", what);
-    }
-    memcpy(dst, r->data + r->pos, len);
-    r->pos += len;
-    return true;
-}
 
 void idm_regex_set_free(IdmRegexSet *set) {
     if (!set) return;
@@ -1349,7 +1340,7 @@ bool idm_regex_set_matches_empty(const IdmRegexSet *set, bool *out, IdmError *er
 
 bool idm_regex_set_serialize(IdmBuffer *out, const IdmRegexSet *set, IdmError *err) {
     if (!set || !set->byteprog || !set->item_sources || set->count == 0 || set->count > UINT32_MAX) return idm_error_set(err, idm_span_unknown(NULL), "regex set is incomplete");
-    if (!idm_buf_append_n(out, "RXSS", 4u) || !idm_buf_put_u32(out, (uint32_t)set->count)) return idm_error_oom(err, idm_span_unknown(NULL));
+    if (!idm_buf_put_u32(out, (uint32_t)set->count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < set->count; i++) {
         if (!idm_buf_put_u32(out, set->item_flags[i]) ||
             !idm_buf_put_str(out, set->item_sources[i], set->item_source_lens[i])) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1357,34 +1348,6 @@ bool idm_regex_set_serialize(IdmBuffer *out, const IdmRegexSet *set, IdmError *e
     return true;
 }
 
-bool idm_regex_set_deserialize(IdmByteReader *r, IdmRegexSet **out, IdmError *err) {
-    *out = NULL;
-    unsigned char magic[4];
-    if (!rx_read_bytes(r, magic, sizeof(magic), err, "regex set magic")) return false;
-    if (memcmp(magic, "RXSS", 4u) != 0) return idm_error_set(err, idm_span_unknown(NULL), "not a regex set");
-    uint32_t count = idm_rd_u32(r);
-    if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated regex set header");
-    if (count == 0) return idm_error_set(err, idm_span_unknown(NULL), "regex set is empty");
-    IdmRegex **items = calloc(count, sizeof(*items));
-    if (!items) return idm_error_oom(err, idm_span_unknown(NULL));
-    bool ok = true;
-    for (uint32_t i = 0; i < count && ok; i++) {
-        uint32_t flags = idm_rd_u32(r);
-        size_t slen = 0;
-        char *src = idm_rd_string(r, &slen);
-        if (!r->ok || !src) {
-            free(src);
-            ok = idm_error_set(err, idm_span_unknown(NULL), "truncated regex set source");
-            break;
-        }
-        ok = idm_regex_compile(src, slen, flags, &items[i], err);
-        free(src);
-    }
-    if (ok) ok = idm_regex_set_compile((const IdmRegex *const *)items, count, out, err);
-    for (uint32_t i = 0; i < count; i++) idm_regex_free(items[i]);
-    free(items);
-    return ok;
-}
 
 bool idm_regex_exec_at_subject(const IdmRegex *rx, IdmValue subject, const char *input, size_t input_len, size_t offset, bool full, IdmRegexResult **out, IdmError *err) {
     if (!rx) {

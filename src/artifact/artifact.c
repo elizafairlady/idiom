@@ -508,8 +508,6 @@ bool idm_package_read_source(IdmRuntime *rt, const char *path, IdmBuffer *out_sr
                          search && search[0] ? ", IDIOMPATH" : "");
 }
 
-#define IDM_ARTIFACT_VERSION 87u
-
 const char *idm_grammar_mode_name(uint8_t mode) {
     switch ((IdmGrammarMode)mode) {
         case IDM_GRAMMAR_MODE_EXTEND: return "extend";
@@ -1398,8 +1396,7 @@ static IdmCore *foldable_core_read(IdmRuntime *rt, IdmByteReader *r, unsigned de
 }
 
 bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *err) {
-    bool ok = idm_buf_append_n(out, "IDMA", 4u) && idm_buf_put_u32(out, IDM_ARTIFACT_VERSION);
-    ok = ok && idm_buf_append_n(out, (const char *)art->src_hash, 32u);
+    bool ok = idm_buf_append_n(out, (const char *)art->src_hash, 32u);
     ok = ok && idm_buf_put_u32(out, (uint32_t)art->dep_count);
     for (size_t i = 0; ok && i < art->dep_count; i++) {
         ok = idm_buf_put_str(out, art->deps[i].path, strlen(art->deps[i].path));
@@ -1560,10 +1557,6 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
     memset(out, 0, sizeof(*out));
     IdmByteReader r;
     idm_byte_reader_init(&r, data, len);
-    if (len < 8u || memcmp(data, "IDMA", 4u) != 0) return idm_error_set(err, idm_span_unknown(NULL), "not an .ic artifact");
-    r.pos = 4u;
-    uint32_t version = idm_rd_u32(&r);
-    if (version != IDM_ARTIFACT_VERSION) return idm_error_set(err, idm_span_unknown(NULL), ".ic artifact version %u unsupported", version);
     if (r.pos + 32u > r.len) return idm_error_set(err, idm_span_unknown(NULL), "truncated artifact hash");
     memcpy(out->src_hash, r.data + r.pos, 32u);
     r.pos += 32u;
@@ -1958,8 +1951,12 @@ void idm_artifact_cache_write(const char *path, const IdmArtifact *art) {
     idm_error_init(&werr);
     IdmBuffer blob;
     idm_buf_init(&blob);
-    bool ok = idm_artifact_serialize(art, &blob, &werr);
-    if (ok) idm_profile_count("artifact.cache.write_bytes", (uint64_t)blob.len);
+    IdmBuffer wire;
+    idm_buf_init(&wire);
+    bool ok = idm_artifact_serialize(art, &blob, &werr) &&
+              idm_wire_begin(&wire, 1u, &werr) &&
+              idm_wire_section(&wire, IDM_WIRE_SECTION_PACKAGE, blob.data, blob.len, &werr);
+    if (ok) idm_profile_count("artifact.cache.write_bytes", (uint64_t)wire.len);
     if (ok) {
         IdmBuffer ishc_path;
         IdmBuffer tmp_path;
@@ -1970,7 +1967,7 @@ void idm_artifact_cache_write(const char *path, const IdmArtifact *art) {
         if (ok) {
             FILE *f = fopen(tmp_path.data, "wb");
             if (f) {
-                ok = fwrite(blob.data, 1u, blob.len, f) == blob.len;
+                ok = fwrite(wire.data, 1u, wire.len, f) == wire.len;
                 ok = fclose(f) == 0 && ok;
                 if (ok) ok = rename(tmp_path.data, ishc_path.data) == 0;
                 if (!ok) remove(tmp_path.data);
@@ -1980,6 +1977,7 @@ void idm_artifact_cache_write(const char *path, const IdmArtifact *art) {
         idm_buf_destroy(&tmp_path);
     }
     idm_buf_destroy(&blob);
+    idm_buf_destroy(&wire);
     idm_error_clear(&werr);
     idm_profile_scope_end(&prof);
 }
@@ -2096,7 +2094,10 @@ bool idm_artifact_cache_load(IdmRuntime *rt, const char *path, const unsigned ch
     idm_profile_count("artifact.cache.read_bytes", (uint64_t)len);
     IdmError derr;
     idm_error_init(&derr);
-    ok = idm_artifact_deserialize(rt, (const unsigned char *)data, len, out, &derr);
+    const unsigned char *payload = NULL;
+    size_t payload_len = 0;
+    ok = idm_wire_find((const unsigned char *)data, len, IDM_WIRE_SECTION_PACKAGE, &payload, &payload_len, &derr) &&
+         idm_artifact_deserialize(rt, payload, payload_len, out, &derr);
     free(data);
     if (ok) {
         ok = memcmp(out->src_hash, src_hash, 32u) == 0;
