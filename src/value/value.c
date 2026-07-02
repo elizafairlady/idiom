@@ -2655,7 +2655,17 @@ bool idm_dict_get(IdmValue dict, IdmValue key, IdmValue *out) {
     if (idm_value_tag(dict) != IDM_VAL_DICT) return false;
     const IdmObject *obj = idm_boxed_object(dict);
     if (obj->as.dict.count == 0) return false;
-    return dict_node_get(idm_boxed_object(obj->as.dict.root), key, dict_key_hash(key), 0u, out);
+    const IdmObject *root = idm_boxed_object(obj->as.dict.root);
+    if (root->as.dict_node.collision_count != 0) {
+        for (uint16_t i = 0; i < root->as.dict_node.collision_count; i++) {
+            if (dict_key_equal(root->as.dict_node.slots[2u * i], key)) {
+                *out = root->as.dict_node.slots[2u * i + 1u];
+                return true;
+            }
+        }
+        return false;
+    }
+    return dict_node_get(root, key, dict_key_hash(key), 0u, out);
 }
 
 bool idm_dict_iter_init(IdmValue dict, IdmDictIter *it) {
@@ -2702,17 +2712,50 @@ IdmValue idm_dict_put(IdmRuntime *rt, IdmValue dict, IdmValue key, IdmValue valu
         return idm_nil();
     }
     const IdmObject *src = idm_boxed_object(dict);
-    uint32_t hash = dict_key_hash(key);
     IdmObject *new_root = NULL;
     bool added = false;
+    const IdmObject *root_node = src->as.dict.count == 0 ? NULL : idm_boxed_object(src->as.dict.root);
     if (src->as.dict.count == 0) {
-        new_root = dict_node_alloc(rt, 1u << (hash & 31u), 0, 0, 2u, err);
+        new_root = dict_node_alloc(rt, 0, 0, 1u, 2u, err);
         if (!new_root) return idm_nil();
         new_root->as.dict_node.slots[0] = key;
         new_root->as.dict_node.slots[1] = value;
         added = true;
+    } else if (root_node->as.dict_node.collision_count != 0) {
+        uint16_t cc = root_node->as.dict_node.collision_count;
+        uint16_t found = UINT16_MAX;
+        for (uint16_t i = 0; i < cc; i++) {
+            if (dict_key_equal(root_node->as.dict_node.slots[2u * i], key)) { found = i; break; }
+        }
+        if (found != UINT16_MAX) {
+            new_root = dict_node_alloc(rt, 0, 0, cc, (size_t)cc * 2u, err);
+            if (!new_root) return idm_nil();
+            memcpy(new_root->as.dict_node.slots, root_node->as.dict_node.slots, (size_t)cc * 2u * sizeof(IdmValue));
+            new_root->as.dict_node.slots[2u * found + 1u] = value;
+        } else if (cc < 8u) {
+            new_root = dict_node_alloc(rt, 0, 0, (uint16_t)(cc + 1u), (size_t)(cc + 1u) * 2u, err);
+            if (!new_root) return idm_nil();
+            memcpy(new_root->as.dict_node.slots, root_node->as.dict_node.slots, (size_t)cc * 2u * sizeof(IdmValue));
+            new_root->as.dict_node.slots[2u * cc] = key;
+            new_root->as.dict_node.slots[2u * cc + 1u] = value;
+            added = true;
+        } else {
+            uint32_t first_hash = dict_key_hash(root_node->as.dict_node.slots[0]);
+            new_root = dict_node_alloc(rt, 1u << (first_hash & 31u), 0, 0, 2u, err);
+            if (!new_root) return idm_nil();
+            new_root->as.dict_node.slots[0] = root_node->as.dict_node.slots[0];
+            new_root->as.dict_node.slots[1] = root_node->as.dict_node.slots[1];
+            for (uint16_t i = 1u; i < cc; i++) {
+                bool ignored = false;
+                IdmValue ik = root_node->as.dict_node.slots[2u * i];
+                new_root = dict_node_put(rt, new_root, ik, root_node->as.dict_node.slots[2u * i + 1u], dict_key_hash(ik), 0u, &ignored, err);
+                if (!new_root) return idm_nil();
+            }
+            new_root = dict_node_put(rt, new_root, key, value, dict_key_hash(key), 0u, &added, err);
+            if (!new_root) return idm_nil();
+        }
     } else {
-        new_root = dict_node_put(rt, idm_boxed_object(src->as.dict.root), key, value, hash, 0u, &added, err);
+        new_root = dict_node_put(rt, root_node, key, value, dict_key_hash(key), 0u, &added, err);
         if (!new_root) return idm_nil();
     }
     IdmValue out = dict_empty(rt, err);
