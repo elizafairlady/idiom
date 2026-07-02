@@ -525,17 +525,7 @@ static bool port_entry_ensure_result(IdmScheduler *sched, PortEntry *entry, IdmE
 }
 
 static IdmValue port_entry_exit_reason(IdmScheduler *sched, PortEntry *entry) {
-    if (idm_value_tag(entry->result) == IDM_VAL_TUPLE && idm_sequence_count(entry->result) >= 2u) {
-        IdmError ignore;
-        idm_error_init(&ignore);
-        IdmValue tag = idm_sequence_item(entry->result, 0, &ignore);
-        IdmValue code = idm_sequence_item(entry->result, 1, &ignore);
-        bool ok_tag = idm_value_tag(tag) == IDM_VAL_ATOM && strcmp(idm_symbol_text(idm_value_symbol(tag)), "ok") == 0;
-        int64_t n = 1;
-        bool ok_code = idm_int_to_i64(code, &n) && n == 0;
-        idm_error_clear(&ignore);
-        if (ok_tag && ok_code) return idm_atom(sched->rt, "normal");
-    }
+    (void)sched;
     return entry->result;
 }
 
@@ -1526,7 +1516,7 @@ void idm_actor_recv_matched(IdmActor *actor, size_t cursor) {
 }
 
 static bool sched_port_data_value(IdmScheduler *sched, const char *data, size_t len, IdmValue *out, IdmError *err);
-static bool sched_port_ok_count_value(IdmScheduler *sched, size_t n, IdmValue *out, IdmError *err);
+static bool sched_port_wrote_value(IdmScheduler *sched, size_t n, IdmValue *out, IdmError *err);
 static IdmValue sched_port_io_atom(IdmScheduler *sched, IdmPortIoStatus status);
 static bool port_io_once(IdmScheduler *sched, uint64_t port_id, PortIoOp op, bool missing_is_closed, const char *stream, size_t max, const char *data, size_t len, IdmValue *out, bool *out_found, bool *out_blocked, IdmError *err);
 
@@ -2064,9 +2054,9 @@ static bool sched_port_data_value(IdmScheduler *sched, const char *data, size_t 
     return !(err && err->present);
 }
 
-static bool sched_port_ok_count_value(IdmScheduler *sched, size_t n, IdmValue *out, IdmError *err) {
+static bool sched_port_wrote_value(IdmScheduler *sched, size_t n, IdmValue *out, IdmError *err) {
     IdmValue items[2];
-    items[0] = idm_atom(sched->rt, "ok");
+    items[0] = idm_atom(sched->rt, "wrote");
     items[1] = idm_int((int64_t)n);
     *out = idm_tuple(sched->rt, items, 2u, err);
     return !(err && err->present);
@@ -2113,7 +2103,7 @@ static bool port_io_once(IdmScheduler *sched, uint64_t port_id, PortIoOp op, boo
     bool ok = idm_port_write(e->port, data, len, &written, &status, err);
     if (!ok) return false;
     *out_blocked = status == IDM_PORT_IO_AGAIN;
-    if (status == IDM_PORT_IO_OK) return sched_port_ok_count_value(sched, written, out, err);
+    if (status == IDM_PORT_IO_OK) return sched_port_wrote_value(sched, written, out, err);
     *out = sched_port_io_atom(sched, status);
     return true;
 }
@@ -2254,6 +2244,16 @@ int idm_sched_session_status(IdmScheduler *sched, IdmValue value, IdmValue reaso
     }
     int64_t status = 0;
     if (idm_value_is_int(reason) && idm_int_to_i64(reason, &status)) return (int)(((status % 256) + 256) % 256);
+    if (idm_value_tag(reason) == IDM_VAL_TUPLE && idm_sequence_count(reason) == 2u) {
+        IdmError probe;
+        idm_error_init(&probe);
+        IdmValue tag = idm_sequence_item(reason, 0, &probe);
+        IdmValue code = idm_sequence_item(reason, 1, &probe);
+        bool exit_tag = !probe.present && idm_value_tag(tag) == IDM_VAL_ATOM &&
+                        strcmp(idm_symbol_text(idm_value_symbol(tag)), "exit-code") == 0;
+        idm_error_clear(&probe);
+        if (exit_tag && idm_int_to_i64(code, &status)) return (int)(((status % 256) + 256) % 256);
+    }
     char *diag = idm_sched_take_diagnostic(sched);
     if (diag) {
         fprintf(stderr, "%s\n", diag);

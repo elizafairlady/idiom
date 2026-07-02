@@ -973,10 +973,7 @@ static int stage_exit_code(int status) {
 }
 
 IdmValue idm_port_result(IdmPort *port, IdmRuntime *rt, IdmError *err) {
-    if (port->kind == PORT_FILE) {
-        IdmValue items[2] = { idm_atom(rt, "ok"), idm_int(0) };
-        return idm_tuple(rt, items, 2u, err);
-    }
+    if (port->kind == PORT_FILE) return idm_atom(rt, "normal");
     int final_code = 0;
     bool any_failure = false;
     int rightmost_failure = 0;
@@ -990,7 +987,8 @@ IdmValue idm_port_result(IdmPort *port, IdmRuntime *rt, IdmError *err) {
     }
     bool ok = port->pipefail ? !any_failure : final_code == 0;
     if (!ok && port->pipefail && final_code == 0) final_code = rightmost_failure;
-    IdmValue items[2] = { idm_atom(rt, ok ? "ok" : "error"), idm_int(final_code) };
+    if (ok) return idm_atom(rt, "normal");
+    IdmValue items[2] = { idm_atom(rt, "exit-code"), idm_int(final_code) };
     return idm_tuple(rt, items, 2u, err);
 }
 

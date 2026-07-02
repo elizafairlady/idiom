@@ -43,7 +43,7 @@ suite "actor-gc-stress" do
     parent = self
     spawn (fn -> port-write-twice parent)
     got = receive do
-      {:port-root {:ok _a} {:ok _b}} -> :ok
+      {:port-root {:wrote _a} {:wrote _b}} -> :ok
       {:port-root _first _second} -> :bad-result
       after 4500 -> :timeout
     end

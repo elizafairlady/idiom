@@ -113,7 +113,7 @@ suite do
     receive do
       {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
       after 500 -> :timeout
-    end |> assert-eq {:error 7}
+    end |> assert-eq {:exit-code 7}
   end
 
   test "spawn-monitor accepts command graph" do
@@ -131,7 +131,7 @@ suite do
     receive do
       {:exit target value} when (eq? target p) -> value
       after 500 -> :timeout
-    end |> assert-eq {:error 6}
+    end |> assert-eq {:exit-code 6}
     trap-exit :false
   end
 
@@ -149,7 +149,7 @@ suite do
     receive do
       {:down r target value} when (and (eq? r ref2) (eq? target with_pipefail)) -> value
       after 500 -> :timeout
-    end |> assert-eq {:error 7}
+    end |> assert-eq {:exit-code 7}
   end
 
   test "monitor observes port completion" do
@@ -159,7 +159,7 @@ suite do
       {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
       after 500 -> :timeout
     end
-    reason |> assert-eq {:error 9}
+    reason |> assert-eq {:exit-code 9}
   end
 
   test "demonitor removes port down signal" do
@@ -179,7 +179,7 @@ suite do
     receive do
       {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
       after 500 -> :timeout
-    end |> assert-eq {:error 143}
+    end |> assert-eq {:exit-code 143}
   end
 
   test "exit port kill sends kill signal" do
@@ -189,7 +189,7 @@ suite do
     receive do
       {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
       after 500 -> :timeout
-    end |> assert-eq {:error 137}
+    end |> assert-eq {:exit-code 137}
   end
 
   test "linked port failure sends exit signal" do
@@ -201,7 +201,7 @@ suite do
       after 500 -> :timeout
     end
     trap-exit :false
-    reason |> assert-eq {:error 3}
+    reason |> assert-eq {:exit-code 3}
   end
 
   test "unlink removes port exit signal" do
@@ -218,7 +218,7 @@ suite do
     receive do
       {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
       after 500 -> :timeout
-    end |> assert-eq {:error 4}
+    end |> assert-eq {:exit-code 4}
   end
 
   test "port read returns stdout data" do
@@ -228,7 +228,7 @@ suite do
 
   test "port write close read uses same port io path" do
     p = spawn Cmd.command (list "cat") (Cmd.stdio :pipe :pipe :null)
-    port-write p "ok" |> assert-eq {:ok 2}
+    port-write p "ok" |> assert-eq {:wrote 2}
     port-close-input p |> assert-eq :ok
     port-read p :stdout 2 |> assert-eq {:data "ok"}
   end
