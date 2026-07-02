@@ -52,27 +52,89 @@ static size_t mag_mul(const uint32_t *a, size_t na, const uint32_t *b, size_t nb
     return mag_normalize(out, na + nb);
 }
 
-static void mag_divmod(const uint32_t *a, size_t na, const uint32_t *b, size_t nb, uint32_t *q, size_t *q_count, uint32_t *rem, size_t *r_count) {
+static unsigned mag_clz32(uint32_t v) {
+    unsigned n = 0u;
+    if (v == 0u) return 32u;
+    while (!(v & 0x80000000u)) { v <<= 1; n++; }
+    return n;
+}
+
+static bool mag_divmod(const uint32_t *a, size_t na, const uint32_t *b, size_t nb, uint32_t *q, size_t *q_count, uint32_t *rem, size_t *r_count) {
     for (size_t i = 0u; i < na; i++) q[i] = 0u;
-    for (size_t i = 0u; i < nb + 1u; i++) rem[i] = 0u;
-    size_t rcount = 0u;
-    for (size_t bit = na * 32u; bit-- > 0u;) {
-        uint32_t carry = 0u;
-        for (size_t i = 0u; i < nb + 1u; i++) {
-            uint32_t nv = (rem[i] << 1) | carry;
-            carry = rem[i] >> 31;
-            rem[i] = nv;
+    if (nb == 1u) {
+        uint64_t d = b[0];
+        uint64_t r = 0u;
+        for (size_t i = na; i-- > 0u;) {
+            uint64_t acc = (r << 32) | a[i];
+            q[i] = (uint32_t)(acc / d);
+            r = acc % d;
         }
-        size_t limb = bit / 32u, off = bit % 32u;
-        rem[0] |= (a[limb] >> off) & 1u;
-        rcount = mag_normalize(rem, nb + 1u);
-        if (mag_cmp(rem, rcount, b, nb) >= 0) {
-            rcount = mag_sub(rem, rcount, b, nb, rem);
-            q[limb] |= 1u << off;
-        }
+        rem[0] = (uint32_t)r;
+        *q_count = mag_normalize(q, na);
+        *r_count = mag_normalize(rem, 1u);
+        return true;
     }
+    if (na > SIZE_MAX / sizeof(uint32_t) - 1u) return false;
+    uint32_t *u = malloc((na + 1u) * sizeof(uint32_t));
+    uint32_t *v = malloc(nb * sizeof(uint32_t));
+    if (!u || !v) {
+        free(u);
+        free(v);
+        return false;
+    }
+    unsigned s = mag_clz32(b[nb - 1u]);
+    if (s == 0u) {
+        memcpy(v, b, nb * sizeof(uint32_t));
+        memcpy(u, a, na * sizeof(uint32_t));
+        u[na] = 0u;
+    } else {
+        for (size_t i = nb; i-- > 1u;) v[i] = (b[i] << s) | (b[i - 1u] >> (32u - s));
+        v[0] = b[0] << s;
+        u[na] = a[na - 1u] >> (32u - s);
+        for (size_t i = na; i-- > 1u;) u[i] = (a[i] << s) | (a[i - 1u] >> (32u - s));
+        u[0] = a[0] << s;
+    }
+    for (size_t j = na - nb + 1u; j-- > 0u;) {
+        uint64_t num = ((uint64_t)u[j + nb] << 32) | u[j + nb - 1u];
+        uint64_t qhat = num / v[nb - 1u];
+        uint64_t rhat = num % v[nb - 1u];
+        while (qhat > 0xFFFFFFFFu || qhat * v[nb - 2u] > ((rhat << 32) | u[j + nb - 2u])) {
+            qhat--;
+            rhat += v[nb - 1u];
+            if (rhat > 0xFFFFFFFFu) break;
+        }
+        int64_t k = 0;
+        for (size_t i = 0u; i < nb; i++) {
+            uint64_t p = qhat * v[i];
+            int64_t t = (int64_t)u[i + j] - k - (int64_t)(p & 0xFFFFFFFFu);
+            u[i + j] = (uint32_t)t;
+            k = (int64_t)(p >> 32) - (t >> 32);
+        }
+        int64_t t = (int64_t)u[j + nb] - k;
+        u[j + nb] = (uint32_t)t;
+        if (t < 0) {
+            qhat--;
+            uint64_t carry = 0u;
+            for (size_t i = 0u; i < nb; i++) {
+                uint64_t sum = (uint64_t)u[i + j] + v[i] + carry;
+                u[i + j] = (uint32_t)sum;
+                carry = sum >> 32;
+            }
+            u[j + nb] = (uint32_t)((uint64_t)u[j + nb] + carry);
+        }
+        q[j] = (uint32_t)qhat;
+    }
+    if (s == 0u) {
+        memcpy(rem, u, nb * sizeof(uint32_t));
+    } else {
+        for (size_t i = 0u; i + 1u < nb; i++) rem[i] = (u[i] >> s) | (u[i + 1u] << (32u - s));
+        rem[nb - 1u] = u[nb - 1u] >> s;
+    }
+    free(u);
+    free(v);
     *q_count = mag_normalize(q, na);
-    *r_count = rcount;
+    *r_count = mag_normalize(rem, nb);
+    return true;
 }
 
 size_t idm_bignum_decimal_limb_cap(size_t digit_len) {
@@ -174,7 +236,7 @@ bool idm_bignum_divmod(const uint32_t *a, size_t na, int sa, const uint32_t *b, 
         *r_sign = sa;
         return true;
     }
-    mag_divmod(a, na, b, nb, q, q_count, r, r_count);
+    if (!mag_divmod(a, na, b, nb, q, q_count, r, r_count)) return false;
     *q_sign = *q_count == 0u ? 0 : (sa == sb ? 1 : -1);
     *r_sign = *r_count == 0u ? 0 : sa;
     return true;

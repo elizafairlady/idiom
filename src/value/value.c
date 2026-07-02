@@ -1004,6 +1004,7 @@ bool idm_int_divmod(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *q_out, Idm
     IntView x, y;
     int_view(a, &x);
     int_view(b, &y);
+    if (y.sign == 0) return idm_error_set(err, idm_span_unknown(NULL), "division by zero");
     size_t qcap = x.count ? x.count : 1u, rcap = 0u;
     if (!size_add(y.count, 1u, &rcap)) return idm_error_set(err, idm_span_unknown(NULL), "integer is too large");
     size_t qbytes = 0, rbytes = 0;
@@ -1016,7 +1017,8 @@ bool idm_int_divmod(IdmRuntime *rt, IdmValue a, IdmValue b, IdmValue *q_out, Idm
     if (!idm_bignum_divmod(x.limbs, x.count, x.sign, y.limbs, y.count, y.sign, q, &qn, &qs, r, &rn, &rs)) {
         free(q);
         free(r);
-        return idm_error_set(err, idm_span_unknown(NULL), "division by zero");
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return false;
     }
     if (q_out) *q_out = make_bignum_adopt(rt, q, qn, qs, err); else free(q);
     if (r_out && !(err && err->present)) *r_out = make_bignum_adopt(rt, r, rn, rs, err); else free(r);
