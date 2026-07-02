@@ -65,5 +65,7 @@ dkms.conf
 .claude/
 build.log
 /docs/
-/README.md
 /VISION.md
+/CLAUDE.md
+/AGENTS.md
+/TASKS.md
