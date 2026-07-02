@@ -163,6 +163,39 @@ void idm_binding_table_init(IdmBindingTable *table) {
     table->cap = 0;
     table->next_id = 1u;
     table->data_free = NULL;
+    table->index_heads = NULL;
+    table->index_next = NULL;
+    table->index_bucket_count = 0;
+}
+
+static uint32_t binding_name_hash(const char *name) {
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static bool binding_index_rebuild(IdmBindingTable *table, size_t bucket_count) {
+    uint32_t *heads = calloc(bucket_count, sizeof(*heads));
+    uint32_t *next = table->cap ? malloc(table->cap * sizeof(*next)) : NULL;
+    if (!heads || (table->cap && !next)) {
+        free(heads);
+        free(next);
+        return false;
+    }
+    free(table->index_heads);
+    free(table->index_next);
+    table->index_heads = heads;
+    table->index_next = next;
+    table->index_bucket_count = bucket_count;
+    for (size_t i = 0; i < table->count; i++) {
+        size_t b = binding_name_hash(table->items[i].name) & (bucket_count - 1u);
+        next[i] = heads[b];
+        heads[b] = (uint32_t)(i + 1u);
+    }
+    return true;
 }
 
 void idm_binding_table_set_data_free(IdmBindingTable *table, void (*data_free)(void *)) {
@@ -178,10 +211,15 @@ void idm_binding_table_destroy(IdmBindingTable *table) {
         if (table->data_free && table->items[i].data) table->data_free(table->items[i].data);
     }
     free(table->items);
+    free(table->index_heads);
+    free(table->index_next);
     table->items = NULL;
     table->count = 0;
     table->cap = 0;
     table->next_id = 1u;
+    table->index_heads = NULL;
+    table->index_next = NULL;
+    table->index_bucket_count = 0;
 }
 
 IdmArity idm_arity_unknown(void) {
@@ -329,8 +367,15 @@ bool idm_arity_deserialize(IdmByteReader *r, IdmArity *out, IdmError *err) {
 }
 
 bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, uint32_t primitive, IdmBindingId *out_id) {
+    size_t old_cap = table->cap;
     if (table->count == table->cap) {
         if (!idm_grow((void **)&table->items, &table->cap, sizeof(*table->items), 16u, table->count + 1u)) return false;
+    }
+    if (table->cap != old_cap || table->index_bucket_count == 0 ||
+        table->count + 1u > table->index_bucket_count - (table->index_bucket_count >> 2)) {
+        size_t bucket_count = table->index_bucket_count ? table->index_bucket_count : 64u;
+        while (table->count + 1u > bucket_count - (bucket_count >> 2)) bucket_count <<= 1;
+        if (!binding_index_rebuild(table, bucket_count)) return false;
     }
     IdmBinding *binding = &table->items[table->count];
     binding->name = idm_strdup(name);
@@ -351,6 +396,9 @@ bool idm_binding_table_add_primitive_with_arity(IdmBindingTable *table, const ch
     memset(&binding->contract, 0, sizeof(binding->contract));
     binding->primitive_backed = true;
     binding->primitive = primitive;
+    size_t bucket = binding_name_hash(binding->name) & (table->index_bucket_count - 1u);
+    table->index_next[table->count] = table->index_heads[bucket];
+    table->index_heads[bucket] = (uint32_t)(table->count + 1u);
     table->count++;
     if (out_id) *out_id = binding->id;
     return true;
@@ -369,6 +417,10 @@ bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, 
 void idm_binding_table_truncate(IdmBindingTable *table, size_t count) {
     while (table->count > count) {
         table->count--;
+        if (table->index_bucket_count) {
+            size_t bucket = binding_name_hash(table->items[table->count].name) & (table->index_bucket_count - 1u);
+            table->index_heads[bucket] = table->index_next[table->count];
+        }
         free(table->items[table->count].name);
         idm_scope_set_destroy(&table->items[table->count].scopes);
         if (table->items[table->count].has_contract) idm_callable_contract_destroy(&table->items[table->count].contract);
@@ -378,20 +430,23 @@ void idm_binding_table_truncate(IdmBindingTable *table, size_t count) {
 
 bool idm_binding_table_set_contract(IdmBindingTable *table, IdmBindingId id, const IdmCallableContract *contract) {
     if (!table) return false;
-    for (size_t i = 0; i < table->count; i++) {
-        IdmBinding *binding = &table->items[i];
-        if (binding->id != id) continue;
-        if (binding->has_contract) {
-            idm_callable_contract_destroy(&binding->contract);
-            binding->has_contract = false;
-        }
-        if (contract) {
-            if (!idm_callable_contract_copy(&binding->contract, contract)) return false;
-            binding->has_contract = true;
-        }
-        return true;
+    size_t lo = 0, hi = table->count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2u;
+        if (table->items[mid].id < id) lo = mid + 1u;
+        else hi = mid;
     }
-    return false;
+    if (lo >= table->count || table->items[lo].id != id) return false;
+    IdmBinding *binding = &table->items[lo];
+    if (binding->has_contract) {
+        idm_callable_contract_destroy(&binding->contract);
+        binding->has_contract = false;
+    }
+    if (contract) {
+        if (!idm_callable_contract_copy(&binding->contract, contract)) return false;
+        binding->has_contract = true;
+    }
+    return true;
 }
 
 bool idm_binding_table_add_data(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, void *data, uint32_t frame_id, IdmBindingId *out_id) {
@@ -417,28 +472,31 @@ static int binding_tie_priority(const IdmBinding *binding) {
     }
 }
 
-static bool binding_prefer_candidate(const IdmBinding *candidate, const IdmBinding *best) {
+static bool binding_prefer_candidate_newest_first(const IdmBinding *candidate, const IdmBinding *best) {
     if (!best) return true;
     if (!idm_scope_set_subset(&best->scopes, &candidate->scopes)) return false;
     if (!idm_scope_set_equal(&best->scopes, &candidate->scopes)) return true;
-    int candidate_priority = binding_tie_priority(candidate);
-    int best_priority = binding_tie_priority(best);
-    return candidate_priority >= best_priority;
+    return binding_tie_priority(candidate) > binding_tie_priority(best);
 }
 
 static IdmResolveStatus binding_resolve_best(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding) {
     const IdmBinding *best = NULL;
-    for (size_t i = 0; i < table->count; i++) {
-        const IdmBinding *candidate = &table->items[i];
+    if (table->index_bucket_count == 0) {
+        if (out_binding) *out_binding = NULL;
+        return IDM_RESOLVE_UNBOUND;
+    }
+    size_t bucket = binding_name_hash(name) & (table->index_bucket_count - 1u);
+    for (uint32_t cur = table->index_heads[bucket]; cur; cur = table->index_next[cur - 1u]) {
+        const IdmBinding *candidate = &table->items[cur - 1u];
         if (!binding_candidate(candidate, name, phase, space, reference_scopes)) continue;
-        if (binding_prefer_candidate(candidate, best)) best = candidate;
+        if (binding_prefer_candidate_newest_first(candidate, best)) best = candidate;
     }
     if (!best) {
         if (out_binding) *out_binding = NULL;
         return IDM_RESOLVE_UNBOUND;
     }
-    for (size_t i = 0; i < table->count; i++) {
-        const IdmBinding *candidate = &table->items[i];
+    for (uint32_t cur = table->index_heads[bucket]; cur; cur = table->index_next[cur - 1u]) {
+        const IdmBinding *candidate = &table->items[cur - 1u];
         if (!binding_candidate(candidate, name, phase, space, reference_scopes)) continue;
         if (!idm_scope_set_subset(&candidate->scopes, &best->scopes)) {
             if (out_binding) *out_binding = NULL;

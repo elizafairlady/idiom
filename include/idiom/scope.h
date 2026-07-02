@@ -160,6 +160,9 @@ typedef struct {
     size_t cap;
     IdmBindingId next_id;
     void (*data_free)(void *);
+    uint32_t *index_heads;
+    uint32_t *index_next;
+    size_t index_bucket_count;
 } IdmBindingTable;
 
 typedef enum {
