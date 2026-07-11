@@ -46,7 +46,7 @@ static bool collect_ctx_package_imports(const ExpandContext *ctx, IdmPkgImport *
         const PackageSlotRef *ref = &ctx->package_slot_refs[b->payload];
         IdmPkgImport *imp = &imports[count];
         imp->name = idm_strdup(b->name);
-        imp->env_key = ref->env_key ? idm_strdup(ref->env_key) : NULL;
+        imp->env_key = ref->env_key;
         imp->slot = ref->slot;
         imp->arity = b->arity;
         bool entry_ok = imp->name != NULL && (ref->env_key == NULL || imp->env_key != NULL);
@@ -89,10 +89,10 @@ static bool artifact_match_hash(const IdmArtifact *art, const void *needle) {
 static bool artifact_match_key(const IdmArtifact *art, const void *needle) {
     char key[65];
     artifact_provider_key(art->src_hash, key);
-    return strcmp(key, (const char *)needle) == 0;
+    return strcmp(key, idm_symbol_text(needle)) == 0;
 }
 
-const IdmArtifact *expand_cache_artifact_by_key(IdmRuntime *rt, const char *env_key) {
+const IdmArtifact *expand_cache_artifact_by_key(IdmRuntime *rt, IdmSymbol *env_key) {
     if (!env_key) return NULL;
     return cache_artifact_find(rt, artifact_match_key, env_key);
 }
@@ -100,7 +100,7 @@ const IdmArtifact *expand_cache_artifact_by_key(IdmRuntime *rt, const char *env_
 static bool install_inherited_import_refs(ExpandContext *ctx, const IdmPkgImport *imports, size_t count, IdmError *err) {
     for (size_t i = 0; i < count; i++) {
         const IdmPkgImport *imp = &imports[i];
-        if (!bind_package_slot_ref(ctx, imp->name, slot_bind_phase(ctx, imp->has_contract, &imp->contract), &imp->scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, imp->env_key, imp->slot, idm_span_unknown(NULL), err)) return false;
+        if (!bind_package_slot_ref(ctx, imp->name, slot_bind_phase(ctx, imp->has_contract, &imp->contract), &imp->scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, idm_symbol_text(imp->env_key), imp->slot, idm_span_unknown(NULL), err)) return false;
     }
     return true;
 }
@@ -170,7 +170,7 @@ static bool install_artifact_field_selectors(ExpandContext *ctx, const IdmArtifa
         sel->slot = art->field_selectors[i].slot;
         sel->env = true;
         sel->emitted = true;
-        sel->env_key = idm_strdup(art->field_selectors[i].env_key ? art->field_selectors[i].env_key : (provider_key ? provider_key : ""));
+        sel->env_key = art->field_selectors[i].env_key ? art->field_selectors[i].env_key : idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, provider_key ? provider_key : "");
         if (!sel->env_key) return idm_error_oom(err, idm_span_unknown(NULL));
     }
     return true;
@@ -276,7 +276,7 @@ bool install_artifact_runtime_slots_mode(ExpandContext *ctx, const IdmArtifact *
         bool ok = idm_scope_set_copy(&scopes, &imp->scopes);
         if (ok) {
             idm_scope_set_relocate(&scopes, min_id, delta);
-            ok = bind_package_slot_ref(ctx, imp->name, slot_bind_phase(ctx, imp->has_contract, &imp->contract), &scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, imp->env_key, imp->slot, span, err);
+            ok = bind_package_slot_ref(ctx, imp->name, slot_bind_phase(ctx, imp->has_contract, &imp->contract), &scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, idm_symbol_text(imp->env_key), imp->slot, span, err);
         }
         idm_scope_set_destroy(&scopes);
         if (!ok) return false;
@@ -541,7 +541,7 @@ const IdmReaderArtifact *ctx_active_reader(ExpandContext *ctx, IdmError *err) {
     for (size_t i = 0; i < ctx->grammar_count; i++) {
         sources[i].grammar = &ctx->grammars[i].artifact;
         sources[i].provider = ctx->grammars[i].provider;
-        sources[i].provider_key = ctx->grammars[i].provider_key;
+        sources[i].provider_key = ctx->grammars[i].provider_key ? idm_symbol_text(ctx->grammars[i].provider_key) : NULL;
         sources[i].binding_scopes = &ctx->grammars[i].binding_scopes;
         sources[i].phase = 0;
     }
@@ -1185,7 +1185,7 @@ static bool install_artifact_trait(ExpandContext *ctx, const IdmPkgTrait *entry,
     t->requirement_count = entry->requirement_count;
     t->method_count = entry->method_count;
     t->dispatch_env = true;
-    t->dispatch_env_key = idm_strdup(provider_key ? provider_key : "");
+    t->dispatch_env_key = provider_key ? idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, provider_key) : NULL;
     if (!t->dispatch_env_key) {
         trait_def_destroy(t);
         surface_rollback(ctx, &checkpoint);
@@ -1212,7 +1212,8 @@ static bool install_artifact_trait(ExpandContext *ctx, const IdmPkgTrait *entry,
 static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethodImpl *impls, size_t count, const char *provider_key, IdmError *err) {
     for (size_t i = 0; i < count; i++) {
         const IdmPkgMethodImpl *src = &impls[i];
-        const char *key = (src->impl_env && (!src->impl_env_key || !src->impl_env_key[0])) ? provider_key : src->impl_env_key;
+        IdmSymbol *key = src->impl_env_key ? src->impl_env_key : (src->impl_env && provider_key ? idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, provider_key) : NULL);
+        if (src->impl_env && provider_key && !key) return idm_error_oom(err, idm_span_unknown(NULL));
         uint32_t method_surface = UINT32_MAX;
         (void)method_surface_index_by_identity(ctx, src->trait, src->method, &method_surface);
         bool updated = false;
@@ -1220,12 +1221,9 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
             MethodImplDef *dst = &ctx->typed.method_impls[j];
             if (dst->trait != src->trait || dst->structural != src->structural || !dst->name || strcmp(idm_symbol_text(dst->name), src->method) != 0) continue;
             if (src->structural ? !idm_structural_head_equal(&dst->structural_head, &src->structural_head) : dst->type != src->type) continue;
-            char *next_key = idm_strdup(key ? key : "");
-            if (!next_key) return idm_error_oom(err, idm_span_unknown(NULL));
             IdmCallableContract next_contract;
             memset(&next_contract, 0, sizeof(next_contract));
             if (src->has_contract && !idm_callable_contract_copy(&next_contract, &src->contract)) {
-                free(next_key);
                 return idm_error_oom(err, idm_span_unknown(NULL));
             }
             if (method_surface != UINT32_MAX) dst->method_surface = method_surface;
@@ -1236,8 +1234,7 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
             if (dst->has_contract) idm_callable_contract_destroy(&dst->contract);
             dst->contract = next_contract;
             dst->has_contract = src->has_contract;
-            free(dst->impl_env_key);
-            dst->impl_env_key = next_key;
+            dst->impl_env_key = key;
             updated = true;
             break;
         }
@@ -1251,11 +1248,10 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
         dst->arity = src->arity;
         dst->impl_env = src->impl_env;
         dst->impl_frame = ctx->frame;
-        dst->impl_env_key = idm_strdup(key ? key : "");
+        dst->impl_env_key = key;
         dst->impl_slot = src->impl_slot;
         if (src->has_contract && idm_callable_contract_copy(&dst->contract, &src->contract)) dst->has_contract = true;
         else if (src->has_contract) {
-            free(dst->impl_env_key);
             memset(dst, 0, sizeof(*dst));
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
@@ -1263,14 +1259,12 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
         dst->type = src->type;
         dst->structural = src->structural;
         if (src->structural && !idm_structural_head_copy(&dst->structural_head, &src->structural_head)) {
-            free(dst->impl_env_key);
             if (dst->has_contract) idm_callable_contract_destroy(&dst->contract);
             memset(dst, 0, sizeof(*dst));
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
         dst->name = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, src->method);
-        if (!dst->impl_env_key || !dst->trait || (!dst->type && !dst->structural) || !dst->name) {
-            free(dst->impl_env_key);
+        if ((dst->impl_env && !dst->impl_env_key) || !dst->trait || (!dst->type && !dst->structural) || !dst->name) {
             idm_structural_head_destroy(&dst->structural_head);
             if (dst->has_contract) idm_callable_contract_destroy(&dst->contract);
             memset(dst, 0, sizeof(*dst));
@@ -2142,11 +2136,11 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             dst->method = idm_strdup(method);
             dst->arity = src->arity;
             dst->impl_env = src->impl_env;
-            dst->impl_env_key = idm_strdup(src->impl_env_key ? src->impl_env_key : "");
+            dst->impl_env_key = src->impl_env_key;
             dst->impl_slot = src->impl_slot;
             if (src->has_contract && idm_callable_contract_copy(&dst->contract, &src->contract)) dst->has_contract = true;
             else if (src->has_contract) copy_ok = false;
-            if (!dst->trait || (!dst->type && !dst->structural) || !dst->method || !dst->impl_env_key) copy_ok = false;
+            if (!dst->trait || (!dst->type && !dst->structural) || !dst->method || (dst->impl_env && !dst->impl_env_key)) copy_ok = false;
         }
         if (!copy_ok && pkg_method_impls) {
             for (size_t i = 0; i < pkg_method_impl_count; i++) idm_pkg_method_impl_destroy(&pkg_method_impls[i]);
@@ -2281,7 +2275,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                 if (!ctx.field_selectors[i].env || !ctx.field_selectors[i].emitted || ctx.field_selectors[i].env_key) continue;
                 out->field_selectors[out->field_selector_count].name = idm_strdup(ctx.field_selectors[i].name);
                 if (!out->field_selectors[out->field_selector_count].name) continue;
-                out->field_selectors[out->field_selector_count].env_key = idm_strdup(idm_symbol_text(ctx.unit_key));
+                out->field_selectors[out->field_selector_count].env_key = ctx.unit_key;
                 out->field_selectors[out->field_selector_count].slot = ctx.field_selectors[i].slot;
                 out->field_selector_count++;
             }

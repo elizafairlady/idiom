@@ -12,6 +12,7 @@ static int saved_materialize(SavedFunctionContext *g, const IdmSyntax *word, con
 static const IdmOperatorDef *op_lookup_capture(const ExpandContext *ctx, const IdmSyntax *syn, const char *capture);
 static const IdmBinding *resolve_surface_binding(const ExpandContext *ctx, const IdmSyntax *word, IdmBindingSpace space, IdmBindingKind kind, IdmResolveStatus *out_status);
 static void core_form_fn_free(IdmBindingKind kind, void *data);
+static IdmSymbol *typed_atom_intern(ExpandContext *ctx, const char *text);
 
 static bool ctx_seed_builtin_types(ExpandContext *ctx) {
     static const char *const parents[] = { "list", "int", "proc" };
@@ -169,22 +170,18 @@ void grammar_def_destroy(GrammarDef *grammar) {
     idm_pkg_grammar_destroy(&grammar->artifact);
     idm_scope_set_destroy(&grammar->binding_scopes);
     free(grammar->provider);
-    free(grammar->provider_key);
     memset(grammar, 0, sizeof(*grammar));
 }
 
 static void method_surface_def_destroy(MethodSurfaceDef *method) {
     if (!method) return;
     free(method->provider);
-    free(method->provider_key);
-    free(method->dispatch_env_key);
     idm_scope_set_destroy(&method->scopes);
     memset(method, 0, sizeof(*method));
 }
 
 static void method_impl_def_destroy(MethodImplDef *impl) {
     if (!impl) return;
-    free(impl->impl_env_key);
     idm_structural_head_destroy(&impl->structural_head);
     if (impl->has_contract) idm_callable_contract_destroy(&impl->contract);
     memset(impl, 0, sizeof(*impl));
@@ -202,7 +199,6 @@ void protocol_def_destroy(ProtocolDef *protocol) {
 
 void trait_def_destroy(TraitDef *trait) {
     if (!trait) return;
-    free(trait->dispatch_env_key);
     for (size_t i = 0; i < trait->requirement_count; i++) idm_trait_requirement_def_destroy(&trait->requirements[i]);
     free(trait->requirements);
     for (size_t i = 0; i < trait->method_count; i++) trait_method_def_destroy(&trait->methods[i]);
@@ -241,10 +237,11 @@ static void typed_entity_destroy(TypedEntity *entity) {
 
 bool record_activation(ExpandContext *ctx, const char *name, const char *provider, const char *provider_key, IdmSpan span, IdmError *err) {
     const char *record_provider = provider && *provider ? provider : name;
-    const char *record_key = provider_key ? provider_key : "";
+    IdmSymbol *record_key = typed_atom_intern(ctx, provider_key ? provider_key : "");
+    if (!record_key) return idm_error_oom(err, span);
     for (size_t i = 0; i < ctx->activation_count; i++) {
         if (strcmp(ctx->activations[i].provider ? ctx->activations[i].provider : "", record_provider) == 0 &&
-            strcmp(ctx->activations[i].provider_key ? ctx->activations[i].provider_key : "", record_key) == 0) {
+            ctx->activations[i].provider_key == record_key) {
             return true;
         }
     }
@@ -253,13 +250,12 @@ bool record_activation(ExpandContext *ctx, const char *name, const char *provide
     }
     ctx->activations[ctx->activation_count].name = idm_strdup(name);
     ctx->activations[ctx->activation_count].provider = idm_strdup(record_provider);
-    ctx->activations[ctx->activation_count].provider_key = idm_strdup(record_key);
+    ctx->activations[ctx->activation_count].provider_key = record_key;
     if (!ctx->activations[ctx->activation_count].name ||
         !ctx->activations[ctx->activation_count].provider ||
         !ctx->activations[ctx->activation_count].provider_key) {
         free(ctx->activations[ctx->activation_count].name);
         free(ctx->activations[ctx->activation_count].provider);
-        free(ctx->activations[ctx->activation_count].provider_key);
         memset(&ctx->activations[ctx->activation_count], 0, sizeof(ctx->activations[ctx->activation_count]));
         return idm_error_oom(err, span);
     }
@@ -271,17 +267,21 @@ bool record_activation(ExpandContext *ctx, const char *name, const char *provide
 static void surface_install_destroy(SurfaceInstall *install) {
     free(install->name);
     free(install->provider);
-    free(install->provider_key);
     idm_scope_set_destroy(&install->scopes);
 }
 
 int surface_install_guard(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, const IdmScopeSet *scopes, IdmError *err) {
-    bool local = strcmp(provider_key, idm_symbol_text(ctx->unit_key)) == 0;
+    IdmSymbol *provider_sym = typed_atom_intern(ctx, provider_key);
+    if (!provider_sym) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return -1;
+    }
+    bool local = provider_sym == ctx->unit_key;
     int phase = ctx->surface_phase >= 0 ? ctx->surface_phase : ctx->phase;
     for (size_t i = 0; i < ctx->surface_install_count; i++) {
         SurfaceInstall *e = &ctx->surface_installs[i];
         if (e->space != space || e->phase != phase || strcmp(e->name, key) != 0 || !idm_scope_set_equal(&e->scopes, scopes)) continue;
-        if (local || strcmp(e->provider_key, provider_key) == 0) return local ? 1 : 0;
+        if (local || e->provider_key == provider_sym) return local ? 1 : 0;
         idm_error_set(err, idm_span_unknown(NULL), "surface '%s' from '%s' is already active in this context; activating '%s' would conflict", display, e->provider, provider);
         return -1;
     }
@@ -295,7 +295,7 @@ int surface_install_guard(ExpandContext *ctx, const char *provider, const char *
     memset(e, 0, sizeof(*e));
     e->name = idm_strdup(key);
     e->provider = idm_strdup(provider);
-    e->provider_key = idm_strdup(provider_key);
+    e->provider_key = provider_sym;
     e->space = space;
     e->phase = phase;
     if (!e->name || !e->provider || !e->provider_key || !idm_scope_set_copy(&e->scopes, scopes)) {
@@ -483,7 +483,6 @@ void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint) {
         ctx->activation_count--;
         free(ctx->activations[ctx->activation_count].name);
         free(ctx->activations[ctx->activation_count].provider);
-        free(ctx->activations[ctx->activation_count].provider_key);
     }
     while (ctx->surface_install_count > checkpoint->surface_install_count) surface_install_destroy(&ctx->surface_installs[--ctx->surface_install_count]);
     for (size_t i = 0; i < ctx->artifact_base_count && i < checkpoint->artifact_base_count; i++) {
@@ -500,7 +499,7 @@ void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint) {
     if (ctx->init_emit_mark_count > checkpoint->init_emit_mark_count) ctx->init_emit_mark_count = checkpoint->init_emit_mark_count;
     if (ctx->runtime_init_mark_count > checkpoint->runtime_init_mark_count) ctx->runtime_init_mark_count = checkpoint->runtime_init_mark_count;
     ctx->phase_runtime_init_mark_count = checkpoint->phase_runtime_init_mark_count;
-    while (ctx->package_slot_ref_count > checkpoint->package_slot_ref_count) free(ctx->package_slot_refs[--ctx->package_slot_ref_count].env_key);
+    if (ctx->package_slot_ref_count > checkpoint->package_slot_ref_count) ctx->package_slot_ref_count = checkpoint->package_slot_ref_count;
     while (ctx->package_slot_count > checkpoint->package_slot_count) idm_pkg_slot_destroy(&ctx->package_slots[--ctx->package_slot_count]);
     while (ctx->grammar_count > checkpoint->grammar_count) grammar_def_destroy(&ctx->grammars[--ctx->grammar_count]);
     if (ctx->reader_generation != checkpoint->reader_generation) ctx_reader_invalidate(ctx);
@@ -516,7 +515,6 @@ void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint) {
     while (ctx->field_selector_count > checkpoint->field_selector_count) {
         FieldSelectorDef *sel = &ctx->field_selectors[--ctx->field_selector_count];
         free(sel->name);
-        free(sel->env_key);
         memset(sel, 0, sizeof(*sel));
     }
     while (ctx->phase_candidate_count > checkpoint->phase_candidate_count) phase_candidate_destroy(&ctx->phase_candidates[--ctx->phase_candidate_count]);
@@ -534,7 +532,6 @@ void ctx_destroy(ExpandContext *ctx) {
     for (size_t i = 0; i < ctx->activation_count; i++) {
         free(ctx->activations[i].name);
         free(ctx->activations[i].provider);
-        free(ctx->activations[i].provider_key);
     }
     free(ctx->activations);
     for (size_t i = 0; i < ctx->surface_install_count; i++) surface_install_destroy(&ctx->surface_installs[i]);
@@ -560,7 +557,7 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->grammars);
     for (size_t i = 0; i < ctx->operator_count; i++) idm_operator_def_destroy(&ctx->operators[i]);
     free(ctx->operators);
-    for (size_t i = 0; i < ctx->field_selector_count; i++) { free(ctx->field_selectors[i].name); free(ctx->field_selectors[i].env_key); }
+    for (size_t i = 0; i < ctx->field_selector_count; i++) free(ctx->field_selectors[i].name);
     free(ctx->field_selectors);
     for (size_t i = 0; i < ctx->typed.entity_count; i++) typed_entity_destroy(&ctx->typed.entities[i]);
     free(ctx->typed.entities);
@@ -582,7 +579,6 @@ void ctx_destroy(ExpandContext *ctx) {
     free(ctx->decl_grammars);
     idm_phase_env_release(ctx->phase_env);
     free(ctx->artifact_bases);
-    for (size_t i = 0; i < ctx->package_slot_ref_count; i++) free(ctx->package_slot_refs[i].env_key);
     free(ctx->package_slot_refs);
     for (size_t i = 0; i < ctx->dep_count; i++) free(ctx->deps[i].path);
     free(ctx->deps);
@@ -1859,14 +1855,14 @@ bool install_method_surface(ExpandContext *ctx, IdmSymbol *trait, const char *tr
                 return idm_error_set(err, idm_span_unknown(NULL), "method surface '%s.%s' arity changed while activating this scope", trait_text, name);
             }
             const char *e_provider = e->provider ? e->provider : "";
-            const char *e_provider_key = e->provider_key ? e->provider_key : "";
+            IdmSymbol *e_provider_key = e->provider_key;
             const char *new_provider = provider ? provider : "";
-            const char *new_provider_key = provider_key ? provider_key : "";
-            if (strcmp(e_provider, new_provider) == 0 && strcmp(e_provider_key, new_provider_key) == 0) {
+            IdmSymbol *new_provider_key = typed_atom_intern(ctx, provider_key ? provider_key : "");
+            if (!new_provider_key) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (strcmp(e_provider, new_provider) == 0 && e_provider_key == new_provider_key) {
                 if (has_dispatch && !e->has_dispatch) {
-                    char *next_key = idm_strdup(dispatch_env_key ? dispatch_env_key : "");
-                    if (!next_key) return idm_error_oom(err, idm_span_unknown(NULL));
-                    free(e->dispatch_env_key);
+                    IdmSymbol *next_key = dispatch_env_key && dispatch_env_key[0] ? typed_atom_intern(ctx, dispatch_env_key) : NULL;
+                    if (dispatch_env_key && dispatch_env_key[0] && !next_key) return idm_error_oom(err, idm_span_unknown(NULL));
                     e->dispatch_env_key = next_key;
                     e->has_dispatch = true;
                     e->dispatch_env = dispatch_env;
@@ -1887,14 +1883,14 @@ bool install_method_surface(ExpandContext *ctx, IdmSymbol *trait, const char *tr
     method->trait_key = typed_atom_intern(ctx, check_key);
     method->name = typed_atom_intern(ctx, name);
     method->provider = idm_strdup(provider ? provider : "");
-    method->provider_key = idm_strdup(provider_key ? provider_key : "");
-    method->dispatch_env_key = idm_strdup(dispatch_env_key ? dispatch_env_key : "");
+    method->provider_key = typed_atom_intern(ctx, provider_key ? provider_key : "");
+    method->dispatch_env_key = dispatch_env_key && dispatch_env_key[0] ? typed_atom_intern(ctx, dispatch_env_key) : NULL;
     method->arity = arity;
     method->has_dispatch = has_dispatch;
     method->dispatch_env = dispatch_env;
     method->dispatch_frame = ctx->frame;
     method->dispatch_slot = dispatch_slot;
-    if (!method->trait || !method->trait_key || !method->name || !method->provider || !method->provider_key || !method->dispatch_env_key || !idm_scope_set_copy(&method->scopes, scopes ? scopes : &ctx->empty_scopes)) {
+    if (!method->trait || !method->trait_key || !method->name || !method->provider || !method->provider_key || (dispatch_env_key && dispatch_env_key[0] && !method->dispatch_env_key) || !idm_scope_set_copy(&method->scopes, scopes ? scopes : &ctx->empty_scopes)) {
         method_surface_def_destroy(method);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
@@ -2090,7 +2086,7 @@ bool package_slot_ref_add(ExpandContext *ctx, const char *env_key, uint32_t slot
         if (!idm_grow((void **)&ctx->package_slot_refs, &ctx->package_slot_ref_cap, sizeof(*ctx->package_slot_refs), 8u, ctx->package_slot_ref_count + 1u)) return false;
     }
     PackageSlotRef *ref = &ctx->package_slot_refs[ctx->package_slot_ref_count];
-    ref->env_key = idm_strdup(env_key);
+    ref->env_key = typed_atom_intern(ctx, env_key);
     if (!ref->env_key) return false;
     ref->slot = slot;
     if (out_id) *out_id = (uint32_t)ctx->package_slot_ref_count;
@@ -2541,7 +2537,7 @@ static bool grammar_rule_surface_value(IdmRuntime *rt, const GrammarDef *entry, 
     IdmValue rule_items[5];
     rule_items[0] = idm_string(rt, entry->provider ? entry->provider : "", err);
     if (err && err->present) return false;
-    rule_items[1] = idm_string(rt, entry->provider_key ? entry->provider_key : "", err);
+    rule_items[1] = idm_string(rt, entry->provider_key ? idm_symbol_text(entry->provider_key) : "", err);
     if (err && err->present) return false;
     rule_items[2] = idm_atom(rt, idm_grammar_rule_kind_name(rule->kind));
     rule_items[3] = idm_atom(rt, rule->name);
@@ -2578,7 +2574,7 @@ static bool grammar_contributor_surface_value(IdmRuntime *rt, const GrammarDef *
     IdmValue items[5];
     items[0] = idm_string(rt, entry->provider ? entry->provider : "", err);
     if (err && err->present) return false;
-    items[1] = idm_string(rt, entry->provider_key ? entry->provider_key : "", err);
+    items[1] = idm_string(rt, entry->provider_key ? idm_symbol_text(entry->provider_key) : "", err);
     if (err && err->present) return false;
     items[2] = idm_atom(rt, idm_grammar_mode_name(entry->artifact.mode));
     items[3] = scope_set_surface_value(rt, &entry->binding_scopes, err);

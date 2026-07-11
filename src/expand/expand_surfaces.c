@@ -620,11 +620,16 @@ static bool grammar_rules_copy_relocated(IdmGrammarRule **out, const IdmGrammarR
 }
 
 static int grammar_install_check(ExpandContext *ctx, const char *name, const IdmPkgGrammar *incoming, const IdmScopeSet *binding_scopes, const char *provider, const char *provider_key, IdmError *err) {
+    IdmSymbol *provider_sym = provider_key ? idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, provider_key) : NULL;
+    if (provider_key && !provider_sym) {
+        idm_error_oom(err, idm_span_unknown(NULL));
+        return -1;
+    }
     for (size_t i = 0; i < ctx->grammar_count; i++) {
         GrammarDef *existing = &ctx->grammars[i];
         if (!existing->artifact.name || strcmp(existing->artifact.name, name) != 0 || !idm_scope_set_equal(&existing->binding_scopes, binding_scopes)) continue;
         bool same_provider = existing->provider && provider && strcmp(existing->provider, provider) == 0 &&
-                             existing->provider_key && provider_key && strcmp(existing->provider_key, provider_key) == 0;
+                             existing->provider_key == provider_sym;
         if (same_provider) return 0;
         if (existing->artifact.mode == IDM_GRAMMAR_MODE_EXTEND && incoming->mode == IDM_GRAMMAR_MODE_EXTEND) {
             for (size_t r = 0; r < incoming->rule_count; r++) {
@@ -790,7 +795,7 @@ bool install_imported_grammar(ExpandContext *ctx, const IdmPkgGrammar *grammar, 
     dst->artifact.mode = grammar->mode;
     dst->artifact.exported = false;
     dst->provider = idm_strdup(provider ? provider : "");
-    dst->provider_key = idm_strdup(provider_key ? provider_key : "");
+    dst->provider_key = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, provider_key ? provider_key : "");
     bool ok = dst->artifact.name && dst->provider && dst->provider_key &&
               idm_scope_set_copy(&dst->artifact.scopes, &grammar->scopes) &&
               idm_scope_set_copy(&dst->binding_scopes, binding_scopes);
@@ -846,7 +851,7 @@ bool ctx_reader_artifact_from_active_grammars(ExpandContext *ctx, const char *su
         if (!entry->artifact.name || strcmp(entry->artifact.name, surface) != 0) continue;
         sources[index].grammar = &entry->artifact;
         sources[index].provider = entry->provider;
-        sources[index].provider_key = entry->provider_key;
+        sources[index].provider_key = entry->provider_key ? idm_symbol_text(entry->provider_key) : NULL;
         sources[index].binding_scopes = &entry->binding_scopes;
         index++;
     }

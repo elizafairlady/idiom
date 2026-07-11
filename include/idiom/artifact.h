@@ -284,7 +284,7 @@ typedef struct {
 
 typedef struct {
     char *name;
-    char *env_key;
+    IdmSymbol *env_key;
     uint32_t slot;
     IdmScopeSet scopes;
     IdmArity arity;
@@ -334,7 +334,7 @@ typedef struct {
     char *method;
     IdmArity arity;
     bool impl_env;
-    char *impl_env_key;
+    IdmSymbol *impl_env_key;
     uint32_t impl_slot;
     bool has_contract;
     IdmCallableContract contract;
@@ -396,7 +396,7 @@ struct IdmArtifact {
     size_t slot_count;
     IdmPkgImport *imports;
     size_t import_count;
-    struct { char *name; char *env_key; uint32_t slot; } *field_selectors;
+    struct { char *name; IdmSymbol *env_key; uint32_t slot; } *field_selectors;
     size_t field_selector_count;
     IdmPkgMacro *macros;
     size_t macro_count;

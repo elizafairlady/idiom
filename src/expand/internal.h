@@ -107,13 +107,13 @@ typedef struct {
     IdmSymbol *trait_key;
     IdmSymbol *name;
     char *provider;
-    char *provider_key;
+    IdmSymbol *provider_key;
     IdmArity arity;
     bool has_dispatch;
     bool dispatch_env;
     uint32_t dispatch_frame;
     uint32_t dispatch_slot;
-    char *dispatch_env_key;
+    IdmSymbol *dispatch_env_key;
     IdmScopeSet scopes;
 } MethodSurfaceDef;
 typedef struct {
@@ -145,7 +145,7 @@ typedef struct {
     TraitMethodDef *methods;
     size_t method_count;
     bool dispatch_env;
-    char *dispatch_env_key;
+    IdmSymbol *dispatch_env_key;
 } TraitDef;
 typedef struct {
     uint32_t method_surface;
@@ -157,7 +157,7 @@ typedef struct {
     IdmArity arity;
     bool impl_env;
     uint32_t impl_frame;
-    char *impl_env_key;
+    IdmSymbol *impl_env_key;
     uint32_t impl_slot;
     bool has_contract;
     IdmCallableContract contract;
@@ -208,12 +208,12 @@ typedef struct {
     IdmPkgGrammar artifact;
     IdmScopeSet binding_scopes;
     char *provider;
-    char *provider_key;
+    IdmSymbol *provider_key;
 } GrammarDef;
 typedef struct {
     char *name;
     char *provider;
-    char *provider_key;
+    IdmSymbol *provider_key;
     IdmBindingSpace space;
     int phase;
     IdmScopeSet scopes;
@@ -285,7 +285,7 @@ typedef struct {
     uint64_t reader_generation;
 } SurfaceCheckpoint;
 typedef struct {
-    char *env_key;
+    IdmSymbol *env_key;
     uint32_t slot;
 } PackageSlotRef;
 typedef struct {
@@ -293,7 +293,7 @@ typedef struct {
     uint32_t slot;
     bool env;
     bool emitted;
-    char *env_key;
+    IdmSymbol *env_key;
 } FieldSelectorDef;
 typedef struct {
     const IdmCore *core;
@@ -345,7 +345,7 @@ typedef struct ExpandContext {
     FieldSelectorDef *field_selectors;
     size_t field_selector_count;
     size_t field_selector_cap;
-    struct { char *name; char *provider; char *provider_key; IdmSpan span; } *activations;
+    struct { char *name; char *provider; IdmSymbol *provider_key; IdmSpan span; } *activations;
     size_t activation_count;
     size_t activation_cap;
     SurfaceInstall *surface_installs;
@@ -477,7 +477,7 @@ typedef struct {
 } ExpandCache;
 ExpandCache *expand_cache_get(IdmRuntime *rt);
 const IdmArtifact *expand_cache_artifact_by_hash(IdmRuntime *rt, const unsigned char hash[32]);
-const IdmArtifact *expand_cache_artifact_by_key(IdmRuntime *rt, const char *env_key);
+const IdmArtifact *expand_cache_artifact_by_key(IdmRuntime *rt, IdmSymbol *env_key);
 bool record_runtime_init(ExpandContext *ctx, const IdmArtifact *art, IdmSpan span, IdmError *err);
 IdmArtifact *expand_cache_intern_artifact(IdmRuntime *rt, IdmArtifact *moved);
 typedef enum { BODY_REC_BIND, BODY_REC_BIND_PATTERN, BODY_REC_EXPR, BODY_REC_GROUPS } BodyRecKind;

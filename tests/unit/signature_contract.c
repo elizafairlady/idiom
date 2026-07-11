@@ -479,7 +479,7 @@ int idm_unit_signature_contract(void) {
     IdmPkgImport probe_import;
     memset(&probe_import, 0, sizeof(probe_import));
     probe_import.name = (char *)"q";
-    probe_import.env_key = (char *)"k";
+    probe_import.env_key = idm_intern(&rt.intern, IDM_SYMBOL_ATOM, "k");
     probe_import.arity = idm_arity_unknown();
     probe_import.has_contract = true;
     probe_import.contract.passthrough = true;

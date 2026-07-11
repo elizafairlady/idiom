@@ -328,7 +328,6 @@ void idm_pkg_slot_destroy(IdmPkgSlot *slot) {
 void idm_pkg_import_destroy(IdmPkgImport *imp) {
     if (!imp) return;
     free(imp->name);
-    free(imp->env_key);
     idm_scope_set_destroy(&imp->scopes);
     if (imp->has_contract) idm_callable_contract_destroy(&imp->contract);
     memset(imp, 0, sizeof(*imp));
@@ -348,7 +347,6 @@ void idm_pkg_trait_destroy(IdmPkgTrait *trait) {
 void idm_pkg_method_impl_destroy(IdmPkgMethodImpl *impl) {
     if (!impl) return;
     free(impl->method);
-    free(impl->impl_env_key);
     idm_structural_head_destroy(&impl->structural_head);
     if (impl->has_contract) idm_callable_contract_destroy(&impl->contract);
     memset(impl, 0, sizeof(*impl));
@@ -429,7 +427,7 @@ void idm_artifact_destroy(IdmArtifact *art) {
         free(art->macros);
     }
     if (art->field_selectors) {
-        for (size_t i = 0; i < art->field_selector_count; i++) { free(art->field_selectors[i].name); free(art->field_selectors[i].env_key); }
+        for (size_t i = 0; i < art->field_selector_count; i++) free(art->field_selectors[i].name);
         free(art->field_selectors);
     }
     if (art->operators) {
@@ -1357,6 +1355,10 @@ static bool artifact_put_symbol(IdmBuffer *out, IdmSymbol *symbol) {
            (kind != IDM_SYMBOL_IDENTITY || idm_buf_append_n(out, (const char *)idm_symbol_identity_hash(symbol), 32u));
 }
 
+static bool artifact_put_opt_symbol(IdmBuffer *out, IdmSymbol *symbol) {
+    return idm_buf_put_u8(out, symbol ? 1u : 0u) && (!symbol || artifact_put_symbol(out, symbol));
+}
+
 static bool put_method_defs(IdmBuffer *out, const IdmTraitMethodDef *methods, size_t count) {
     if (!idm_buf_put_u32(out, (uint32_t)count)) return false;
     for (size_t i = 0; i < count; i++) {
@@ -1583,7 +1585,7 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     for (size_t i = 0; ok && i < art->import_count; i++) {
         const IdmPkgImport *imp = &art->imports[i];
         ok = idm_buf_put_str(out, imp->name, strlen(imp->name)) &&
-             idm_buf_put_str(out, imp->env_key ? imp->env_key : "", strlen(imp->env_key ? imp->env_key : "")) &&
+             artifact_put_opt_symbol(out, imp->env_key) &&
              idm_buf_put_u32(out, imp->slot) &&
              idm_arity_serialize(out, imp->arity, err) &&
              idm_buf_put_u8(out, imp->has_contract ? 1u : 0u);
@@ -1593,7 +1595,7 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     ok = ok && idm_buf_put_u32(out, (uint32_t)art->field_selector_count);
     for (size_t i = 0; ok && i < art->field_selector_count; i++) {
         ok = idm_buf_put_str(out, art->field_selectors[i].name, strlen(art->field_selectors[i].name)) &&
-             idm_buf_put_str(out, art->field_selectors[i].env_key ? art->field_selectors[i].env_key : "", strlen(art->field_selectors[i].env_key ? art->field_selectors[i].env_key : "")) &&
+             artifact_put_opt_symbol(out, art->field_selectors[i].env_key) &&
              idm_buf_put_u32(out, art->field_selectors[i].slot);
     }
     ok = ok && idm_buf_put_u32(out, (uint32_t)art->operator_count);
@@ -1648,7 +1650,7 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
              idm_buf_put_str(out, impl->method, strlen(impl->method)) &&
              idm_arity_serialize(out, impl->arity, err) &&
              idm_buf_put_u8(out, impl->impl_env ? 1u : 0u) &&
-             idm_buf_put_str(out, impl->impl_env_key ? impl->impl_env_key : "", strlen(impl->impl_env_key ? impl->impl_env_key : "")) &&
+             artifact_put_opt_symbol(out, impl->impl_env_key) &&
              idm_buf_put_u32(out, impl->impl_slot) &&
              idm_buf_put_u8(out, impl->has_contract ? 1u : 0u);
         if (ok && impl->has_contract) ok = idm_callable_contract_serialize(out, &impl->contract, err);
@@ -1777,6 +1779,13 @@ static bool artifact_read_symbol(IdmRuntime *rt, IdmByteReader *r, IdmSymbol **o
     return *out != NULL || idm_error_oom(err, idm_span_unknown(NULL));
 }
 
+static bool artifact_read_opt_symbol(IdmRuntime *rt, IdmByteReader *r, IdmSymbol **out, IdmError *err) {
+    *out = NULL;
+    uint8_t present = idm_rd_u8(r);
+    if (!r->ok || present > 1u) return idm_error_set(err, idm_span_unknown(NULL), "invalid optional artifact symbol");
+    return present == 0u || artifact_read_symbol(rt, r, out, err);
+}
+
 static bool read_module_ref(IdmRuntime *rt, IdmByteReader *r, IdmModuleRef **out, IdmError *err) {
     *out = idm_module_ref_create(rt);
     return *out != NULL && read_module_blob(rt, r, &(*out)->module, err);
@@ -1893,7 +1902,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         IdmPkgImport *imp = &out->imports[i];
         out->import_count = i + 1u;
         RD_STR(imp->name);
-        RD_STR(imp->env_key);
+        if (ok) ok = artifact_read_opt_symbol(rt, &r, &imp->env_key, err);
         RD_U32(imp->slot);
         imp->arity = idm_arity_unknown();
         if (ok) ok = idm_arity_deserialize(&r, &imp->arity, err);
@@ -1909,7 +1918,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
     for (uint32_t i = 0; ok && i < fsel_count; i++) {
         out->field_selector_count = i + 1u;
         RD_STR(out->field_selectors[i].name);
-        RD_STR(out->field_selectors[i].env_key);
+        if (ok) ok = artifact_read_opt_symbol(rt, &r, &out->field_selectors[i].env_key, err);
         RD_U32(out->field_selectors[i].slot);
     }
     uint32_t operator_count;
@@ -1998,7 +2007,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         impl->arity = idm_arity_unknown();
         if (ok) ok = idm_arity_deserialize(&r, &impl->arity, err);
         RD_FLAG(impl->impl_env, "method impl env");
-        RD_STR(impl->impl_env_key);
+        if (ok) ok = artifact_read_opt_symbol(rt, &r, &impl->impl_env_key, err);
         RD_U32(impl->impl_slot);
         RD_FLAG(impl->has_contract, "method impl contract");
         if (ok && impl->has_contract) ok = idm_callable_contract_deserialize(rt, &r, &impl->contract, err);

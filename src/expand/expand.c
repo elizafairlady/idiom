@@ -529,7 +529,7 @@ static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, 
             }
             const PackageSlotRef *slot_ref = package_slot_ref_get(ctx, binding->payload);
             if (!slot_ref) return (IdmCore *)(uintptr_t)idm_error_set(err, word->span, "package slot payload %u is out of bounds", binding->payload);
-            IdmCore *ref = idm_core_package_ref(word->as.text, idm_atom(ctx->rt, slot_ref->env_key), slot_ref->slot, word->span);
+            IdmCore *ref = idm_core_package_ref(word->as.text, idm_atom_symbol(slot_ref->env_key), slot_ref->slot, word->span);
             return zero_arity_binding_ref_if_known(ref, binding, callee_position, word->span, err);
         }
     }
@@ -1036,8 +1036,8 @@ static bool method_ref_attach_contract(const IdmCallableContract *contract, IdmC
 static IdmCore *method_dispatch_ref(ExpandContext *ctx, const MethodSurfaceDef *method, IdmSpan span, IdmError *err) {
     IdmCore *ref = NULL;
     if (method->dispatch_env) {
-        ref = method->dispatch_env_key && method->dispatch_env_key[0]
-            ? idm_core_package_ref(method_surface_name_text(method), idm_atom(ctx->rt, method->dispatch_env_key), method->dispatch_slot, span)
+        ref = method->dispatch_env_key
+            ? idm_core_package_ref(method_surface_name_text(method), idm_atom_symbol(method->dispatch_env_key), method->dispatch_slot, span)
             : idm_core_env_ref(method_surface_name_text(method), method->dispatch_slot, span);
     } else if (method->dispatch_frame == ctx->frame) {
         ref = idm_core_local_ref(method_surface_name_text(method), method->dispatch_slot, span);
@@ -1126,9 +1126,9 @@ static IdmCore *build_field_selector_callee(ExpandContext *ctx, const char *name
     }
     IdmCore *callee = NULL;
     if (sel->env) {
-        const char *key = sel->env_key && sel->env_key[0] ? sel->env_key : (ctx->unit_key && ctx->in_package ? idm_symbol_text(ctx->unit_key) : NULL);
+        IdmSymbol *key = sel->env_key ? sel->env_key : (ctx->in_package ? ctx->unit_key : NULL);
         callee = key
-            ? idm_core_package_ref(name, idm_atom(ctx->rt, key), sel->slot, span)
+            ? idm_core_package_ref(name, idm_atom_symbol(key), sel->slot, span)
             : idm_core_env_ref(name, sel->slot, span);
     } else {
         callee = idm_core_local_ref(name, sel->slot, span);
@@ -1184,8 +1184,8 @@ static IdmCore *method_impl_ref(ExpandContext *ctx, const MethodSurfaceDef *meth
     const char *name = method_surface_name_text(method);
     IdmCore *ref = NULL;
     if (impl->impl_env) {
-        ref = impl->impl_env_key && impl->impl_env_key[0]
-            ? idm_core_package_ref(name, idm_atom(ctx->rt, impl->impl_env_key), impl->impl_slot, span)
+        ref = impl->impl_env_key
+            ? idm_core_package_ref(name, idm_atom_symbol(impl->impl_env_key), impl->impl_slot, span)
             : idm_core_env_ref(name, impl->impl_slot, span);
     } else if (impl->impl_frame == ctx->frame) {
         ref = idm_core_local_ref(name, impl->impl_slot, span);
