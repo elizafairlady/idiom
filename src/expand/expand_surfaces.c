@@ -181,15 +181,21 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
         idm_syn_free(use_copy);
         return false;
     }
-    IdmScopeId use_scope = idm_scope_fresh(&ctx->scope_store);
-    if (!idm_syn_scope_add_tree(use_copy, 0, use_scope)) {
+    IdmScopeId intro_scope = idm_scope_fresh(&ctx->scope_store);
+    if (!idm_syn_scope_add_tree(use_copy, 0, intro_scope)) {
         idm_syn_free(use_copy); return idm_error_oom(err, use_syntax->span);
+    }
+    if (ctx->def_ctx) {
+        IdmScopeId use_scope = idm_scope_fresh(&ctx->scope_store);
+        if (!idm_syn_scope_add_tree(use_copy, 0, use_scope) || !idm_scope_set_add(&ctx->def_ctx->use_scopes, use_scope)) {
+            idm_syn_free(use_copy); return idm_error_oom(err, use_syntax->span);
+        }
     }
     IdmSyntax *expanded_syntax = NULL;
     bool old_intro_active = ctx->rt->macro_intro_active;
     IdmScopeId old_intro_scope = ctx->rt->macro_intro_scope;
     ctx->rt->macro_intro_active = true;
-    ctx->rt->macro_intro_scope = use_scope;
+    ctx->rt->macro_intro_scope = intro_scope;
     bool invoked = invoke(ctx, payload, use_copy, head, &expanded_syntax, err);
     ctx->rt->macro_intro_active = old_intro_active;
     ctx->rt->macro_intro_scope = old_intro_scope;
@@ -201,7 +207,7 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
         return false;
     }
     idm_syn_free(use_copy);
-    if (!idm_syn_scope_flip_tree(expanded_syntax, 0, use_scope)) {
+    if (!idm_syn_scope_flip_tree(expanded_syntax, 0, intro_scope)) {
         idm_syn_free(expanded_syntax); return idm_error_oom(err, use_syntax->span);
     }
     if (!idm_syn_origin_push_tree(expanded_syntax, head->as.text)) {

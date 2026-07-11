@@ -458,23 +458,10 @@ static bool binding_candidate(const IdmBinding *candidate, const char *name, int
     return idm_scope_set_subset(&candidate->scopes, reference_scopes);
 }
 
-static int binding_tie_priority(const IdmBinding *binding) {
-    switch (binding->kind) {
-        case IDM_BIND_VALUE:
-        case IDM_BIND_LOCAL:
-        case IDM_BIND_ARG:
-        case IDM_BIND_ENV:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
 static bool binding_prefer_candidate_newest_first(const IdmBinding *candidate, const IdmBinding *best) {
     if (!best) return true;
     if (!idm_scope_set_subset(&best->scopes, &candidate->scopes)) return false;
-    if (!idm_scope_set_equal(&best->scopes, &candidate->scopes)) return true;
-    return binding_tie_priority(candidate) > binding_tie_priority(best);
+    return !idm_scope_set_equal(&best->scopes, &candidate->scopes);
 }
 
 static IdmResolveStatus binding_resolve_best(const IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes, const IdmBinding **out_binding) {

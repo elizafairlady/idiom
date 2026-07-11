@@ -429,6 +429,7 @@ typedef struct ExpandContext {
 } ExpandContext;
 typedef struct BodyDefCtx {
     struct BodyDefCtx *prev;
+    IdmScopeSet use_scopes;
 } BodyDefCtx;
 typedef struct {
     ExpandContext *ctx;

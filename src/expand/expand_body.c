@@ -3923,12 +3923,18 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         free(work);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, items[index]->span);
     }
+    BodyDefCtx def_ctx;
+    def_ctx.prev = ctx->def_ctx;
+    idm_scope_set_init(&def_ctx.use_scopes);
+    ctx->def_ctx = &def_ctx;
     IdmCore **prepared = NULL;
     size_t prepared_count = 0;
     size_t prepared_cap = 0;
     if (!body_prepare_declarations(ctx, work, &work_count, true, &prepared, &prepared_count, &prepared_cap, err)) {
         for (size_t p = 0; p < prepared_count; p++) idm_core_free(prepared[p]);
         free(prepared);
+        ctx->def_ctx = def_ctx.prev;
+        idm_scope_set_destroy(&def_ctx.use_scopes);
         idm_scope_set_destroy(&body_ctx_scopes);
         for (size_t o = 0; o < owned_count; o++) idm_syn_free(owned[o]);
         free(owned);
@@ -3942,9 +3948,6 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     BodyRec *recs = NULL;
     size_t rec_count = 0;
     size_t rec_cap = 0;
-    BodyDefCtx def_ctx;
-    def_ctx.prev = ctx->def_ctx;
-    ctx->def_ctx = &def_ctx;
     bool failed = false;
     IdmScopeId definition_scope = 0;
     size_t i = 0;
@@ -4609,6 +4612,7 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     }
 
     ctx->def_ctx = def_ctx.prev;
+    idm_scope_set_destroy(&def_ctx.use_scopes);
     ctx->op_fallback = saved_op_fallback;
     ctx->body_depth = saved_body_depth;
     idm_scope_set_destroy(&body_ctx_scopes);
