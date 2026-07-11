@@ -3907,9 +3907,10 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         free(work);
         return NULL;
     }
+    IdmScopeId outside_edge = 0;
     if (def_scope) {
-        IdmScopeId body_scope = idm_scope_fresh(&ctx->scope_store);
-        if (!body_scope_add_range(ctx, work, 0, work_count, body_scope, items[index]->span, err)) {
+        outside_edge = idm_scope_fresh(&ctx->scope_store);
+        if (!body_scope_add_range(ctx, work, 0, work_count, outside_edge, items[index]->span, err)) {
             for (size_t i = 0; i < owned_count; i++) idm_syn_free(owned[i]);
             free(owned);
             free(work);
@@ -3925,6 +3926,8 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     }
     BodyDefCtx def_ctx;
     def_ctx.prev = ctx->def_ctx;
+    def_ctx.outside_edge = outside_edge;
+    def_ctx.inside_edge = 0;
     idm_scope_set_init(&def_ctx.use_scopes);
     ctx->def_ctx = &def_ctx;
     IdmCore **prepared = NULL;
@@ -3949,7 +3952,6 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
     size_t rec_count = 0;
     size_t rec_cap = 0;
     bool failed = false;
-    IdmScopeId definition_scope = 0;
     size_t i = 0;
     BodySignature *signatures = NULL;
     size_t signature_count = 0;
@@ -3966,8 +3968,8 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
         has_defn = defn_form_parts(work[d], &ignored_name, &ignored_start, NULL);
     }
     if (has_defn && !persistent_repl_env && !package_top) {
-        definition_scope = idm_scope_fresh(&ctx->scope_store);
-        if (!body_definition_scope_add(ctx, work, 0, work_count, definition_scope, items[index]->span, err)) failed = true;
+        def_ctx.inside_edge = idm_scope_fresh(&ctx->scope_store);
+        if (!body_definition_scope_add(ctx, work, 0, work_count, def_ctx.inside_edge, items[index]->span, err)) failed = true;
     }
     size_t body_binding_start = ctx->bindings.count;
     if (!failed && !body_prebind_defns(ctx, work, work_count, err)) failed = true;
@@ -4071,8 +4073,8 @@ IdmCore *expand_body_items(ExpandContext *ctx, IdmSyntax *const *items, size_t i
             bool persistent_repl_env = ctx->repl_env_binds && ctx->frame == IDM_FRAME_TOP;
             bool package_top = ctx->in_package && ctx->frame == IDM_FRAME_TOP;
             if (!persistent_repl_env && !package_top) {
-                if (definition_scope == 0) definition_scope = idm_scope_fresh(&ctx->scope_store);
-                if (!body_definition_scope_add(ctx, work, i, work_count, definition_scope, form->span, err)) {
+                if (def_ctx.inside_edge == 0) def_ctx.inside_edge = idm_scope_fresh(&ctx->scope_store);
+                if (!body_definition_scope_add(ctx, work, i, work_count, def_ctx.inside_edge, form->span, err)) {
                     failed = true;
                     break;
                 }

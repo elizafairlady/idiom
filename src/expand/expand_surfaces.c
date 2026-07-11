@@ -210,6 +210,10 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
     if (!idm_syn_scope_flip_tree(expanded_syntax, 0, intro_scope)) {
         idm_syn_free(expanded_syntax); return idm_error_oom(err, use_syntax->span);
     }
+    if (ctx->def_ctx && ctx->def_ctx->inside_edge != 0 &&
+        !idm_syn_scope_add_tree(expanded_syntax, 0, ctx->def_ctx->inside_edge)) {
+        idm_syn_free(expanded_syntax); return idm_error_oom(err, use_syntax->span);
+    }
     if (!idm_syn_origin_push_tree(expanded_syntax, head->as.text)) {
         idm_syn_free(expanded_syntax); return idm_error_oom(err, use_syntax->span);
     }

@@ -429,6 +429,8 @@ typedef struct ExpandContext {
 } ExpandContext;
 typedef struct BodyDefCtx {
     struct BodyDefCtx *prev;
+    IdmScopeId outside_edge;
+    IdmScopeId inside_edge;
     IdmScopeSet use_scopes;
 } BodyDefCtx;
 typedef struct {
