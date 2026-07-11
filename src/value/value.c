@@ -729,31 +729,14 @@ static uint32_t intern_hash(IdmSymbolKind kind, const char *text) {
 }
 
 static IdmBuiltinType builtin_type_from_text(const char *text) {
-    if (strcmp(text, "nil") == 0) return IDM_BUILTIN_TYPE_NIL;
-    if (strcmp(text, "atom") == 0) return IDM_BUILTIN_TYPE_ATOM;
-    if (strcmp(text, "word") == 0) return IDM_BUILTIN_TYPE_WORD;
-    if (strcmp(text, "int") == 0) return IDM_BUILTIN_TYPE_INT;
-    if (strcmp(text, "fixnum") == 0) return IDM_BUILTIN_TYPE_FIXNUM;
-    if (strcmp(text, "bignum") == 0) return IDM_BUILTIN_TYPE_BIGNUM;
-    if (strcmp(text, "float") == 0) return IDM_BUILTIN_TYPE_FLOAT;
-    if (strcmp(text, "string") == 0) return IDM_BUILTIN_TYPE_STRING;
-    if (strcmp(text, "pair") == 0) return IDM_BUILTIN_TYPE_PAIR;
-    if (strcmp(text, "empty-list") == 0) return IDM_BUILTIN_TYPE_EMPTY_LIST;
-    if (strcmp(text, "list") == 0) return IDM_BUILTIN_TYPE_LIST;
-    if (strcmp(text, "tuple") == 0) return IDM_BUILTIN_TYPE_TUPLE;
-    if (strcmp(text, "vector") == 0) return IDM_BUILTIN_TYPE_VECTOR;
-    if (strcmp(text, "dict") == 0) return IDM_BUILTIN_TYPE_DICT;
-    if (strcmp(text, "syntax") == 0) return IDM_BUILTIN_TYPE_SYNTAX;
-    if (strcmp(text, "cell") == 0) return IDM_BUILTIN_TYPE_CELL;
-    if (strcmp(text, "closure") == 0) return IDM_BUILTIN_TYPE_CLOSURE;
-    if (strcmp(text, "pid") == 0) return IDM_BUILTIN_TYPE_PID;
-    if (strcmp(text, "ref") == 0) return IDM_BUILTIN_TYPE_REF;
-    if (strcmp(text, "port") == 0) return IDM_BUILTIN_TYPE_PORT;
-    if (strcmp(text, "record") == 0) return IDM_BUILTIN_TYPE_RECORD;
-    if (strcmp(text, "regex") == 0) return IDM_BUILTIN_TYPE_REGEX;
-    if (strcmp(text, "regex-result") == 0) return IDM_BUILTIN_TYPE_REGEX_RESULT;
-    if (strcmp(text, "bitstring") == 0) return IDM_BUILTIN_TYPE_BITSTRING;
-    if (strcmp(text, "proc") == 0) return IDM_BUILTIN_TYPE_PROC;
+    static const char *const names[IDM_BUILTIN_TYPE_COUNT] = {
+#define IDM_BUILTIN_TYPE_NAME(id, text, parent, member) [IDM_BUILTIN_TYPE_##id] = text,
+        IDM_BUILTIN_TYPE_ROWS(IDM_BUILTIN_TYPE_NAME)
+#undef IDM_BUILTIN_TYPE_NAME
+    };
+    for (IdmBuiltinType type = IDM_BUILTIN_TYPE_NIL; type < IDM_BUILTIN_TYPE_COUNT; type++) {
+        if (strcmp(text, names[type]) == 0) return type;
+    }
     return IDM_BUILTIN_TYPE_NONE;
 }
 
@@ -761,25 +744,17 @@ bool idm_type_name_is_builtin(const char *text) {
     return text && builtin_type_from_text(text) != IDM_BUILTIN_TYPE_NONE;
 }
 
-size_t idm_builtin_overtype_members(const char *parent, const char *const **out_names) {
-    static const char *const list_members[] = { "empty-list", "pair" };
-    static const char *const int_members[] = { "fixnum", "bignum" };
-    static const char *const proc_members[] = { "pid", "port" };
-    *out_names = NULL;
-    if (!parent) return 0;
-    switch (builtin_type_from_text(parent)) {
-        case IDM_BUILTIN_TYPE_LIST:
-            *out_names = list_members;
-            return 2;
-        case IDM_BUILTIN_TYPE_INT:
-            *out_names = int_members;
-            return 2;
-        case IDM_BUILTIN_TYPE_PROC:
-            *out_names = proc_members;
-            return 2;
-        default:
-            return 0;
+size_t idm_builtin_overtype_members(const char *parent, const char **out_names, size_t capacity) {
+    IdmBuiltinType parent_type = parent ? builtin_type_from_text(parent) : IDM_BUILTIN_TYPE_NONE;
+    size_t count = 0;
+#define IDM_BUILTIN_TYPE_MEMBER(id, text, row_parent, member) \
+    if (member && parent_type == IDM_BUILTIN_TYPE_##row_parent) { \
+        if (count < capacity) out_names[count] = text; \
+        count++; \
     }
+    IDM_BUILTIN_TYPE_ROWS(IDM_BUILTIN_TYPE_MEMBER)
+#undef IDM_BUILTIN_TYPE_MEMBER
+    return count;
 }
 
 static bool intern_rehash(IdmIntern *intern, size_t new_count) {
@@ -3038,16 +3013,12 @@ bool idm_value_builtin_type_symbol(IdmSymbol *type) {
 
 bool idm_builtin_type_includes(IdmBuiltinType outer, IdmBuiltinType member) {
     if (outer == member) return outer != IDM_BUILTIN_TYPE_NONE;
-    switch (outer) {
-        case IDM_BUILTIN_TYPE_INT:
-            return member == IDM_BUILTIN_TYPE_FIXNUM || member == IDM_BUILTIN_TYPE_BIGNUM;
-        case IDM_BUILTIN_TYPE_LIST:
-            return member == IDM_BUILTIN_TYPE_PAIR || member == IDM_BUILTIN_TYPE_EMPTY_LIST || member == IDM_BUILTIN_TYPE_NIL;
-        case IDM_BUILTIN_TYPE_PROC:
-            return member == IDM_BUILTIN_TYPE_PID || member == IDM_BUILTIN_TYPE_PORT;
-        default:
-            return false;
-    }
+    static const IdmBuiltinType parents[IDM_BUILTIN_TYPE_COUNT] = {
+#define IDM_BUILTIN_TYPE_PARENT(id, text, parent, listed) [IDM_BUILTIN_TYPE_##id] = IDM_BUILTIN_TYPE_##parent,
+        IDM_BUILTIN_TYPE_ROWS(IDM_BUILTIN_TYPE_PARENT)
+#undef IDM_BUILTIN_TYPE_PARENT
+    };
+    return member > IDM_BUILTIN_TYPE_NONE && member < IDM_BUILTIN_TYPE_COUNT && parents[member] == outer;
 }
 
 bool idm_value_matches_builtin_type(IdmValue value, IdmBuiltinType type) {

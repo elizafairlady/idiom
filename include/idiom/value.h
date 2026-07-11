@@ -355,38 +355,43 @@ const char *idm_value_type_name(IdmValueTag tag);
 const char *idm_value_dispatch_type_name(IdmValue value);
 const char *idm_value_sequence_kind_name(IdmValueSequenceKind kind);
 const char *idm_syntax_build_kind_name(IdmSyntaxBuildKind kind);
+#define IDM_BUILTIN_TYPE_ROWS(X) \
+    X(NIL, "nil", LIST, 0) \
+    X(ATOM, "atom", NONE, 0) \
+    X(WORD, "word", NONE, 0) \
+    X(INT, "int", NONE, 0) \
+    X(FIXNUM, "fixnum", INT, 1) \
+    X(BIGNUM, "bignum", INT, 1) \
+    X(FLOAT, "float", NONE, 0) \
+    X(STRING, "string", NONE, 0) \
+    X(PAIR, "pair", LIST, 1) \
+    X(EMPTY_LIST, "empty-list", LIST, 1) \
+    X(LIST, "list", NONE, 0) \
+    X(TUPLE, "tuple", NONE, 0) \
+    X(VECTOR, "vector", NONE, 0) \
+    X(DICT, "dict", NONE, 0) \
+    X(SYNTAX, "syntax", NONE, 0) \
+    X(CELL, "cell", NONE, 0) \
+    X(CLOSURE, "closure", NONE, 0) \
+    X(PID, "pid", PROC, 1) \
+    X(REF, "ref", NONE, 0) \
+    X(PORT, "port", PROC, 1) \
+    X(RECORD, "record", NONE, 0) \
+    X(REGEX, "regex", NONE, 0) \
+    X(REGEX_RESULT, "regex-result", NONE, 0) \
+    X(BITSTRING, "bitstring", NONE, 0) \
+    X(PROC, "proc", NONE, 0)
+
 typedef enum {
     IDM_BUILTIN_TYPE_NONE,
-    IDM_BUILTIN_TYPE_NIL,
-    IDM_BUILTIN_TYPE_ATOM,
-    IDM_BUILTIN_TYPE_WORD,
-    IDM_BUILTIN_TYPE_INT,
-    IDM_BUILTIN_TYPE_FIXNUM,
-    IDM_BUILTIN_TYPE_BIGNUM,
-    IDM_BUILTIN_TYPE_FLOAT,
-    IDM_BUILTIN_TYPE_STRING,
-    IDM_BUILTIN_TYPE_PAIR,
-    IDM_BUILTIN_TYPE_EMPTY_LIST,
-    IDM_BUILTIN_TYPE_LIST,
-    IDM_BUILTIN_TYPE_TUPLE,
-    IDM_BUILTIN_TYPE_VECTOR,
-    IDM_BUILTIN_TYPE_DICT,
-    IDM_BUILTIN_TYPE_SYNTAX,
-    IDM_BUILTIN_TYPE_CELL,
-    IDM_BUILTIN_TYPE_CLOSURE,
-    IDM_BUILTIN_TYPE_PID,
-    IDM_BUILTIN_TYPE_REF,
-    IDM_BUILTIN_TYPE_PORT,
-    IDM_BUILTIN_TYPE_RECORD,
-    IDM_BUILTIN_TYPE_REGEX,
-    IDM_BUILTIN_TYPE_REGEX_RESULT,
-    IDM_BUILTIN_TYPE_BITSTRING,
-    IDM_BUILTIN_TYPE_PROC,
+#define IDM_BUILTIN_TYPE_ENUM(id, text, parent, member) IDM_BUILTIN_TYPE_##id,
+    IDM_BUILTIN_TYPE_ROWS(IDM_BUILTIN_TYPE_ENUM)
+#undef IDM_BUILTIN_TYPE_ENUM
     IDM_BUILTIN_TYPE_COUNT
 } IdmBuiltinType;
 IdmBuiltinType idm_value_builtin_type_kind(IdmSymbol *type);
 bool idm_type_name_is_builtin(const char *text);
-size_t idm_builtin_overtype_members(const char *parent, const char *const **out_names);
+size_t idm_builtin_overtype_members(const char *parent, const char **out_names, size_t capacity);
 bool idm_value_builtin_type_symbol(IdmSymbol *type);
 bool idm_value_matches_builtin_type(IdmValue value, IdmBuiltinType type);
 bool idm_builtin_type_includes(IdmBuiltinType outer, IdmBuiltinType member);

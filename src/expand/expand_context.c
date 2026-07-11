@@ -18,8 +18,8 @@ static bool ctx_seed_builtin_types(ExpandContext *ctx) {
     IdmError err;
     idm_error_init(&err);
     for (size_t p = 0; p < sizeof(parents) / sizeof(parents[0]); p++) {
-        const char *const *member_names = NULL;
-        size_t member_count = idm_builtin_overtype_members(parents[p], &member_names);
+        const char *member_names[IDM_BUILTIN_TYPE_COUNT];
+        size_t member_count = idm_builtin_overtype_members(parents[p], member_names, IDM_BUILTIN_TYPE_COUNT);
         if (member_count == 0) continue;
         uint32_t index = 0;
         TypeDef *type = typed_registry_add_type(ctx, &index, &err, idm_span_unknown(NULL));
