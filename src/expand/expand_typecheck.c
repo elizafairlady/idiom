@@ -34,7 +34,6 @@ typedef struct {
     IdmSubst subst;
     IdmConstraintSet wanted;
     IdmConstraintSet given;
-    IdmTypeCmp cmp;
     const char *owner;
     bool may;
     const SiblingContract *siblings;
@@ -138,11 +137,8 @@ static const IdmCallableContract *sibling_contract(const GenCtx *g, const IdmCor
 static bool cmp_name_eq(void *user, const char *a, const char *b) {
     return type_name_same((ExpandContext *)user, a, b);
 }
-static bool cmp_trait_eq(void *user, const char *a, const char *b) {
-    return typeclass_same_trait((ExpandContext *)user, a, b);
-}
-static bool cmp_given_matches(void *user, const IdmConstraint *given, const char *trait, const IdmTypeTerm *lhs) {
-    return typeclass_given_matches((ExpandContext *)user, given, trait, lhs);
+static bool cmp_given_matches(void *user, const IdmConstraint *given, IdmSymbol *trait, const IdmTypeTerm *lhs) {
+    return typeclass_given_matches((ExpandContext *)user, given, idm_symbol_text(trait), lhs);
 }
 
 static void type_env_destroy(TypeEnv *env) {
@@ -200,37 +196,40 @@ static bool type_env_lookup_local(const TypeEnv *env, uint32_t slot, IdmTypeTerm
 static bool fresh_var(GenCtx *g, IdmTypeTerm *out) {
     if (g->ctx->type_var_seq >= 0x7fffffffu) { memset(out, 0, sizeof(*out)); return false; }
     g->ctx->type_var_seq++;
-    return idm_type_var(out, "t", 0x80000000u | g->ctx->type_var_seq, false);
+    return idm_type_var(g->ctx->rt, out, "t", 0x80000000u | g->ctx->type_var_seq, false);
 }
 
-static bool type_con_term(const char *name, IdmTypeTerm *out, IdmError *err, IdmSpan span) {
-    return idm_type_con(out, name) || idm_error_oom(err, span);
+static bool type_con_term(GenCtx *g, const char *name, IdmTypeTerm *out, IdmError *err, IdmSpan span) {
+    return idm_type_con(g->ctx->rt, out, name) || idm_error_oom(err, span);
 }
 
 static bool type_from_literal(GenCtx *g, IdmValue value, IdmTypeTerm *out, IdmError *err, IdmSpan span) {
     (void)g;
-    if (idm_is_nil(value)) return type_con_term("empty-list", out, err, span);
+    if (idm_is_nil(value)) return type_con_term(g, "empty-list", out, err, span);
     IdmValueTag tag = idm_value_tag(value);
     const char *name = tag == IDM_VAL_BIGNUM ? "int" : idm_value_type_name(tag);
-    return type_con_term(name, out, err, span);
+    return type_con_term(g, name, out, err, span);
 }
 
-static IdmInstanceResult ctx_instance_oracle(void *user, const char *trait, const IdmTypeTerm *ty) {
+static IdmInstanceResult ctx_instance_oracle(void *user, IdmSymbol *trait_symbol, const IdmTypeTerm *ty) {
     ExpandContext *ctx = user;
-    if (ty && ty->kind == IDM_TYPE_CON && ty->name && strcmp(ty->name, "Any") == 0) return IDM_INST_YES;
+    const char *trait = idm_symbol_text(trait_symbol);
+    const char *type = idm_type_term_text(ty);
+    if (ty && ty->kind == IDM_TYPE_CON && type && strcmp(type, "Any") == 0) return IDM_INST_YES;
     if (trait && trait[0] == '_' && trait[1] == '.') {
-        if (!ty || ty->kind != IDM_TYPE_CON || !ty->name) return IDM_INST_UNKNOWN;
-        return type_satisfies_structural_head(ctx, trait, ty->name) ? IDM_INST_YES : IDM_INST_NO;
+        if (!ty || ty->kind != IDM_TYPE_CON || !type) return IDM_INST_UNKNOWN;
+        return type_satisfies_structural_head(ctx, trait, type) ? IDM_INST_YES : IDM_INST_NO;
     }
     const TraitDef *td = trait_by_constraint_name(ctx, trait);
     if (!td) return IDM_INST_UNKNOWN;
     return trait_impl_satisfies_term(ctx, td, ty) ? IDM_INST_YES : IDM_INST_NO;
 }
 
-static const char *canonical_trait(GenCtx *g, const char *trait) {
+static IdmSymbol *canonical_trait(GenCtx *g, IdmSymbol *trait_symbol) {
+    const char *trait = idm_symbol_text(trait_symbol);
     const TraitDef *td = trait_by_constraint_name(g->ctx, trait);
     const char *id = td ? trait_def_identity_text(td) : NULL;
-    return id ? id : trait;
+    return id ? idm_intern(&g->ctx->rt->intern, IDM_SYMBOL_ATOM, id) : trait_symbol;
 }
 
 typedef struct {
@@ -255,9 +254,10 @@ static bool fresh_map_get(GenCtx *g, FreshMap *seen, FreshMap *repl, uint32_t sr
 }
 
 static bool contract_quantifies(const IdmCallableContract *c, const IdmTypeTerm *v) {
-    if (!c || !v || v->kind != IDM_TYPE_VAR || !v->name) return false;
+    const char *name = idm_type_term_text(v);
+    if (!c || !v || v->kind != IDM_TYPE_VAR || !name) return false;
     for (size_t i = 0; i < c->quantified_count; i++) {
-        if (c->quantified[i] && strcmp(c->quantified[i], v->name) == 0) return true;
+        if (c->quantified[i] && strcmp(c->quantified[i], name) == 0) return true;
     }
     return v->var_id != 0u && v->var_id <= c->quantified_count;
 }
@@ -278,8 +278,8 @@ static bool term_map_vars(void *user, TermVarMap map_var, const IdmTypeTerm *src
         }
     }
     if (src->kind == IDM_TYPE_CON) {
-        if (src->arg_count == 0) { free(args); return idm_type_con(out, src->name); }
-        if (idm_type_con_take(out, src->name, args, src->arg_count)) return true;
+        if (src->arg_count == 0) { free(args); return idm_type_con_symbol(out, src->symbol); }
+        if (idm_type_con_take_symbol(out, src->symbol, args, src->arg_count)) return true;
     } else if (idm_type_compound(out, src->kind, args, src->arg_count)) {
         return true;
     }
@@ -299,8 +299,8 @@ static bool inst_map_var(void *user, const IdmTypeTerm *var, IdmTypeTerm *out) {
     InstVars *iv = user;
     if (contract_quantifies(iv->owner, var)) {
         uint32_t nv = 0;
-        if (!fresh_map_get(iv->g, iv->seen, iv->repl, var->var_id ? var->var_id : (uint32_t)(uintptr_t)var->name, &nv)) return false;
-        return idm_type_var(out, var->name ? var->name : "t", nv, false);
+        if (!fresh_map_get(iv->g, iv->seen, iv->repl, var->var_id ? var->var_id : idm_symbol_id(var->symbol), &nv)) return false;
+        return idm_type_var_symbol(out, var->symbol, nv, false);
     }
     return idm_type_term_copy(out, var);
 }
@@ -312,8 +312,8 @@ static bool inst_term(GenCtx *g, const IdmCallableContract *owner, FreshMap *see
 
 static bool rigid_map_var(void *user, const IdmTypeTerm *var, IdmTypeTerm *out) {
     (void)user;
-    if (var->name && strcmp(var->name, "_") == 0) return idm_type_term_copy(out, var);
-    return idm_type_var(out, var->name ? var->name : "t", var->var_id, true);
+    if (strcmp(idm_type_term_text(var), "_") == 0) return idm_type_term_copy(out, var);
+    return idm_type_var_symbol(out, var->symbol, var->var_id, true);
 }
 
 static bool rigidify_term(const IdmCallableContract *c, const IdmTypeTerm *src, IdmTypeTerm *out) {
@@ -420,10 +420,11 @@ static bool subsume_mismatch(GenCtx *g, IdmError *err, IdmSpan span, const IdmTy
 }
 
 static bool subsume_overtype(GenCtx *g, const IdmTypeTerm *expected, const IdmTypeTerm *actual, IdmError *err, IdmSpan span, unsigned depth) {
-    if (!expected->name) return subsume_mismatch(g, err, span, expected, actual);
-    const TraitDef *trait = trait_by_constraint_name(g->ctx, expected->name);
+    const char *expected_name = idm_type_term_text(expected);
+    if (!expected_name) return subsume_mismatch(g, err, span, expected, actual);
+    const TraitDef *trait = trait_by_constraint_name(g->ctx, expected_name);
     if (trait && trait_impl_satisfies_term(g->ctx, trait, actual)) return true;
-    const TypeDef *td = type_def_by_name(g->ctx, expected->name);
+    const TypeDef *td = type_def_by_name(g->ctx, expected_name);
     if (td && td->member_count != 0) {
         for (size_t i = 0; i < td->member_count; i++) {
             if (idm_type_term_equal(&td->members[i].term, expected)) continue;
@@ -431,8 +432,8 @@ static bool subsume_overtype(GenCtx *g, const IdmTypeTerm *expected, const IdmTy
             idm_error_clear(err);
         }
     }
-    if (actual->kind == IDM_TYPE_CON && actual->name) {
-        const TypeDef *ta = type_def_by_name(g->ctx, actual->name);
+    if (actual->kind == IDM_TYPE_CON && actual->symbol) {
+        const TypeDef *ta = type_def_by_name(g->ctx, idm_type_term_text(actual));
         if (ta && ta->member_count != 0) {
             bool all = true;
             for (size_t i = 0; all && i < ta->member_count; i++) {
@@ -447,9 +448,11 @@ static bool subsume_overtype(GenCtx *g, const IdmTypeTerm *expected, const IdmTy
 }
 
 static bool numeric_con_pair(const IdmTypeTerm *e, const IdmTypeTerm *a) {
-    if (e->kind != IDM_TYPE_CON || a->kind != IDM_TYPE_CON || e->arg_count != 0 || a->arg_count != 0 || !e->name || !a->name) return false;
-    return (strcmp(e->name, "int") == 0 && strcmp(a->name, "float") == 0) ||
-           (strcmp(e->name, "float") == 0 && strcmp(a->name, "int") == 0);
+    if (e->kind != IDM_TYPE_CON || a->kind != IDM_TYPE_CON || e->arg_count != 0 || a->arg_count != 0 || !e->symbol || !a->symbol) return false;
+    const char *en = idm_type_term_text(e);
+    const char *an = idm_type_term_text(a);
+    return (strcmp(en, "int") == 0 && strcmp(an, "float") == 0) ||
+           (strcmp(en, "float") == 0 && strcmp(an, "int") == 0);
 }
 
 static bool number_classed_var(GenCtx *g, const IdmTypeTerm *v) {
@@ -458,7 +461,7 @@ static bool number_classed_var(GenCtx *g, const IdmTypeTerm *v) {
         const IdmConstraint *c = &g->wanted.items[i];
         if (c->kind != IDM_CONSTR_CLASS) continue;
         if (c->lhs.kind != IDM_TYPE_VAR || c->lhs.var_id != v->var_id) continue;
-        if (typeclass_same_trait(g->ctx, c->trait, "Number")) return true;
+        if (typeclass_same_trait(g->ctx, idm_symbol_text(c->trait), "Number")) return true;
     }
     return false;
 }
@@ -482,17 +485,17 @@ static bool subsume(GenCtx *g, const IdmTypeTerm *expected, const IdmTypeTerm *a
     if (member_identity) {
         ok = true;
     } else if (var_member) {
-        ok = idm_unify(&g->subst, &g->cmp, var_member, &a, err, span);
+        ok = idm_unify(&g->subst, var_member, &a, err, span);
         if (!ok) { idm_error_clear(err); ok = subsume_mismatch(g, err, span, &e, &a); }
-    } else if (e.kind == IDM_TYPE_CON && e.name && strcmp(e.name, "Any") == 0) {
+    } else if (e.kind == IDM_TYPE_CON && e.symbol && strcmp(idm_type_term_text(&e), "Any") == 0) {
         ok = true;
     } else if (e.kind == IDM_TYPE_VAR && e.rigid && a.kind == IDM_TYPE_UNION) {
         ok = true;
         for (size_t i = 0; i < a.arg_count && ok; i++) ok = subsume(g, &e, &a.args[i], err, span, depth + 1u);
     } else if (e.kind == IDM_TYPE_VAR || a.kind == IDM_TYPE_VAR) {
-        ok = idm_unify(&g->subst, &g->cmp, &e, &a, err, span);
+        ok = idm_unify(&g->subst, &e, &a, err, span);
         if (!ok) { idm_error_clear(err); ok = subsume_mismatch(g, err, span, &e, &a); }
-    } else if (a.kind == IDM_TYPE_CON && a.name && strcmp(a.name, "Any") == 0) {
+    } else if (a.kind == IDM_TYPE_CON && a.symbol && strcmp(idm_type_term_text(&a), "Any") == 0) {
         ok = true;
     } else if (a.kind == IDM_TYPE_UNION && g->may) {
         ok = false;
@@ -516,8 +519,8 @@ static bool subsume(GenCtx *g, const IdmTypeTerm *expected, const IdmTypeTerm *a
             ok = subsume(g, &e.args[i], &a, err, span, depth + 1u);
             if (!ok) idm_error_clear(err);
         }
-        if (!ok && a.kind == IDM_TYPE_CON && a.name) {
-            const TypeDef *ta = type_def_by_name(g->ctx, a.name);
+        if (!ok && a.kind == IDM_TYPE_CON && a.symbol) {
+            const TypeDef *ta = type_def_by_name(g->ctx, idm_type_term_text(&a));
             if (ta && ta->member_count != 0) {
                 ok = true;
                 for (size_t i = 0; ok && i < ta->member_count; i++) {
@@ -528,14 +531,14 @@ static bool subsume(GenCtx *g, const IdmTypeTerm *expected, const IdmTypeTerm *a
             }
         }
         if (!ok) subsume_mismatch(g, err, span, &e, &a);
-    } else if (e.kind == IDM_TYPE_CON && a.kind == IDM_TYPE_CON && type_name_same(g->ctx, e.name, a.name)) {
+    } else if (e.kind == IDM_TYPE_CON && a.kind == IDM_TYPE_CON && e.symbol == a.symbol) {
         ok = true;
         if (e.arg_count == a.arg_count) {
             for (size_t i = 0; i < e.arg_count && ok; i++) ok = subsume(g, &e.args[i], &a.args[i], err, span, depth + 1u);
         }
     } else if (numeric_con_pair(&e, &a) && number_classed_var(g, expected)) {
         IdmTypeTerm widened;
-        ok = idm_type_con(&widened, "float") || idm_error_oom(err, span);
+        ok = idm_type_con(g->ctx->rt, &widened, "float") || idm_error_oom(err, span);
         if (ok) {
             ok = idm_subst_widen(&g->subst, expected, &widened) || idm_error_oom(err, span);
             idm_type_term_destroy(&widened);
@@ -627,13 +630,13 @@ static bool clause_slot_pin(GenCtx *g, const IdmFnClause *cl, size_t i, IdmTypeT
             return true;
         }
         if (!probe.has_head) return true;
-        if (!type_con_term(probe.head_name, out, err, p->span)) return false;
+        if (!type_con_term(g, probe.head_name, out, err, p->span)) return false;
         *pinned = true;
         return true;
     }
     for (const IdmCore *n = cl->guard; n;) {
         if (guard_check_pins_slot(n->kind == IDM_CORE_COND ? n->as.cond_expr.cond : n, (uint32_t)i)) {
-            if (!type_con_term("bitstring", out, err, p->span)) return false;
+            if (!type_con_term(g, "bitstring", out, err, p->span)) return false;
             *pinned = true;
             return true;
         }
@@ -653,10 +656,11 @@ static bool term_overlaps_head(GenCtx *g, const IdmTypeTerm *t, const IdmPattern
         }
         return false;
     }
-    if (t->kind != IDM_TYPE_CON || !t->name) return true;
-    if (strcmp(t->name, "Any") == 0) return true;
-    if (type_name_same(g->ctx, t->name, probe->head_name)) return true;
-    const TypeDef *td = type_def_by_name(g->ctx, t->name);
+    const char *name = idm_type_term_text(t);
+    if (t->kind != IDM_TYPE_CON || !name) return true;
+    if (strcmp(name, "Any") == 0) return true;
+    if (type_name_same(g->ctx, name, probe->head_name)) return true;
+    const TypeDef *td = type_def_by_name(g->ctx, name);
     if (td && td->member_count != 0) {
         for (size_t i = 0; i < td->member_count; i++) {
             if (idm_type_term_equal(&td->members[i].term, t)) continue;
@@ -664,13 +668,13 @@ static bool term_overlaps_head(GenCtx *g, const IdmTypeTerm *t, const IdmPattern
         }
         return false;
     }
-    return idm_pattern_probe_overlaps_type(g->ctx->rt, probe, t->name);
+    return idm_pattern_probe_overlaps_type(g->ctx->rt, probe, name);
 }
 
 
 static bool term_all_concrete(const IdmTypeTerm *t) {
     if (t->kind == IDM_TYPE_VAR) return false;
-    if (t->kind == IDM_TYPE_CON && t->name && strcmp(t->name, "Any") == 0) return false;
+    if (t->kind == IDM_TYPE_CON && t->symbol && strcmp(idm_type_term_text(t), "Any") == 0) return false;
     for (size_t i = 0; i < t->arg_count; i++) {
         if (!term_all_concrete(&t->args[i])) return false;
     }
@@ -688,8 +692,8 @@ static bool match_closed_members(GenCtx *g, const IdmTypeTerm *s0, IdmTypeTerm *
     bool ok = true;
     if (s0->kind == IDM_TYPE_UNION) {
         ok = union_collect(g, &members, &count, &cap, s0) || idm_error_oom(err, span);
-    } else if (s0->kind == IDM_TYPE_CON && s0->name) {
-        const TypeDef *td = type_def_by_name(g->ctx, s0->name);
+    } else if (s0->kind == IDM_TYPE_CON && s0->symbol) {
+        const TypeDef *td = type_def_by_name(g->ctx, idm_type_term_text(s0));
         for (size_t i = 0; ok && td && i < td->member_count; i++) {
             ok = union_collect(g, &members, &count, &cap, &td->members[i].term) || idm_error_oom(err, span);
         }
@@ -728,7 +732,7 @@ static const IdmCallableContract *call_callee_contract(GenCtx *g, const IdmCore 
     if (!callee) return NULL;
     if (callee->kind == IDM_CORE_FN_MULTI && callee->as.fn_multi.count == 1u && callee->as.fn_multi.clauses[0].primitive_backed) {
         bool has = false;
-        if (!idm_primitive_contract(callee->as.fn_multi.clauses[0].primitive, core->as.call.arg_count, tmp, &has, err, core->span)) return NULL;
+        if (!idm_primitive_contract(g->ctx->rt, callee->as.fn_multi.clauses[0].primitive, core->as.call.arg_count, tmp, &has, err, core->span)) return NULL;
         if (has) { *tmp_owned = true; return tmp; }
         return NULL;
     }
@@ -850,11 +854,11 @@ static bool dispatch_receiver_term(ExpandContext *ctx, const IdmCore *core, IdmT
     idm_error_init(&probe);
     IdmTypeTerm t;
     bool ok = gen_core(&g, NULL, core, &t, &probe);
-    if (ok) ok = idm_solve(&g.subst, &g.cmp, &g.given, &g.wanted, ctx_instance_oracle, ctx, NULL, &probe, core->span);
+    if (ok) ok = idm_solve(&g.subst, &g.given, &g.wanted, cmp_given_matches, ctx_instance_oracle, ctx, NULL, &probe, core->span);
     if (ok) {
         IdmTypeTerm applied;
         if (idm_subst_apply(&g.subst, &t, &applied)) {
-            if (applied.kind == IDM_TYPE_CON && applied.name && strcmp(applied.name, "->") != 0) {
+            if (applied.kind == IDM_TYPE_CON && applied.symbol && strcmp(idm_type_term_text(&applied), "->") != 0) {
                 *out = applied;
                 if (has_type) *has_type = true;
             } else {
@@ -897,7 +901,7 @@ static bool gen_dispatch(GenCtx *g, const TypeEnv *env, const IdmCore *core, Idm
         }
         if (has_applied) idm_type_term_destroy(&applied);
         node->as.dispatch.route = route;
-        return type_con_term("atom", out, err, core->span);
+        return type_con_term(g, "atom", out, err, core->span);
     }
     if (core->as.dispatch.kind == IDM_DISPATCH_FIELD) {
         if (core->as.dispatch.arg_count == 0) return fresh_var(g, out) || idm_error_oom(err, core->span);
@@ -905,7 +909,7 @@ static bool gen_dispatch(GenCtx *g, const TypeEnv *env, const IdmCore *core, Idm
         IdmTypeTerm applied;
         bool got = false;
         if (!dispatch_receiver_term(g->ctx, core->as.dispatch.args[0], &applied, &got)) return idm_error_oom(err, core->span);
-        const char *rt_name = got ? applied.name : NULL;
+        const char *rt_name = got ? idm_type_term_text(&applied) : NULL;
         bool routed = expand_dispatch_route_field(g->ctx, node, rt_name, err);
         if (got) idm_type_term_destroy(&applied);
         if (!routed) return false;
@@ -928,7 +932,7 @@ static bool gen_dispatch(GenCtx *g, const TypeEnv *env, const IdmCore *core, Idm
         idm_type_term_destroy(&receiver_type);
         return idm_error_oom(err, core->span);
     }
-    const char *rt_name = has_routed_type ? routed_type.name : NULL;
+    const char *rt_name = has_routed_type ? idm_type_term_text(&routed_type) : NULL;
     bool routed = expand_dispatch_route_method(g->ctx, node, rt_name, err);
     if (has_routed_type) idm_type_term_destroy(&routed_type);
     if (!routed) {
@@ -943,7 +947,7 @@ static bool gen_dispatch(GenCtx *g, const TypeEnv *env, const IdmCore *core, Idm
         const IdmDispatchImplDef *cand = &node->as.dispatch.impls[node->as.dispatch.route_index];
         if (cand->passthrough && cand->primitive < IDM_PRIM_COUNT) {
             bool has = false;
-            if (!idm_primitive_contract((IdmPrimitive)cand->primitive, core->as.dispatch.arg_count, &tmp, &has, err, core->span)) {
+            if (!idm_primitive_contract(g->ctx->rt, (IdmPrimitive)cand->primitive, core->as.dispatch.arg_count, &tmp, &has, err, core->span)) {
                 idm_type_term_destroy(&receiver_type);
                 return false;
             }
@@ -1008,11 +1012,11 @@ static bool gen_dispatch(GenCtx *g, const TypeEnv *env, const IdmCore *core, Idm
     return ok;
 }
 
-static bool union_member_push(GenCtx *g, IdmTypeTerm **members, size_t *count, size_t *cap, const IdmTypeTerm *m) {
+static bool union_member_push(IdmTypeTerm **members, size_t *count, size_t *cap, const IdmTypeTerm *m) {
     for (size_t i = 0; i < *count; i++) {
         const IdmTypeTerm *seen = &(*members)[i];
         if (idm_type_term_equal(seen, m)) return true;
-        if (seen->kind == IDM_TYPE_CON && m->kind == IDM_TYPE_CON && seen->arg_count == 0 && m->arg_count == 0 && type_name_same(g->ctx, seen->name, m->name)) return true;
+        if (seen->kind == IDM_TYPE_CON && m->kind == IDM_TYPE_CON && seen->arg_count == 0 && m->arg_count == 0 && seen->symbol == m->symbol) return true;
     }
     if (*count == *cap && !idm_grow((void **)members, cap, sizeof(**members), 4u, *count + 1u)) return false;
     if (!idm_type_term_copy(&(*members)[*count], m)) return false;
@@ -1027,7 +1031,7 @@ static bool union_collect(GenCtx *g, IdmTypeTerm **members, size_t *count, size_
         }
         return true;
     }
-    return union_member_push(g, members, count, cap, t);
+    return union_member_push(members, count, cap, t);
 }
 
 static bool gen_union_alt(GenCtx *g, const IdmTypeTerm *a, const IdmTypeTerm *b, IdmTypeTerm *out, IdmError *err, IdmSpan span) {
@@ -1089,7 +1093,7 @@ static bool subsume_alternatives(GenCtx *g, const IdmTypeTerm *expected, const I
                 dropped = true;
                 continue;
             }
-            ok = union_member_push(g, &members, &count, &cap, m) || idm_error_oom(err, span);
+            ok = union_member_push(&members, &count, &cap, m) || idm_error_oom(err, span);
         }
         if (ok && dropped) {
             if (count == 0) {
@@ -1123,7 +1127,7 @@ static bool gen_union(GenCtx *g, const IdmTypeTerm *a, const IdmTypeTerm *b, Idm
     if (a->kind == IDM_TYPE_VAR || b->kind == IDM_TYPE_VAR) {
         IdmError probe;
         idm_error_init(&probe);
-        if (idm_unify(&g->subst, &g->cmp, a, b, &probe, span)) return idm_subst_apply(&g->subst, a, out) || idm_error_oom(err, span);
+        if (idm_unify(&g->subst, a, b, &probe, span)) return idm_subst_apply(&g->subst, a, out) || idm_error_oom(err, span);
         idm_error_clear(&probe);
     }
     IdmTypeTerm *members = NULL;
@@ -1165,19 +1169,19 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
             for (size_t i = 0; i < core->as.string_concat.count; i++) {
                 if (!gen_discard(g, env, core->as.string_concat.items[i], err)) return false;
             }
-            return type_con_term("string", out, err, core->span);
+            return type_con_term(g, "string", out, err, core->span);
         case IDM_CORE_VALUE_SEQUENCE:
             for (size_t i = 0; i < core->as.value_sequence.count; i++) {
                 if (!gen_discard(g, env, core->as.value_sequence.items[i], err)) return false;
             }
-            return type_con_term(idm_value_sequence_kind_name(core->as.value_sequence.kind), out, err, core->span);
+            return type_con_term(g, idm_value_sequence_kind_name(core->as.value_sequence.kind), out, err, core->span);
         case IDM_CORE_FORM_BUILD:
             if (!gen_discard(g, env, core->as.syntax_build.ctx, err)) return false;
             if (!gen_discard(g, env, core->as.syntax_build.payload, err)) return false;
-            return type_con_term("syntax", out, err, core->span);
+            return type_con_term(g, "syntax", out, err, core->span);
         case IDM_CORE_RECORD_IS:
             if (!gen_discard(g, env, core->as.record_is.value, err)) return false;
-            return type_con_term("atom", out, err, core->span);
+            return type_con_term(g, "atom", out, err, core->span);
         case IDM_CORE_RECORD_CONSTRUCT: {
             const char *tname = idm_symbol_text(core->as.record_construct.type);
             char disp[96];
@@ -1201,7 +1205,7 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
                 idm_type_term_destroy(&vt);
                 if (!ok) return false;
             }
-            return type_con_term(tname, out, err, core->span);
+            return type_con_term(g, tname, out, err, core->span);
         }
         case IDM_CORE_RECORD_FIELD: {
             if (!gen_discard(g, env, core->as.record_field.receiver, err)) return false;
@@ -1275,7 +1279,7 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
                     scl[ci].pattern_local_count = cl->pattern_local_count;
                     scl[ci].has_guard = cl->guard != NULL;
                 }
-                for (size_t m = 0; ok && m < member_count; m++) names[m] = members[m].kind == IDM_TYPE_CON ? members[m].name : NULL;
+                for (size_t m = 0; ok && m < member_count; m++) names[m] = members[m].kind == IDM_TYPE_CON ? idm_type_term_text(&members[m]) : NULL;
                 clause_covers = member_count && cc ? calloc(cc * member_count, sizeof(*clause_covers)) : NULL;
                 if (member_count && cc && !clause_covers) ok = idm_error_oom(err, core->span);
                 if (ok && uniform) ok = idm_pattern_selector_usefulness(g->ctx->rt, scl, cc, names, member_count, cmp_name_eq, g->ctx, useful, covered, clause_covers, &residual, err);
@@ -1353,7 +1357,7 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
                         IdmTypeTerm s0;
                         if (!idm_subst_apply(&g->subst, &st[0], &s0)) ok = idm_error_oom(err, core->span);
                         else {
-                            if (s0.kind == IDM_TYPE_CON && s0.name && type_name_same(g->ctx, s0.name, probe.head_name)) {
+                            if (s0.kind == IDM_TYPE_CON && s0.symbol && type_name_same(g->ctx, idm_type_term_text(&s0), probe.head_name)) {
                                 IdmTypeTerm nr;
                                 if (fresh_var(g, &nr)) {
                                     idm_type_term_destroy(&st[0]);
@@ -1484,7 +1488,7 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
         case IDM_CORE_LIST_CONS:
             if (!gen_discard(g, env, core->as.list_pair.head, err)) return false;
             if (!gen_discard(g, env, core->as.list_pair.tail, err)) return false;
-            return type_con_term("pair", out, err, core->span);
+            return type_con_term(g, "pair", out, err, core->span);
         case IDM_CORE_LIST_APPEND:
             if (!gen_discard(g, env, core->as.list_pair.head, err)) return false;
             if (!gen_discard(g, env, core->as.list_pair.tail, err)) return false;
@@ -1614,7 +1618,7 @@ static bool seed_pattern_local_typed(GenCtx *g, TypeEnv *env, const IdmFnClause 
     for (uint32_t k = 0; k < cl->pattern_local_count; k++) {
         if (!cl->pattern_locals[k].name || strcmp(cl->pattern_locals[k].name, name) != 0) continue;
         IdmTypeTerm t;
-        if (!type_con_term(type_name, &t, err, idm_span_unknown(NULL))) return false;
+        if (!type_con_term(g, type_name, &t, err, idm_span_unknown(NULL))) return false;
         bool ok = type_env_set_local(env, cl->pattern_locals[k].slot, &t);
         idm_type_term_destroy(&t);
         return ok || idm_error_oom(err, idm_span_unknown(NULL));
@@ -1682,7 +1686,7 @@ static bool seed_match_clause(GenCtx *g, TypeEnv *nested, const IdmFnClause *cl,
             const IdmPattern *bp = i < cl->pattern_count ? cl->param_patterns[i] : NULL;
             if (bp && bp->kind == IDM_PAT_BITS) {
                 return idm_error_set(err, bp->span, "type mismatch for '%s': expected bitstring, got %s",
-                                     g && g->owner ? g->owner : "<expr>", base->name ? base->name : "?");
+                                     g && g->owner ? g->owner : "<expr>", idm_type_term_text(base) ? idm_type_term_text(base) : "?");
             }
         }
         if (!have_refined && !base) {
@@ -1709,10 +1713,6 @@ static bool seed_match_clause(GenCtx *g, TypeEnv *nested, const IdmFnClause *cl,
 static void gen_ctx_init(GenCtx *g, ExpandContext *ctx, const char *owner) {
     g->ctx = ctx;
     g->owner = owner;
-    g->cmp.name_eq = cmp_name_eq;
-    g->cmp.trait_eq = cmp_trait_eq;
-    g->cmp.given_matches = cmp_given_matches;
-    g->cmp.user = ctx;
     g->may = false;
     idm_subst_init(&g->subst);
     idm_constraint_set_init(&g->wanted);
@@ -1745,7 +1745,7 @@ static bool reject_residual(GenCtx *g, const IdmConstraintSet *residual, IdmErro
         IdmBuffer tb;
         idm_buf_init(&tb);
         bool w = idm_type_term_write(&tb, &ty);
-        const char *tr = c->trait ? c->trait : "?";
+        const char *tr = c->trait ? idm_symbol_text(c->trait) : "?";
         int trn = (int)strcspn(tr, "#");
         idm_error_set(err, span, "unsolved typeclass '%.*s' for %s", trn, tr, w && tb.data ? tb.data : "?");
         idm_buf_destroy(&tb);
@@ -1767,7 +1767,7 @@ static bool seed_pattern_type(GenCtx *g, TypeEnv *env, const IdmFnClause *clause
         pinned = false;
         if (p->kind == IDM_PAT_BITS) {
             return idm_error_set(err, p->span, "type mismatch for '%s': expected bitstring, got %s",
-                                 g && g->owner ? g->owner : "<expr>", ptype->name ? ptype->name : "?");
+                                 g && g->owner ? g->owner : "<expr>", idm_type_term_text(ptype) ? idm_type_term_text(ptype) : "?");
         }
     }
     const IdmTypeTerm *t = pinned ? &pin : ptype;
@@ -1787,10 +1787,11 @@ static bool seed_pattern_type(GenCtx *g, TypeEnv *env, const IdmFnClause *clause
 }
 
 static bool term_is_flex_var(const IdmTypeTerm *t) {
-    return t && t->kind == IDM_TYPE_VAR && !t->rigid && t->var_id != 0u && !(t->name && strcmp(t->name, "_") == 0);
+    return t && t->kind == IDM_TYPE_VAR && !t->rigid && t->var_id != 0u && strcmp(idm_type_term_text(t), "_") != 0;
 }
 
 typedef struct {
+    IdmRuntime *rt;
     uint32_t *ids;
     char **names;
     size_t count;
@@ -1846,11 +1847,11 @@ static bool quantify_applied(QuantMap *qm, const IdmTypeTerm *t, IdmTypeTerm *ou
     if (term_is_flex_var(t)) {
         size_t idx = 0;
         if (!quant_map_intern(qm, t->var_id, &idx)) return false;
-        return idm_type_var(out, qm->names[idx], (uint32_t)(idx + 1u), false);
+        return idm_type_var(qm->rt, out, qm->names[idx], (uint32_t)(idx + 1u), false);
     }
     if (t->kind == IDM_TYPE_VAR) return idm_type_term_copy(out, t);
     if (t->arg_count == 0) {
-        if (t->kind == IDM_TYPE_CON) return idm_type_con(out, t->name);
+        if (t->kind == IDM_TYPE_CON) return idm_type_con_symbol(out, t->symbol);
         return idm_type_compound(out, t->kind, NULL, 0u);
     }
     IdmTypeTerm *args = calloc(t->arg_count, sizeof(*args));
@@ -1862,7 +1863,7 @@ static bool quantify_applied(QuantMap *qm, const IdmTypeTerm *t, IdmTypeTerm *ou
             return false;
         }
     }
-    bool ok = t->kind == IDM_TYPE_CON ? idm_type_con_take(out, t->name, args, t->arg_count)
+    bool ok = t->kind == IDM_TYPE_CON ? idm_type_con_take_symbol(out, t->symbol, args, t->arg_count)
                                       : idm_type_compound(out, t->kind, args, t->arg_count);
     if (!ok) {
         for (size_t i = 0; i < t->arg_count; i++) idm_type_term_destroy(&args[i]);
@@ -1890,6 +1891,7 @@ static bool generalize_contract_sigs(GenCtx *g, const GenSigInput *inputs, size_
     memset(out, 0, sizeof(*out));
     QuantMap qm;
     memset(&qm, 0, sizeof(qm));
+    qm.rt = g->ctx->rt;
     bool ok = true;
     for (size_t si = 0; ok && si < input_count; si++) {
         const GenSigInput *in = &inputs[si];
@@ -1921,14 +1923,13 @@ static bool generalize_contract_sigs(GenCtx *g, const GenSigInput *inputs, size_
             if (!member_var) continue;
             bool dup = false;
             for (size_t j = 0; j < cc; j++) {
-                if (ctxc[j].lhs.var_id == (uint32_t)(idx + 1u) && ctxc[j].trait && c->trait && strcmp(ctxc[j].trait, c->trait) == 0) { dup = true; break; }
+                if (ctxc[j].lhs.var_id == (uint32_t)(idx + 1u) && ctxc[j].trait == c->trait) { dup = true; break; }
             }
             if (dup) continue;
             memset(&ctxc[cc], 0, sizeof(ctxc[cc]));
             ctxc[cc].kind = IDM_CONSTR_CLASS;
-            if (!idm_type_var(&ctxc[cc].lhs, qm.names[idx], (uint32_t)(idx + 1u), false)) { ok = idm_error_oom(err, idm_span_unknown(NULL)); break; }
-            ctxc[cc].trait = c->trait ? idm_strdup(c->trait) : NULL;
-            if (c->trait && !ctxc[cc].trait) { idm_type_term_destroy(&ctxc[cc].lhs); ok = idm_error_oom(err, idm_span_unknown(NULL)); break; }
+            if (!idm_type_var(g->ctx->rt, &ctxc[cc].lhs, qm.names[idx], (uint32_t)(idx + 1u), false)) { ok = idm_error_oom(err, idm_span_unknown(NULL)); break; }
+            ctxc[cc].trait = c->trait;
             cc++;
         }
         if (ok && cc) { out->context = ctxc; out->context_count = cc; }
@@ -1988,7 +1989,7 @@ static bool check_clause(ExpandContext *ctx, const IdmFnClause *clause, const Id
     }
     IdmConstraintSet residual;
     idm_constraint_set_init(&residual);
-    if (ok) ok = idm_solve(&g.subst, &g.cmp, &g.given, &g.wanted, ctx_instance_oracle, ctx, &residual, err, bspan);
+    if (ok) ok = idm_solve(&g.subst, &g.given, &g.wanted, cmp_given_matches, ctx_instance_oracle, ctx, &residual, err, bspan);
     if (ok && contract) ok = reject_residual(&g, &residual, err, bspan);
     if (ok) ok = gen_harvest_flush(&g, err);
     idm_constraint_set_destroy(&residual);
@@ -2228,7 +2229,7 @@ static bool infer_scheme(ExpandContext *ctx, const IdmCore *value, const char *n
     }
     IdmConstraintSet residual;
     idm_constraint_set_init(&residual);
-    if (ok) ok = idm_solve(&g.subst, &g.cmp, &g.given, &g.wanted, ctx_instance_oracle, ctx, &residual, err, value->span);
+    if (ok) ok = idm_solve(&g.subst, &g.given, &g.wanted, cmp_given_matches, ctx_instance_oracle, ctx, &residual, err, value->span);
     if (ok) ok = gen_harvest_flush(&g, err);
     if (ok) ok = generalize_contract_sigs(&g, inputs, arity_count, &residual, out, err);
     if (ok) *out_has = true;
@@ -2286,7 +2287,7 @@ static bool check_fn(ExpandContext *ctx, const IdmCore *value, const IdmCallable
     if (ok && vsig && vsig->has_result) ok = subsume(&g, &vsig->result, &t, err, value->span, 0u);
     IdmConstraintSet residual;
     idm_constraint_set_init(&residual);
-    if (ok) ok = idm_solve(&g.subst, &g.cmp, &g.given, &g.wanted, ctx_instance_oracle, ctx, &residual, err, value->span);
+    if (ok) ok = idm_solve(&g.subst, &g.given, &g.wanted, cmp_given_matches, ctx_instance_oracle, ctx, &residual, err, value->span);
     if (ok && contract) ok = reject_residual(&g, &residual, err, value->span);
     if (ok) ok = gen_harvest_flush(&g, err);
     idm_constraint_set_destroy(&residual);
@@ -2445,12 +2446,14 @@ static bool group_member_skeleton(GenCtx *g, GroupMember *m, const IdmCore *valu
 }
 
 static bool overtype_member_covers(GenCtx *g, const TypeDef *td, const IdmTypeTerm *t) {
-    if (t->kind != IDM_TYPE_CON || !t->name) return false;
+    const char *name = idm_type_term_text(t);
+    if (t->kind != IDM_TYPE_CON || !name) return false;
     const char *id = type_def_identity_text(td);
-    if (id && type_name_same(g->ctx, id, t->name)) return false;
+    if (id && type_name_same(g->ctx, id, name)) return false;
     for (size_t i = 0; i < td->member_count; i++) {
         const IdmTypeTerm *m = &td->members[i].term;
-        if (m->kind == IDM_TYPE_CON && m->name && type_name_same(g->ctx, m->name, t->name)) return true;
+        const char *member = idm_type_term_text(m);
+        if (m->kind == IDM_TYPE_CON && member && type_name_same(g->ctx, member, name)) return true;
     }
     return false;
 }
@@ -2485,7 +2488,7 @@ static bool promote_arg_binding(GenCtx *g, const IdmTypeTerm *var, IdmError *err
         const char *id = td ? type_def_identity_text(td) : NULL;
         if (id) {
             IdmTypeTerm wide;
-            if (!idm_type_con(&wide, id)) ok = idm_error_oom(err, span);
+            if (!idm_type_con(g->ctx->rt, &wide, id)) ok = idm_error_oom(err, span);
             else {
                 ok = idm_subst_widen(&g->subst, var, &wide) || idm_error_oom(err, span);
                 idm_type_term_destroy(&wide);
@@ -3051,7 +3054,7 @@ bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, I
                 g.ctx->type_var_seq++;
                 oid = 0x80000000u | g.ctx->type_var_seq;
                 idm_type_term_destroy(&ms->sargs[j]);
-                if (!idm_type_var(&ms->sargs[j], oname, oid, false)) { ok = idm_error_oom(err, gspan); break; }
+                if (!idm_type_var(g.ctx->rt, &ms->sargs[j], oname, oid, false)) { ok = idm_error_oom(err, gspan); break; }
                 if (k < members[i].skel.sig_count && j < members[i].skel.sigs[k].arg_count) {
                     idm_type_term_destroy(&members[i].skel.sigs[k].args[j]);
                     ok = idm_type_term_copy(&members[i].skel.sigs[k].args[j], &ms->sargs[j]) || idm_error_oom(err, gspan);
@@ -3072,7 +3075,7 @@ bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, I
     g.owner = NULL;
     IdmConstraintSet residual;
     idm_constraint_set_init(&residual);
-    if (ok) ok = idm_solve(&g.subst, &g.cmp, &g.given, &g.wanted, ctx_instance_oracle, ctx, &residual, err, gspan);
+    if (ok) ok = idm_solve(&g.subst, &g.given, &g.wanted, cmp_given_matches, ctx_instance_oracle, ctx, &residual, err, gspan);
     if (ok) ok = gen_harvest_flush(&g, err);
     for (size_t i = 0; ok && i < count; i++) {
         if (groups[i].has_contract || !members[i].shaped) continue;

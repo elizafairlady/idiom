@@ -1,4 +1,5 @@
 #include "idiom/scope.h"
+#include "idiom/value.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -557,24 +558,40 @@ const char *idm_resolve_status_name(IdmResolveStatus status) {
     return "<bad-resolve-status>";
 }
 
-bool idm_type_var(IdmTypeTerm *out, const char *name, uint32_t var_id, bool rigid) {
+bool idm_type_var_symbol(IdmTypeTerm *out, IdmSymbol *symbol, uint32_t var_id, bool rigid) {
     memset(out, 0, sizeof(*out));
     out->kind = IDM_TYPE_VAR;
     out->var_id = var_id;
     out->rigid = rigid;
-    out->name = idm_strdup(name ? name : "_");
-    return out->name != NULL;
+    out->symbol = symbol;
+    return symbol != NULL;
 }
 
-bool idm_type_con(IdmTypeTerm *out, const char *name) {
+bool idm_type_var(IdmRuntime *rt, IdmTypeTerm *out, const char *name, uint32_t var_id, bool rigid) {
+    return rt && idm_type_var_symbol(out, idm_intern(&rt->intern, IDM_SYMBOL_WORD, name ? name : "_"), var_id, rigid);
+}
+
+bool idm_type_con_symbol(IdmTypeTerm *out, IdmSymbol *symbol) {
     memset(out, 0, sizeof(*out));
     out->kind = IDM_TYPE_CON;
-    out->name = idm_strdup(name ? name : "");
-    return out->name != NULL;
+    out->symbol = symbol;
+    return symbol != NULL;
 }
 
-bool idm_type_con_take(IdmTypeTerm *out, const char *name, IdmTypeTerm *args, size_t arg_count) {
-    if (!idm_type_con(out, name)) return false;
+bool idm_type_con(IdmRuntime *rt, IdmTypeTerm *out, const char *name) {
+    if (name && strcmp(name, "nil") == 0) name = "empty-list";
+    return rt && idm_type_con_symbol(out, idm_intern(&rt->intern, IDM_SYMBOL_ATOM, name ? name : ""));
+}
+
+bool idm_type_con_take_symbol(IdmTypeTerm *out, IdmSymbol *symbol, IdmTypeTerm *args, size_t arg_count) {
+    if (!idm_type_con_symbol(out, symbol)) return false;
+    out->args = args;
+    out->arg_count = arg_count;
+    return true;
+}
+
+bool idm_type_con_take(IdmRuntime *rt, IdmTypeTerm *out, const char *name, IdmTypeTerm *args, size_t arg_count) {
+    if (!idm_type_con(rt, out, name)) return false;
     out->args = args;
     out->arg_count = arg_count;
     return true;
@@ -590,7 +607,6 @@ bool idm_type_compound(IdmTypeTerm *out, IdmTypeKind kind, IdmTypeTerm *args, si
 
 void idm_type_term_destroy(IdmTypeTerm *term) {
     if (!term) return;
-    free(term->name);
     for (size_t i = 0; i < term->arg_count; i++) idm_type_term_destroy(&term->args[i]);
     free(term->args);
     memset(term, 0, sizeof(*term));
@@ -603,10 +619,6 @@ bool idm_type_term_copy(IdmTypeTerm *dst, const IdmTypeTerm *src) {
     dst->symbol = src->symbol;
     dst->var_id = src->var_id;
     dst->rigid = src->rigid;
-    if (src->name) {
-        dst->name = idm_strdup(src->name);
-        if (!dst->name) return false;
-    }
     if (src->arg_count != 0) {
         dst->args = calloc(src->arg_count, sizeof(*dst->args));
         if (!dst->args) { idm_type_term_destroy(dst); return false; }
@@ -622,7 +634,7 @@ bool idm_type_term_equal(const IdmTypeTerm *a, const IdmTypeTerm *b) {
     if (a == b) return true;
     if (!a || !b || a->kind != b->kind || a->arg_count != b->arg_count) return false;
     if (a->kind == IDM_TYPE_VAR) return a->var_id == b->var_id;
-    if ((a->name || b->name) && (!a->name || !b->name || strcmp(a->name, b->name) != 0)) return false;
+    if (a->symbol != b->symbol) return false;
     for (size_t i = 0; i < a->arg_count; i++) {
         if (!idm_type_term_equal(&a->args[i], &b->args[i])) return false;
     }
@@ -631,11 +643,15 @@ bool idm_type_term_equal(const IdmTypeTerm *a, const IdmTypeTerm *b) {
 
 bool idm_type_term_mentions(const IdmTypeTerm *term, const char *var_name) {
     if (!term || !var_name) return false;
-    if (term->kind == IDM_TYPE_VAR && term->name && strcmp(term->name, var_name) == 0) return true;
+    if (term->kind == IDM_TYPE_VAR && strcmp(idm_type_term_text(term), var_name) == 0) return true;
     for (size_t i = 0; i < term->arg_count; i++) {
         if (idm_type_term_mentions(&term->args[i], var_name)) return true;
     }
     return false;
+}
+
+const char *idm_type_term_text(const IdmTypeTerm *term) {
+    return term && term->symbol ? idm_symbol_text(term->symbol) : NULL;
 }
 
 static bool type_write_args(IdmBuffer *buf, const IdmTypeTerm *term, char open, char close, const char *sep) {
@@ -651,9 +667,9 @@ bool idm_type_term_write(IdmBuffer *buf, const IdmTypeTerm *term) {
     if (!term) return idm_buf_append(buf, "_");
     switch (term->kind) {
         case IDM_TYPE_VAR:
-            return idm_buf_append(buf, term->name ? term->name : "_");
+            return idm_buf_append(buf, idm_type_term_text(term) ? idm_type_term_text(term) : "_");
         case IDM_TYPE_CON:
-            if (!idm_buf_append(buf, term->name ? term->name : "_")) return false;
+            if (!idm_buf_append(buf, idm_type_term_text(term) ? idm_type_term_text(term) : "_")) return false;
             if (term->arg_count == 0) return true;
             return type_write_args(buf, term, '<', '>', " ");
         case IDM_TYPE_TUPLE:
@@ -676,7 +692,7 @@ static bool type_term_serialize_depth(IdmBuffer *out, const IdmTypeTerm *term, u
     if (!type_term_kind_valid((uint8_t)term->kind)) return idm_error_set(err, idm_span_unknown(NULL), "invalid type term kind");
     if (term->arg_count > UINT32_MAX) return idm_error_set(err, idm_span_unknown(NULL), "type term has too many arguments");
     if (!idm_buf_put_u8(out, (uint8_t)term->kind) ||
-        !idm_buf_put_opt_str(out, term->name) ||
+        !idm_buf_put_opt_str(out, idm_type_term_text(term)) ||
         !idm_buf_put_u32(out, term->var_id) ||
         !idm_buf_put_u8(out, term->rigid ? 1u : 0u) ||
         !idm_buf_put_u32(out, (uint32_t)term->arg_count)) {
@@ -692,7 +708,7 @@ bool idm_type_term_serialize(IdmBuffer *out, const IdmTypeTerm *term, IdmError *
     return type_term_serialize_depth(out, term, 0u, err);
 }
 
-static bool type_term_deserialize_depth(IdmByteReader *r, IdmTypeTerm *out, unsigned depth, IdmError *err) {
+static bool type_term_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, IdmTypeTerm *out, unsigned depth, IdmError *err) {
     memset(out, 0, sizeof(*out));
     if (depth > IDM_TYPE_TERM_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "serialized type term nested too deeply");
     uint8_t kind = idm_rd_u8(r);
@@ -721,7 +737,13 @@ static bool type_term_deserialize_depth(IdmByteReader *r, IdmTypeTerm *out, unsi
         return idm_error_set(err, idm_span_unknown(NULL), "type term exceeds payload");
     }
     out->kind = (IdmTypeKind)kind;
-    out->name = name;
+    if (name) {
+        IdmSymbolKind symbol_kind = out->kind == IDM_TYPE_VAR ? IDM_SYMBOL_WORD : IDM_SYMBOL_ATOM;
+        const char *canonical = out->kind == IDM_TYPE_CON && strcmp(name, "nil") == 0 ? "empty-list" : name;
+        out->symbol = idm_intern(&rt->intern, symbol_kind, canonical);
+        free(name);
+        if (!out->symbol) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
+    }
     out->var_id = var_id;
     out->rigid = rigid != 0;
     if (arg_count != 0) {
@@ -732,7 +754,7 @@ static bool type_term_deserialize_depth(IdmByteReader *r, IdmTypeTerm *out, unsi
         }
         out->arg_count = arg_count;
         for (uint32_t i = 0; i < arg_count; i++) {
-            if (!type_term_deserialize_depth(r, &out->args[i], depth + 1u, err)) {
+            if (!type_term_deserialize_depth(rt, r, &out->args[i], depth + 1u, err)) {
                 idm_type_term_destroy(out);
                 return false;
             }
@@ -741,15 +763,14 @@ static bool type_term_deserialize_depth(IdmByteReader *r, IdmTypeTerm *out, unsi
     return true;
 }
 
-bool idm_type_term_deserialize(IdmByteReader *r, IdmTypeTerm *out, IdmError *err) {
-    return type_term_deserialize_depth(r, out, 0u, err);
+bool idm_type_term_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmTypeTerm *out, IdmError *err) {
+    return type_term_deserialize_depth(rt, r, out, 0u, err);
 }
 
 void idm_constraint_destroy(IdmConstraint *c) {
     if (!c) return;
     idm_type_term_destroy(&c->lhs);
     idm_type_term_destroy(&c->rhs);
-    free(c->trait);
     memset(c, 0, sizeof(*c));
 }
 
@@ -830,10 +851,7 @@ bool idm_constraint_copy(IdmConstraint *dst, const IdmConstraint *src) {
     dst->kind = src->kind;
     if (!idm_type_term_copy(&dst->lhs, &src->lhs)) return false;
     if (!idm_type_term_copy(&dst->rhs, &src->rhs)) { idm_constraint_destroy(dst); return false; }
-    if (src->trait) {
-        dst->trait = idm_strdup(src->trait);
-        if (!dst->trait) { idm_constraint_destroy(dst); return false; }
-    }
+    dst->trait = src->trait;
     return true;
 }
 
@@ -841,14 +859,14 @@ bool idm_constraint_serialize(IdmBuffer *out, const IdmConstraint *constraint, I
     if (!constraint) return idm_error_set(err, idm_span_unknown(NULL), "cannot serialize null constraint");
     if (constraint->kind > IDM_CONSTR_CLASS) return idm_error_set(err, idm_span_unknown(NULL), "invalid constraint kind");
     if (!idm_buf_put_u8(out, (uint8_t)constraint->kind) ||
-        !idm_buf_put_opt_str(out, constraint->trait)) {
+        !idm_buf_put_opt_str(out, constraint->trait ? idm_symbol_text(constraint->trait) : NULL)) {
         return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
     }
     return idm_type_term_serialize(out, &constraint->lhs, err) &&
            idm_type_term_serialize(out, &constraint->rhs, err);
 }
 
-bool idm_constraint_deserialize(IdmByteReader *r, IdmConstraint *constraint, IdmError *err) {
+bool idm_constraint_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmConstraint *constraint, IdmError *err) {
     memset(constraint, 0, sizeof(*constraint));
     uint8_t kind = idm_rd_u8(r);
     if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated constraint");
@@ -857,9 +875,15 @@ bool idm_constraint_deserialize(IdmByteReader *r, IdmConstraint *constraint, Idm
         return idm_error_set(err, idm_span_unknown(NULL), "invalid constraint kind");
     }
     constraint->kind = (IdmConstraintKind)kind;
-    if (!idm_rd_opt_str(r, &constraint->trait, err)) return false;
-    if (!idm_type_term_deserialize(r, &constraint->lhs, err) ||
-        !idm_type_term_deserialize(r, &constraint->rhs, err)) {
+    char *trait = NULL;
+    if (!idm_rd_opt_str(r, &trait, err)) return false;
+    if (trait) {
+        constraint->trait = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, trait);
+        free(trait);
+        if (!constraint->trait) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
+    }
+    if (!idm_type_term_deserialize(rt, r, &constraint->lhs, err) ||
+        !idm_type_term_deserialize(rt, r, &constraint->rhs, err)) {
         idm_constraint_destroy(constraint);
         return false;
     }
@@ -996,7 +1020,7 @@ bool idm_callable_contract_serialize(IdmBuffer *out, const IdmCallableContract *
     return idm_buf_put_opt_str(out, contract->doc) || (err ? idm_error_oom(err, idm_span_unknown(NULL)) : false);
 }
 
-bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *contract, IdmError *err) {
+bool idm_callable_contract_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmCallableContract *contract, IdmError *err) {
     memset(contract, 0, sizeof(*contract));
     uint32_t quantified_count = idm_rd_u32(r);
     if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated callable contract");
@@ -1019,7 +1043,7 @@ bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *co
         if (!contract->context) { idm_callable_contract_destroy(contract); return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false; }
         contract->context_count = context_count;
         for (uint32_t i = 0; i < context_count; i++) {
-            if (!idm_constraint_deserialize(r, &contract->context[i], err)) {
+            if (!idm_constraint_deserialize(rt, r, &contract->context[i], err)) {
                 idm_callable_contract_destroy(contract);
                 return false;
             }
@@ -1040,7 +1064,7 @@ bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *co
                 if (!sig->args) { idm_callable_contract_destroy(contract); return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false; }
                 sig->arg_count = arg_count;
                 for (uint32_t j = 0; j < arg_count; j++) {
-                    if (!idm_type_term_deserialize(r, &sig->args[j], err)) {
+                    if (!idm_type_term_deserialize(rt, r, &sig->args[j], err)) {
                         idm_callable_contract_destroy(contract);
                         return false;
                     }
@@ -1053,7 +1077,7 @@ bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *co
                 return idm_error_set(err, idm_span_unknown(NULL), "invalid callable contract result flag");
             }
             sig->has_result = has_result != 0;
-            if (sig->has_result && !idm_type_term_deserialize(r, &sig->result, err)) {
+            if (sig->has_result && !idm_type_term_deserialize(rt, r, &sig->result, err)) {
                 idm_callable_contract_destroy(contract);
                 return false;
             }

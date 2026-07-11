@@ -18,7 +18,8 @@ static bool lower_core(LowerCtx *lc, LowerFrame *fr, IdmCore **slot, IdmError *e
 static const char *lower_type_name(const LowerCtx *lc, const IdmCore *core) {
     if (!core) return NULL;
     const IdmTypeTerm *term = expand_solved_type_lookup(lc->ctx, core);
-    if (term && term->kind == IDM_TYPE_CON && term->name && strcmp(term->name, "->") != 0) return term->name;
+    const char *name = idm_type_term_text(term);
+    if (term && term->kind == IDM_TYPE_CON && name && strcmp(name, "->") != 0) return name;
     return NULL;
 }
 
@@ -36,7 +37,7 @@ static bool lower_replace(LowerCtx *lc, IdmCore **slot, IdmCore *replacement, co
     idm_core_free(old);
     if (!alias) return true;
     IdmTypeTerm term;
-    if (!idm_type_con(&term, alias)) return false;
+    if (!idm_type_con(lc->ctx->rt, &term, alias)) return false;
     return expand_solved_type_set(lc->ctx, replacement, &term);
 }
 
@@ -117,7 +118,7 @@ bool expand_dispatch_route_method(ExpandContext *ctx, IdmCore *node, const char 
             const char *missing = NULL;
             bool covered = true;
             for (size_t m = 0; m < td->member_count && covered; m++) {
-                const char *member = td->members[m].term.kind == IDM_TYPE_CON ? td->members[m].term.name : NULL;
+                const char *member = td->members[m].term.kind == IDM_TYPE_CON ? idm_type_term_text(&td->members[m].term) : NULL;
                 if (!member) { covered = false; break; }
                 size_t member_chosen = SIZE_MAX;
                 if (expand_dispatch_select_impl(ctx, node, member, argc, &member_chosen) == 0) { covered = false; missing = member; }
@@ -163,7 +164,7 @@ static const char *contract_result_alias(LowerCtx *lc, const IdmCallableContract
     if (!contract) return NULL;
     const IdmContractSig *sig = idm_contract_sig_for(contract, argc);
     if (!sig || !sig->has_result) return NULL;
-    if (sig->result.kind == IDM_TYPE_CON && sig->result.name && sig->result.arg_count == 0) return sig->result.name;
+    if (sig->result.kind == IDM_TYPE_CON && sig->result.symbol && sig->result.arg_count == 0) return idm_type_term_text(&sig->result);
     if (sig->result.kind != IDM_TYPE_VAR || sig->result.rigid) return NULL;
     const char *name = NULL;
     bool saw_float = false;
@@ -193,7 +194,7 @@ static IdmCore *lower_method_dispatch(LowerCtx *lc, IdmCore *node, const char **
             bool prim_has = false;
             IdmError probe;
             idm_error_init(&probe);
-            if (idm_primitive_contract((IdmPrimitive)cand->primitive, argc, &prim_contract, &prim_has, &probe, span) && prim_has) {
+            if (idm_primitive_contract(lc->ctx->rt, (IdmPrimitive)cand->primitive, argc, &prim_contract, &prim_has, &probe, span) && prim_has) {
                 *out_alias = contract_result_alias(lc, &prim_contract, argc, node->as.dispatch.args);
                 idm_callable_contract_destroy(&prim_contract);
             }
@@ -226,13 +227,12 @@ static IdmCore *lower_method_dispatch(LowerCtx *lc, IdmCore *node, const char **
 }
 
 static IdmCore *lower_field_dispatch(LowerCtx *lc, IdmCore *node, const char **out_alias, IdmError *err) {
-    ExpandContext *ctx = lc->ctx;
+    (void)lc;
     IdmSpan span = node->span;
-    (void)ctx;
     if (node->as.dispatch.route == IDM_DISPATCH_ROUTE_FIELD_STATIC) {
         const IdmDispatchFieldDef *chosen = &node->as.dispatch.fields[node->as.dispatch.route_index];
-        if (chosen->has_contract && chosen->contract.kind == IDM_TYPE_CON && chosen->contract.name && chosen->contract.arg_count == 0) {
-            *out_alias = chosen->contract.name;
+        if (chosen->has_contract && chosen->contract.kind == IDM_TYPE_CON && chosen->contract.symbol && chosen->contract.arg_count == 0) {
+            *out_alias = idm_type_term_text(&chosen->contract);
         }
         IdmCore *receiver = node->as.dispatch.args[0];
         node->as.dispatch.args[0] = NULL;
@@ -866,7 +866,7 @@ static bool lower_slot_swap(LowerCtx *lc, IdmCore **slot, IdmCore *out, const ch
     *slot = out;
     if (!alias) return true;
     IdmTypeTerm term;
-    if (!idm_type_con(&term, alias)) return idm_error_oom(err, out->span);
+    if (!idm_type_con(lc->ctx->rt, &term, alias)) return idm_error_oom(err, out->span);
     return expand_solved_type_set(lc->ctx, out, &term) || idm_error_oom(err, out->span);
 }
 

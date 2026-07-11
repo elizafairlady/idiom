@@ -1,26 +1,21 @@
 #include "idiom/infer.h"
 #include "idiom/common.h"
+#include "idiom/value.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-static bool cmp_name(const IdmTypeCmp *cmp, const char *a, const char *b) {
-    if (cmp && cmp->name_eq) return cmp->name_eq(cmp->user, a, b);
-    return a && b && strcmp(a, b) == 0;
-}
-
-static bool cmp_trait(const IdmTypeCmp *cmp, const char *a, const char *b) {
-    if (cmp && cmp->trait_eq) return cmp->trait_eq(cmp->user, a, b);
-    return a && b && strcmp(a, b) == 0;
+static bool same_symbol(const IdmSymbol *a, const IdmSymbol *b) {
+    return a && a == b;
 }
 
 static bool term_is_wildcard(const IdmTypeTerm *t) {
-    return t && t->kind == IDM_TYPE_VAR && t->name && strcmp(t->name, "_") == 0;
+    return t && t->kind == IDM_TYPE_VAR && strcmp(idm_type_term_text(t), "_") == 0;
 }
 
 static bool term_is_flex(const IdmTypeTerm *t) {
-    return t && t->kind == IDM_TYPE_VAR && !t->rigid && t->var_id != 0u && !(t->name && strcmp(t->name, "_") == 0);
+    return t && t->kind == IDM_TYPE_VAR && !t->rigid && t->var_id != 0u && strcmp(idm_type_term_text(t), "_") != 0;
 }
 
 void idm_subst_init(IdmSubst *s) {
@@ -67,9 +62,9 @@ bool idm_subst_apply(const IdmSubst *s, const IdmTypeTerm *in, IdmTypeTerm *out)
     if (h->kind == IDM_TYPE_CON) {
         if (h->arg_count == 0) {
             free(args);
-            return idm_type_con(out, h->name);
+            return idm_type_con_symbol(out, h->symbol);
         }
-        if (idm_type_con_take(out, h->name, args, h->arg_count)) return true;
+        if (idm_type_con_take_symbol(out, h->symbol, args, h->arg_count)) return true;
     } else if (idm_type_compound(out, h->kind, args, h->arg_count)) {
         return true;
     }
@@ -145,10 +140,10 @@ static bool unify_fail(IdmError *err, IdmSpan span, const IdmTypeTerm *a, const 
 
 static bool rigid_same(const IdmTypeTerm *a, const IdmTypeTerm *b) {
     if (a->var_id != 0u || b->var_id != 0u) return a->var_id == b->var_id;
-    return a->name && b->name && strcmp(a->name, b->name) == 0;
+    return same_symbol(a->symbol, b->symbol);
 }
 
-bool idm_unify(IdmSubst *s, const IdmTypeCmp *cmp, const IdmTypeTerm *a, const IdmTypeTerm *b, IdmError *err, IdmSpan span) {
+bool idm_unify(IdmSubst *s, const IdmTypeTerm *a, const IdmTypeTerm *b, IdmError *err, IdmSpan span) {
     const IdmTypeTerm *ra = resolve_head(s, a);
     const IdmTypeTerm *rb = resolve_head(s, b);
     if (term_is_wildcard(ra) || term_is_wildcard(rb)) return true;
@@ -171,11 +166,11 @@ bool idm_unify(IdmSubst *s, const IdmTypeCmp *cmp, const IdmTypeTerm *a, const I
         return unify_fail(err, span, ra, rb);
     }
     if (ra->kind == IDM_TYPE_CON) {
-        if (!cmp_name(cmp, ra->name, rb->name)) return unify_fail(err, span, ra, rb);
+        if (!same_symbol(ra->symbol, rb->symbol)) return unify_fail(err, span, ra, rb);
     }
     if (ra->arg_count != rb->arg_count) return unify_fail(err, span, ra, rb);
     for (size_t i = 0; i < ra->arg_count; i++) {
-        if (!idm_unify(s, cmp, &ra->args[i], &rb->args[i], err, span)) return false;
+        if (!idm_unify(s, &ra->args[i], &rb->args[i], err, span)) return false;
     }
     return true;
 }
@@ -211,11 +206,11 @@ bool idm_constraint_set_add_eq(IdmConstraintSet *cs, const IdmTypeTerm *a, const
     return ok;
 }
 
-bool idm_constraint_set_add_class(IdmConstraintSet *cs, const char *trait, const IdmTypeTerm *ty) {
+bool idm_constraint_set_add_class(IdmConstraintSet *cs, IdmSymbol *trait, const IdmTypeTerm *ty) {
     IdmConstraint c;
     memset(&c, 0, sizeof(c));
     c.kind = IDM_CONSTR_CLASS;
-    c.trait = idm_strdup(trait ? trait : "");
+    c.trait = trait;
     if (!c.trait || !idm_type_term_copy(&c.lhs, ty)) {
         idm_constraint_destroy(&c);
         return false;
@@ -225,40 +220,27 @@ bool idm_constraint_set_add_class(IdmConstraintSet *cs, const char *trait, const
     return ok;
 }
 
-static bool term_eq_cmp(const IdmTypeCmp *cmp, const IdmTypeTerm *a, const IdmTypeTerm *b) {
-    if (a->kind != b->kind) return false;
-    if (a->kind == IDM_TYPE_VAR) return rigid_same(a, b);
-    if (a->kind == IDM_TYPE_CON && !cmp_name(cmp, a->name, b->name)) return false;
-    if (a->arg_count != b->arg_count) return false;
-    for (size_t i = 0; i < a->arg_count; i++) {
-        if (!term_eq_cmp(cmp, &a->args[i], &b->args[i])) return false;
-    }
-    return true;
-}
-
-static bool given_discharges(const IdmSubst *s, const IdmTypeCmp *cmp, const IdmConstraintSet *given, const char *trait, const IdmTypeTerm *ty) {
+static bool given_discharges(const IdmSubst *s, const IdmConstraintSet *given, IdmSymbol *trait, const IdmTypeTerm *ty, IdmGivenOracle oracle, void *oracle_user) {
     for (size_t i = 0; i < given->count; i++) {
         const IdmConstraint *g = &given->items[i];
         if (g->kind != IDM_CONSTR_CLASS) continue;
-        if (cmp && cmp->given_matches) {
-            if (cmp->given_matches(cmp->user, g, trait, ty)) return true;
-            continue;
-        }
-        if (!cmp_trait(cmp, g->trait, trait)) continue;
+        if (oracle && oracle(oracle_user, g, trait, ty)) return true;
+        if (g->trait != trait) continue;
         IdmTypeTerm gt;
         if (!idm_subst_apply(s, &g->lhs, &gt)) return false;
-        bool same = term_eq_cmp(cmp, &gt, ty);
+        bool same = idm_type_term_equal(&gt, ty);
         idm_type_term_destroy(&gt);
         if (same) return true;
     }
     return false;
 }
 
-static bool solve_class(IdmSubst *s, const IdmTypeCmp *cmp, const IdmConstraintSet *given,
-                        const char *trait, const IdmTypeTerm *ty,
+static bool solve_class(IdmSubst *s, const IdmConstraintSet *given,
+                        IdmSymbol *trait, const IdmTypeTerm *ty,
+                        IdmGivenOracle given_oracle,
                         IdmInstanceOracle oracle, void *oracle_user,
                         IdmConstraintSet *residual, IdmError *err, IdmSpan span) {
-    if (given && given_discharges(s, cmp, given, trait, ty)) return true;
+    if (given && given_discharges(s, given, trait, ty, given_oracle, oracle_user)) return true;
     if (ty->kind == IDM_TYPE_VAR) {
         if (residual && !idm_constraint_set_add_class(residual, trait, ty)) return idm_error_oom(err, span);
         return true;
@@ -267,7 +249,7 @@ static bool solve_class(IdmSubst *s, const IdmTypeCmp *cmp, const IdmConstraintS
         for (size_t i = 0; i < ty->arg_count; i++) {
             IdmError probe;
             idm_error_init(&probe);
-            if (solve_class(s, cmp, given, trait, &ty->args[i], oracle, oracle_user, residual, &probe, span)) {
+            if (solve_class(s, given, trait, &ty->args[i], given_oracle, oracle, oracle_user, residual, &probe, span)) {
                 idm_error_clear(&probe);
                 return true;
             }
@@ -280,7 +262,7 @@ static bool solve_class(IdmSubst *s, const IdmTypeCmp *cmp, const IdmConstraintS
         IdmBuffer tb;
         idm_buf_init(&tb);
         bool w = idm_type_term_write(&tb, ty);
-        const char *tr = trait ? trait : "?";
+        const char *tr = trait ? idm_symbol_text(trait) : "?";
         int trn = (int)strcspn(tr, "#");
         bool set = tr[0] == '_' && tr[1] == '.'
             ? idm_error_set(err, span, "structural constraint '%s' is not satisfied by %s", tr, w && tb.data ? tb.data : "?")
@@ -292,23 +274,23 @@ static bool solve_class(IdmSubst *s, const IdmTypeCmp *cmp, const IdmConstraintS
 }
 
 bool idm_solve(IdmSubst *s,
-               const IdmTypeCmp *cmp,
                const IdmConstraintSet *given,
                const IdmConstraintSet *wanted,
+               IdmGivenOracle given_oracle,
                IdmInstanceOracle oracle, void *oracle_user,
                IdmConstraintSet *residual,
                IdmError *err, IdmSpan span) {
     for (size_t i = 0; i < wanted->count; i++) {
         const IdmConstraint *c = &wanted->items[i];
         if (c->kind != IDM_CONSTR_EQ) continue;
-        if (!idm_unify(s, cmp, &c->lhs, &c->rhs, err, span)) return false;
+        if (!idm_unify(s, &c->lhs, &c->rhs, err, span)) return false;
     }
     for (size_t i = 0; i < wanted->count; i++) {
         const IdmConstraint *c = &wanted->items[i];
         if (c->kind != IDM_CONSTR_CLASS) continue;
         IdmTypeTerm ty;
         if (!idm_subst_apply(s, &c->lhs, &ty)) return idm_error_oom(err, span);
-        bool ok = solve_class(s, cmp, given, c->trait, &ty, oracle, oracle_user, residual, err, span);
+        bool ok = solve_class(s, given, c->trait, &ty, given_oracle, oracle, oracle_user, residual, err, span);
         idm_type_term_destroy(&ty);
         if (!ok) return false;
     }

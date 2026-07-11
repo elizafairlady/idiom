@@ -625,7 +625,7 @@ const char *idm_primitive_name(IdmPrimitive primitive);
 bool idm_primitive_pure(IdmPrimitive primitive);
 size_t idm_primitive_count(void);
 IdmArity idm_primitive_arity(IdmPrimitive primitive);
-bool idm_primitive_contract(IdmPrimitive primitive, size_t argc, IdmCallableContract *out, bool *has_contract, IdmError *err, IdmSpan span);
+bool idm_primitive_contract(IdmRuntime *rt, IdmPrimitive primitive, size_t argc, IdmCallableContract *out, bool *has_contract, IdmError *err, IdmSpan span);
 const char *idm_primitive_home(IdmPrimitive primitive);
 bool idm_primitive_home_exists(const char *home);
 bool idm_primitive_lookup(const char *home, const char *name, IdmPrimitive *out);

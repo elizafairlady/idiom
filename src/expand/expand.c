@@ -1626,8 +1626,9 @@ bool is_a_target_names(ExpandContext *ctx, const char *name, TypeNameList *out, 
     if (td && td->member_count != 0) {
         for (size_t i = 0; i < td->member_count; i++) {
             const IdmTypeTerm *m = &td->members[i].term;
-            if (m->kind != IDM_TYPE_CON || !m->name) return false;
-            if (!is_a_target_names(ctx, m->name, out, err)) return false;
+            const char *member = idm_type_term_text(m);
+            if (m->kind != IDM_TYPE_CON || !member) return false;
+            if (!is_a_target_names(ctx, member, out, err)) return false;
         }
     }
     return true;

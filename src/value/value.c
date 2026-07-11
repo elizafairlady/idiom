@@ -3050,18 +3050,6 @@ bool idm_builtin_type_includes(IdmBuiltinType outer, IdmBuiltinType member) {
     }
 }
 
-bool idm_type_term_intern_symbols(IdmRuntime *rt, IdmTypeTerm *term, IdmError *err) {
-    if (!term) return true;
-    if (term->kind == IDM_TYPE_CON && term->name) {
-        term->symbol = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, term->name);
-        if (!term->symbol) return idm_error_oom(err, idm_span_unknown(NULL));
-    }
-    for (size_t i = 0; i < term->arg_count; i++) {
-        if (!idm_type_term_intern_symbols(rt, &term->args[i], err)) return false;
-    }
-    return true;
-}
-
 bool idm_value_matches_builtin_type(IdmValue value, IdmBuiltinType type) {
     IdmValueTag vt = idm_value_tag(value);
     switch (type) {
@@ -4658,11 +4646,7 @@ bool idm_value_matches_type_term(IdmValue value, const IdmTypeTerm *term) {
             return false;
         case IDM_TYPE_TUPLE: return idm_value_tag(value) == IDM_VAL_TUPLE;
         case IDM_TYPE_VECTOR: return idm_value_tag(value) == IDM_VAL_VECTOR;
-        case IDM_TYPE_CON: {
-            if (term->symbol) return idm_value_matches_type_name(value, term->symbol, NULL, true);
-            if (!term->name) return false;
-            return idm_value_matches_type_name(value, NULL, term->name, true);
-        }
+        case IDM_TYPE_CON: return idm_value_matches_type_name(value, term->symbol, NULL, true);
     }
     return false;
 }

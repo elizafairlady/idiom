@@ -155,11 +155,11 @@ static const IdmPkgMethodImpl *find_method_impl(const IdmArtifact *art, const ch
 }
 
 static bool type_con_named(const IdmTypeTerm *term, const char *name) {
-    return term && term->kind == IDM_TYPE_CON && term->name && strcmp(term->name, name) == 0;
+    return term && term->kind == IDM_TYPE_CON && term->symbol && strcmp(idm_type_term_text(term), name) == 0;
 }
 
 static bool type_var_named(const IdmTypeTerm *term, const char *name) {
-    return term && term->kind == IDM_TYPE_VAR && term->name && strcmp(term->name, name) == 0;
+    return term && term->kind == IDM_TYPE_VAR && term->symbol && strcmp(idm_type_term_text(term), name) == 0;
 }
 
 static bool wide_sparse_source(IdmBuffer *out, bool hole) {
@@ -289,7 +289,7 @@ int idm_unit_signature_contract(void) {
     check(showish->contract.quantified_count == 1u && strcmp(showish->contract.quantified[0], "a") == 0, "showish quantifier");
     check(showish->contract.context_count == 1u, "showish context");
     check(showish->contract.context[0].kind == IDM_CONSTR_CLASS, "showish class constraint");
-    check(strcmp(showish->contract.context[0].trait, "Showable") == 0, "showish trait");
+    check(strcmp(idm_symbol_text(showish->contract.context[0].trait), "Showable") == 0, "showish trait");
     check(type_var_named(&showish->contract.context[0].lhs, "a"), "showish constraint arg");
     check(showish->contract.sigs[0].arg_count == 1u && showish->contract.sigs[0].has_result, "showish contract shape");
     check(type_var_named(&showish->contract.sigs[0].args[0], "a"), "showish arg var");
@@ -298,7 +298,7 @@ int idm_unit_signature_contract(void) {
     const IdmPkgSlot *sumish = find_slot(&art, "sumish");
     check(sumish && sumish->has_contract, "sumish slot contract");
     check(sumish->contract.context_count == 1u, "sumish context");
-    check(sumish->contract.context[0].trait && strcmp(sumish->contract.context[0].trait, "Number") != 0, "sumish trait identity");
+    check(sumish->contract.context[0].trait && strcmp(idm_symbol_text(sumish->contract.context[0].trait), "Number") != 0, "sumish trait identity");
     check(sumish->contract.sigs[0].arg_count == 2u && sumish->contract.sigs[0].has_result, "sumish contract shape");
     check(type_var_named(&sumish->contract.sigs[0].args[0], "a"), "sumish arg a0");
     check(type_var_named(&sumish->contract.sigs[0].args[1], "a"), "sumish arg a1");
@@ -383,7 +383,7 @@ int idm_unit_signature_contract(void) {
     check(marker_trait->methods[0].has_contract, "Marker method contract");
     check(marker_trait->methods[0].contract.context_count == 1u, "Marker method context");
     check(marker_trait->methods[0].contract.context[0].trait &&
-          strcmp(marker_trait->methods[0].contract.context[0].trait, marker_trait->identity) == 0,
+          strcmp(idm_symbol_text(marker_trait->methods[0].contract.context[0].trait), marker_trait->identity) == 0,
           "Marker method context identity");
     check(!marker_trait->methods[0].contract.passthrough, "Marker method is not a passthrough");
 
@@ -1159,7 +1159,7 @@ int idm_unit_signature_contract(void) {
     check(dub->contract.sigs[0].arg_count == 1u && dub->contract.sigs[0].has_result, "dub inferred shape");
     check(dub->contract.quantified_count == 1u, "dub inferred quantifier");
     check(dub->contract.context_count == 1u, "dub inferred context");
-    check(dub->contract.context[0].trait && strncmp(dub->contract.context[0].trait, "Number", 6u) == 0, "dub inferred Number");
+    check(dub->contract.context[0].trait && strncmp(idm_symbol_text(dub->contract.context[0].trait), "Number", 6u) == 0, "dub inferred Number");
     check(type_var_named(&dub->contract.sigs[0].args[0], "a"), "dub inferred arg a");
     check(type_var_named(&dub->contract.sigs[0].result, "a"), "dub inferred result a");
     check(dub->contract.sigs[0].args[0].var_id == dub->contract.sigs[0].result.var_id, "dub inferred shared var");

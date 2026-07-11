@@ -54,7 +54,7 @@ static void test_record_contract_type_terms(void) {
     IdmRuntime rt;
     idm_runtime_init(&rt);
     IdmTypeTerm int_contract;
-    check(idm_type_con(&int_contract, "int"), "int contract term");
+    check(idm_type_con(&rt, &int_contract, "int"), "int contract term");
     IdmCore *record = typed_record_core(&rt, idm_int(7), &int_contract, &err);
     check_error(&err, "typed record core error");
     IdmBytecodeModule module;
@@ -77,7 +77,8 @@ static void test_record_contract_type_terms(void) {
     check(idm_ic_deserialize(&rt2, (const unsigned char *)bytes.data, bytes.len, &roundtrip, &err), "typed record deserialize");
     check_error(&err, "typed record deserialize error");
     check(roundtrip.type_count == 1u, "typed record roundtrip type pool count");
-    check(idm_type_term_equal(&roundtrip.types[0], &int_contract), "typed record roundtrip type term");
+    check(strcmp(idm_type_term_text(&roundtrip.types[0]), idm_type_term_text(&int_contract)) == 0, "typed record roundtrip type text");
+    check(!idm_type_term_equal(&roundtrip.types[0], &int_contract), "type symbol handles differ across runtimes");
 
     IdmValue out = idm_nil();
     check(idm_bc_intern_literals(&rt2, &roundtrip, &err), "roundtrip finalize");
@@ -509,13 +510,9 @@ int idm_unit_bytecode_record(void) {
     IdmTypeTerm record_term;
     IdmTypeTerm builtin_record_term;
     IdmTypeTerm wrong_record_term;
-    check(idm_type_con(&record_term, "test.Record"), "record term");
-    check(idm_type_con(&builtin_record_term, "record"), "builtin record term");
-    check(idm_type_con(&wrong_record_term, "test.Other"), "wrong record term");
-    check(idm_type_term_intern_symbols(&rt2, &record_term, &err), "record term intern");
-    check(idm_type_term_intern_symbols(&rt2, &builtin_record_term, &err), "builtin record term intern");
-    check(idm_type_term_intern_symbols(&rt2, &wrong_record_term, &err), "wrong record term intern");
-    check_error(&err, "term intern error");
+    check(idm_type_con(&rt2, &record_term, "test.Record"), "record term");
+    check(idm_type_con(&rt2, &builtin_record_term, "record"), "builtin record term");
+    check(idm_type_con(&rt2, &wrong_record_term, "test.Other"), "wrong record term");
     check(idm_value_matches_type_term(got, &record_term), "record term match");
     check(idm_value_matches_type_term(got, &builtin_record_term), "builtin record term match");
     check(!idm_value_matches_type_term(got, &wrong_record_term), "wrong record term mismatch");

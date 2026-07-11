@@ -6,6 +6,7 @@
 typedef uint32_t IdmScopeId;
 typedef uint32_t IdmBindingId;
 typedef struct IdmSymbol IdmSymbol;
+typedef struct IdmRuntime IdmRuntime;
 
 #define IDM_PHASE_ANY (-1)
 
@@ -75,7 +76,6 @@ typedef enum {
 
 typedef struct IdmTypeTerm {
     IdmTypeKind kind;
-    char *name;
     IdmSymbol *symbol;
     uint32_t var_id;
     bool rigid;
@@ -89,7 +89,7 @@ typedef struct {
     IdmConstraintKind kind;
     IdmTypeTerm lhs;
     IdmTypeTerm rhs;
-    char *trait;
+    IdmSymbol *trait;
 } IdmConstraint;
 
 typedef struct {
@@ -129,17 +129,21 @@ typedef struct {
 #define IDM_PURITY_PURE 2u
 #define IDM_PURITY_CONST 3u
 
-bool idm_type_var(IdmTypeTerm *out, const char *name, uint32_t var_id, bool rigid);
-bool idm_type_con(IdmTypeTerm *out, const char *name);
-bool idm_type_con_take(IdmTypeTerm *out, const char *name, IdmTypeTerm *args, size_t arg_count);
+bool idm_type_var(IdmRuntime *rt, IdmTypeTerm *out, const char *name, uint32_t var_id, bool rigid);
+bool idm_type_var_symbol(IdmTypeTerm *out, IdmSymbol *symbol, uint32_t var_id, bool rigid);
+bool idm_type_con(IdmRuntime *rt, IdmTypeTerm *out, const char *name);
+bool idm_type_con_symbol(IdmTypeTerm *out, IdmSymbol *symbol);
+bool idm_type_con_take(IdmRuntime *rt, IdmTypeTerm *out, const char *name, IdmTypeTerm *args, size_t arg_count);
+bool idm_type_con_take_symbol(IdmTypeTerm *out, IdmSymbol *symbol, IdmTypeTerm *args, size_t arg_count);
 bool idm_type_compound(IdmTypeTerm *out, IdmTypeKind kind, IdmTypeTerm *args, size_t arg_count);
 void idm_type_term_destroy(IdmTypeTerm *term);
 bool idm_type_term_copy(IdmTypeTerm *dst, const IdmTypeTerm *src);
 bool idm_type_term_equal(const IdmTypeTerm *a, const IdmTypeTerm *b);
+const char *idm_type_term_text(const IdmTypeTerm *term);
 bool idm_type_term_write(IdmBuffer *buf, const IdmTypeTerm *term);
 bool idm_type_term_mentions(const IdmTypeTerm *term, const char *var_name);
 bool idm_type_term_serialize(IdmBuffer *out, const IdmTypeTerm *term, IdmError *err);
-bool idm_type_term_deserialize(IdmByteReader *r, IdmTypeTerm *out, IdmError *err);
+bool idm_type_term_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmTypeTerm *out, IdmError *err);
 
 void idm_constraint_destroy(IdmConstraint *c);
 bool idm_constraint_copy(IdmConstraint *dst, const IdmConstraint *src);
@@ -156,7 +160,7 @@ IdmContractSig *idm_contract_add_sig(IdmCallableContract *c);
 void idm_callable_contract_destroy(IdmCallableContract *c);
 bool idm_callable_contract_copy(IdmCallableContract *dst, const IdmCallableContract *src);
 bool idm_callable_contract_serialize(IdmBuffer *out, const IdmCallableContract *contract, IdmError *err);
-bool idm_callable_contract_deserialize(IdmByteReader *r, IdmCallableContract *contract, IdmError *err);
+bool idm_callable_contract_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmCallableContract *contract, IdmError *err);
 
 typedef struct {
     char *name;

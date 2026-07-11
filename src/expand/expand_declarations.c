@@ -13,7 +13,7 @@ static bool install_required_trait_methods(ExpandContext *ctx, const TraitDef *r
 static bool method_signature_arity(ExpandContext *ctx, const IdmSyntax *form, IdmArity *out_arity, IdmError *err);
 static void method_contract_stamp_default(TraitMethodDef *method, const IdmCore *fn);
 static bool method_arity_mismatch(IdmError *err, IdmSpan span, const char *trait, const char *name, const IdmArity *expected, const IdmArity *got);
-static bool method_implicit_trait_contract(const char *trait, const IdmArity *arity, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span);
+static bool method_implicit_trait_contract(ExpandContext *ctx, const char *trait, const IdmArity *arity, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span);
 static bool method_contract_ensure_trait_context(ExpandContext *ctx, IdmCallableContract *contract, const char *trait, IdmError *err, IdmSpan span);
 static bool method_contract_ensure_requirement_contexts(ExpandContext *ctx, IdmCallableContract *contract, const IdmTraitRequirementDef *requirements, size_t requirement_count, IdmError *err, IdmSpan span);
 static TraitMethodDef *find_decl_method(ExpandContext *ctx, const char *name);
@@ -357,12 +357,12 @@ static bool method_arity_single(const IdmArity *arity, uint32_t *out) {
     return true;
 }
 
-static bool method_contract_add_trait_context(IdmCallableContract *contract, const char *trait, const IdmTypeTerm *receiver, IdmError *err, IdmSpan span) {
+static bool method_contract_add_trait_context(ExpandContext *ctx, IdmCallableContract *contract, const char *trait, const IdmTypeTerm *receiver, IdmError *err, IdmSpan span) {
     if (!idm_grow((void **)&contract->context, &contract->context_cap, sizeof(*contract->context), 4u, contract->context_count + 1u)) return idm_error_oom(err, span);
     IdmConstraint *constraint = &contract->context[contract->context_count];
     memset(constraint, 0, sizeof(*constraint));
     constraint->kind = IDM_CONSTR_CLASS;
-    constraint->trait = idm_strdup(trait);
+    constraint->trait = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, trait);
     if (!constraint->trait || !idm_type_term_copy(&constraint->lhs, receiver)) {
         idm_constraint_destroy(constraint);
         return idm_error_oom(err, span);
@@ -378,7 +378,7 @@ static bool method_contract_ensure_trait_context(ExpandContext *ctx, IdmCallable
     for (size_t i = 0; i < contract->context_count; i++) {
         if (typeclass_given_matches(ctx, &contract->context[i], trait, receiver)) return true;
     }
-    return method_contract_add_trait_context(contract, trait, receiver, err, span);
+    return method_contract_add_trait_context(ctx, contract, trait, receiver, err, span);
 }
 
 static bool method_contract_ensure_requirement_contexts(ExpandContext *ctx, IdmCallableContract *contract, const IdmTraitRequirementDef *requirements, size_t requirement_count, IdmError *err, IdmSpan span) {
@@ -394,12 +394,12 @@ static bool method_contract_ensure_requirement_contexts(ExpandContext *ctx, IdmC
                 break;
             }
         }
-        if (!present && !method_contract_add_trait_context(contract, trait, receiver, err, span)) return false;
+        if (!present && !method_contract_add_trait_context(ctx, contract, trait, receiver, err, span)) return false;
     }
     return true;
 }
 
-static bool method_implicit_trait_contract(const char *trait, const IdmArity *arity, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span) {
+static bool method_implicit_trait_contract(ExpandContext *ctx, const char *trait, const IdmArity *arity, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span) {
     *out_has = false;
     memset(out, 0, sizeof(*out));
     uint32_t argc = 0;
@@ -419,18 +419,18 @@ static bool method_implicit_trait_contract(const char *trait, const IdmArity *ar
     }
     out->quantified_count = 1u;
     osig->arg_count = argc;
-    if (!idm_type_var(&osig->args[0], "a", 1u, false)) {
+    if (!idm_type_var(ctx->rt, &osig->args[0], "a", 1u, false)) {
         idm_callable_contract_destroy(out);
         return idm_error_oom(err, span);
     }
     for (uint32_t i = 1u; i < argc; i++) {
-        if (!idm_type_var(&osig->args[i], "_", 0u, false)) {
+        if (!idm_type_var(ctx->rt, &osig->args[i], "_", 0u, false)) {
             idm_callable_contract_destroy(out);
             return idm_error_oom(err, span);
         }
     }
     out->context[0].kind = IDM_CONSTR_CLASS;
-    out->context[0].trait = idm_strdup(trait);
+    out->context[0].trait = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, trait);
     if (!out->context[0].trait || !idm_type_term_copy(&out->context[0].lhs, &osig->args[0])) {
         idm_callable_contract_destroy(out);
         return idm_error_oom(err, span);
@@ -443,7 +443,7 @@ static bool method_implicit_trait_contract(const char *trait, const IdmArity *ar
 static bool method_type_var_same(const IdmTypeTerm *a, const IdmTypeTerm *b) {
     if (!a || !b || a->kind != IDM_TYPE_VAR || b->kind != IDM_TYPE_VAR) return false;
     if (a->var_id != 0u || b->var_id != 0u) return a->var_id == b->var_id;
-    return a->name && b->name && strcmp(a->name, b->name) == 0;
+    return a->symbol == b->symbol;
 }
 
 static bool method_contract_replace_type(IdmTypeTerm *term, const IdmTypeTerm *var, const IdmTypeTerm *replacement, IdmError *err, IdmSpan span) {
@@ -462,14 +462,14 @@ static bool method_contract_replace_type(IdmTypeTerm *term, const IdmTypeTerm *v
     return true;
 }
 
-static bool method_contract_replace_receiver_var(IdmCallableContract *contract, const char *type, IdmError *err, IdmSpan span) {
+static bool method_contract_replace_receiver_var(ExpandContext *ctx, IdmCallableContract *contract, const char *type, IdmError *err, IdmSpan span) {
     if (!contract || contract->sig_count == 0 || contract->sigs[0].arg_count == 0 || contract->sigs[0].args[0].kind != IDM_TYPE_VAR) return true;
     IdmTypeTerm var;
     IdmTypeTerm replacement;
     memset(&var, 0, sizeof(var));
     memset(&replacement, 0, sizeof(replacement));
     if (!idm_type_term_copy(&var, &contract->sigs[0].args[0])) return idm_error_oom(err, span);
-    if (!idm_type_con(&replacement, type)) {
+    if (!idm_type_con(ctx->rt, &replacement, type)) {
         idm_type_term_destroy(&var);
         return idm_error_oom(err, span);
     }
@@ -485,13 +485,13 @@ static bool method_contract_replace_receiver_var(IdmCallableContract *contract, 
     return ok;
 }
 
-static bool method_contract_for_type(const TraitMethodDef *method, const char *type, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span) {
+static bool method_contract_for_type(ExpandContext *ctx, const TraitMethodDef *method, const char *type, IdmCallableContract *out, bool *out_has, IdmError *err, IdmSpan span) {
     *out_has = false;
     memset(out, 0, sizeof(*out));
     if (!method || !method->has_contract || method->contract.sig_count == 0) return true;
     if (!idm_callable_contract_copy(out, &method->contract)) return idm_error_oom(err, span);
     *out_has = true;
-    if (!method_contract_replace_receiver_var(out, type, err, span)) {
+    if (!method_contract_replace_receiver_var(ctx, out, type, err, span)) {
         idm_callable_contract_destroy(out);
         *out_has = false;
         return false;
@@ -512,9 +512,9 @@ static bool receiver_only_contract(const ExpandContext *ctx, const char *type, c
     sig->args = calloc(argc, sizeof(*sig->args));
     if (!sig->args) goto oom;
     sig->arg_count = argc;
-    if (!idm_type_con(&sig->args[0], identity)) goto oom;
+    if (!idm_type_con(ctx->rt, &sig->args[0], identity)) goto oom;
     for (uint32_t i = 1u; i < argc; i++) {
-        if (!idm_type_var(&sig->args[i], "_", 0u, false)) goto oom;
+        if (!idm_type_var(ctx->rt, &sig->args[i], "_", 0u, false)) goto oom;
     }
     *out_has = true;
     return true;
@@ -1118,7 +1118,7 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait_d
         }
         IdmCallableContract trait_contract;
         bool trait_has_contract = false;
-        if (!method_contract_for_type(contract, type, &trait_contract, &trait_has_contract, err, name->span)) {
+        if (!method_contract_for_type(ctx, contract, type, &trait_contract, &trait_has_contract, err, name->span)) {
             if (provided_has_contract) idm_callable_contract_destroy(&provided_contract);
             ok = false;
             break;
@@ -1641,7 +1641,7 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
             ok = false;
             break;
         }
-        if (!method_has_contract && !method_implicit_trait_contract(identity, &arity, &method_contract, &method_has_contract, err, method_name->span)) { ok = false; break; }
+        if (!method_has_contract && !method_implicit_trait_contract(ctx, identity, &arity, &method_contract, &method_has_contract, err, method_name->span)) { ok = false; break; }
         if (method_has_contract && !method_contract_ensure_trait_context(ctx, &method_contract, identity, err, method_name->span)) {
             idm_callable_contract_destroy(&method_contract);
             ok = false;
@@ -2167,18 +2167,17 @@ static bool parse_record_fields(ExpandContext *ctx, const IdmSyntax *body, Recor
     return true;
 }
 
-static bool replace_type_term_name(IdmTypeTerm *term, const char *name, IdmError *err, IdmSpan span) {
-    char *copy = idm_strdup(name);
-    if (!copy) return idm_error_oom(err, span);
-    free(term->name);
-    term->name = copy;
+static bool replace_type_term_name(ExpandContext *ctx, IdmTypeTerm *term, const char *name, IdmError *err, IdmSpan span) {
+    IdmSymbol *symbol = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, name);
+    if (!symbol) return idm_error_oom(err, span);
+    term->symbol = symbol;
     return true;
 }
 
 static bool resolve_type_term_names(ExpandContext *ctx, IdmTypeTerm *term, const char *self_name, const char *identity, bool allow_unbound, IdmSpan span, IdmError *err) {
     if (!term) return true;
-    if (term->kind == IDM_TYPE_CON && term->name) {
-        const char *name = term->name;
+    if (term->kind == IDM_TYPE_CON && term->symbol) {
+        const char *name = idm_type_term_text(term);
         if (strcmp(name, "_") != 0) {
             const char *resolved = NULL;
             IdmSymbol *contract_symbol = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, name);
@@ -2203,7 +2202,7 @@ static bool resolve_type_term_names(ExpandContext *ctx, IdmTypeTerm *term, const
                     resolved = type_def_identity_text(type);
                 }
             }
-            if (!resolved || !replace_type_term_name(term, resolved, err, span)) return false;
+            if (!resolved || !replace_type_term_name(ctx, term, resolved, err, span)) return false;
         }
     }
     for (size_t i = 0; i < term->arg_count; i++) {
@@ -2231,13 +2230,13 @@ static bool resolve_type_members(ExpandContext *ctx, TypeMemberDef *members, siz
     return true;
 }
 
-static bool resolve_pending_type_member_term(IdmTypeTerm *term, const char *surface_name, const char *identity, IdmSpan span, IdmError *err) {
+static bool resolve_pending_type_member_term(ExpandContext *ctx, IdmTypeTerm *term, const char *surface_name, const char *identity, IdmSpan span, IdmError *err) {
     if (!term) return true;
-    if (term->kind == IDM_TYPE_CON && term->name && strcmp(term->name, surface_name) == 0) {
-        if (!replace_type_term_name(term, identity, err, span)) return false;
+    if (term->kind == IDM_TYPE_CON && term->symbol && strcmp(idm_type_term_text(term), surface_name) == 0) {
+        if (!replace_type_term_name(ctx, term, identity, err, span)) return false;
     }
     for (size_t i = 0; i < term->arg_count; i++) {
-        if (!resolve_pending_type_member_term(&term->args[i], surface_name, identity, span, err)) return false;
+        if (!resolve_pending_type_member_term(ctx, &term->args[i], surface_name, identity, span, err)) return false;
     }
     return true;
 }
@@ -2256,7 +2255,7 @@ static bool resolve_pending_type_members(ExpandContext *ctx, const char *surface
         const char *resolved_identity = resolved ? type_def_identity_text(resolved) : NULL;
         if (!resolved_identity || strcmp(resolved_identity, identity) != 0) continue;
         for (size_t m = 0; m < type->member_count; m++) {
-            if (!resolve_pending_type_member_term(&type->members[m].term, surface_name, identity, span, err)) return false;
+            if (!resolve_pending_type_member_term(ctx, &type->members[m].term, surface_name, identity, span, err)) return false;
         }
     }
     return true;
@@ -2426,7 +2425,7 @@ static bool record_contract_add_arg(IdmCallableContract *contract, const IdmType
     return true;
 }
 
-static bool record_constructor_contract(const TypeDef *type, IdmCallableContract *contract, IdmError *err, IdmSpan span) {
+static bool record_constructor_contract(ExpandContext *ctx, const TypeDef *type, IdmCallableContract *contract, IdmError *err, IdmSpan span) {
     memset(contract, 0, sizeof(*contract));
     if (!idm_contract_add_sig(contract)) return idm_error_oom(err, span);
     for (size_t i = 0; i < type->field_count; i++) {
@@ -2434,7 +2433,7 @@ static bool record_constructor_contract(const TypeDef *type, IdmCallableContract
         memset(&any, 0, sizeof(any));
         const IdmTypeTerm *arg = type->fields[i].has_contract ? &type->fields[i].contract : NULL;
         if (!arg) {
-            if (!idm_type_var(&any, "_", 0u, false)) return idm_error_oom(err, span);
+            if (!idm_type_var(ctx->rt, &any, "_", 0u, false)) return idm_error_oom(err, span);
             arg = &any;
         }
         bool ok = record_contract_add_arg(contract, arg, err, span);
@@ -2444,7 +2443,7 @@ static bool record_constructor_contract(const TypeDef *type, IdmCallableContract
             return false;
         }
     }
-    if (!idm_type_con(&contract->sigs[0].result, type_def_identity_text(type))) {
+    if (!idm_type_con_symbol(&contract->sigs[0].result, type_def_identity_symbol(type))) {
         idm_callable_contract_destroy(contract);
         return idm_error_oom(err, span);
     }
@@ -2452,19 +2451,19 @@ static bool record_constructor_contract(const TypeDef *type, IdmCallableContract
     return true;
 }
 
-static bool record_predicate_contract(IdmCallableContract *contract, IdmError *err, IdmSpan span) {
+static bool record_predicate_contract(ExpandContext *ctx, IdmCallableContract *contract, IdmError *err, IdmSpan span) {
     memset(contract, 0, sizeof(*contract));
     if (!idm_contract_add_sig(contract)) return idm_error_oom(err, span);
     IdmTypeTerm arg;
     memset(&arg, 0, sizeof(arg));
-    if (!idm_type_var(&arg, "_", 0u, false)) return idm_error_oom(err, span);
+    if (!idm_type_var(ctx->rt, &arg, "_", 0u, false)) return idm_error_oom(err, span);
     bool ok = record_contract_add_arg(contract, &arg, err, span);
     idm_type_term_destroy(&arg);
     if (!ok) {
         idm_callable_contract_destroy(contract);
         return false;
     }
-    if (!idm_type_con(&contract->sigs[0].result, "atom")) {
+    if (!idm_type_con(ctx->rt, &contract->sigs[0].result, "atom")) {
         idm_callable_contract_destroy(contract);
         return idm_error_oom(err, span);
     }
@@ -2580,8 +2579,8 @@ IdmCore *expand_record_decl(ExpandContext *ctx, const IdmSyntax *form, IdmError 
     IdmCallableContract predicate_contract;
     bool contracts_ready = false;
     record_identity = record_type ? type_def_identity_symbol(record_type) : NULL;
-    if (!record_constructor_contract(record_type, &constructor_contract, err, form->span) ||
-        !record_predicate_contract(&predicate_contract, err, form->span)) {
+    if (!record_constructor_contract(ctx, record_type, &constructor_contract, err, form->span) ||
+        !record_predicate_contract(ctx, &predicate_contract, err, form->span)) {
         idm_callable_contract_destroy(&constructor_contract);
         free(predicate_name);
         record_fields_destroy(fields, field_count);

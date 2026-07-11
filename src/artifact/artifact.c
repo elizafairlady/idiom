@@ -1367,7 +1367,7 @@ static bool put_method_defs(IdmBuffer *out, const IdmTraitMethodDef *methods, si
     return true;
 }
 
-static bool read_method_defs(IdmByteReader *r, IdmTraitMethodDef **out_methods, size_t *out_count, IdmError *err) {
+static bool read_method_defs(IdmRuntime *rt, IdmByteReader *r, IdmTraitMethodDef **out_methods, size_t *out_count, IdmError *err) {
     uint32_t count = idm_rd_u32(r);
     if (!r->ok || count > (r->len - r->pos) / 4u) return false;
     if (count == 0) return true;
@@ -1380,7 +1380,7 @@ static bool read_method_defs(IdmByteReader *r, IdmTraitMethodDef **out_methods, 
         if (!artifact_read_str(r, &m->name, err)) return false;
         if (!idm_arity_deserialize(r, &m->arity, err)) return false;
         m->has_contract = r->ok && idm_rd_u8(r) != 0;
-        if (m->has_contract && !idm_callable_contract_deserialize(r, &m->contract, err)) return false;
+        if (m->has_contract && !idm_callable_contract_deserialize(rt, r, &m->contract, err)) return false;
         if (m->has_contract && m->contract.passthrough && !idm_primitive_info((IdmPrimitive)m->contract.primitive)) {
             r->ok = false;
             return idm_error_set(err, idm_span_unknown(NULL), "trait method primitive %u out of bounds", m->contract.primitive);
@@ -1822,7 +1822,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         slot->arity = idm_arity_unknown();
         if (ok) ok = idm_arity_deserialize(&r, &slot->arity, err);
         RD_FLAG(slot->has_contract, "package slot contract");
-        if (ok && slot->has_contract) ok = idm_callable_contract_deserialize(&r, &slot->contract, err);
+        if (ok && slot->has_contract) ok = idm_callable_contract_deserialize(rt, &r, &slot->contract, err);
         if (ok && slot->has_contract) RD_CONTRACT_PRIMITIVE(slot->contract, "package slot primitive");
         RD_FLAG(slot->exported, "package slot export");
         idm_scope_set_init(&slot->scopes);
@@ -1853,7 +1853,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         imp->arity = idm_arity_unknown();
         if (ok) ok = idm_arity_deserialize(&r, &imp->arity, err);
         RD_FLAG(imp->has_contract, "package import contract");
-        if (ok && imp->has_contract) ok = idm_callable_contract_deserialize(&r, &imp->contract, err);
+        if (ok && imp->has_contract) ok = idm_callable_contract_deserialize(rt, &r, &imp->contract, err);
         if (ok && imp->has_contract) RD_CONTRACT_PRIMITIVE(imp->contract, "package import primitive");
         idm_scope_set_init(&imp->scopes);
         if (ok) ok = idm_scope_set_deserialize(&r, &imp->scopes, NULL);
@@ -1916,7 +1916,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         RD_CALLOC(t->members, member_count);
         for (uint32_t m = 0; ok && m < member_count; m++) {
             t->member_count = m + 1u;
-            ok = idm_type_term_deserialize(&r, &t->members[m].term, err);
+            ok = idm_type_term_deserialize(rt, &r, &t->members[m].term, err);
         }
         uint32_t field_count;
         RD_U32(field_count);
@@ -1925,7 +1925,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
             t->field_count = f + 1u;
             RD_STR(t->fields[f].name);
             RD_FLAG(t->fields[f].has_contract, "type field contract");
-            if (ok && t->fields[f].has_contract) ok = idm_type_term_deserialize(&r, &t->fields[f].contract, err);
+            if (ok && t->fields[f].has_contract) ok = idm_type_term_deserialize(rt, &r, &t->fields[f].contract, err);
         }
     }
     uint32_t trait_count;
@@ -1937,7 +1937,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         RD_STR(t->name);
         RD_STR(t->identity);
         if (ok) ok = read_requirement_defs(&r, &t->requirements, &t->requirement_count, err);
-        if (ok) ok = read_method_defs(&r, &t->methods, &t->method_count, err);
+        if (ok) ok = read_method_defs(rt, &r, &t->methods, &t->method_count, err);
     }
     uint32_t method_impl_count;
     RD_U32(method_impl_count);
@@ -1954,7 +1954,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         RD_STR(impl->impl_env_key);
         RD_U32(impl->impl_slot);
         RD_FLAG(impl->has_contract, "method impl contract");
-        if (ok && impl->has_contract) ok = idm_callable_contract_deserialize(&r, &impl->contract, err);
+        if (ok && impl->has_contract) ok = idm_callable_contract_deserialize(rt, &r, &impl->contract, err);
         if (ok && impl->has_contract) RD_CONTRACT_PRIMITIVE(impl->contract, "method impl primitive");
     }
     uint32_t protocol_count;

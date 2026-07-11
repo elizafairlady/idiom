@@ -11,18 +11,20 @@ static void check(bool cond, const char *msg) {
 }
 
 int idm_unit_type_term(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     IdmTypeTerm v;
-    check(idm_type_var(&v, "a", 1u, false), "make var");
-    check(v.kind == IDM_TYPE_VAR && v.var_id == 1u && strcmp(v.name, "a") == 0, "var fields");
+    check(idm_type_var(&rt, &v, "a", 1u, false), "make var");
+    check(v.kind == IDM_TYPE_VAR && v.var_id == 1u && strcmp(idm_type_term_text(&v), "a") == 0, "var fields");
 
     IdmTypeTerm c;
-    check(idm_type_con(&c, "int"), "make con");
-    check(c.kind == IDM_TYPE_CON && c.arg_count == 0 && strcmp(c.name, "int") == 0, "con fields");
+    check(idm_type_con(&rt, &c, "int"), "make con");
+    check(c.kind == IDM_TYPE_CON && c.arg_count == 0 && strcmp(idm_type_term_text(&c), "int") == 0, "con fields");
 
     IdmTypeTerm *args = calloc(1, sizeof(*args));
-    idm_type_var(&args[0], "a", 1u, false);
+    idm_type_var(&rt, &args[0], "a", 1u, false);
     IdmTypeTerm box;
-    check(idm_type_con_take(&box, "Box", args, 1u), "applied con");
+    check(idm_type_con_take(&rt, &box, "Box", args, 1u), "applied con");
     check(box.arg_count == 1u && idm_type_term_mentions(&box, "a"), "box mentions a");
     check(!idm_type_term_mentions(&box, "b"), "box not mentions b");
 
@@ -31,8 +33,8 @@ int idm_unit_type_term(void) {
     check(idm_type_term_equal(&box, &box2), "copy equal");
 
     IdmTypeTerm *u = calloc(2, sizeof(*u));
-    idm_type_con(&u[0], "int");
-    idm_type_con(&u[1], "string");
+    idm_type_con(&rt, &u[0], "int");
+    idm_type_con(&rt, &u[1], "string");
     IdmTypeTerm un;
     check(idm_type_compound(&un, IDM_TYPE_UNION, u, 2u), "union");
     IdmBuffer b;
@@ -46,7 +48,7 @@ int idm_unit_type_term(void) {
     idm_buf_destroy(&b2);
 
     IdmTypeTerm v2;
-    idm_type_var(&v2, "a", 2u, false);
+    idm_type_var(&rt, &v2, "a", 2u, false);
     check(!idm_type_term_equal(&v, &v2), "var id distinguishes");
 
     IdmError err;
@@ -58,7 +60,7 @@ int idm_unit_type_term(void) {
     IdmByteReader reader;
     idm_byte_reader_init(&reader, (const unsigned char *)(wire.data ? wire.data : ""), wire.len);
     IdmTypeTerm box3;
-    check(idm_type_term_deserialize(&reader, &box3, &err), "deserialize applied type term");
+    check(idm_type_term_deserialize(&rt, &reader, &box3, &err), "deserialize applied type term");
     check(reader.ok && reader.pos == reader.len, "deserialize consumes type term");
     check(idm_type_term_equal(&box, &box3), "serialized type term equal");
     idm_type_term_destroy(&box3);
@@ -70,9 +72,9 @@ int idm_unit_type_term(void) {
     IdmContractSig *ctsig = idm_contract_add_sig(&ct);
     check(ctsig != NULL, "contract sig");
     ctsig->args = calloc(1, sizeof(*ctsig->args));
-    idm_type_var(&ctsig->args[0], "a", 1u, false);
+    idm_type_var(&rt, &ctsig->args[0], "a", 1u, false);
     ctsig->arg_count = 1u;
-    idm_type_var(&ctsig->result, "a", 1u, false);
+    idm_type_var(&rt, &ctsig->result, "a", 1u, false);
     ctsig->has_result = true;
     IdmCallableContract ct2;
     check(idm_callable_contract_copy(&ct2, &ct), "contract copy");
@@ -80,8 +82,6 @@ int idm_unit_type_term(void) {
     idm_callable_contract_destroy(&ct);
     idm_callable_contract_destroy(&ct2);
 
-    IdmRuntime rt;
-    idm_runtime_init(&rt);
     IdmValue one = idm_fixnum(1);
     IdmValue atom = idm_atom(&rt, "x");
     IdmTypeTerm any;
@@ -89,11 +89,11 @@ int idm_unit_type_term(void) {
     IdmTypeTerm integer_term;
     IdmTypeTerm atom_term;
     IdmTypeTerm atomx_term;
-    check(idm_type_con(&any, "Any"), "make Any");
-    check(idm_type_con(&int_term, "int"), "make int term");
-    check(idm_type_con(&integer_term, "integer"), "make integer term");
-    check(idm_type_con(&atom_term, "atom"), "make atom term");
-    check(idm_type_con(&atomx_term, "atomx"), "make atomx term");
+    check(idm_type_con(&rt, &any, "Any"), "make Any");
+    check(idm_type_con(&rt, &int_term, "int"), "make int term");
+    check(idm_type_con(&rt, &integer_term, "integer"), "make integer term");
+    check(idm_type_con(&rt, &atom_term, "atom"), "make atom term");
+    check(idm_type_con(&rt, &atomx_term, "atomx"), "make atomx term");
     check(idm_value_matches_type_term(one, &any), "Any matches int");
     check(idm_value_matches_type_term(one, &int_term), "int term matches int");
     check(!idm_value_matches_type_term(one, &integer_term), "integer term is not int prefix");

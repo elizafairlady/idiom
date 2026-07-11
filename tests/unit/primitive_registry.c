@@ -40,6 +40,8 @@ static bool primitive_variadic_allowed(IdmPrimitive primitive) {
 }
 
 static void check_registry_roundtrip(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     IdmError err;
     idm_error_init(&err);
     for (size_t i = 0; i < idm_primitive_count(); i++) {
@@ -64,7 +66,7 @@ static void check_registry_roundtrip(void) {
 
         IdmCallableContract contract;
         bool has_contract = false;
-        check(idm_primitive_contract(primitive, info->min_arity, &contract, &has_contract, &err, idm_span_unknown(NULL)), "primitive contract min");
+        check(idm_primitive_contract(&rt, primitive, info->min_arity, &contract, &has_contract, &err, idm_span_unknown(NULL)), "primitive contract min");
         check(!err.present, "primitive contract min no error");
         if (!has_contract) fprintf(stderr, "primitive missing contract: %s/%u\n", info->name, info->min_arity);
         check(has_contract, "primitive contract min present");
@@ -72,7 +74,7 @@ static void check_registry_roundtrip(void) {
         idm_callable_contract_destroy(&contract);
         if (info->max_arity != info->min_arity && info->max_arity != UINT32_MAX) {
             has_contract = false;
-            check(idm_primitive_contract(primitive, info->max_arity, &contract, &has_contract, &err, idm_span_unknown(NULL)), "primitive contract max");
+            check(idm_primitive_contract(&rt, primitive, info->max_arity, &contract, &has_contract, &err, idm_span_unknown(NULL)), "primitive contract max");
             check(!err.present, "primitive contract max no error");
             if (!has_contract) fprintf(stderr, "primitive missing contract: %s/%u\n", info->name, info->max_arity);
             check(has_contract, "primitive contract max present");
@@ -81,6 +83,7 @@ static void check_registry_roundtrip(void) {
         }
     }
     idm_error_clear(&err);
+    idm_runtime_destroy(&rt);
 }
 
 int idm_unit_primitive_registry(void) {

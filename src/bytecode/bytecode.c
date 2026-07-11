@@ -355,9 +355,6 @@ bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError 
             module->constants[i] = idm_value_copy(rt, &rt->immortal, module->constants[i], err);
             if (err->present) return false;
         }
-        for (size_t i = 0; i < module->type_count; i++) {
-            if (!idm_type_term_intern_symbols(rt, &module->types[i], err)) return false;
-        }
         return true;
     }
     if (!module->verified && !idm_bc_verify(module, err)) return false;
@@ -367,9 +364,6 @@ bool idm_bc_intern_literals(IdmRuntime *rt, IdmBytecodeModule *module, IdmError 
     for (size_t i = 0; i < module->const_count; i++) {
         module->constants[i] = idm_value_copy(rt, &rt->immortal, module->constants[i], err);
         if (err->present) return false;
-    }
-    for (size_t i = 0; i < module->type_count; i++) {
-        if (!idm_type_term_intern_symbols(rt, &module->types[i], err)) return false;
     }
     for (size_t i = 0; i < module->function_count; i++) {
         IdmBcFunction *fn = &module->functions[i];
@@ -1839,7 +1833,7 @@ bool idm_ic_deserialize(IdmRuntime *rt, const unsigned char *data, size_t len, I
     uint32_t type_count = idm_rd_u32(&r);
     for (uint32_t i = 0; i < type_count && r.ok; i++) {
         IdmTypeTerm term;
-        if (!idm_type_term_deserialize(&r, &term, err)) { idm_bc_destroy(module); return false; }
+        if (!idm_type_term_deserialize(rt, &r, &term, err)) { idm_bc_destroy(module); return false; }
         bool added = idm_bc_add_type_term(module, &term, NULL);
         idm_type_term_destroy(&term);
         if (!added) { idm_bc_destroy(module); return idm_error_oom(err, idm_span_unknown(NULL)); }

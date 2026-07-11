@@ -31,7 +31,7 @@ static bool ctx_seed_builtin_types(ExpandContext *ctx) {
         type->members = calloc(member_count, sizeof(*type->members));
         if (!type->members) return false;
         for (size_t m = 0; m < member_count; m++) {
-            if (!idm_type_con(&type->members[m].term, member_names[m])) return false;
+            if (!idm_type_con(ctx->rt, &type->members[m].term, member_names[m])) return false;
             type->member_count++;
         }
     }
@@ -776,14 +776,15 @@ const char *trait_method_name_text(const TraitMethodDef *method) {
 }
 
 bool type_var_is_wildcard(const IdmTypeTerm *term) {
-    return term && term->kind == IDM_TYPE_VAR && (term->var_id == 0u || (term->name && strcmp(term->name, "_") == 0));
+    const char *name = idm_type_term_text(term);
+    return term && term->kind == IDM_TYPE_VAR && (term->var_id == 0u || (name && strcmp(name, "_") == 0));
 }
 
 bool type_var_same(const IdmTypeTerm *a, const IdmTypeTerm *b) {
     if (!a || !b || a->kind != IDM_TYPE_VAR || b->kind != IDM_TYPE_VAR) return false;
     if (type_var_is_wildcard(a) || type_var_is_wildcard(b)) return true;
     if (a->var_id != 0u || b->var_id != 0u) return a->var_id == b->var_id;
-    return a->name && b->name && strcmp(a->name, b->name) == 0;
+    return a->symbol == b->symbol;
 }
 
 static const TypeDef *typed_type_by_identity_or_name(const ExpandContext *ctx, const char *name);
@@ -857,10 +858,10 @@ static bool trait_requires_trait(ExpandContext *ctx, const TraitDef *source, con
     return false;
 }
 
-static bool typeclass_same_lhs(ExpandContext *ctx, const IdmTypeTerm *given, const IdmTypeTerm *wanted) {
+static bool typeclass_same_lhs(const IdmTypeTerm *given, const IdmTypeTerm *wanted) {
     if (!given || !wanted) return false;
     if (given->kind == IDM_TYPE_VAR && wanted->kind == IDM_TYPE_VAR) return type_var_same(given, wanted);
-    if (given->kind == IDM_TYPE_CON && wanted->kind == IDM_TYPE_CON && type_name_same(ctx, given->name, wanted->name)) return true;
+    if (given->kind == IDM_TYPE_CON && wanted->kind == IDM_TYPE_CON && given->symbol == wanted->symbol) return true;
     return idm_type_term_equal(given, wanted);
 }
 
@@ -871,11 +872,12 @@ static bool trait_name_is_decl(const ExpandContext *ctx, const char *name) {
 }
 
 bool typeclass_given_matches(ExpandContext *ctx, const IdmConstraint *given, const char *trait, const IdmTypeTerm *lhs) {
-    if (!given || given->kind != IDM_CONSTR_CLASS || !trait || !given->trait || !typeclass_same_lhs(ctx, &given->lhs, lhs)) return false;
-    if (strcmp(given->trait, trait) == 0) return true;
-    const TraitDef *given_trait = trait_by_constraint_name(ctx, given->trait);
+    if (!given || given->kind != IDM_CONSTR_CLASS || !trait || !given->trait || !typeclass_same_lhs(&given->lhs, lhs)) return false;
+    const char *given_name = idm_symbol_text(given->trait);
+    if (strcmp(given_name, trait) == 0) return true;
+    const TraitDef *given_trait = trait_by_constraint_name(ctx, given_name);
     const TraitDef *wanted_trait = trait_by_constraint_name(ctx, trait);
-    if (!given_trait || !wanted_trait) return trait_name_is_decl(ctx, given->trait) && trait_name_is_decl(ctx, trait);
+    if (!given_trait || !wanted_trait) return trait_name_is_decl(ctx, given_name) && trait_name_is_decl(ctx, trait);
     return given_trait == wanted_trait || trait_requires_trait(ctx, given_trait, wanted_trait, 0u);
 }
 
@@ -932,9 +934,10 @@ bool trait_impl_satisfies_term(const ExpandContext *ctx, const TraitDef *trait, 
         }
         return true;
     }
-    if (lhs->kind != IDM_TYPE_CON || !lhs->name) return false;
-    if (trait_impl_satisfies_type(ctx, trait, lhs->name)) return true;
-    const TypeDef *type = typed_type_by_identity_or_name(ctx, lhs->name);
+    const char *lhs_name = idm_type_term_text(lhs);
+    if (lhs->kind != IDM_TYPE_CON || !lhs_name) return false;
+    if (trait_impl_satisfies_type(ctx, trait, lhs_name)) return true;
+    const TypeDef *type = typed_type_by_identity_or_name(ctx, lhs_name);
     if (type && type->member_count != 0) {
         bool checked = false;
         for (size_t i = 0; i < type->member_count; i++) {
@@ -1220,7 +1223,7 @@ static bool parse_type_atom(ExpandContext *ctx, IdmSyntax *const *items, size_t 
         }
         if (type) type_name = type_def_identity_text(type);
     }
-    if (ok) ok = is_var ? idm_type_var(out, word->as.text, var_id, false) : idm_type_con(out, type_name);
+    if (ok) ok = is_var ? idm_type_var(ctx->rt, out, word->as.text, var_id, false) : idm_type_con(ctx->rt, out, type_name);
     IdmSpan span = word->span;
     idm_syn_free(word);
     if (!ok) return idm_error_oom(err, span);
@@ -1369,7 +1372,9 @@ static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, 
             IdmConstraint constraint;
             memset(&constraint, 0, sizeof(constraint));
             constraint.kind = IDM_CONSTR_CLASS;
-            constraint.trait = head_text;
+            constraint.trait = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, head_text);
+            free(head_text);
+            if (!constraint.trait) return idm_error_oom(err, span);
             bool sok = parse_type_term_range(ctx, items, trait_end, arg_end, out, &constraint.lhs, err) &&
                        callable_contract_add_constraint(out, &constraint, err, span);
             idm_constraint_destroy(&constraint);
@@ -1399,7 +1404,7 @@ static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, 
                  (strcmp(trait_name, ctx->trait_key) == 0 || strcmp(trait_name, ctx->trait_name) == 0)) {
             trait_name = ctx->trait_name;
         }
-        constraint.trait = idm_strdup(trait_name);
+        constraint.trait = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, trait_name);
         IdmSpan span = trait->span;
         idm_syn_free(trait);
         if (!constraint.trait) return idm_error_oom(err, span);
@@ -1414,22 +1419,23 @@ static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, 
 
 static bool contract_terms_resolved(ExpandContext *ctx, const IdmTypeTerm *term, IdmSpan span, IdmError *err) {
     if (!term) return true;
-    if (term->kind == IDM_TYPE_CON && term->name && strcmp(term->name, "_") != 0 &&
-        strcmp(term->name, "Any") != 0 &&
-        !strchr(term->name, '#') && !idm_type_name_is_builtin(term->name)) {
-        size_t n = strlen(term->name);
+    const char *name = idm_type_term_text(term);
+    if (term->kind == IDM_TYPE_CON && name && strcmp(name, "_") != 0 &&
+        strcmp(name, "Any") != 0 &&
+        !strchr(name, '#') && !idm_type_name_is_builtin(name)) {
+        size_t n = strlen(name);
         for (size_t i = 0; i < ctx->typed.entity_count; i++) {
             const TypedEntity *e = &ctx->typed.entities[i];
             const char *id = NULL;
             if (e->kind == IDM_TYPED_ENTITY_TYPE) id = type_def_identity_text(&e->as.type);
             else if (e->kind == IDM_TYPED_ENTITY_TRAIT) id = trait_def_identity_text(&e->as.trait);
-            if (!id || strncmp(id, term->name, n) != 0 || id[n] != '#') continue;
+            if (!id || strncmp(id, name, n) != 0 || id[n] != '#') continue;
             if (e->kind == IDM_TYPED_ENTITY_TRAIT) {
-                return expand_error(err, span, "unbound type '%s' in contract; '%s' is a trait — constrain with it before '=>' instead", term->name, term->name);
+                return expand_error(err, span, "unbound type '%s' in contract; '%s' is a trait — constrain with it before '=>' instead", name, name);
             }
-            return expand_error(err, span, "unbound type '%s' in contract; a type named '%s' is declared but not visible here — reference it through its import alias", term->name, term->name);
+            return expand_error(err, span, "unbound type '%s' in contract; a type named '%s' is declared but not visible here — reference it through its import alias", name, name);
         }
-        return expand_error(err, span, "unbound type '%s' in contract", term->name);
+        return expand_error(err, span, "unbound type '%s' in contract", name);
     }
     for (size_t i = 0; i < term->arg_count; i++) {
         if (!contract_terms_resolved(ctx, &term->args[i], span, err)) return false;
@@ -1685,13 +1691,15 @@ static bool field_term_satisfies_name(const ExpandContext *ctx, const char *expe
         }
         return t->arg_count != 0;
     }
-    if (t->kind != IDM_TYPE_CON || !t->name) return false;
-    if (type_name_same(ctx, expected, t->name)) return true;
+    const char *name = idm_type_term_text(t);
+    if (t->kind != IDM_TYPE_CON || !name) return false;
+    if (type_name_same(ctx, expected, name)) return true;
     const TypeDef *td = typed_type_by_identity_or_name(ctx, expected);
     if (td) {
         for (size_t i = 0; i < td->member_count; i++) {
             const IdmTypeTerm *m = &td->members[i].term;
-            if (m->kind == IDM_TYPE_CON && m->name && type_name_same(ctx, m->name, t->name)) return true;
+            const char *member = idm_type_term_text(m);
+            if (m->kind == IDM_TYPE_CON && member && type_name_same(ctx, member, name)) return true;
         }
     }
     return false;
@@ -1716,8 +1724,9 @@ bool type_satisfies_structural_head(const ExpandContext *ctx, const char *head, 
     if (td->member_count) {
         for (size_t i = 0; i < td->member_count; i++) {
             const IdmTypeTerm *m = &td->members[i].term;
-            if (m->kind != IDM_TYPE_CON || !m->name) return false;
-            if (!type_satisfies_structural_head(ctx, head, m->name)) return false;
+            const char *member = idm_type_term_text(m);
+            if (m->kind != IDM_TYPE_CON || !member) return false;
+            if (!type_satisfies_structural_head(ctx, head, member)) return false;
         }
         return true;
     }

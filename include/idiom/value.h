@@ -346,7 +346,6 @@ bool idm_record_shape_fill_contracts(IdmRecordShape *shape, const IdmTypeTerm *c
 IdmValue idm_record_from_shape(IdmRuntime *rt, IdmRecordShape *shape, const IdmValue *field_values, IdmError *err);
 IdmValue idm_record_update_value(IdmRuntime *rt, IdmValue rec, IdmValue dict, IdmError *err);
 IdmSymbol *idm_record_shape_field_symbol(IdmRecordShape *shape, size_t index);
-bool idm_type_term_intern_symbols(IdmRuntime *rt, IdmTypeTerm *term, IdmError *err);
 IdmValue idm_regex_value(IdmRuntime *rt, IdmRegex *regex, IdmError *err);
 IdmValue idm_regex_result_value(IdmRuntime *rt, IdmRegexResult *result, IdmError *err);
 IdmValue idm_pid(uint64_t id);

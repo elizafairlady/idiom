@@ -161,12 +161,14 @@ static void check_invalid_arity_bounds(void) {
 }
 
 static void check_invalid_invocation_mask(void) {
+    IdmRuntime rt;
+    idm_runtime_init(&rt);
     IdmCallableContract contract;
     memset(&contract, 0, sizeof(contract));
     IdmContractSig *sig = idm_contract_add_sig(&contract);
     check(sig != NULL, "invocation mask signature");
     sig->args = calloc(1u, sizeof(*sig->args));
-    check(sig->args != NULL && idm_type_con(&sig->args[0], "int"), "invocation mask argument");
+    check(sig->args != NULL && idm_type_con(&rt, &sig->args[0], "int"), "invocation mask argument");
     sig->arg_count = 1u;
     check(idm_arg_mask_set(&sig->invoked, 1u), "invocation mask invalid bit");
     IdmBuffer buf;
@@ -178,6 +180,7 @@ static void check_invalid_invocation_mask(void) {
     idm_error_clear(&err);
     idm_buf_destroy(&buf);
     idm_callable_contract_destroy(&contract);
+    idm_runtime_destroy(&rt);
 }
 
 int idm_unit_wire_helpers(void) {

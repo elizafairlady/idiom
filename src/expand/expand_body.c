@@ -1336,7 +1336,7 @@ static bool body_signature_add(ExpandContext *ctx, BodySignature **signatures, s
                 for (size_t q = 0; q < base->context_count; q++) {
                     const IdmConstraint *bc = &base->context[q];
                     const IdmConstraint *ec = &extra.context[k];
-                    if (bc->kind == ec->kind && bc->trait && ec->trait && strcmp(bc->trait, ec->trait) == 0 && bc->lhs.name && ec->lhs.name && strcmp(bc->lhs.name, ec->lhs.name) == 0) { seen = true; break; }
+                    if (bc->kind == ec->kind && bc->trait == ec->trait && idm_type_term_equal(&bc->lhs, &ec->lhs)) { seen = true; break; }
                 }
                 if (seen) continue;
                 if (!idm_grow((void **)&base->context, &base->context_cap, sizeof(*base->context), 4u, base->context_count + 1u)) { ok = idm_error_oom(err, name->span); break; }
@@ -2343,7 +2343,7 @@ static bool typecheck_transformer(ExpandContext *ctx, const char *name, IdmCore 
     sig->args = calloc(1u, sizeof(*sig->args));
     if (!sig->args) { idm_callable_contract_destroy(&contract); return idm_error_oom(err, idm_span_unknown(NULL)); }
     sig->arg_count = 1u;
-    if (!idm_type_con(&sig->args[0], "syntax") || !idm_type_con(&sig->result, "syntax")) {
+    if (!idm_type_con(ctx->rt, &sig->args[0], "syntax") || !idm_type_con(ctx->rt, &sig->result, "syntax")) {
         idm_callable_contract_destroy(&contract);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
@@ -2924,11 +2924,11 @@ static bool primitive_seed_exports(const char *home) {
     return !home || strcmp(home, "regex") != 0;
 }
 
-static bool primitive_contract_for_slot(IdmPrimitive primitive, IdmArity arity, IdmCallableContract *contract, IdmError *err, IdmSpan span) {
+static bool primitive_contract_for_slot(ExpandContext *ctx, IdmPrimitive primitive, IdmArity arity, IdmCallableContract *contract, IdmError *err, IdmSpan span) {
     memset(contract, 0, sizeof(*contract));
     bool typed = false;
     if (arity.kind != IDM_ARITY_UNKNOWN && arity.min == arity.max && idm_arity_accepts(&arity, arity.min) &&
-        !idm_primitive_contract(primitive, arity.min, contract, &typed, err, span)) {
+        !idm_primitive_contract(ctx->rt, primitive, arity.min, contract, &typed, err, span)) {
         return false;
     }
     contract->passthrough = true;
@@ -2967,7 +2967,7 @@ static bool seed_virtual_package_primitives(ExpandContext *ctx, IdmSyntax *const
         IdmCallableContract contract;
         memset(&contract, 0, sizeof(contract));
         if (ok) ok = binder_scopes_pruned(ctx, name_syntax, &scopes);
-        if (ok) ok = primitive_contract_for_slot(primitive, arity, &contract, err, name_syntax->span);
+        if (ok) ok = primitive_contract_for_slot(ctx, primitive, arity, &contract, err, name_syntax->span);
         if (ok) {
             const IdmBinding *existing = NULL;
             if (body_existing_env_binding(ctx, info->name, &scopes, &existing)) {
@@ -4842,7 +4842,7 @@ static bool clause_guard_refine(ExpandContext *ctx, const IdmCore *guard) {
         if (b->kind != IDM_BIND_ARG || b->frame_id != ctx->frame || b->payload != slot) continue;
         if (b->has_contract) return true;
         IdmTypeTerm con;
-        if (!idm_type_con(&con, tname)) return false;
+        if (!idm_type_con(ctx->rt, &con, tname)) return false;
         IdmCallableContract contract;
         bool ok = callable_contract_from_value_type(&con, &contract);
         if (ok) ok = idm_binding_table_set_contract(&ctx->bindings, b->id, &contract);
