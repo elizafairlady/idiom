@@ -827,7 +827,8 @@ bool idm_structural_head_write(IdmBuffer *out, const IdmStructuralHead *head) {
 }
 
 bool idm_structural_head_serialize(IdmBuffer *out, const IdmStructuralHead *head, IdmError *err) {
-    if (!head || !head->field) return idm_error_set(err, idm_span_unknown(NULL), "structural constraint requires a field");
+    if (!head || !head->field || idm_symbol_kind(head->field) != IDM_SYMBOL_ATOM || idm_symbol_text(head->field)[0] == '\0') return idm_error_set(err, idm_span_unknown(NULL), "structural constraint requires a field");
+    if (head->has_type && (head->type.kind != IDM_TYPE_CON || !head->type.symbol)) return idm_error_set(err, idm_span_unknown(NULL), "structural constraint requires a field type name");
     if (!idm_buf_put_str(out, idm_symbol_text(head->field), strlen(idm_symbol_text(head->field))) ||
         !idm_buf_put_u8(out, head->has_type ? 1u : 0u)) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
     return !head->has_type || idm_type_term_serialize(out, &head->type, err);
@@ -841,7 +842,7 @@ bool idm_structural_head_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmStruct
     head->field = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, field);
     free(field);
     uint8_t has_type = idm_rd_u8(r);
-    if (!head->field || !r->ok || has_type > 1u) {
+    if (!head->field || idm_symbol_text(head->field)[0] == '\0' || !r->ok || has_type > 1u) {
         idm_structural_head_destroy(head);
         return idm_error_set(err, idm_span_unknown(NULL), "invalid structural constraint");
     }
@@ -849,6 +850,10 @@ bool idm_structural_head_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmStruct
     if (head->has_type && !idm_type_term_deserialize(rt, r, &head->type, err)) {
         idm_structural_head_destroy(head);
         return false;
+    }
+    if (head->has_type && (head->type.kind != IDM_TYPE_CON || !head->type.symbol)) {
+        idm_structural_head_destroy(head);
+        return idm_error_set(err, idm_span_unknown(NULL), "invalid structural constraint field type");
     }
     return true;
 }

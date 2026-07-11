@@ -384,6 +384,8 @@ typedef struct {
 typedef struct {
     uint32_t method;
     IdmSymbol *type;
+    bool structural;
+    IdmStructuralHead structural_head;
     IdmArity arity;
     bool passthrough;
     uint32_t primitive;
@@ -612,7 +614,7 @@ IdmCore *idm_core_record_is(IdmCore *value, IdmSymbol *type, IdmSpan span);
 IdmCore *idm_core_dispatch(IdmDispatchKind kind, const char *name, IdmSymbol *identity, IdmSpan span);
 bool idm_core_dispatch_add_arg(IdmCore *core, IdmCore *arg);
 bool idm_core_dispatch_add_method(IdmCore *core, IdmSymbol *trait, IdmCore *evidence, uint8_t evidence_state);
-bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, IdmSymbol *type, IdmArity arity, bool passthrough, uint32_t primitive, IdmCore *ref, uint8_t ref_state);
+bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, IdmSymbol *type, const IdmStructuralHead *structural, IdmArity arity, bool passthrough, uint32_t primitive, IdmCore *ref, uint8_t ref_state);
 bool idm_core_dispatch_add_field(IdmCore *core, IdmSymbol *type, IdmSymbol *field, uint32_t field_index, const IdmTypeTerm *contract);
 void idm_core_dispatch_set_fallback(IdmCore *core, IdmCore *fallback, uint8_t fallback_state);
 void idm_core_free(IdmCore *core);

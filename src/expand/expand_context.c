@@ -184,6 +184,7 @@ static void method_surface_def_destroy(MethodSurfaceDef *method) {
 static void method_impl_def_destroy(MethodImplDef *impl) {
     if (!impl) return;
     free(impl->impl_env_key);
+    idm_structural_head_destroy(&impl->structural_head);
     if (impl->has_contract) idm_callable_contract_destroy(&impl->contract);
     memset(impl, 0, sizeof(*impl));
 }
@@ -626,9 +627,7 @@ bool expand_multi_add_dispatch_clause(ExpandContext *ctx, IdmCore *multi, uint32
     if (argc != 0 && !patterns) return idm_error_oom(err, span);
     bool ok = true;
     for (uint32_t i = 0; i < argc && ok; i++) {
-        const char *type_text = idm_symbol_text(arg0_type);
-        bool structural_head = arg0_type && type_text[0] == '_' && type_text[1] == '.';
-        patterns[i] = i == 0 && arg0_type && !structural_head ? idm_pat_type_symbol(arg0_type, span) : idm_pat_wildcard(span);
+        patterns[i] = i == 0 && arg0_type ? idm_pat_type_symbol(arg0_type, span) : idm_pat_wildcard(span);
         if (!patterns[i]) ok = false;
     }
     IdmCore *body = ok ? body_fn(ctx, multi, body_user, argc, span, err) : NULL;
@@ -928,10 +927,25 @@ bool trait_impl_satisfies_term(const ExpandContext *ctx, const TraitDef *trait, 
         }
         return true;
     }
-    const char *lhs_name = idm_type_term_text(lhs);
-    if (lhs->kind != IDM_TYPE_CON || !lhs_name) return false;
-    if (trait_impl_satisfies_type(ctx, trait, lhs_name)) return true;
-    const TypeDef *type = typed_type_by_identity_or_name(ctx, lhs_name);
+    if (lhs->kind != IDM_TYPE_CON || !lhs->symbol) return false;
+    bool implemented = trait->method_count != 0;
+    for (size_t m = 0; implemented && m < trait->method_count; m++) {
+        bool found = false;
+        for (size_t i = 0; i < ctx->typed.method_impl_count; i++) {
+            const MethodImplDef *impl = &ctx->typed.method_impls[i];
+            if (impl->trait == trait->name && impl->name == trait->methods[m].name && method_impl_matches_type_symbol(ctx, impl, lhs->symbol)) {
+                found = true;
+                break;
+            }
+        }
+        implemented = found;
+    }
+    if (implemented) return true;
+    const TypeDef *type = NULL;
+    for (size_t i = 0; i < ctx->typed.entity_count; i++) {
+        const TypedEntity *entity = &ctx->typed.entities[i];
+        if (entity->kind == IDM_TYPED_ENTITY_TYPE && entity->as.type.identity == lhs->symbol) { type = &entity->as.type; break; }
+    }
     if (type && type->member_count != 0) {
         bool checked = false;
         for (size_t i = 0; i < type->member_count; i++) {
@@ -1328,7 +1342,7 @@ static size_t contract_arg_field_end(IdmSyntax *const *items, size_t start, size
     return pos;
 }
 
-static bool parse_structural_constraint_head(ExpandContext *ctx, const char *text, IdmSyntax *const *items, size_t end, size_t *pos, IdmCallableContract *owner, IdmStructuralHead *out, IdmError *err, IdmSpan span) {
+bool parse_structural_head_syntax(ExpandContext *ctx, const char *text, IdmSyntax *const *items, size_t end, size_t *pos, IdmCallableContract *owner, IdmStructuralHead *out, IdmError *err, IdmSpan span) {
     memset(out, 0, sizeof(*out));
     if (!text || text[0] != '_' || text[1] != '.' || text[2] == '\0') return idm_error_set(err, span, "structural constraint expects a field");
     out->field = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, text + 2u);
@@ -1377,7 +1391,7 @@ static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, 
         if (trait->as.text[0] == '_' && trait->as.text[1] == '.') {
             IdmSpan span = trait->span;
             IdmStructuralHead head;
-            bool head_ok = parse_structural_constraint_head(ctx, trait->as.text, items, end, &trait_end, out, &head, err, span);
+            bool head_ok = parse_structural_head_syntax(ctx, trait->as.text, items, end, &trait_end, out, &head, err, span);
             idm_syn_free(trait);
             if (!head_ok) return false;
             size_t arg_end = trait_end < end ? contract_arg_field_end(items, trait_end, end) : trait_end;
@@ -1647,43 +1661,14 @@ const char *method_impl_name_text(const MethodImplDef *impl) {
     return impl && impl->name ? idm_symbol_text(impl->name) : NULL;
 }
 
-bool method_impl_set_identity(ExpandContext *ctx, MethodImplDef *impl, IdmSymbol *trait, IdmSymbol *name, const char *type, IdmError *err, IdmSpan span) {
-    if (!ctx || !impl || !trait || !name || !type) return idm_error_set(err, span, "method implementation requires trait, method, and receiver type");
-    const TypeDef *type_def = typed_type_by_identity_or_name(ctx, type);
-    IdmSymbol *type_sym = type_def ? type_def->identity : typed_atom_intern(ctx, type);
-    if (!type_sym) return idm_error_oom(err, span);
+bool method_impl_set_identity(MethodImplDef *impl, IdmSymbol *trait, IdmSymbol *name, IdmSymbol *type, const IdmStructuralHead *structural, IdmError *err, IdmSpan span) {
+    if (!impl || !trait || !name || (!type && !structural)) return idm_error_set(err, span, "method implementation requires trait, method, and receiver type");
     impl->trait = trait;
     impl->name = name;
-    impl->type = type_sym;
+    impl->type = type;
+    impl->structural = structural != NULL;
+    if (structural && !idm_structural_head_copy(&impl->structural_head, structural)) return idm_error_oom(err, span);
     return true;
-}
-
-char *structural_head_join(const char *head, IdmSyntax *const *items, size_t count, size_t *inout_pos) {
-    if (!head || head[0] != '_' || head[1] != '.') return NULL;
-    size_t pos = *inout_pos;
-    const char *field_type = pos + 1u < count && syntax_text_is(items[pos], "::") ? surface_token_text(items[pos + 1u]) : NULL;
-    IdmBuffer joined;
-    idm_buf_init(&joined);
-    bool ok = idm_buf_append(&joined, head);
-    if (ok && field_type) {
-        ok = idm_buf_append(&joined, "::") && idm_buf_append(&joined, field_type);
-        pos += 2u;
-    }
-    char *text = ok ? idm_strdup(joined.data) : NULL;
-    idm_buf_destroy(&joined);
-    if (!text) return NULL;
-    *inout_pos = pos;
-    return text;
-}
-
-bool structural_head_parse(const char *head, const char **out_field, size_t *out_field_len, const char **out_type) {
-    if (!head || head[0] != '_' || head[1] != '.') return false;
-    const char *f = head + 2;
-    const char *sep = strstr(f, "::");
-    *out_field = f;
-    *out_field_len = sep ? (size_t)(sep - f) : strlen(f);
-    *out_type = sep ? sep + 2 : NULL;
-    return *out_field_len != 0;
 }
 
 static bool field_term_satisfies_symbol(const ExpandContext *ctx, IdmSymbol *expected, const IdmTypeTerm *t) {
@@ -1739,27 +1724,6 @@ bool type_satisfies_structural(const ExpandContext *ctx, const IdmStructuralHead
         return true;
     }
     return false;
-}
-
-bool type_satisfies_structural_head(const ExpandContext *ctx, const char *encoded, const char *type_name) {
-    const char *field = NULL;
-    size_t field_len = 0;
-    const char *field_type = NULL;
-    if (!structural_head_parse(encoded, &field, &field_len, &field_type)) return false;
-    char *field_text = idm_strndup(field, field_len);
-    if (!field_text) return false;
-    IdmStructuralHead head;
-    memset(&head, 0, sizeof(head));
-    head.field = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, field_text);
-    free(field_text);
-    if (field_type) {
-        const TypeDef *td = typed_type_by_identity_or_name(ctx, field_type);
-        head.type.symbol = td ? td->identity : idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, field_type);
-        head.type.kind = IDM_TYPE_CON;
-        head.has_type = head.type.symbol != NULL;
-    }
-    const TypeDef *type = typed_type_by_identity_or_name(ctx, type_name);
-    return type_satisfies_structural(ctx, &head, type ? type->identity : idm_intern_lookup(&ctx->rt->intern, IDM_SYMBOL_ATOM, type_name));
 }
 
 FieldSelectorDef *field_selector_lookup(ExpandContext *ctx, const char *name) {
@@ -1826,10 +1790,18 @@ void expand_seed_const_defn(ExpandContext *ctx, uint32_t slot, IdmCore *value) {
 }
 
 bool method_impl_matches_type(const ExpandContext *ctx, const MethodImplDef *impl, const char *type) {
-    if (!impl || !impl->type) return false;
-    const char *impl_type = method_impl_type_text(impl);
-    if (impl_type && impl_type[0] == '_' && impl_type[1] == '.') return type && type_satisfies_structural_head(ctx, impl_type, type);
-    return type_name_same(ctx, impl_type, type);
+    if (!impl || !type) return false;
+    const TypeDef *td = typed_type_by_identity_or_name(ctx, type);
+    IdmSymbol *symbol = td ? td->identity : typed_atom_lookup(ctx, type);
+    return symbol ? method_impl_matches_type_symbol(ctx, impl, symbol) : type_name_same(ctx, method_impl_type_text(impl), type);
+}
+
+bool method_impl_matches_type_symbol(const ExpandContext *ctx, const MethodImplDef *impl, IdmSymbol *type) {
+    if (!impl || !type) return false;
+    if (impl->structural) return type_satisfies_structural(ctx, &impl->structural_head, type);
+    if (impl->type == type) return true;
+    if (!impl->type) return false;
+    return nil_empty_list_same(idm_symbol_text(impl->type), idm_symbol_text(type));
 }
 
 bool method_impl_matches_trait(const ExpandContext *ctx, const MethodImplDef *impl, const char *trait) {
@@ -1841,7 +1813,9 @@ bool method_impl_matches_trait(const ExpandContext *ctx, const MethodImplDef *im
 }
 
 bool method_impl_same_type(const MethodImplDef *a, const MethodImplDef *b) {
-    return a && b && a->type && a->type == b->type;
+    if (!a || !b || a->structural != b->structural) return false;
+    return a->structural ? idm_structural_head_equal(&a->structural_head, &b->structural_head)
+                         : a->type && a->type == b->type;
 }
 
 bool method_impl_matches_identity(const ExpandContext *ctx, const MethodImplDef *impl, const char *trait, const char *name, const char *type) {

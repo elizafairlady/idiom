@@ -152,6 +152,8 @@ typedef struct {
     IdmSymbol *trait;
     IdmSymbol *name;
     IdmSymbol *type;
+    bool structural;
+    IdmStructuralHead structural_head;
     IdmArity arity;
     bool impl_env;
     uint32_t impl_frame;
@@ -604,11 +606,10 @@ bool method_surfaces_share_trait_identity(const MethodSurfaceDef *a, const Metho
 const char *method_impl_trait_text(const MethodImplDef *impl);
 const char *method_impl_name_text(const MethodImplDef *impl);
 const char *method_impl_type_text(const MethodImplDef *impl);
-bool method_impl_set_identity(ExpandContext *ctx, MethodImplDef *impl, IdmSymbol *trait, IdmSymbol *name, const char *type, IdmError *err, IdmSpan span);
+bool method_impl_set_identity(MethodImplDef *impl, IdmSymbol *trait, IdmSymbol *name, IdmSymbol *type, const IdmStructuralHead *structural, IdmError *err, IdmSpan span);
 bool method_impl_matches_type(const ExpandContext *ctx, const MethodImplDef *impl, const char *type);
-char *structural_head_join(const char *head, IdmSyntax *const *items, size_t count, size_t *inout_pos);
-bool structural_head_parse(const char *head, const char **out_field, size_t *out_field_len, const char **out_type);
-bool type_satisfies_structural_head(const ExpandContext *ctx, const char *head, const char *type_name);
+bool method_impl_matches_type_symbol(const ExpandContext *ctx, const MethodImplDef *impl, IdmSymbol *type);
+bool parse_structural_head_syntax(ExpandContext *ctx, const char *text, IdmSyntax *const *items, size_t end, size_t *pos, IdmCallableContract *owner, IdmStructuralHead *out, IdmError *err, IdmSpan span);
 bool type_satisfies_structural(const ExpandContext *ctx, const IdmStructuralHead *head, IdmSymbol *type);
 FieldSelectorDef *field_selector_lookup(ExpandContext *ctx, const char *name);
 FieldSelectorDef *field_selector_ensure(ExpandContext *ctx, const char *name, IdmError *err);

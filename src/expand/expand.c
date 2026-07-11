@@ -1267,8 +1267,7 @@ static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const Metho
         for (size_t j = 0; j < ctx->typed.method_impl_count; j++) {
             const MethodImplDef *impl = &ctx->typed.method_impls[j];
             if (!method_impl_matches_identity(ctx, impl, method_surface_trait_text(method), method_surface_name_text(method), NULL)) continue;
-            const char *impl_type = method_impl_type_text(impl);
-            if (!impl_type) continue;
+            if (!impl->type && !impl->structural) continue;
             uint8_t ref_state = IDM_DISPATCH_REF_NONE;
             IdmCore *ref = NULL;
             bool passthrough = impl->has_contract && impl->contract.passthrough && impl->contract.primitive < IDM_PRIM_COUNT;
@@ -1279,7 +1278,7 @@ static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const Metho
                     return NULL;
                 }
             }
-            if (!idm_core_dispatch_add_impl(node, method_pos, impl->type, impl->arity, passthrough, passthrough ? impl->contract.primitive : 0u, ref, ref_state)) {
+            if (!idm_core_dispatch_add_impl(node, method_pos, impl->type, impl->structural ? &impl->structural_head : NULL, impl->arity, passthrough, passthrough ? impl->contract.primitive : 0u, ref, ref_state)) {
                 idm_core_free(ref);
                 idm_core_free(node);
                 return (IdmCore *)(uintptr_t)idm_error_oom(err, span);

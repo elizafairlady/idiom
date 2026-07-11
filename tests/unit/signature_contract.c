@@ -1376,6 +1376,18 @@ int idm_unit_signature_contract(void) {
     dir = write_package_dir(structural_source, &err);
     idm_buf_init(&wire);
     check_ok(idm_expand_package_artifact_serialize(&rt, dir, &wire, &err), &err, "structural impl compiles");
+    IdmArtifact structural_art;
+    check_ok(idm_artifact_deserialize(&rt, (const unsigned char *)(wire.data ? wire.data : ""), wire.len, &structural_art, &err), &err, "structural impl artifact deserialize");
+    const IdmPkgMethodImpl *structural_impl = NULL;
+    for (size_t i = 0; i < structural_art.typed.method_impl_count; i++) {
+        if (structural_art.typed.method_impls[i].structural) { structural_impl = &structural_art.typed.method_impls[i]; break; }
+    }
+    check(structural_impl != NULL, "structural impl survives artifact wire");
+    check(strcmp(idm_symbol_text(structural_impl->structural_head.field), "size") == 0 &&
+          structural_impl->structural_head.has_type &&
+          strcmp(idm_type_term_text(&structural_impl->structural_head.type), "int") == 0,
+          "structural impl head survives artifact wire");
+    idm_artifact_destroy(&structural_art);
     idm_buf_destroy(&wire);
     remove_package_dir(dir);
     free(dir);

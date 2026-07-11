@@ -579,13 +579,19 @@ bool idm_core_dispatch_add_method(IdmCore *core, IdmSymbol *trait, IdmCore *evid
     return true;
 }
 
-bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, IdmSymbol *type, IdmArity arity, bool passthrough, uint32_t primitive, IdmCore *ref, uint8_t ref_state) {
-    if (!core || core->kind != IDM_CORE_DISPATCH || !type) return false;
+bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, IdmSymbol *type, const IdmStructuralHead *structural, IdmArity arity, bool passthrough, uint32_t primitive, IdmCore *ref, uint8_t ref_state) {
+    if (!core || core->kind != IDM_CORE_DISPATCH || (!type && !structural)) return false;
     size_t cap = core->as.dispatch.impl_count;
     if (!idm_grow((void **)&core->as.dispatch.impls, &cap, sizeof(*core->as.dispatch.impls), 4u, core->as.dispatch.impl_count + 1u)) return false;
     IdmDispatchImplDef *im = &core->as.dispatch.impls[core->as.dispatch.impl_count];
+    memset(im, 0, sizeof(*im));
     im->method = method;
     im->type = type;
+    im->structural = structural != NULL;
+    if (structural && !idm_structural_head_copy(&im->structural_head, structural)) {
+        idm_structural_head_destroy(&im->structural_head);
+        return false;
+    }
     im->arity = arity;
     im->passthrough = passthrough;
     im->primitive = primitive;
@@ -762,6 +768,7 @@ void idm_core_free(IdmCore *core) {
             }
             free(core->as.dispatch.methods);
             for (size_t i = 0; i < core->as.dispatch.impl_count; i++) {
+                idm_structural_head_destroy(&core->as.dispatch.impls[i].structural_head);
                 idm_core_free(core->as.dispatch.impls[i].ref);
             }
             free(core->as.dispatch.impls);

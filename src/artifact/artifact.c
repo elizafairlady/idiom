@@ -349,6 +349,7 @@ void idm_pkg_method_impl_destroy(IdmPkgMethodImpl *impl) {
     if (!impl) return;
     free(impl->method);
     free(impl->impl_env_key);
+    idm_structural_head_destroy(&impl->structural_head);
     if (impl->has_contract) idm_callable_contract_destroy(&impl->contract);
     memset(impl, 0, sizeof(*impl));
 }
@@ -1642,7 +1643,8 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     for (size_t i = 0; ok && i < art->typed.method_impl_count; i++) {
         const IdmPkgMethodImpl *impl = &art->typed.method_impls[i];
         ok = artifact_put_identity(out, impl->trait) &&
-             artifact_put_symbol(out, impl->type) &&
+             idm_buf_put_u8(out, impl->structural ? 1u : 0u) &&
+             (impl->structural ? idm_structural_head_serialize(out, &impl->structural_head, err) : artifact_put_symbol(out, impl->type)) &&
              idm_buf_put_str(out, impl->method, strlen(impl->method)) &&
              idm_arity_serialize(out, impl->arity, err) &&
              idm_buf_put_u8(out, impl->impl_env ? 1u : 0u) &&
@@ -1989,7 +1991,9 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         IdmPkgMethodImpl *impl = &out->typed.method_impls[i];
         out->typed.method_impl_count = i + 1u;
         if (ok) ok = artifact_read_identity(rt, &r, &impl->trait, err);
-        if (ok) ok = artifact_read_symbol(rt, &r, &impl->type, err);
+        RD_FLAG(impl->structural, "structural method impl");
+        if (ok) ok = impl->structural ? idm_structural_head_deserialize(rt, &r, &impl->structural_head, err)
+                                      : artifact_read_symbol(rt, &r, &impl->type, err);
         RD_STR(impl->method);
         impl->arity = idm_arity_unknown();
         if (ok) ok = idm_arity_deserialize(&r, &impl->arity, err);

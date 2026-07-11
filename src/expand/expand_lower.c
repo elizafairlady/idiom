@@ -65,9 +65,9 @@ static IdmCore *dispatch_take_args_call(IdmCore *node, IdmCore *callee, IdmError
 }
 
 static bool dispatch_impl_matches_type(const ExpandContext *ctx, const IdmDispatchImplDef *cand, IdmSymbol *type) {
-    if (!cand->type || !type) return false;
-    const char *candidate = idm_symbol_text(cand->type);
-    if (candidate[0] == '_' && candidate[1] == '.') return type_satisfies_structural_head(ctx, candidate, idm_symbol_text(type));
+    if (!type) return false;
+    if (cand->structural) return type_satisfies_structural(ctx, &cand->structural_head, type);
+    if (!cand->type) return false;
     return cand->type == type;
 }
 
@@ -335,17 +335,14 @@ static IdmCore *lower_implements_dispatch(LowerCtx *lc, LowerFrame *fr, IdmCore 
     for (size_t i = 0; ok && trait_identity && i < ctx->typed.method_impl_count; i++) {
         const MethodImplDef *impl = &ctx->typed.method_impls[i];
         if (impl->trait != trait_identity) continue;
-        const char *type = method_impl_type_text(impl);
-        if (!type) continue;
-        if (type[0] == '_' && type[1] == '.') {
+        if (impl->structural) {
             for (size_t e = 0; ok && e < ctx->typed.entity_count; e++) {
                 const TypedEntity *ent = &ctx->typed.entities[e];
                 if (ent->kind != IDM_TYPED_ENTITY_TYPE || ent->as.type.field_count == 0) continue;
-                const char *id = type_def_identity_text(&ent->as.type);
-                if (!id || !type_satisfies_structural_head(ctx, type, id)) continue;
+                if (!ent->as.type.identity || !type_satisfies_structural(ctx, &impl->structural_head, ent->as.type.identity)) continue;
                 ok = implements_target_add(lc, trait, ent->as.type.identity, &targets, span, err);
             }
-        } else {
+        } else if (impl->type) {
             ok = implements_target_add(lc, trait, impl->type, &targets, span, err);
         }
     }

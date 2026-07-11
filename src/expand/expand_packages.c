@@ -1218,7 +1218,8 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
         bool updated = false;
         for (size_t j = 0; j < ctx->typed.method_impl_count; j++) {
             MethodImplDef *dst = &ctx->typed.method_impls[j];
-            if (dst->trait != src->trait || dst->type != src->type || !dst->name || strcmp(idm_symbol_text(dst->name), src->method) != 0) continue;
+            if (dst->trait != src->trait || dst->structural != src->structural || !dst->name || strcmp(idm_symbol_text(dst->name), src->method) != 0) continue;
+            if (src->structural ? !idm_structural_head_equal(&dst->structural_head, &src->structural_head) : dst->type != src->type) continue;
             char *next_key = idm_strdup(key ? key : "");
             if (!next_key) return idm_error_oom(err, idm_span_unknown(NULL));
             IdmCallableContract next_contract;
@@ -1260,9 +1261,17 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
         }
         dst->trait = src->trait;
         dst->type = src->type;
-        dst->name = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, src->method);
-        if (!dst->impl_env_key || !dst->trait || !dst->type || !dst->name) {
+        dst->structural = src->structural;
+        if (src->structural && !idm_structural_head_copy(&dst->structural_head, &src->structural_head)) {
             free(dst->impl_env_key);
+            if (dst->has_contract) idm_callable_contract_destroy(&dst->contract);
+            memset(dst, 0, sizeof(*dst));
+            return idm_error_oom(err, idm_span_unknown(NULL));
+        }
+        dst->name = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, src->method);
+        if (!dst->impl_env_key || !dst->trait || (!dst->type && !dst->structural) || !dst->name) {
+            free(dst->impl_env_key);
+            idm_structural_head_destroy(&dst->structural_head);
             if (dst->has_contract) idm_callable_contract_destroy(&dst->contract);
             memset(dst, 0, sizeof(*dst));
             return idm_error_oom(err, idm_span_unknown(NULL));
@@ -2116,19 +2125,20 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             const MethodImplDef *src = &ctx.typed.method_impls[i];
             IdmPkgMethodImpl *dst = &pkg_method_impls[i];
             const MethodSurfaceDef *surface = method_surface_by_index(&ctx, src->method_surface);
-            const char *type = method_impl_type_text(src);
             const char *trait = method_impl_trait_text(src);
             const char *method = method_impl_name_text(src);
             if (surface) {
                 trait = method_surface_trait_text(surface);
                 method = method_surface_name_text(surface);
             }
-            if (!trait || !method || !type) {
+            if (!trait || !method || (!src->type && !src->structural)) {
                 copy_ok = false;
                 break;
             }
             dst->trait = surface ? surface->trait : src->trait;
             dst->type = src->type;
+            dst->structural = src->structural;
+            if (src->structural && !idm_structural_head_copy(&dst->structural_head, &src->structural_head)) copy_ok = false;
             dst->method = idm_strdup(method);
             dst->arity = src->arity;
             dst->impl_env = src->impl_env;
@@ -2136,7 +2146,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
             dst->impl_slot = src->impl_slot;
             if (src->has_contract && idm_callable_contract_copy(&dst->contract, &src->contract)) dst->has_contract = true;
             else if (src->has_contract) copy_ok = false;
-            if (!dst->trait || !dst->type || !dst->method || !dst->impl_env_key) copy_ok = false;
+            if (!dst->trait || (!dst->type && !dst->structural) || !dst->method || !dst->impl_env_key) copy_ok = false;
         }
         if (!copy_ok && pkg_method_impls) {
             for (size_t i = 0; i < pkg_method_impl_count; i++) idm_pkg_method_impl_destroy(&pkg_method_impls[i]);

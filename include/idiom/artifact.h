@@ -329,6 +329,8 @@ typedef struct {
 typedef struct {
     IdmSymbol *trait;
     IdmSymbol *type;
+    bool structural;
+    IdmStructuralHead structural_head;
     char *method;
     IdmArity arity;
     bool impl_env;

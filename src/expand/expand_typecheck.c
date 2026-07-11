@@ -1945,7 +1945,10 @@ static bool generalize_contract_sigs(GenCtx *g, const GenSigInput *inputs, size_
             cc++;
         }
         if (ok && cc) { out->context = ctxc; out->context_count = cc; }
-        else free(ctxc);
+        else {
+            for (size_t i = 0; i < cc; i++) idm_constraint_destroy(&ctxc[i]);
+            free(ctxc);
+        }
     }
     if (ok && qm.count) {
         out->quantified = calloc(qm.count, sizeof(*out->quantified));
