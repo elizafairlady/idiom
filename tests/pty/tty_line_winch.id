@@ -1,0 +1,11 @@
+use std/term
+
+println "ready"
+match tty-read-line do
+  {:line l} -> println "got=${l}"
+  other -> println "first=#{inspect other}"
+end
+match tty-read-line do
+  {:signal :resize} -> println "resize-latched"
+  other -> println "second=#{inspect other}"
+end

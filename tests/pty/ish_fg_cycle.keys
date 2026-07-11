@@ -1,0 +1,20 @@
+w % 
+s sleep 5 &\r
+w [1] sleep 5 &
+s sleep 6 &\r
+w [2] sleep 6 &
+s jobs\r
+w Running  sleep 6
+s fg\r
+w sleep 6
+s \x03
+w % 
+s jobs\r
+w Running  sleep 5
+s fg\r
+w sleep 5
+s \x03
+w % 
+s fg\r
+w no current job
+s :q\r

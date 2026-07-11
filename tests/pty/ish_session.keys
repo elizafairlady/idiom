@@ -1,0 +1,20 @@
+w % 
+s echo pty-hello\r
+w pty-hello
+s printf "a\\nb\\n" | wc -l\r
+w 2
+s false || echo rescued\r
+w rescued
+s sleep 0.4 &\r
+w [1] sleep 0.4 &
+s jobs\r
+w Running
+s fg\r
+w sleep 0.4
+s x = add 40 2\r
+s print x\r
+w 42
+s cd /tmp\r
+s pwd\r
+w /tmp
+s :q\r

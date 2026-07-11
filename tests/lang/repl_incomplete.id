@@ -1,0 +1,120 @@
+use std/test
+use std/file with [write! mkdir-p! remove]
+use std/compile with [compile]
+
+activate Test
+
+suite "incomplete input is a typed reason, not a spelling" do
+  test "open forms continue" do
+    match (compile "if :true do") do
+      :incomplete -> :ok
+      other -> error {:open-if other}
+    end
+    match (compile "match 1 do") do
+      :incomplete -> :ok
+      other -> error {:open-match other}
+    end
+    match (compile "fn x ->") do
+      :incomplete -> :ok
+      other -> error {:open-arrow other}
+    end
+    match (compile "receive do") do
+      :incomplete -> :ok
+      other -> error {:open-receive other}
+    end
+    match (compile "x = [1,") do
+      :incomplete -> :ok
+      other -> error {:open-vector other}
+    end
+    match (compile "\"abc") do
+      :incomplete -> :ok
+      other -> error {:open-string other}
+    end
+    match (compile "%<1:8") do
+      :incomplete -> :ok
+      other -> error {:open-bitstring other}
+    end
+    match (compile "1 +") do
+      :incomplete -> :ok
+      other -> error {:open-operand other}
+    end
+    match (compile "add 1 2 |>") do
+      :incomplete -> :ok
+      other -> error {:open-pipe other}
+    end
+    match (compile "\"abc\\\"") do
+      :incomplete -> :ok
+      other -> error {:open-escaped-quote other}
+    end
+  end
+
+  test "closed forms compile and genuine breakage errors" do
+    match (compile "if :true do\n  40 + 2\nend\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:closed-if other}
+    end
+    match (compile "1 )") do
+      {:error _detail} -> :ok
+      other -> error {:stray-close other}
+    end
+    match (compile "nosuchfn 1") do
+      {:error _detail} -> :ok
+      other -> error {:unbound other}
+    end
+    match (compile "%<1:8)") do
+      {:error _detail} -> :ok
+      other -> error {:bitstring-stray-closer other}
+    end
+    match (compile "(1 + )") do
+      {:error _detail} -> :ok
+      other -> error {:mid-form-operand other}
+    end
+  end
+
+  test "an open-at-EOF package errors at the importer, never continues" do
+    mkdir-p! "/tmp/t2-broken"
+    write! "/tmp/t2-broken/pkg.id" "package t2broken\nexport defn f -> \"oops"
+    match (compile "import /tmp/t2-broken") do
+      {:error _detail} -> :ok
+      other -> error {:import-open-string other}
+    end
+    mkdir-p! "/tmp/t2-arrowend"
+    write! "/tmp/t2-arrowend/pkg.id" "package t2arrowend\nexport defn f x ->"
+    match (compile "import /tmp/t2-arrowend") do
+      {:error _detail} -> :ok
+      other -> error {:import-open-arrow other}
+    end
+    remove "/tmp/t2-broken/pkg.id"
+    remove "/tmp/t2-arrowend/pkg.id"
+  end
+
+  test "an abandoned starved alternative never converts a genuine error into incomplete" do
+    match (compile "protocol Starveish do\n  grammar Starve exclusive do\n    skip space {:regex \"[ \\t\\r\\n]+\"}\n    token name {:regex \"(?<name_text>[a-z-]+)\"} -> {:capture-word name_text}\n    form stmt {:alt {:seq {:capture a {:token name}} {:capture b {:token name}}} {:capture a {:token name}}} -> {:emit-form \"%-expr\" [{:capture a} {:splice b}]}\n    form program {:capture s {:ref stmt}} -> {:emit-form \"%-package-begin\" [{:capture s}]}\n  end\nend\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:starveish-define other}
+    end
+    match (compile "activate Starveish\nnosuchword\n") do
+      {:error _detail} -> :ok
+      other -> error {:starved-alt-reports-error other}
+    end
+  end
+
+  test "a surface without do/end still continues on its own open form" do
+    match (compile "protocol Braceish do\n  grammar Brace exclusive do\n    skip space {:regex \"[ \\t\\r\\n]+\"}\n    token lb {:literal \"<<<\"} -> {:emit-atom lb}\n    token rb {:literal \">>>\"} -> {:emit-atom rb}\n    token name {:regex \"(?<name_text>[a-z]+)\"} -> {:capture-string name_text}\n    form greeting {:seq {:token lb} {:capture who {:token name}} {:token rb}} -> {:emit-form \"%-expr\" [{:emit-word \"println\"} {:capture who}]}\n    form program {:repeat {:capture line {:ref greeting}}} -> {:emit-form \"%-package-begin\" [{:splice line}]}\n  end\nend\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:braceish-define other}
+    end
+    match (compile "activate Braceish\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:braceish-activate other}
+    end
+    match (compile "<<<hello") do
+      :incomplete -> :ok
+      other -> error {:open-brace other}
+    end
+    match (compile "<<<hello>>>") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:closed-brace other}
+    end
+  end
+end

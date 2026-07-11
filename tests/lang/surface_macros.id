@@ -1,0 +1,111 @@
+use std/test
+use tests/pkg/surface_macros
+import std/test as QualifiedTest
+import tests/pkg/surface_macros as QualifiedSurface
+activate Test
+
+defmacro body-splice do
+  %`(body-splice) -> %`do
+    10
+    20
+  end
+end
+
+defn kadd2 a b -> add a b
+defmacro twice2 %`(twice2 %,e) -> %`(kadd2 %,e %,e)
+
+defmacro my-or do
+  %`(my-or %,a %,b) -> %`(do
+    tmp = %,a
+    cond tmp tmp %,b
+  end)
+end
+
+suite do
+  test "body-macro-splices-expanded-body" do
+    do
+      body-splice
+    end |> assert-eq 20
+  end
+
+  test "package-export-macro-emits-exported-definition" do
+    generated |> assert-eq 42
+  end
+
+  test "qualified package macro import uses shared artifact binding name" do
+    QualifiedSurface.emit-value 43 |> assert-eq 43
+  end
+
+  test "unqualified package use imports exported macros" do
+    emit-value 41 |> assert-eq 41
+  end
+
+  test "use selection can pick an exported macro" do
+    assert-compiles "use tests/pkg/surface_macros with [emit-value]\nemit-value 41\n"
+  end
+
+  test "qualified protocol activation exposes qualified macros" do
+    assert-compiles "use std/test\nimport std/test as QualifiedTest\nactivate QualifiedTest.Test\nsuite do\n  test \"qualified-suite-test\" do\n    :ok\n  end\nend\n"
+  end
+
+  test "template references resolve at definition context" do
+    got = do
+      defn kadd2 a b -> :shadow
+      twice2 21
+    end
+    got |> assert-eq 42
+  end
+
+  test "macro syntax patterns unwrap layout groups" do
+    got = twice2
+      add 10 11
+    got |> assert-eq 42
+  end
+
+  test "macro-introduced binders do not capture caller names" do
+    got = do
+      tmp = :user
+      {(my-or :nil tmp) (my-or tmp 99)}
+    end
+    assert-inspect got "{:user :user}"
+  end
+
+  test "macro-introduced names stay inside expansion" do
+    assert-expand-error "defmacro m stx -> %`(do\n  hidden = 1\nend)\nm x\nhidden\n" "unbound identifier 'hidden'"
+  end
+
+  test "macro operator with caller name is visible" do
+    got = do
+      defmacro install-op stx -> match stx do
+        %`(install-op %,name) -> %`do
+          core-operator %,name 50 "left" "infix" add
+        end
+      end
+      install-op <++>
+      40 <++> 2
+    end
+    got |> assert-eq 42
+  end
+
+  test "macro-invented operator name is hygienic" do
+    assert-expand-error "defmacro install-op stx -> %`do\n  core-operator <++> 50 \"left\" \"infix\" add\nend\ninstall-op x\n40 <++> 2\n" "unbound identifier '<++>'"
+  end
+
+  test "transformers are capture-free: phase-0 binds do not reach defmacro bodies" do
+    assert-expand-error "k = 1\ndefmacro bad stx -> make-syntax-int stx k\nbad x\n" "unbound identifier 'k'"
+    assert-expand-error "package p\nk = 1\nexport defmacro bad stx -> make-syntax-int stx k\nbad x\n" "unbound identifier 'k'"
+    assert-expand-error "defn f y -> do\n  defmacro m stx -> make-syntax-int stx y\n  m x\nend\n" "unbound identifier 'y'"
+  end
+
+  test "the deferred registration rail is gone" do
+    assert-expand-error "internal-register-macro 'a 'b\n" "unbound identifier 'internal-register-macro'"
+  end
+
+  test "a phase-1 macro-body raise carries a live, stable filename" do
+    detail = expand-error-detail "defmacro boom stx -> match 1 do 2 -> stx end\nboom x\n"
+    dict-get detail :file "" |> assert-eq "<expand-check>"
+    dict-get detail :line :nil |> assert-eq 1
+    dict-get detail :column :nil |> assert-eq 28
+    dict-get detail :reason :nil |> assert-eq {:no-clause :match {1}}
+  end
+end

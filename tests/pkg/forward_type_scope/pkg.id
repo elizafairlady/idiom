@@ -1,0 +1,22 @@
+package forward_type_scope
+
+defmacro mk-scoped-union do
+  %`(mk-scoped-union) -> %`do
+    type UM :: TM
+    record TM do
+      field a :: int
+    end
+    :ok
+  end
+end
+
+type UO :: TM
+mk-scoped-union
+record TM do
+  field b :: string
+end
+
+spec fwd-check :: UO -> atom
+defn fwd-check _u -> :ok
+
+export defn forward-scope-check -> fwd-check (TM "x")

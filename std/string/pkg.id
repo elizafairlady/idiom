@@ -1,0 +1,179 @@
+package string
+
+use std/enum
+import std/list as List
+
+export defn empty? s -> s |> byte-len |> eq? 0
+
+export defn starts-with? s prefix -> do
+  n = prefix |> byte-len
+  and (n |> lte? (s |> byte-len)) (s |> byte-slice 0 n |> eq? prefix)
+end
+
+export defn ends-with? s suffix -> do
+  n = suffix |> byte-len
+  total = s |> byte-len
+  and (n |> lte? total) (s |> byte-slice (total - n) total |> eq? suffix)
+end
+
+export defn space? do
+  32 -> :true
+  9 -> :true
+  10 -> :true
+  13 -> :true
+  _ -> :false
+end
+
+defn scan-left do
+  s i n when (eq? i n) -> i
+  s i n -> cond (s |> byte i |> space?) (scan-left s (add i 1) n) i
+end
+
+defn scan-right do
+  s i when (eq? i 0) -> 0
+  s i -> cond (s |> byte (i - 1) |> space?) (scan-right s (sub i 1)) i
+end
+
+defn blank-from do
+  _ i n when (eq? i n) -> :true
+  s i n -> cond (s |> byte i |> space?) (blank-from s (add i 1) n) :false
+end
+
+export defn blank? s -> s |> blank-from 0 (s |> byte-len)
+
+export defn trim-left s -> do
+  n = s |> byte-len
+  s |> byte-slice (s |> scan-left 0 n) n
+end
+export defn trim-right s -> s |> byte-slice 0 (s |> scan-right (s |> byte-len))
+export defn trim s -> s |> trim-left |> trim-right
+
+defn split-from do
+  s sep i acc -> match (s |> byte-find sep i) do
+    :nil -> cons (s |> byte-slice i (s |> byte-len)) acc
+    at -> split-from s sep (at + (sep |> byte-len)) (cons (s |> byte-slice i at) acc)
+  end
+end
+
+export defn split do
+  s sep when (sep |> byte-len |> eq? 0) -> error {:split :empty-separator}
+  s sep -> List.reverse (split-from s sep 0 '())
+end
+
+export defn lines s -> s |> split "\n"
+
+defn str-parts do
+  '() -> ""
+  parts -> apply parts &str
+end
+
+spec join :: Enum a => a string -> string
+export defn join xs sep -> xs.to-list |> List.intersperse sep |> str-parts
+
+export defn replace s old new ->
+  s |> split old |> join new
+
+defn repeat-parts do
+  _s n acc when (lte? n 0) -> acc
+  s n acc -> repeat-parts s (sub n 1) (cons s acc)
+end
+
+export defn repeat do
+  _s n when (lte? n 0) -> ""
+  s n -> repeat-parts s n '() |> str-parts
+end
+
+defn pad do
+  s n ch left? -> do
+    gap = n - (s |> byte-len)
+    if (lte? gap 0) do
+      s
+    else do
+      padding = ch |> repeat gap
+      cond left? "${padding}${s}" "${s}${padding}"
+    end
+  end
+end
+
+export defn pad-left s n ch -> s |> pad n ch :true
+export defn pad-right s n ch -> s |> pad n ch :false
+
+defn flush-span s j i acc -> cond (eq? j i) acc "#{acc}#{byte-slice s j i}"
+
+defn sweep do
+  s j i n _f acc when (eq? i n) -> cond (eq? j 0) s (flush-span s j n acc)
+  s j i n f acc -> do
+    b = s |> byte i
+    m = f b
+    cond (eq? m b) (sweep s j (add i 1) n f acc) (sweep-mapped s (flush-span s j i acc) (add i 1) n f (cons m '()))
+  end
+end
+
+defn sweep-mapped do
+  _s acc i n _f runs when (eq? i n) -> "#{acc}#{from-runes (List.reverse runs)}"
+  s acc i n f runs -> do
+    b = s |> byte i
+    m = f b
+    cond (eq? m b) (sweep s i (add i 1) n f "#{acc}#{from-runes (List.reverse runs)}") (sweep-mapped s acc (add i 1) n f (cons m runs))
+  end
+end
+
+defn upbyte b -> cond (and (gte? b 97) (lte? b 122)) (sub b 32) b
+defn downbyte b -> cond (and (gte? b 65) (lte? b 90)) (add b 32) b
+
+export defn upcase s -> sweep s 0 0 (s |> byte-len) &upbyte ""
+export defn downcase s -> sweep s 0 0 (s |> byte-len) &downbyte ""
+
+export defn capitalize do
+  "" -> ""
+  s -> do
+    b = s |> byte 0
+    if (and (eq? (upbyte b) b) (eq? (downbyte b) b)) do
+      downcase s
+    else do
+      "#{byte-str (upbyte b)}#{s |> byte-slice 1 (s |> byte-len) |> downcase}"
+    end
+  end
+end
+
+export defn reverse-runes s -> from-runes (List.reverse (runes-lossy s))
+
+export defn first-rune do
+  "" -> :nil
+  s -> List.first (runes-lossy s)
+end
+
+export defn first-rune! do
+  "" -> error {:empty-string}
+  s -> List.first! (runes-lossy s)
+end
+
+export defn last-rune do
+  "" -> :nil
+  s -> List.last (runes-lossy s)
+end
+
+export defn last-rune! do
+  "" -> error {:empty-string}
+  s -> List.last! (runes-lossy s)
+end
+
+export defn take-runes s n -> from-runes (List.take (runes-lossy s) n)
+
+export defn drop-runes s n -> from-runes (List.drop (runes-lossy s) n)
+
+export defn slice-runes s a b -> s |> drop-runes a |> take-runes (sub b a)
+
+export defn parse-int! do
+  s -> match (parse-int s) do
+    {:ok n} -> n
+    {:error reason} -> error reason
+  end
+end
+
+export defn parse-float! do
+  s -> match (parse-float s) do
+    {:ok f} -> f
+    {:error reason} -> error reason
+  end
+end

@@ -1,0 +1,43 @@
+use std/test
+activate Test
+
+record BoxA do
+  field v :: int
+end
+
+record BoxB do
+  field w :: int
+end
+
+trait T do
+  method m x
+  method d x -> x.m
+  method dd x -> add x.d 1
+end
+
+implement T on BoxA do
+  method m x -> x.v
+end
+
+implement T on BoxB do
+  method m x -> mul x.w 10
+  method d _x -> 0
+end
+
+suite do
+  test "trait default method dispatches sibling required method" do
+    (BoxA 5).d |> assert-eq 5
+    (BoxB 7).m |> assert-eq 70
+    (BoxB 7).d |> assert-eq 0
+  end
+
+  test "trait default method dispatches sibling default method" do
+    (BoxA 5).dd |> assert-eq 6
+    (BoxB 7).dd |> assert-eq 1
+  end
+
+  test "static method dispatch inside one closure keeps impls apart" do
+    f = fn -> {(BoxA 5).m (BoxB 7).m (BoxA 5).d (BoxB 7).d}
+    f |> assert-eq {5 70 5 0}
+  end
+end

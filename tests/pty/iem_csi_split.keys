@@ -1,0 +1,9 @@
+w L1:C1
+s hi
+w L1:C3
+s \e[
+p 120
+s D
+w L1:C2
+c 1 2
+s \x18\x03

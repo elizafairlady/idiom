@@ -1,0 +1,21 @@
+use std/test
+use std/compile with [compile]
+
+activate Test
+
+suite "activation changes the next reader unit" do
+  test "the current input is read first and the following input uses the grammar" do
+    match (compile "protocol Greetish do\n  grammar Greet exclusive do\n    skip space {:regex \"[ \\t\\r\\n]+\"}\n    token name {:regex \"(?<name_text>[a-z]+)\"} -> {:capture-string name_text}\n    form greeting {:capture who {:token name}} -> {:emit-form \"%-expr\" [{:emit-word \"println\"} {:capture who}]}\n    form program {:repeat {:capture line {:ref greeting}}} -> {:emit-form \"%-package-begin\" [{:splice line}]}\n  end\nend\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:greetish-define other}
+    end
+    match (compile "activate Greetish\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:activate other}
+    end
+    match (compile "hello\nworld\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:next-unit-reader other}
+    end
+  end
+end

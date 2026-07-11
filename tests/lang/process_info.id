@@ -1,0 +1,93 @@
+use std/test
+use std/cmd
+use std/port
+use std/string
+import std/list as List
+
+activate Test
+
+defn nap -> receive do
+  {:never-a-message} -> :ok
+  after 20 -> :ok
+end
+
+defn wait-for-status pid want tries -> match tries do
+  0 -> :gave-up
+  _ -> match (process-info pid) do
+    :nil -> :dead
+    d -> cond (eq? (dict-get d :status :nil) want) :ok (do
+      nap
+      wait-for-status pid want (tries - 1)
+    end)
+  end
+end
+
+defn wait-for-dead pid tries -> match tries do
+  0 -> :gave-up
+  _ -> match (process-info pid) do
+    :nil -> :ok
+    _d -> do
+      nap
+      wait-for-dead pid (tries - 1)
+    end
+  end
+end
+
+suite "process and port introspection" do
+  test "self reports running with an empty mailbox" do
+    match (process-info (self)) do
+      :nil -> error :self-has-no-info
+      d -> do
+        assert-eq (dict-get d :status :nil) :running
+        assert-eq (dict-get d :mailbox 99) 0
+        assert-eq (dict-get d :trap-exit :nil) :false
+      end
+    end
+  end
+
+  test "a blocked child reports waiting-receive with depth and head" do
+    pid = spawn (fn do
+      receive do :never-arrives -> :ok end
+    end)
+    send pid {:noise 1}
+    assert-eq (wait-for-status pid :waiting-receive 100) :ok
+    match (process-info pid) do
+      :nil -> error :child-gone
+      d -> do
+        assert-eq (dict-get d :mailbox 0) 1
+        assert-eq (dict-get d :mailbox-head :nil) {:noise 1}
+        at = dict-get d :waiting-at %{}
+        assert-eq (contains? (dict-get at :file "") "process_info") :true
+      end
+    end
+    exit pid :kill
+  end
+
+  test "a dead pid reports nil" do
+    pid = spawn (fn do :done end)
+    assert-eq (wait-for-dead pid 100) :ok
+  end
+
+  test "processes lists self" do
+    me = self
+    hits = List.filter processes (fn p -> eq? p me)
+    assert-eq (List.length hits) 1
+  end
+
+  test "port-info carries argv and stage pids" do
+    p = spawn (command (list "sleep" "5"))
+    match (port-info p) do
+      :nil -> error :port-gone
+      d -> do
+        cmd = dict-get d :command %{}
+        match (dict-get cmd :stages '()) do
+          '(st . _) -> do
+            assert-eq (dict-get st :argv '()) '("sleep" "5")
+            assert-eq (eq? (dict-get st :pid :nil) :nil) :false
+          end
+        end
+      end
+    end
+    exit p :kill
+  end
+end

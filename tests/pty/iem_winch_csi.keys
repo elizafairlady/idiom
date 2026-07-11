@@ -1,0 +1,10 @@
+w L1:C1
+s hi
+w L1:C3
+s \e[
+r 80 12
+s D
+w L1:C2
+c 1 2
+g tests/pty/iem_winch_csi_1.grid
+s \x18\x03

@@ -1,0 +1,83 @@
+package buffer
+
+use std/string
+
+export record Buffer do
+  field text :: string
+  field point :: int
+  field mark
+  field undo :: list
+  field redo :: list
+  field version :: int
+end
+
+spec new :: string -> Buffer
+export defn new text -> Buffer text 0 :nil '() '() 0
+
+spec text-of :: Buffer -> string
+export defn text-of buf -> buf.text
+
+spec point-of :: Buffer -> int
+export defn point-of buf -> buf.point
+
+export defn mark-of buf -> buf.mark
+
+spec version-of :: Buffer -> int
+export defn version-of buf -> buf.version
+
+export defn insert at text -> {:replace at at text}
+
+export defn delete from to -> {:replace from to ""}
+
+defn iclamp v lo hi -> cond (lt? v lo) lo (cond (gt? v hi) hi v)
+
+defn shift p from to delta -> cond (lt? p from) p (cond (gte? p to) (p + delta) from)
+
+defn shift-mark do
+  :nil _from _to _delta -> :nil
+  m from to delta -> shift m from to delta
+end
+
+export defn step do
+  buf {:replace from to text} -> do
+    len = byte-len buf.text
+    cond (and (and (gte? from 0) (lte? from to)) (lte? to len)) :nil (error {:buffer :bad-range from to})
+    delta = (byte-len text) - (to - from)
+    snap = {buf.text buf.point buf.mark}
+    next = str (byte-slice buf.text 0 from) text (byte-slice buf.text to len)
+    Buffer next (shift buf.point from to delta) (shift-mark buf.mark from to delta) (cons snap buf.undo) '() (buf.version + 1)
+  end
+  buf {:goto off} -> Buffer buf.text (iclamp off 0 (byte-len buf.text)) buf.mark buf.undo buf.redo buf.version
+  buf {:mark off} -> Buffer buf.text buf.point (iclamp off 0 (byte-len buf.text)) buf.undo buf.redo buf.version
+  buf {:mark-clear} -> Buffer buf.text buf.point :nil buf.undo buf.redo buf.version
+  buf {:undo} -> match buf.undo do
+    '() -> buf
+    '({t p m} . rest) -> Buffer t p m rest (cons {buf.text buf.point buf.mark} buf.redo) (buf.version + 1)
+  end
+  buf {:redo} -> match buf.redo do
+    '() -> buf
+    '({t p m} . rest) -> Buffer t p m (cons {buf.text buf.point buf.mark} buf.undo) rest (buf.version + 1)
+  end
+end
+
+export defn region buf -> match buf.mark do
+  :nil -> :nil
+  m -> cond (lte? m buf.point) {m buf.point} {buf.point m}
+end
+
+spec line-count :: Buffer -> int
+export defn line-count buf -> (line-of buf.text (byte-len buf.text)) + 1
+
+export defn line-text buf n -> match (line-start buf.text n) do
+  :nil -> :nil
+  start -> do
+    stop = match (line-start buf.text (n + 1)) do
+      :nil -> byte-len buf.text
+      after -> after - 1
+    end
+    byte-slice buf.text start stop
+  end
+end
+
+spec line-at :: Buffer int -> int
+export defn line-at buf off -> line-of buf.text (iclamp off 0 (byte-len buf.text))

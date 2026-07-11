@@ -1,0 +1,61 @@
+use std/test
+use std/compile
+
+activate Test
+
+spec doubled :: int -> int
+defn doubled x -> mul x 2
+
+suite "spec and defn associate outside packages" do
+  test "a top-level spec attaches to its defn" do
+    doubled 21 |> assert-eq 42
+  end
+
+  test "the attached contract is enforced" do
+    assert-expand-error "spec g :: int -> int\ndefn g x -> x\ndefn h -> g \"nope\"\nh\n" "type mismatch for 'g': expected int, got string"
+  end
+
+  test "a spec with no defn is still an error" do
+    assert-expand-error "spec lonely :: int -> int\n:ok\n" "signature for 'lonely' has no definition"
+  end
+
+  test "an unknown type name in a contract is a compile error" do
+    assert-expand-error "spec f :: Zorble -> int\ndefn f _x -> 1\n:ok\n" "unbound type 'Zorble' in contract"
+  end
+
+  test "a trait name in signature position points at the constraint form" do
+    assert-expand-error "spec f :: Number -> int\ndefn f _x -> 1\n:ok\n" "'Number' is a trait — constrain with it before '=>'"
+  end
+
+  test "a declared-but-shadowed type hints at alias qualification" do
+    assert-expand-error "import app/iem/buffer as B\nspec f :: Buffer -> int\ndefn f _x -> 1\n:ok\n" "reference it through its import alias"
+  end
+
+  test "interpolation errors carry true file positions" do
+    assert-expand-error-at "x = \"say \#{undefined-name} loud\"\nx\n" "unbound identifier" 1 12
+  end
+
+  test "spec is a shape, not a stolen word: clause patterns may bind it" do
+    m = match 5 do
+      spec -> spec * 2
+    end
+    m |> assert-eq 10
+    f = fn do
+      spec -> spec + 1
+    end
+    f 41 |> assert-eq 42
+  end
+
+  test "Any is top: rigid vars subsume into it and flexible vars stay free" do
+    spec take-any :: Any -> atom
+    defn take-any _x -> :ok
+    spec rigid-through :: a -> atom
+    defn rigid-through x -> take-any x
+    rigid-through 1 |> assert-eq :ok
+    defn still-int x -> do
+      _ = take-any x
+      x + 1
+    end
+    still-int 41 |> assert-eq 42
+  end
+end

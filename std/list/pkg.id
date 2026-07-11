@@ -1,0 +1,304 @@
+package list
+
+defn rev-into do
+  '() acc -> &acc
+  '(h . t) acc -> rev-into t (cons &h acc)
+end
+
+defn len-into do
+  acc '() -> &acc
+  acc '(_ . t) -> len-into (add acc 1) t
+end
+
+export defn empty? do
+  '() -> :true
+  _ -> :false
+end
+
+export defn proper? xs -> xs |> list?
+
+export defn length xs -> len-into 0 xs
+
+spec reverse :: list -> list
+export defn reverse xs -> xs |> rev-into '()
+
+export defn append do
+  '() ys -> &ys
+  '(h . t) ys -> cons &h (append t ys)
+end
+
+export defn concat xs ys -> xs |> append ys
+
+defn concat-all-rev do
+  '() acc -> &acc
+  '(h . t) acc -> concat-all-rev t (rev-into &h acc)
+end
+
+export defn concat-all do
+  xs -> concat-all-rev xs '() |> rev-into '()
+end
+
+defn map-acc do
+  '() _ acc -> rev-into acc '()
+  '(h . t) f acc -> map-acc t f (cons (f &h) acc)
+end
+
+export defn map do
+  xs f -> map-acc xs f '()
+end
+
+defn filter-acc do
+  '() _ acc -> rev-into acc '()
+  '(h . t) f acc -> filter-acc t f (cond (f &h) (cons &h acc) &acc)
+end
+
+export defn filter do
+  xs f -> filter-acc xs f '()
+end
+
+export defn reject xs f -> xs |> filter (fn x -> cond (f &x) :false :true)
+
+export defn each do
+  '() _ -> :ok
+  '(h . t) f -> do
+    f &h
+    each t f
+  end
+end
+
+export defn foldl do
+  '() acc _ -> &acc
+  '(h . t) acc f -> foldl t (f &h &acc) f
+end
+
+export defn foldr do
+  '() acc _ -> &acc
+  '(h . t) acc f -> f &h (foldr t acc f)
+end
+
+export defn member? do
+  '() _ -> :false
+  '(h . _) x when (eq? &h &x) -> :true
+  '(_ . t) x -> member? t x
+end
+
+export defn any? do
+  '() _ -> :false
+  '(h . t) f -> cond (f &h) :true (any? t f)
+end
+
+export defn all? do
+  '() _ -> :true
+  '(h . t) f -> cond (f &h) (all? t f) :false
+end
+
+export defn find do
+  '() _ -> :nil
+  '(h . t) f -> cond (f &h) &h (find t f)
+end
+
+export defn find-or do
+  '() _ default -> &default
+  '(h . t) f default -> cond (f &h) &h (find-or t f default)
+end
+
+defn nth-from do
+  '() _ default -> &default
+  '(h . _) 0 _ -> &h
+  '(_ . t) i default -> nth-from t (sub i 1) default
+end
+
+export defn nth xs i -> cond (lt? i 0) :nil (xs |> nth-from i :nil)
+
+export defn nth-or xs i default -> cond (lt? i 0) &default (xs |> nth-from i default)
+
+defn nth-bang-from do
+  '() _ original -> error {:index-out-of-range original}
+  '(h . _) 0 _ -> &h
+  '(_ . t) i original -> nth-bang-from t (sub i 1) original
+end
+
+export defn nth! xs i -> cond (lt? i 0) (error {:index-out-of-range i}) (xs |> nth-bang-from i i)
+
+defn take-acc do
+  _ n acc when (lte? n 0) -> rev-into acc '()
+  '() _ acc -> rev-into acc '()
+  '(h . t) n acc -> take-acc t (sub n 1) (cons &h acc)
+end
+
+export defn take xs n -> take-acc xs n '()
+
+export defn drop do
+  xs n when (lte? n 0) -> &xs
+  '() _ -> '()
+  '(_ . t) n -> drop t (sub n 1)
+end
+
+defn take-while-acc do
+  '() _ acc -> rev-into acc '()
+  '(h . t) f acc -> cond (f &h) (take-while-acc t f (cons &h acc)) (rev-into acc '())
+end
+
+export defn take-while xs f -> take-while-acc xs f '()
+
+export defn drop-while do
+  '() _ -> '()
+  '(h . t) f -> cond (f &h) (drop-while t f) (cons &h &t)
+end
+
+export defn split-at xs n -> {(xs |> take n) (xs |> drop n)}
+
+defn split-with-acc do
+  '() _ acc -> {(rev-into acc '()) '()}
+  '(h . t) f acc -> cond (f &h) (split-with-acc t f (cons &h acc)) {(rev-into acc '()) (cons &h &t)}
+end
+
+export defn split-with xs f -> xs |> split-with-acc f '()
+
+defn partition-acc do
+  '() _ yes no -> {(rev-into yes '()) (rev-into no '())}
+  '(h . t) f yes no -> cond (f &h) (partition-acc t f (cons &h yes) no) (partition-acc t f yes (cons &h no))
+end
+
+export defn partition xs f -> xs |> partition-acc f '() '()
+
+defn zip-acc do
+  '() _ acc -> rev-into acc '()
+  _ '() acc -> rev-into acc '()
+  '(a . at) '(b . bt) acc -> zip-acc at bt (cons {&a &b} acc)
+end
+
+export defn zip a b -> zip-acc a b '()
+
+defn zip-with-acc do
+  '() _ _ acc -> rev-into acc '()
+  _ '() _ acc -> rev-into acc '()
+  '(a . at) '(b . bt) f acc -> zip-with-acc at bt f (cons (f &a &b) acc)
+end
+
+export defn zip-with a b f -> zip-with-acc a b f '()
+
+defn intersperse-from do
+  '() _ acc -> rev-into acc '()
+  '(h . t) sep acc -> intersperse-from t sep (cons &h (cons &sep acc))
+end
+
+export defn intersperse do
+  '() _ -> '()
+  '(h . t) sep -> intersperse-from t sep (cons &h '())
+end
+
+defn flatten-into do
+  '() acc -> &acc
+  '(h . t) acc when (list? &h) -> flatten-into t (flatten-into &h acc)
+  '(h . t) acc -> flatten-into t (cons &h acc)
+end
+
+export defn flatten xs -> flatten-into xs '() |> rev-into '()
+
+export defn first do
+  '() -> :nil
+  '(h . _) -> &h
+end
+
+export defn first! do
+  '() -> error {:empty-list}
+  '(h . _) -> &h
+end
+
+export defn rest do
+  '() -> '()
+  '(_ . t) -> &t
+end
+
+defn last-from do
+  x '() -> &x
+  _ '(h . t) -> last-from &h t
+end
+
+export defn last do
+  '() -> :nil
+  '(h . t) -> last-from h t
+end
+
+export defn last! do
+  '() -> error {:empty-list}
+  '(h . t) -> last-from h t
+end
+
+defn init-from do
+  _ '() -> '()
+  h '(nh . nt) -> cons &h (init-from &nh nt)
+end
+
+export defn init do
+  '() -> '()
+  '(h . t) -> init-from h t
+end
+
+export defn delete do
+  xs x -> delete-acc xs x '()
+end
+
+defn delete-acc do
+  '() _ acc -> rev-into acc '()
+  '(h . t) x acc when (eq? &h &x) -> (rev-into acc '()) |> append t
+  '(h . t) x acc -> delete-acc t x (cons &h acc)
+end
+
+export defn delete-all do
+  xs x -> xs |> filter (fn item -> neq? item x)
+end
+
+defn delete-at-acc do
+  xs i acc when (lt? i 0) -> append (rev-into acc '()) xs
+  '() _ acc -> rev-into acc '()
+  '(_ . t) 0 acc -> (rev-into acc '()) |> append t
+  '(h . t) i acc -> delete-at-acc t (sub i 1) (cons &h acc)
+end
+
+export defn delete-at xs i -> delete-at-acc xs i '()
+
+defn insert-at-acc do
+  xs i x acc when (lte? i 0) -> (rev-into acc '()) |> append (cons &x &xs)
+  '() _ x acc -> (rev-into acc '()) |> append (cons &x '())
+  '(h . t) i x acc -> insert-at-acc t (sub i 1) x (cons &h acc)
+end
+
+export defn insert-at xs i x -> insert-at-acc xs i x '()
+
+defn replace-at-acc do
+  xs i _ acc when (lt? i 0) -> append (rev-into acc '()) xs
+  '() _ _ acc -> rev-into acc '()
+  '(_ . t) 0 x acc -> (rev-into acc '()) |> append (cons &x &t)
+  '(h . t) i x acc -> replace-at-acc t (sub i 1) x (cons &h acc)
+end
+
+export defn replace-at xs i x -> replace-at-acc xs i x '()
+
+defn update-at-acc do
+  xs i _ acc when (lt? i 0) -> append (rev-into acc '()) xs
+  '() _ _ acc -> rev-into acc '()
+  '(h . t) 0 f acc -> (rev-into acc '()) |> append (cons (f &h) &t)
+  '(h . t) i f acc -> update-at-acc t (sub i 1) f (cons &h acc)
+end
+
+export defn update-at xs i f -> update-at-acc xs i f '()
+
+export defn starts-with? do
+  _ '() -> :true
+  '() _ -> :false
+  '(h . t) '(ph . pt) when (eq? &h &ph) -> starts-with? t pt
+  _ _ -> :false
+end
+
+export defn ends-with? xs suffix -> xs |> reverse |> starts-with? (suffix |> reverse)
+
+export defn duplicate do
+  x n -> duplicate-acc &x n '()
+end
+
+defn duplicate-acc do
+  _ n acc when (lte? n 0) -> &acc
+  x n acc -> duplicate-acc &x (sub n 1) (cons &x acc)
+end

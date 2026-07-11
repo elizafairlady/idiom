@@ -1,0 +1,20 @@
+w idiom repl
+s if :true do\r
+w ...>
+s   40 + 2\r
+s end\r
+w 42
+s match 3 do\r
+w ...>
+s   n -> n * 2\r
+s end\r
+w 6
+s 1 )\r
+w left unmatched input
+s 2000 +\r
+w ...>
+s   1\r
+w 2001
+s add 20 22\r
+w 42
+s :q\r

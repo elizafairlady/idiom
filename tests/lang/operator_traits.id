@@ -1,0 +1,106 @@
+use std/test
+activate Test
+
+record Vec2 do
+  field x :: int
+  field y :: int
+end
+
+implement Number on Vec2 do
+  method + a b -> Vec2 (a.x + b.x) (a.y + b.y)
+  method neg a -> Vec2 (neg a.x) (neg a.y)
+end
+
+trait Loud do
+  operator "<>" precedence: 45 assoc: left capture: :infix a b -> {:loud a b}
+end
+
+trait Quiet do
+  method <> a b
+  operator "<>" precedence: 45 assoc: left capture: :infix -> <>
+end
+
+implement Loud on int
+implement Quiet on string do
+  method <> a b -> {:quiet a b}
+end
+
+suite "operators are trait methods" do
+  test "+ on a record dispatches through its Number impl" do
+    v = (Vec2 1 2) + (Vec2 3 4)
+    v.x |> assert-eq 4
+    v.y |> assert-eq 6
+  end
+
+  test "prefix minus dispatches through the neg method" do
+    v = - (Vec2 1 2)
+    v.x |> assert-eq (- 1)
+    v.y |> assert-eq (- 2)
+  end
+
+  test "== dispatches through Eq on builtins" do
+    (1 + 2) == 3 |> assert
+    :a == :a |> assert
+    "x" == "y" |> assert-eq :false
+  end
+
+  test "one symbol declared by two traits with agreeing metadata dispatches per receiver" do
+    1 <> 2 |> assert-eq {:loud 1 2}
+    "a" <> "b" |> assert-eq {:quiet "a" "b"}
+  end
+
+  test "one symbol with conflicting metadata is an error" do
+    assert-expand-error "trait A do\n  operator \"<->\" precedence: 45 assoc: left capture: :infix a b -> a\nend\ntrait B do\n  operator \"<->\" precedence: 46 assoc: left capture: :infix a b -> b\nend\n" "operator '<->' already declared with different precedence or associativity"
+  end
+
+  test "< dispatches through Ord on every collection type" do
+    '() < '(1) |> assert
+    '(1 2) < '(1 3) |> assert
+    '(1 2) < '(1 2 3) |> assert
+    {2} < {1 2} |> assert
+    {1 2} < {1 3} |> assert
+    {1 2} <= {1 2} |> assert
+    [2] < [1 2] |> assert-eq :false
+    [1 2] < [1 3] |> assert
+    %{:b 1} < %{:a 1 :c 2} |> assert
+    %{:a 1} < %{:b 1} |> assert
+    %{:a 1} < %{:a 2} |> assert
+    %{:a 1} >= %{:a 1} |> assert
+    %{:a 2 :b 0} < %{:a 1 :c 0} |> assert
+    (string-bits "a") < (string-bits "b") |> assert
+  end
+
+  test "compare is one total order over the number class" do
+    compare 2 1.5 |> assert-eq :gt
+    compare 1.5 2 |> assert-eq :lt
+    compare 1 1.0 |> assert-eq :lt
+    compare 1.0 1 |> assert-eq :gt
+    {1.5} < {2} |> assert
+    compare (- (10 ** 30)) (10 ** 30) |> assert-eq :lt
+    compare (- (10 ** 30)) 1.0 |> assert-eq :lt
+    compare (- (10 ** 30)) "x" |> assert-eq :lt
+    compare "x" 1.0 |> assert-eq :gt
+    big = 10 ** 30
+    d1 = %{} |> dict-put (- big) 1 |> dict-put "x" 2 |> dict-put 1.0 3
+    d2 = %{} |> dict-put 1.0 3 |> dict-put "x" 2 |> dict-put (- big) 1
+    eq? d1 d2 |> assert
+    compare d1 d2 |> assert-eq :eq
+  end
+
+  test "show renders every collection through its Show impl" do
+    show '(1 2) |> assert-eq "(1 2)"
+    show '() |> assert-eq ""
+    show {1 :two} |> assert-eq "{1 :two}"
+    show [1 2] |> assert-eq "[1 2]"
+    show %{:a 1} |> assert-eq "%{:a 1}"
+    show (string-bits "H") |> assert-eq "%<72>"
+  end
+
+  test "an operand of the wrong type is a runtime crash" do
+    send (self) "not a number"
+    escaped = receive do
+      s -> s
+    end
+    assert-raises (fn -> 1 + escaped)
+  end
+end

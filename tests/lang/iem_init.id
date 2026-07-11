@@ -1,0 +1,57 @@
+use std/test
+use std/string
+use std/system with [env-set]
+use std/file with [write! remove]
+import app/iem/buffer as B
+use app/iem
+use app/iem/main
+import std/list as List
+
+activate Test
+
+defn feed do
+  frame '() -> frame
+  frame '(k . rest) -> feed (drive frame {:tea-key k}) rest
+end
+
+defn typed text -> text |> runes-lossy |> List.map (fn r -> {:char (rune-str r)})
+defn key-m-x frame -> drive (drive frame {:tea-key :esc}) {:tea-key {:char "x"}}
+
+suite "init.id configures the bare machine" do
+  test "the bare editor has no ish command" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = drive (feed (key-m-x f) (typed "ish")) {:tea-key :enter}
+    echo-line f2 |> assert-eq "Unknown command: ish"
+    current f2 |> assert-eq "scratch"
+  end
+
+  test "an init file registers commands and keys" do
+    path = "/tmp/iem-init-test.id"
+    write! path "use app/iem\n\nfn frame -> bind-key (register-command frame \"greet\" (fn f -> {(register-command f \"marker\" {:frame :quit}) '()})) :c-t {:buf {:type \"!\"}}\n"
+    env-set "IEM_INIT" path
+    f = load-init (frame-new)
+    f2 = drive f {:open "scratch" "" :nil}
+    f3 = feed f2 (list :c-t)
+    B.text-of (snap f3) |> assert-eq "!"
+    f4 = drive (feed (key-m-x f3) (typed "greet")) {:tea-key :enter}
+    dict-get (commands f4) "marker" :nil |> assert-eq {{:frame :quit} ""}
+    remove path
+  end
+
+  test "a broken init file leaves the editor bare" do
+    path = "/tmp/iem-init-broken.id"
+    write! path "fn frame -> (unbound-nonsense frame)\n"
+    env-set "IEM_INIT" path
+    f = load-init (frame-new)
+    f2 = drive f {:open "scratch" "" :nil}
+    current f2 |> assert-eq "scratch"
+    remove path
+  end
+
+  test "the example init wires ish" do
+    env-set "IEM_INIT" "examples/iem-init.id"
+    f = load-init (frame-new)
+    neq? (dict-get (commands f) "ish" :nil) :nil |> assert-eq :true
+  end
+end
+:ok

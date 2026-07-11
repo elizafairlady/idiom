@@ -1,0 +1,45 @@
+use std/test
+activate Test
+
+defn eval-expr do
+  expr env when number? expr -> expr
+
+  name env when word? name ->
+    env name
+
+  '(tag params body) env when tag=='lambda -> do
+    '(param)=params
+    fn arg do
+      extended-env = fn name -> cond name==param arg (env name)
+      eval-expr body extended-env
+    end
+  end
+
+  '(callee arg) env ->
+    (eval-expr callee env) (eval-expr arg env)
+end
+
+defn run-expr expr ->
+  eval-expr expr (fn name -> error {:unbound name})
+
+suite "tiny lisp interpreter" do
+  test "numbers evaluate to themselves" do
+    run-expr 42 |> assert-eq 42
+  end
+
+  test "application evaluates callee and argument" do
+    run-expr '((lambda (x) x) 42) |> assert-eq 42
+  end
+
+  test "closures capture lexical environment" do
+    run-expr '(((lambda (x) (lambda (y) x)) 42) 0) |> assert-eq 42
+  end
+
+  test "inner bindings shadow outer bindings" do
+    run-expr '((lambda (x) ((lambda (x) x) 7)) 42) |> assert-eq 7
+  end
+
+  test "unbound names crash as data" do
+    assert-raises (fn -> run-expr 'missing) |> assert-eq {:error {:unbound 'missing}}
+  end
+end

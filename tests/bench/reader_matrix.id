@@ -1,0 +1,37 @@
+use std/compile with [compile]
+use std/string
+use std/system with [time-ns]
+use std/test
+activate Test
+
+defn ok! r -> match r do
+  {:ok _ _} -> :ok
+  other -> error {:compile-failed other}
+end
+
+defn time-parse n -> do
+  s0 = time-ns
+  ok! (compile (repeat "a" n))
+  (time-ns - s0)
+end
+
+defn imin3 a b c -> do
+  ab = cond (lt? a b) a b
+  cond (lt? ab c) ab c
+end
+
+ok! (compile "protocol PackratBench do\n  grammar PackratRead exclusive do\n    skip space {:regex \"[ \\t\\r\\n]+\"}\n    token ta {:literal \"a\"} -> {:emit-word a}\n    token tb {:literal \"b\"} -> {:emit-word b}\n    token tc {:literal \"c\"} -> {:emit-word c}\n    form expr {:alt {:seq {:token ta} {:ref expr} {:token tb}} {:seq {:token ta} {:ref expr} {:token tc}} {:token ta}} -> {:emit-int 1}\n    form program {:repeat {:ref expr}} -> {:emit-form \"%-package-begin\" [{:emit-form \"%-expr\" [{:emit-int 1}]}]}\n  end\nend\n")
+ok! (compile "activate PackratBench\n")
+
+suite "reader" do
+  bench "read/pathological-backtrack-400" expect: :ok do
+    ok! (compile (repeat "a" 400))
+  end
+
+  bench "read/pathological-linear-class" expect: :true do
+    t-small = imin3 (time-parse 400) (time-parse 400) (time-parse 400)
+    t-big = imin3 (time-parse 1600) (time-parse 1600) (time-parse 1600)
+    lt? t-big (mul (add t-small 500000) 8)
+  end
+end
+:ok

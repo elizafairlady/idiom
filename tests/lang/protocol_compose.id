@@ -1,0 +1,56 @@
+use std/test
+
+activate Test
+
+protocol ComposeBase do
+  export defn compose-base-val -> 40
+  operator "<+++>" precedence: 50 assoc: left capture: :infix -> add
+end
+
+protocol ComposeDerived do
+  activate ComposeBase
+  export defn compose-derived-val -> add compose-base-val 2
+  info :prompt "derived> "
+  info :answer add compose-base-val 2
+  reader-form "%-group" stx -> syntax-nth stx 1
+end
+
+suite "protocol composition" do
+  test "activation is transitive through requires" do
+    got = do
+      activate ComposeDerived
+      compose-base-val
+    end
+    got |> assert-eq 40
+  end
+
+  test "a requiring protocol's body uses the required surface" do
+    got = do
+      activate ComposeDerived
+      compose-derived-val
+    end
+    got |> assert-eq 42
+  end
+
+  test "required operators arrive with the requiring protocol" do
+    got = do
+      activate ComposeDerived
+      20 <+++> 22
+    end
+    got |> assert-eq 42
+  end
+
+  test "protocol-info reads the declared dict" do
+    got = do
+      activate ComposeDerived
+      protocol-info ComposeDerived
+    end
+    dict-get got :prompt "" |> assert-eq "derived> "
+    dict-get got :answer 0 |> assert-eq 42
+  end
+
+  test "a protocol reader-form scopes to its activation" do
+    plain = (7)
+    plain |> assert-eq 7
+  end
+end

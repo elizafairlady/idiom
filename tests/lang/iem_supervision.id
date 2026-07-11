@@ -1,0 +1,96 @@
+use std/test
+use std/string
+import app/iem/buffer as B
+use app/iem
+import std/list as List
+
+activate Test
+
+defn crash-buffer pid -> do
+  send pid {:step {:replace 5 99 ""}}
+  receive do
+    {:down _ref p reason} when (eq? p pid) -> reason
+    after 2000 -> :no-down
+  end
+end
+
+suite "buffer actors are monitored and their death is a frame event" do
+  test "a crashing buffer posts down to its owner" do
+    pid = spawn-buffer ""
+    reason = crash-buffer pid
+    neq? reason :no-down |> assert
+  end
+
+  test "buffer death prunes the entry and echoes the reason" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = drive f {:open "b" "" :nil}
+    pid = buffer-pid f2 "a"
+    reason = crash-buffer pid
+    f3 = drive f2 {:buffer-down pid reason}
+    buffer-pid f3 "a" |> assert-eq :nil
+    contains? (echo-line f3) "Buffer a died" |> assert
+    current f3 |> assert-eq "b"
+  end
+
+  test "death of the current buffer switches to a survivor" do
+    f = drive (frame-new) {:open "keep" "kept" :nil}
+    f2 = drive f {:open "doomed" "" :nil}
+    f3 = drive f2 {:switch "doomed"}
+    pid = buffer-pid f3 "doomed"
+    reason = crash-buffer pid
+    f4 = drive f3 {:buffer-down pid reason}
+    current f4 |> assert-eq "keep"
+    B.text-of (snap f4) |> assert-eq "kept"
+  end
+
+  test "death of the last buffer leaves a bare frame" do
+    f = drive (frame-new) {:open "only" "" :nil}
+    pid = buffer-pid f "only"
+    reason = crash-buffer pid
+    f2 = drive f {:buffer-down pid reason}
+    current f2 |> assert-eq :nil
+    snap f2 |> assert-eq :nil
+  end
+
+  test "current buffer death with a mini open switches to a real buffer" do
+    f = drive (drive (frame-new) {:open "a" "" :nil}) {:open "b" "" :nil}
+    f2 = drive f {:switch "a"}
+    mpid = spawn-buffer ""
+    f3 = drive f2 {:mini-opened "M-x " mpid :m-x}
+    apid = buffer-pid f3 "a"
+    reason = crash-buffer apid
+    f4 = drive f3 {:buffer-down apid reason}
+    current f4 |> assert-eq "b"
+    List.length (minis f4) |> assert-eq 1
+  end
+
+  test "minibuffer death with no real buffers leaves the bare frame standing" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    apid = buffer-pid f "a"
+    mpid = spawn-buffer ""
+    f2 = drive f {:mini-opened "M-x " mpid :m-x}
+    f3 = drive f2 {:buffer-down apid (crash-buffer apid)}
+    current f3 |> assert-eq :nil
+    f4 = drive f3 {:buffer-down mpid (crash-buffer mpid)}
+    minis f4 |> assert-eq '()
+    current f4 |> assert-eq :nil
+  end
+
+  test "minibuffer death clears the mini state" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    pid = spawn-buffer ""
+    f2 = drive f {:mini-opened "M-x " pid :m-x}
+    reason = crash-buffer pid
+    f3 = drive f2 {:buffer-down pid reason}
+    minis f3 |> assert-eq '()
+    contains? (echo-line f3) "died" |> assert
+  end
+
+  test "a down for an unknown pid is a no-op" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    {p _r} = spawn-monitor (fn -> :ok)
+    f2 = drive f {:buffer-down p :whatever}
+    current f2 |> assert-eq "a"
+    echo-line f2 |> assert-eq ""
+  end
+end

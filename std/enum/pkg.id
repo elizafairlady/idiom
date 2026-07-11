@@ -1,0 +1,76 @@
+package enum
+
+import std/list as List
+
+export trait Iter do
+  method foldl xs acc f
+end
+
+defn foldl-indexed do
+  _xs i n acc _f when (eq? i n) -> &acc
+  xs i n acc f -> foldl-indexed xs (add i 1) n (f (seq-nth xs i) &acc) f
+end
+
+implement Iter on empty-list do
+  method foldl _xs acc _f -> &acc
+end
+
+implement Iter on pair do
+  method foldl xs acc f -> List.foldl xs acc f
+end
+
+implement Iter on vector do
+  method foldl xs acc f -> foldl-indexed xs 0 (seq-count xs) acc f
+end
+
+implement Iter on tuple do
+  method foldl xs acc f -> foldl-indexed xs 0 (seq-count xs) acc f
+end
+
+implement Iter on dict do
+  method foldl xs acc f -> xs |> dict-to-list |> List.foldl acc f
+end
+
+implement Iter on string do
+  method foldl xs acc f -> foldl-indexed xs 0 (seq-count xs) acc f
+end
+
+export trait Enum do
+  require Iter
+
+  method to-list xs -> List.reverse (xs.foldl '() &cons)
+  method map xs f -> List.reverse (xs.foldl '() (fn x acc -> cons (f &x) acc))
+  method filter xs f -> List.reverse (xs.foldl '() (fn x acc -> cond (f &x) (cons &x acc) &acc))
+  method reject xs f -> List.reverse (xs.foldl '() (fn x acc -> cond (f &x) &acc (cons &x acc)))
+  method each xs f -> do
+    xs.foldl :ok (fn x _acc -> do f &x; :ok end)
+    :ok
+  end
+  method length xs -> xs.foldl 0 (fn _x acc -> add acc 1)
+  method count xs -> xs.foldl 0 (fn _x acc -> add acc 1)
+  method count-matching xs f -> xs.foldl 0 (fn x acc -> cond (f &x) (add acc 1) acc)
+  method sum xs -> xs.foldl 0 &add
+  method product xs -> xs.foldl 1 &mul
+  method any? xs f -> xs.foldl :false (fn x acc -> cond acc :true (f &x))
+  method all? xs f -> xs.foldl :true (fn x acc -> cond acc (f &x) :false)
+  method member? xs x -> xs.foldl :false (fn item acc -> cond acc :true (eq? &item &x))
+  method frequencies xs -> xs.foldl %{} (fn x acc -> dict-put acc &x (add (dict-get acc &x 0) 1))
+  method group-by xs f -> xs.foldl %{} (fn x acc -> do
+    key = f &x
+    dict-put acc key (cons &x (dict-get acc key '()))
+  end)
+  method reverse xs -> xs.foldl '() &cons
+  method take xs n -> List.take (List.reverse (xs.foldl '() &cons)) n
+  method drop xs n -> List.drop (List.reverse (xs.foldl '() &cons)) n
+  method take-while xs f -> List.take-while (List.reverse (xs.foldl '() &cons)) f
+  method drop-while xs f -> List.drop-while (List.reverse (xs.foldl '() &cons)) f
+  method nth xs i -> List.nth (List.reverse (xs.foldl '() &cons)) i
+  method partition xs f -> List.partition (List.reverse (xs.foldl '() &cons)) f
+end
+
+implement Enum on empty-list
+implement Enum on pair
+implement Enum on vector
+implement Enum on tuple
+implement Enum on dict
+implement Enum on string

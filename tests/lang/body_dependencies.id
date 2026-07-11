@@ -1,0 +1,51 @@
+use std/test
+
+activate Test
+
+suite "body dependencies" do
+  test "later value initializes first" do
+    first = add second 1
+    second = 41
+    first |> assert-eq 42
+  end
+
+  test "late import supplies earlier references" do
+    reversed = List.reverse (list 1 2 3)
+    import std/list as List
+    reversed |> assert-eq (list 3 2 1)
+  end
+
+  test "callable recursion crosses unrelated bindings" do
+    defn even do
+      0 -> :true
+      n -> odd (sub n 1)
+    end
+    marker = :kept
+    defn odd do
+      0 -> :false
+      n -> even (sub n 1)
+    end
+    marker |> assert-eq :kept
+    even 10 |> assert-eq :true
+    odd 10 |> assert-eq :false
+  end
+
+  test "function clauses cross declarations" do
+    defn choose :left -> 1
+    type DependencyMarker :: int
+    defn choose :right -> 2
+    choose :left |> assert-eq 1
+    choose :right |> assert-eq 2
+  end
+
+  test "initializer follows transitive callable dependencies" do
+    answer = read-later
+    defn read-later -> later
+    later = 42
+    answer |> assert-eq 42
+  end
+
+  test "eager cycles fail" do
+    assert-expand-error "a = add b 1\nb = add a 1\na\n" "initialization cycle involving 'a'"
+  end
+end

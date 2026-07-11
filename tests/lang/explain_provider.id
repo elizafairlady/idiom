@@ -1,0 +1,20 @@
+use std/test
+use std/string
+import std/list as List
+
+activate Test
+
+defmacro unless %`(unless %,c %,b) -> %`(cond %,c :nil %,b)
+
+suite "explain attributes meaning to the binding that resolved" do
+  test "a local shadow of a kernel macro attributes to this unit" do
+    edges = explain (unless :false :ok)
+    macros = List.filter edges (fn e -> eq? (dict-get e :kind :nil) :macro)
+    match macros do
+      '(m . _) -> do
+        assert-eq (dict-get m :name :nil) "unless"
+        assert-eq (contains? (dict-get m :provider "") "explain_provider") :true
+      end
+    end
+  end
+end

@@ -1,0 +1,13 @@
+use std/test
+
+activate Test
+
+suite "activation respects reader boundaries" do
+  test "activation does not re-read its current unit" do
+    assert-expand-error "package switch_probe\nprotocol Greetish do\n  grammar Greet exclusive do\n    skip space {:regex \"[ \\t\\r\\n]+\"}\n    token name {:regex \"(?<name_text>[a-z]+)\"} -> {:capture-string name_text}\n    form greeting {:capture who {:token name}} -> {:emit-form \"%-expr\" [{:emit-word \"println\"} {:capture who}]}\n    form program {:repeat {:capture line {:ref greeting}}} -> {:emit-form \"%-package-begin\" [{:splice line}]}\n  end\nend\nactivate Greetish\nhello\nworld\n" "unbound identifier 'hello'"
+  end
+
+  test "the unchanged reader reports the original source span" do
+    assert-expand-error-at "package switch_probe2\nprotocol Greetish do\n  grammar Greet exclusive do\n    skip space {:regex \"[ \\t\\r\\n]+\"}\n    token name {:regex \"(?<name_text>[a-z]+)\"} -> {:capture-string name_text}\n    form greeting {:capture who {:token name}} -> {:emit-form \"%-expr\" [{:emit-word \"println\"} {:capture who}]}\n    form program {:repeat {:capture line {:ref greeting}}} -> {:emit-form \"%-package-begin\" [{:splice line}]}\n  end\nend\nactivate Greetish\nhello\n5\n" "unbound identifier 'hello'" 11 1
+  end
+end

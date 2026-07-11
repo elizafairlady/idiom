@@ -1,0 +1,261 @@
+package supervisor
+
+use std/enum
+use std/system with [time-ms]
+import std/list as List
+
+## Start a supervisor linked to the caller.
+##
+## `specs` is the child-spec list for :one-for-one, :one-for-all, and
+## :rest-for-one; for :simple-one-for-one it is a single spec used as the
+## template for children started later with `start-child`. A child spec is
+## `{id function restart}` or `{id function restart shutdown}`. `restart` is
+## :permanent | :transient | :temporary. `shutdown` is :brutal-kill,
+## :infinity, or a millisecond window (default 5000, the OTP worker default).
+## `intensity`/`period` bound restarts: more than `intensity` restarts within
+## `period` ms and the supervisor gives up and exits.
+export defn start do
+  specs -> start specs :one-for-one 3 5000
+  specs intensity period -> start specs :one-for-one intensity period
+  specs strategy intensity period -> do
+    parent = self
+    spawn-link (fn do
+      trap-exit :true
+      init specs strategy intensity period parent
+    end)
+  end
+end
+
+## Stop the supervisor, terminating every child on the way down.
+export defn stop do
+  sup -> stop sup 5000
+  sup timeout-ms -> do
+    send sup {:stop (self)}
+    receive do
+      {:stopped p result} when (eq? p sup) -> &result
+      after timeout-ms -> {:error {:timeout :supervisor-stop sup}}
+    end
+  end
+end
+
+## Count the supervisor's live children.
+export defn count do
+  sup -> count sup 5000
+  sup timeout-ms -> do
+    send sup {:count (self)}
+    receive do
+      {:child-count p n} when (eq? p sup) -> n
+      after timeout-ms -> {:error {:timeout :supervisor-count sup}}
+    end
+  end
+end
+
+## Start a dynamic child under a :simple-one-for-one supervisor. `args` is the
+## argument list applied to the template's function. Returns {:ok pid} or an
+## error.
+export defn start-child do
+  sup args -> start-child sup args 5000
+  sup args timeout-ms -> do
+    send sup {:start-child (self) args}
+    receive do
+      {:started p result} when (eq? p sup) -> &result
+      after timeout-ms -> {:error {:timeout :supervisor-start-child sup}}
+    end
+  end
+end
+
+defn spawn-child f -> spawn-link &f
+
+defn norm-spec do
+  {id f restart} -> {id &f restart 5000}
+  {id f restart shutdown} -> {id &f restart shutdown}
+end
+
+defn init specs strategy intensity period parent -> if (eq? strategy :simple-one-for-one) do
+  loop {strategy '() '() intensity period parent (norm-spec specs)}
+else do
+  loop {strategy (start-all (specs.to-list)) '() intensity period parent :nil}
+end
+
+defn start-all do
+  '() -> '()
+  '(spec . rest) -> cons (start-spec spec) (start-all rest)
+end
+
+defn start-spec spec -> match (norm-spec spec) do
+  {id f restart shutdown} -> {id (spawn-child &f) &f restart shutdown}
+end
+
+defn start-simple template args -> match template do
+  {id f restart shutdown} -> do
+    thunk = (fn -> apply args &f)
+    {id (spawn-child &thunk) &thunk restart shutdown}
+  end
+end
+
+defn child-pid child -> match child do
+  {_id pid _thunk _restart _shutdown} -> pid
+end
+
+defn respawn child -> match child do
+  {id _pid thunk restart shutdown} -> {id (spawn-child &thunk) &thunk restart shutdown}
+end
+
+defn loop state -> match state do
+  {_strategy children _restarts _intensity _period _parent _template} -> receive do
+    {:exit from reason} -> on-exit state from reason
+    {:count from} -> do
+      send from {:child-count (self) (children.length)}
+      loop state
+    end
+    {:stop from} -> do
+      terminate-all children
+      send from {:stopped (self) :ok}
+      :ok
+    end
+    {:start-child from args} -> on-start-child state from args
+    other -> do
+      eprintln "supervisor: unexpected message:" other
+      loop state
+    end
+  end
+end
+
+defn on-start-child state from args -> match state do
+  {strategy children restarts intensity period parent template} -> if (eq? strategy :simple-one-for-one) do
+    child = start-simple template args
+    send from {:started (self) {:ok (child-pid child)}}
+    loop {strategy (cons child children) restarts intensity period parent template}
+  else do
+    send from {:started (self) {:error {:not-simple strategy}}}
+    loop state
+  end
+end
+
+defn on-exit state from reason -> match state do
+  {_strategy _children _restarts _intensity _period parent _template} -> cond (eq? from parent)
+    (parent-down state reason)
+    (child-down state from reason)
+end
+
+defn parent-down state reason -> match state do
+  {_strategy children _restarts _intensity _period _parent _template} -> do
+    terminate-all children
+    exit reason
+  end
+end
+
+defn child-down state pid reason -> match state do
+  {strategy children restarts intensity period parent template} -> match (find-child children pid) do
+    :nil -> loop state
+    child -> match child do
+      {_id _pid _thunk restart _shutdown} -> cond (restart? restart reason)
+        (restart-flow state pid)
+        (loop {strategy (remove-child children pid) restarts intensity period parent template})
+    end
+  end
+end
+
+defn restart? do
+  :permanent _ -> :true
+  :temporary _ -> :false
+  :transient :normal -> :false
+  :transient :shutdown -> :false
+  :transient {:shutdown _} -> :false
+  :transient _ -> :true
+end
+
+defn restart-flow state pid -> match state do
+  {strategy children restarts intensity period parent template} -> do
+    now = time-ms
+    recent = restarts |> List.filter (fn t -> lt? (sub now t) period)
+    if (gte? (recent.length) intensity) do
+      terminate-all (remove-child children pid)
+      exit {:shutdown :max-restart-intensity}
+    else do
+      loop {strategy (do-restart strategy children pid) (cons now recent) intensity period parent template}
+    end
+  end
+end
+
+defn do-restart do
+  :one-for-one children pid -> respawn-one children pid
+  :simple-one-for-one children pid -> respawn-one children pid
+  :one-for-all children pid -> respawn-all children pid
+  :rest-for-one children pid -> respawn-rest children pid
+end
+
+defn respawn-one do
+  '() _pid -> '()
+  '(child . rest) pid -> cond (eq? (child-pid child) pid)
+    (cons (respawn child) (respawn-one rest pid))
+    (cons child (respawn-one rest pid))
+end
+
+defn respawn-all children pid -> do
+  terminate-all (children |> List.reject (fn c -> eq? (child-pid c) pid))
+  children |> List.map &respawn
+end
+
+defn respawn-rest children pid -> match (split-before children '() pid) do
+  {before from} -> match from do
+    '() -> before
+    '(_dead . after) -> do
+      terminate-all after
+      List.append before (from |> List.map &respawn)
+    end
+  end
+end
+
+defn split-before do
+  '() acc _pid -> {(List.reverse acc) '()}
+  '(child . rest) acc pid -> cond (eq? (child-pid child) pid)
+    {(List.reverse acc) (cons child rest)}
+    (split-before rest (cons child acc) pid)
+end
+
+defn find-child do
+  '() _pid -> :nil
+  '(child . rest) pid -> cond (eq? (child-pid child) pid) child (find-child rest pid)
+end
+
+defn remove-child do
+  '() _pid -> '()
+  '(child . rest) pid -> cond (eq? (child-pid child) pid) rest (cons child (remove-child rest pid))
+end
+
+defn terminate-all children -> children |> List.reverse |> terminate-seq
+
+defn terminate-seq do
+  '() -> :ok
+  '(child . rest) -> do
+    terminate-child child
+    terminate-seq rest
+  end
+end
+
+defn terminate-child child -> match child do
+  {_id pid _thunk _restart shutdown} -> if (eq? shutdown :brutal-kill) do
+    exit pid :kill
+    wait-exit pid
+  else do
+    exit pid :shutdown
+    wait-graceful pid shutdown
+  end
+end
+
+defn wait-exit pid -> receive do
+  {:exit p _reason} when (eq? p pid) -> :ok
+end
+
+defn wait-graceful pid shutdown -> if (eq? shutdown :infinity) do
+  wait-exit pid
+else do
+  receive do
+    {:exit p _reason} when (eq? p pid) -> :ok
+    after shutdown -> do
+      exit pid :kill
+      wait-exit pid
+    end
+  end
+end

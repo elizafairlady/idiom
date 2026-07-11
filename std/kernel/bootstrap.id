@@ -1,0 +1,132 @@
+(export protocol IdiomReader (%-body
+(core-grammar Idiom :exclusive [
+  {:skip space {:regex "[ \t\r]+"}}
+  {:token doc_comment {:regex "##[ ]?(?<doc_body>[^\n]*)"} {:emit-form "%-doc" [{:capture-string doc_body}]}}
+  {:skip comment {:regex "#[^\n]*"}}
+  {:token newline {:regex "\n+"} {:emit-atom newline}}
+  {:token semi {:literal ";"} {:emit-atom semi}}
+  {:token percent_lbrace {:literal "%{"} {:emit-atom percent_lbrace}}
+  {:token bitstring {:bitstring} {:bitstring bitstring}}
+  {:token percent_comma_at {:literal "%,@"} {:emit-atom percent_comma_at}}
+  {:token percent_quasiquote {:literal "%`"} {:emit-atom percent_quasiquote}}
+  {:token percent_quote {:literal "%'"} {:emit-atom percent_quote}}
+  {:token percent_comma {:literal "%,"} {:emit-atom percent_comma}}
+  {:token comma_at {:literal ",@"} {:emit-atom comma_at}}
+  {:token lparen {:literal "("} {:emit-atom lparen}}
+  {:token rparen {:literal ")"} {:emit-atom rparen}}
+  {:token lbracket {:literal "["} {:emit-atom lbracket}}
+  {:token rbracket {:literal "]"} {:emit-atom rbracket}}
+  {:token lbrace {:literal "{"} {:emit-atom lbrace}}
+  {:token rbrace {:literal "}"} {:emit-atom rbrace}}
+  {:token quote {:literal "'"} {:emit-atom quote}}
+  {:token quasiquote {:literal "`"} {:emit-atom quasiquote}}
+  {:token comma {:literal ","} {:emit-atom comma}}
+  {:token pin {:literal "^"} {:emit-atom pin}}
+  {:token do {:literal "do"} {:emit-word do}}
+  {:token end {:literal "end"} {:emit-word end}}
+  {:token else {:literal "else"} {:emit-word else}}
+  {:token rescue {:literal "rescue"} {:emit-word rescue}}
+  {:token ensure {:literal "ensure"} {:emit-word ensure}}
+  {:token regex {:regex "r\"(?<regex_body>([^\"\\\\]|\\\\.)*)\""} {:emit-form "%-regex" [{:capture-string regex_body}]}}
+  {:token string {:string} {:interp-string string}}
+  {:token fn_value {:regex "(?<fn_name>&[A-Za-z_][A-Za-z0-9_?!/<>-]*(=\\?)?(\\.[A-Za-z_][A-Za-z0-9_?!/<>-]*(=\\?)?)*)"} {:emit-form "%-expression" [{:capture-word fn_name}]}}
+  {:token word_colon_text {:regex "(?<word_body>[A-Za-z_][A-Za-z0-9_?!/<>-]*(=\\?)?:[^ \t\r\n()\\[\\]{};\"'`,<>|=]+)"} {:emit-form "%-word" [{:capture-string word_body}]}}
+  {:token keyword {:regex "(?<keyword_name>[A-Za-z_][A-Za-z0-9_?!/<>-]*(=\\?)?):"} {:capture-atom keyword_name}}
+  {:token arrow {:literal "->"} {:emit-word "->"}}
+  {:token double_colon {:literal "::"} {:emit-word "::"}}
+  {:token fat_arrow {:literal "=>"} {:emit-word "=>"}}
+  {:token atom {:regex ":(?<atom_name>[^ \t\r\n()\\[\\]{};#\"'`,]+)"} {:capture-atom atom_name}}
+  {:token float {:regex "[+-]?([0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?|[0-9]+[eE][+-]?[0-9]+)"} {:capture float}}
+  {:token integer {:regex "[+-]?[0-9]+"} {:capture integer}}
+  {:token colon {:literal ":"} {:emit-word ":"}}
+  {:token op {:regex "[-><=|+*/%!&@?]+"} {:capture-word op}}
+  {:token dot {:literal "."} {:emit-word "."}}
+  {:token word_text {:regex "(?<word_body>[-$~+*/][^ \t\r\n()\\[\\]{};\"'`,<>|=]*)"} {:emit-form "%-word" [{:capture-string word_body}]}}
+  {:token word {:regex "[A-Za-z_][A-Za-z0-9_?!/<>-]*(=\\?)?"} {:capture word}}
+
+  {:pair do end}
+
+  {:form sep {:alt {:token newline} {:token semi}} {:emit-list []}}
+  {:form do_word {:token do} {:emit-word do}}
+  {:form end_word {:token end} {:emit-word end}}
+  {:form else_word {:token else} {:emit-word else}}
+  {:form rescue_word {:token rescue} {:emit-word rescue}}
+  {:form ensure_word {:token ensure} {:emit-word ensure}}
+
+  {:form quote_empty_list {:seq {:token quote} {:token lparen} {:token rparen}} {:emit-form "%-quote" [{:emit-list []}]}}
+  {:form quote_expr {:seq {:token quote} {:capture value {:ref term}}} {:emit-form "%-quote" [{:capture value}]}}
+  {:form quasiquote_expr {:seq {:token quasiquote} {:capture value {:ref term}}} {:emit-form "%-quasiquote" [{:capture value}]}}
+  {:form unquote {:seq {:token comma} {:capture value {:ref term}}} {:emit-form "%-unquote" [{:capture value}]}}
+  {:form unquote_splicing {:seq {:token comma_at} {:capture value {:ref term}}} {:emit-form "%-unquote-splicing" [{:capture value}]}}
+  {:form syntax_quote {:seq {:token percent_quote} {:capture value {:ref term}}} {:emit-form "%-syntax" [{:capture value}]}}
+  {:form quasisyntax {:seq {:token percent_quasiquote} {:capture value {:ref term}}} {:emit-form "%-quasisyntax" [{:capture value}]}}
+  {:form unsyntax {:seq {:token percent_comma} {:capture value {:ref term}}} {:emit-form "%-unsyntax" [{:capture value}]}}
+  {:form unsyntax_splicing {:seq {:token percent_comma_at} {:capture value {:ref term}}} {:emit-form "%-unsyntax-splicing" [{:capture value}]}}
+  {:form pin_expr {:seq {:token pin} {:capture value {:ref term}}} {:emit-form "%-pin" [{:capture value}]}}
+
+  {:form layout_line {:seq {:capture first {:ref term}} {:repeat {:capture rest {:ref term}}}} {:emit-form "%-layout-group" [{:emit-form "%-expr" [{:capture first} {:splice rest}]}]}}
+  {:form body_rest_layout_line {:seq {:capture first {:ref body_rest_term}} {:repeat {:capture rest {:ref body_rest_term}}}} {:emit-form "%-layout-group" [{:emit-form "%-expr" [{:capture first} {:splice rest}]}]}}
+  {:form body_layout_line {:seq {:capture first {:ref body_term}} {:repeat {:capture rest {:ref body_term}}}} {:emit-form "%-layout-group" [{:emit-form "%-expr" [{:capture first} {:splice rest}]}]}}
+  {:form expr_stmt {:seq {:capture first {:ref term}} {:repeat {:alt {:capture rest {:ref term}} {:seq {:token newline} {:indent-gt first {:capture rest {:ref layout_line}}}}}}} {:emit-form "%-expr" [{:capture first} {:splice rest}]}}
+  {:form body_expr_stmt {:seq {:capture first {:ref body_term}} {:repeat {:alt {:capture rest {:ref body_term}} {:seq {:token newline} {:indent-gt first {:capture rest {:ref body_layout_line}}}}}}} {:emit-form "%-expr" [{:capture first} {:splice rest}]}}
+  {:form body_if_expr_stmt {:seq {:capture first {:alt {:literal if} {:literal try}}} {:repeat {:alt {:capture rest {:ref body_rest_term}} {:seq {:token newline} {:indent-gt first {:capture rest {:ref body_rest_layout_line}}}}}}} {:emit-form "%-expr" [{:capture first} {:splice rest}]}}
+  {:form if_expr {:seq {:capture first {:alt {:literal if} {:literal try}}} {:repeat {:alt {:capture rest {:ref body_rest_term}} {:seq {:token newline} {:indent-gt first {:capture rest {:ref body_rest_layout_line}}}}}}} {:emit-form "%-expr" [{:capture first} {:splice rest}]}}
+
+  {:form decl_head {:alt {:capture head {:literal defn}} {:capture head {:literal defmacro}}} {:capture head}}
+  {:form decl_terminal_term {:alt {:capture value {:token bitstring}} {:capture value {:token regex}} {:capture value {:token string}} {:capture value {:token fn_value}} {:capture value {:token word_colon_text}} {:capture value {:token atom}} {:capture value {:token float}} {:capture value {:token integer}} {:capture value {:token colon}} {:capture value {:token op}} {:capture value {:token dot}} {:capture value {:token word_text}} {:capture value {:token word}}} {:capture value}}
+  {:form decl_lhs_term {:alt {:capture value {:ref decl_terminal_term}} {:capture value {:ref keyword_dict}} {:capture value {:ref group}} {:capture value {:ref vector}} {:capture value {:ref tuple}} {:capture value {:ref dict}} {:capture value {:ref quote_empty_list}} {:capture value {:ref quote_expr}} {:capture value {:ref quasiquote_expr}} {:capture value {:ref unquote_splicing}} {:capture value {:ref unquote}} {:capture value {:ref syntax_quote}} {:capture value {:ref quasisyntax}} {:capture value {:ref unsyntax_splicing}} {:capture value {:ref unsyntax}} {:capture value {:ref pin_expr}}} {:capture value}}
+  {:form body_decl_arrow_stmt {:seq {:optional {:capture export_head {:literal export}}} {:capture head {:ref decl_head}} {:capture name {:token word}} {:repeat {:capture lhs {:ref decl_lhs_term}}} {:capture arrow {:token arrow}} {:repeat {:alt {:capture rhs {:ref body_rest_term}} {:seq {:token newline} {:indent-gt head {:capture rhs {:ref body_rest_layout_line}}}}}}} {:emit-form "%-expr" [{:splice export_head} {:capture head} {:capture name} {:splice lhs} {:capture arrow} {:splice rhs}]}}
+  {:form body_decl_block_stmt {:seq {:optional {:capture export_head {:literal export}}} {:capture head {:ref decl_head}} {:capture name {:token word}} {:repeat {:capture lhs {:ref decl_lhs_term}}} {:capture body_value {:ref body}}} {:emit-form "%-expr" [{:splice export_head} {:capture head} {:capture name} {:splice lhs} {:capture body_value}]}}
+
+  {:form group {:seq {:token lparen} {:repeat {:ref sep}} {:capture inner {:ref expr_stmt}} {:repeat {:ref sep}} {:token rparen}} {:emit-form "%-group" [{:capture inner}]}}
+
+  {:form vector_item {:seq {:capture item {:ref term}} {:repeat {:ref sep}}} {:capture item}}
+  {:form vector {:seq {:token lbracket} {:repeat {:ref sep}} {:repeat {:capture vector_item {:ref vector_item}}} {:token rbracket}} {:emit-vector [{:splice vector_item}]}}
+  {:form tuple_item {:seq {:capture item {:ref term}} {:repeat {:ref sep}}} {:capture item}}
+  {:form tuple {:seq {:token lbrace} {:repeat {:ref sep}} {:repeat {:capture tuple_item {:ref tuple_item}}} {:token rbrace}} {:emit-tuple [{:splice tuple_item}]}}
+  {:form dict_item {:seq {:capture item {:alt {:ref keyword_pair} {:ref term}}} {:repeat {:ref sep}}} {:capture item}}
+  {:form dict {:seq {:token percent_lbrace} {:repeat {:ref sep}} {:repeat {:capture dict_item {:ref dict_item}}} {:token rbrace}} {:emit-dict [{:splice dict_item}]}}
+
+  {:form dotted_pair_value {:seq {:capture first {:ref term}} {:capture rest {:token dot}} {:capture rest {:ref term}} {:repeat {:seq {:capture rest {:token dot}} {:capture rest {:ref term}}}}} {:emit-form "%-expr" [{:capture first} {:splice rest}]}}
+  {:form pair_value {:alt {:capture pv {:ref dotted_pair_value}} {:capture pv {:ref term}}} {:capture pv}}
+  {:form keyword_pair_inline {:seq {:capture key {:token keyword}} {:capture value {:ref pair_value}}} {:emit-form "%-dict-entry" [{:capture key} {:capture value}]}}
+  {:form keyword_pair_block {:seq {:capture key {:token keyword}} {:token newline} {:indent-gt key {:capture value {:ref layout_line}}}} {:emit-form "%-dict-entry" [{:capture key} {:capture value}]}}
+  {:form keyword_pair {:alt {:capture pair {:ref keyword_pair_block}} {:capture pair {:ref keyword_pair_inline}}} {:capture pair}}
+  {:form keyword_dict {:seq {:capture first_pair {:ref keyword_pair}} {:repeat {:alt {:capture rest_pair {:ref keyword_pair}} {:seq {:token newline} {:indent-eq first_pair {:capture rest_pair {:ref keyword_pair}}}}}}} {:emit-dict [{:splice first_pair} {:splice rest_pair}]}}
+
+  {:form doc_stmt {:seq {:capture doc_node {:token doc_comment}}} {:capture doc_node}}
+  {:form body_stmt {:alt {:capture body_node {:ref doc_stmt}} {:capture body_node {:ref body_decl_arrow_stmt}} {:capture body_node {:ref body_decl_block_stmt}} {:capture body_node {:ref body_if_expr_stmt}} {:capture body_node {:ref body_expr_stmt}}} {:capture body_node}}
+  {:form body_item {:seq {:capture body_node {:ref body_stmt}} {:repeat {:ref sep}}} {:capture body_node}}
+  {:form body_until_else {:seq {:token do} {:repeat {:ref sep}} {:repeat {:capture body_item {:ref body_item}}} {:repeat {:ref sep}} {:peek {:alt {:token else} {:token rescue} {:token ensure}}}} {:emit-form "%-body" [{:splice body_item}]}}
+  {:form body_until_end {:seq {:token do} {:repeat {:ref sep}} {:repeat {:capture body_item {:ref body_item}}} {:repeat {:ref sep}} {:token end}} {:emit-form "%-body" [{:splice body_item}]}}
+  {:form body {:alt {:capture body_value {:ref body_until_else}} {:capture body_value {:ref body_until_end}}} {:capture body_value}}
+
+  {:form terminal_term {:alt {:capture value {:token bitstring}} {:capture value {:token regex}} {:capture value {:token string}} {:capture value {:token fn_value}} {:capture value {:token word_colon_text}} {:capture value {:token atom}} {:capture value {:token float}} {:capture value {:token integer}} {:capture value {:token arrow}} {:capture value {:token double_colon}} {:capture value {:token fat_arrow}} {:capture value {:token colon}} {:capture value {:token op}} {:capture value {:token dot}} {:capture value {:token word_text}} {:capture value {:token word}}} {:capture value}}
+  {:form term {:alt {:capture value {:ref body}} {:capture value {:ref terminal_term}} {:capture value {:ref keyword_dict}} {:capture value {:ref group}} {:capture value {:ref vector}} {:capture value {:ref tuple}} {:capture value {:ref dict}} {:capture value {:ref quote_empty_list}} {:capture value {:ref quote_expr}} {:capture value {:ref quasiquote_expr}} {:capture value {:ref unquote_splicing}} {:capture value {:ref unquote}} {:capture value {:ref syntax_quote}} {:capture value {:ref quasisyntax}} {:capture value {:ref unsyntax_splicing}} {:capture value {:ref unsyntax}} {:capture value {:ref pin_expr}} {:capture value {:ref do_word}} {:capture value {:ref end_word}} {:capture value {:ref else_word}} {:capture value {:ref rescue_word}} {:capture value {:ref ensure_word}}} {:capture value}}
+  {:form body_rest_term {:alt {:capture value {:ref if_expr}} {:capture value {:ref body}} {:capture value {:ref terminal_term}} {:capture value {:ref keyword_dict}} {:capture value {:ref group}} {:capture value {:ref vector}} {:capture value {:ref tuple}} {:capture value {:ref dict}} {:capture value {:ref quote_empty_list}} {:capture value {:ref quote_expr}} {:capture value {:ref quasiquote_expr}} {:capture value {:ref unquote_splicing}} {:capture value {:ref unquote}} {:capture value {:ref syntax_quote}} {:capture value {:ref quasisyntax}} {:capture value {:ref unsyntax_splicing}} {:capture value {:ref unsyntax}} {:capture value {:ref pin_expr}} {:capture value {:ref do_word}} {:capture value {:ref else_word}} {:capture value {:ref rescue_word}} {:capture value {:ref ensure_word}}} {:capture value}}
+  {:form body_term {:alt {:capture value {:ref if_expr}} {:capture value {:ref body}} {:capture value {:ref terminal_term}} {:capture value {:ref keyword_dict}} {:capture value {:ref group}} {:capture value {:ref vector}} {:capture value {:ref tuple}} {:capture value {:ref dict}} {:capture value {:ref quote_empty_list}} {:capture value {:ref quote_expr}} {:capture value {:ref quasiquote_expr}} {:capture value {:ref unquote_splicing}} {:capture value {:ref unquote}} {:capture value {:ref syntax_quote}} {:capture value {:ref quasisyntax}} {:capture value {:ref unsyntax_splicing}} {:capture value {:ref unsyntax}} {:capture value {:ref pin_expr}}} {:capture value}}
+
+  {:form program_item {:seq {:capture program_node {:alt {:ref doc_stmt} {:ref expr_stmt}}} {:repeat {:ref sep}}} {:capture program_node}}
+  {:form program {:seq {:repeat {:ref sep}} {:repeat {:capture program_item {:ref program_item}}} {:repeat {:ref sep}}} {:emit-form "%-package-begin" [{:splice program_item}]}}
+])
+
+(core-reader-form "%-expr" {:parts})
+(core-reader-form "%-adjacent" {:parts})
+(core-reader-form "%-body" {:scope {:body}})
+(core-reader-form "%-group" {:value {:child 1}})
+(core-reader-form "%-layout-group" {:value {:child 1}})
+(core-reader-form "%-expression" {:value {:child 1}})
+(core-reader-form "%-syntax" {:syntax {:child 1}})
+(core-reader-form "%-quasisyntax" {:template :quasisyntax {:child 1}})
+(core-reader-form "%-quote" {:template :quote {:child 1}})
+(core-reader-form "%-quasiquote" {:template :quasiquote {:child 1}})
+(core-reader-form "%-string" {:concat {:each}})
+(core-reader-form "%-regex" {:regex})
+(core-reader-form "%-match" {:match})
+(core-reader-form "%-try" {:try})
+(core-reader-form "%-receive" {:receive})
+(core-reader-form "%-implements" {:implements})
+(core-reader-form "%-protocol-info" {:protocol-info})
+(core-reader-form "%-bitstring" {:bitstring})
+))
+(activate IdiomReader)

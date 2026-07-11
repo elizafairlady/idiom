@@ -1,0 +1,204 @@
+use std/test
+import tests/pkg/surface_macros as SM
+
+activate Test
+
+defmacro swap %`(swap %,f %,a %,b) -> %`(%,f %,b %,a)
+
+defmacro list-of do
+  %`(list-of) -> %`'()
+  %`(list-of %,x) -> %`(cons %,x '())
+  %`(list-of %,x %,@rest) -> %`(cons %,x (list-of %,@rest))
+end
+
+defmacro my-or do
+  %`(my-or %,a %,b) -> %`(do
+    tmp = %,a
+    cond tmp tmp %,b
+  end)
+end
+
+defn base a b -> add a b
+defmacro twice %`(twice %,e) -> %`(base %,e %,e)
+
+defmacro is-add? do
+  %`(is-add? %,x) -> match (free-identifier=? x %'add) do
+    :true -> %`:same-add
+    :false -> %`:different
+  end
+end
+
+defn wrap-pair a b -> {:pair a b}
+operator <+> precedence: 40 assoc: left capture: :infix -> wrap-pair
+
+operator <|> precedence: 10 assoc: left capture: {:infix :expression} macro do
+  %`(_ %,right %,left) -> %`(cond %,left %,left %,right)
+end
+
+core-operator <*+*> 50 "left" "infix" add
+
+defn helper x -> make-syntax-int x 42
+defmacro use-helper %`(use-helper %,e) -> helper e
+
+suite "tutorial/ch12 the bureau of stamps" do
+  test "a quoted identifier is a word" do
+    word? 'x |> assert-eq :true
+    atom? 'x |> assert-eq :false
+    string? 'x |> assert-eq :false
+    ('x == :x) |> assert-eq :false
+    ('x == 'x) |> assert-eq :true
+  end
+
+  test "quote suspends every container shape" do
+    '(:nil :atom 42 3.5 "x" [1 :a] {2 "b"} %{:a 1}) |> assert-eq '(:nil :atom 42 3.5 "x" [1 :a] {2 "b"} %{:a 1})
+  end
+
+  test "a quoted quote is a list headed by the word quote" do
+    assert-inspect ''x "(quote x)"
+  end
+
+  test "the empty list is nil" do
+    inspect '() |> assert-eq ":nil"
+  end
+
+  test "quasiquote pastes and splices" do
+    x = 5
+    xs = '(1 2 3)
+    `(a ,x) |> assert-eq '(a 5)
+    `(a ,@xs b) |> assert-eq '(a 1 2 3 b)
+    `[a ,x] |> assert-eq '[a 5]
+    `{a ,x} |> assert-eq '{a 5}
+    k = :key
+    `%{,k ,x} |> assert-eq %{:key 5}
+  end
+
+  test "nested quasiquote stays data one level down" do
+    x = 1
+    assert-inspect `(a `(b ,x)) "(a (quasiquote (b (unquote x))))"
+  end
+
+  test "plain quote never opens the mail slots" do
+    x = 3
+    assert-inspect '(a ,x) "(a (unquote x))"
+  end
+
+  test "splicing outside a list is illegal" do
+    assert-expand-error "xs = '(1 2 3)\n`[a ,@xs]\n" "unquote-splicing is only valid inside a sequence"
+  end
+
+  test "splicing a non-list crashes at runtime" do
+    xs = [1 2]
+    got = assert-raises (fn -> `(a ,@xs))
+    got |> assert-eq {:error {:type-error :append [1 2]}}
+  end
+
+  test "syntax quotes make syntax not values" do
+    syntax? %'x |> assert-eq :true
+    syntax? 'x |> assert-eq :false
+  end
+
+  test "the quote families do not mix" do
+    assert-expand-error "'(%'1 %'2)\n" "unsupported quote template"
+  end
+
+  test "swap swaps at expansion time" do
+    swap sub 3 10 |> assert-eq 7
+    sub 3 10 |> assert-eq (-7)
+  end
+
+  test "a macro clause must match the whole call shape" do
+    assert-expand-error "defmacro swap %`(swap %,f %,a %,b) -> %`(%,f %,b %,a)\nswap sub 3 10 20\n" "no clause of 'swap' matches"
+  end
+
+  test "multi-clause macros recurse over syntax" do
+    list-of |> assert-eq '()
+    list-of 1 |> assert-eq '(1)
+    list-of 1 2 3 |> assert-eq '(1 2 3)
+  end
+
+  test "macro tmp does not capture caller tmp" do
+    tmp = :caller-owns-this
+    my-or :nil tmp |> assert-eq :caller-owns-this
+    my-or tmp 99 |> assert-eq :caller-owns-this
+    tmp |> assert-eq :caller-owns-this
+  end
+
+  test "macro-introduced bindings stay invisible" do
+    assert-expand-error "defmacro m stx -> %`(do\n  hidden = 1\nend)\nm x\nhidden\n" "unbound identifier 'hidden'"
+  end
+
+  test "template references resolve at definition site" do
+    got = do
+      defn base a b -> :shadow
+      twice 21
+    end
+    got |> assert-eq 42
+  end
+
+  test "free-identifier=? compares bindings not spellings" do
+    is-add? add |> assert-eq :same-add
+    is-add? sub |> assert-eq :different
+    shadowing = do
+      defn add a b -> :shadow
+      is-add? add
+    end
+    shadowing |> assert-eq :different
+  end
+
+  test "a function-backed operator with chosen precedence" do
+    (1 <+> 2 <+> 3) |> assert-eq {:pair {:pair 1 2} 3}
+    (1 <+> 2 + 3) |> assert-eq {:pair 1 5}
+  end
+
+  test "an operator macro sees left operand last" do
+    (:nil <|> :fallback) |> assert-eq :fallback
+    (:hit <|> :fallback) |> assert-eq :hit
+  end
+
+  test "core-operator is the raw form" do
+    (40 <*+*> 2) |> assert-eq 42
+  end
+
+  test "caller-supplied operator names are visible" do
+    got = do
+      defmacro install-op stx -> match stx do
+        %`(install-op %,name) -> %`do
+          core-operator %,name 50 "left" "infix" add
+        end
+      end
+      install-op <++>
+      40 <++> 2
+    end
+    got |> assert-eq 42
+  end
+
+  test "macro-invented operator names are private" do
+    assert-expand-error "defmacro install-op stx -> %`do\n  core-operator <++> 50 \"left\" \"infix\" add\nend\ninstall-op x\n40 <++> 2\n" "unbound identifier '<++>'"
+  end
+
+  test "a transformer reaching a runtime helper compiles it for phase 1" do
+    assert-compiles "defn plain-helper x -> make-syntax-int x (add (syntax-int-value x) 1)\ndefmacro use-plain %`(use-plain %,e) -> plain-helper e\nprint (use-plain 41)\n"
+  end
+
+  test "for-syntax is gone; declarations have one home" do
+    assert-expand-error "for-syntax do\n  defn helper x -> add x 1\nend\nhelper 41\n" "unbound identifier 'for-syntax'"
+  end
+
+  test "a transformer's helper is an ordinary defn" do
+    use-helper 41 |> assert-eq 42
+  end
+
+  test "qualified imports deliver package macros" do
+    SM.emit-value 43 |> assert-eq 43
+  end
+
+  test "unqualified use delivers package macros" do
+    use tests/pkg/surface_macros
+    emit-value 44 |> assert-eq 44
+  end
+
+  test "a package macro can export definitions" do
+    use tests/pkg/surface_macros
+    generated |> assert-eq 42
+  end
+end

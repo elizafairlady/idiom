@@ -1,0 +1,195 @@
+package kernel
+
+core-form do do
+  stx -> syntax-error stx "unterminated command"
+end
+
+export protocol IdiomExpander do
+
+  export defmacro operator stx do
+    defn empty-opts -> %`%{}
+
+    defn option-key-name do
+      stx key when (syntax-atom? key) -> syntax-atom-text key
+      stx _ -> syntax-error stx "operator options must use keyword keys"
+    end
+
+    defn known-option-key? do
+      "precedence" -> :true
+      "assoc" -> :true
+      "capture" -> :true
+      _ -> :false
+    end
+
+    defn check-known-options do
+      stx opts i n when (eq? i n) -> opts
+      stx opts i n -> do
+        key = option-key-name stx (syntax-nth opts i)
+        if (eq? (known-option-key? key) :false) do
+          syntax-error stx "unknown operator keyword '#{key}'"
+        end
+        check-known-options stx opts (add i 2) n
+      end
+    end
+
+    defn known-options stx opts -> do
+      if (eq? (syntax-kind opts) :dict) do
+        check-known-options stx opts 0 (syntax-length opts)
+      else do
+        syntax-error stx "operator options must be a keyword dictionary"
+      end
+      opts
+    end
+
+    defn option-get do
+      stx opts key default i n when (eq? i n) -> default
+      stx opts key default i n -> do
+        candidate = option-key-name stx (syntax-nth opts i)
+        if (eq? candidate key) do
+          syntax-nth opts (add i 1)
+        else do
+          option-get stx opts key default (add i 2) n
+        end
+      end
+    end
+
+    defn option-value stx opts key default ->
+      option-get stx opts key default 0 (syntax-length opts)
+
+    defn assoc-text do
+      stx value when (syntax-word? value) -> syntax-word-text value
+      stx value when (syntax-atom? value) -> syntax-atom-text value
+      stx _ -> syntax-error stx "operator assoc must be left, right, or none"
+    end
+
+    defn precedence-of do
+      stx opts -> match (option-value stx opts "precedence" (make-syntax-int stx 50)) do
+        p when (syntax-int? p) -> syntax-int-value p
+        _ -> syntax-error stx "operator precedence must be an integer 0..255"
+      end
+    end
+
+    defn assoc-of do
+      stx opts -> match (assoc-text stx (option-value stx opts "assoc" (make-syntax-word stx "left"))) do
+        "left" -> "left"
+        "right" -> "right"
+        "none" -> "none"
+        _ -> syntax-error stx "operator assoc must be left, right, or none"
+      end
+    end
+
+    defn string-syntax? p -> and (syntax? p) (eq? (syntax-kind p) :string)
+
+    defn capture-part-text do
+      stx v when (syntax-atom? v) -> syntax-atom-text v
+      stx v when (string-syntax? v) -> syntax-string-text v
+      stx v when (syntax-int? v) -> "#{syntax-int-value v}"
+      stx _ -> syntax-error stx "operator capture must use atoms, strings, integers, tuples, or grouped expressions"
+    end
+
+    defn operator-name-text do
+      stx v when (syntax-word? v) -> syntax-word-text v
+      stx v when (syntax-atom? v) -> syntax-atom-text v
+      stx v when (string-syntax? v) -> syntax-string-text v
+      stx v when (syntax-int? v) -> "#{syntax-int-value v}"
+      stx _ -> syntax-error stx "operator name must be a symbol"
+    end
+
+    defn operator-target stx name -> make-syntax-word stx "__operator_target__#{operator-name-text stx name}"
+
+    defn capture-join-syntax do
+      stx v i len "" when (eq? i len) -> ""
+      stx v i len acc when (eq? i len) -> acc
+      stx v i len "" -> capture-join-syntax stx v (add i 1) len (capture-part-text stx (syntax-nth v i))
+      stx v i len acc -> capture-join-syntax stx v (add i 1) len "${acc} #{capture-part-text stx (syntax-nth v i)}"
+    end
+
+    defn capture-text do
+      stx v when (or (head-is? v "%-group") (head-is? v "%-layout-group")) -> capture-text stx (syntax-nth v 1)
+      stx v when (and (head-is? v "%-expr") (gt? (syntax-length v) 1)) -> capture-join-syntax stx v 1 (syntax-length v) ""
+      stx v when (eq? (syntax-kind v) :tuple) -> capture-join-syntax stx v 0 (syntax-length v) ""
+      stx v -> capture-part-text stx v
+    end
+
+    defn capture-of do
+      stx opts -> match (option-value stx opts "capture" :nil) do
+        :nil -> "infix"
+        capture -> capture-text stx capture
+      end
+    end
+
+    defn option-values stx opts -> do
+      data = known-options stx opts
+      {(precedence-of stx data) (assoc-of stx data) (capture-of stx data)}
+    end
+
+    defn emit-target stx name opts target -> do
+      {p a c} = option-values stx opts
+      %`do
+        core-operator %,name %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,target
+      end
+    end
+
+    defn emit-fn stx name opts body -> do
+      target = operator-target stx name
+      {p a c} = option-values stx opts
+      %`do
+        defn %,target %,body
+        core-operator %,name %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,target
+      end
+    end
+
+    defn emit-macro-tail stx name opts params body -> do
+      target = operator-target stx name
+      {p a c} = option-values stx opts
+      %`do
+        defmacro %,target %,@params %,body
+        core-operator %,name %,(make-syntax-int stx p) %,(make-syntax-string stx a) %,(make-syntax-string stx c) %,target
+      end
+    end
+
+    match stx do
+      %`(operator (%,name %,opts -> macro %,@params) %,body) -> emit-macro-tail stx name opts params body
+      %`(operator (%,name -> macro %,@params) %,body) -> emit-macro-tail stx name (empty-opts) params body
+      %`(operator %,name %,opts -> %,target) -> emit-target stx name opts target
+      %`(operator %,name -> %,target) -> emit-target stx name (empty-opts) target
+      %`(operator (%,name %,opts macro %,@params) %,body) -> emit-macro-tail stx name opts params body
+      %`(operator (%,name macro %,@params) %,body) -> emit-macro-tail stx name (empty-opts) params body
+      %`(operator (%,name %,opts) do %,@body end) -> emit-fn stx name opts %`do %,@body end
+      %`(operator %,name do %,@body end) -> emit-fn stx name (empty-opts) %`do %,@body end
+      %`(operator) -> syntax-error stx "operator declaration requires a name and a target"
+      %`(operator %,name) -> syntax-error stx "operator declaration requires a name and a target"
+      _ -> syntax-error stx "operator declaration requires '-> target' or an operator body"
+    end
+  end
+
+  export defmacro form stx do
+    match stx do
+      %`(form %,name %,spec) -> %`do
+        core-form %,name %,spec
+      end
+      %`(form %,name %,param -> %,@body) -> %`do
+        core-form %,name do
+          %,param -> %,@body
+        end
+      end
+      _ -> syntax-error stx "form expects: form NAME do CLAUSES end or form NAME PARAM -> BODY"
+    end
+  end
+
+  export defmacro reader-form stx do
+    match stx do
+      %`(reader-form %,name %,spec) -> %`do
+        core-reader-form %,name %,spec
+      end
+      %`(reader-form %,name %,param -> %,@body) -> %`do
+        core-reader-form %,name do
+          %,param -> %,@body
+        end
+      end
+      _ -> syntax-error stx "reader-form expects: reader-form \"%-name\" INSTRUCTION, a transformer body, or PARAM -> BODY"
+    end
+  end
+end
+
+activate IdiomExpander

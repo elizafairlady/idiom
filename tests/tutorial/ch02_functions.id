@@ -1,0 +1,123 @@
+use std/test
+
+activate Test
+
+defn double x -> x * 2
+
+defn answer -> 42
+
+defn hold x -> x
+
+defn pair x y -> {x y}
+
+defn classify do
+  0 -> :zero
+  _ -> :other
+end
+
+defn sum-to do
+  0 acc -> acc
+  n acc -> sum-to (n - 1) (acc + n)
+end
+
+defn fib do
+  0 -> 0
+  1 -> 1
+  n -> fib (n - 1) + fib (n - 2)
+end
+
+suite "tutorial/ch02 naming things and feeding them" do
+  test "defn arrow form" do
+    double 21 |> assert-eq 42
+  end
+
+  test "multi-clause defn takes the first clause that fits" do
+    classify 0 |> assert-eq :zero
+    classify 7 |> assert-eq :other
+  end
+
+  test "fn applied inline" do
+    (fn x -> x + 1) 41 |> assert-eq 42
+  end
+
+  test "fn with literal clauses" do
+    z = fn do
+      0 -> :zero
+      _ -> :nonzero
+    end
+    z 0 |> assert-eq :zero
+    z 9 |> assert-eq :nonzero
+  end
+
+  test "fn bindings live indoors" do
+    inc = fn x -> x + 1
+    inc 41 |> assert-eq 42
+  end
+
+  test "nullary functions answer when their name is called" do
+    answer |> assert-eq 42
+    g = &answer
+    g |> assert-eq 42
+    r = apply '() &answer
+    r |> assert-eq 42
+  end
+
+  test "ampersand takes a function as a value" do
+    add2 = &add
+    add2 1 2 |> assert-eq 3
+  end
+
+  test "ampersand on a plain value changes nothing" do
+    x = 5
+    add &x 1 |> assert-eq 6
+    v = [1 2 3]
+    &v |> assert-eq [1 2 3]
+  end
+
+  test "apply takes the args first and the function last" do
+    apply '(1 2) &add |> assert-eq 3
+    reason = assert-raises (fn -> apply add (list 1 2))
+    reason |> assert-eq {:error {:runtime "apply expects a proper list of arguments"}}
+  end
+
+  test "pipe feeds the first slot" do
+    3 |> sub 1 |> assert-eq 2
+    2 |> add 1 |> mul 10 |> assert-eq 30
+    5 |> (fn x -> x * 2) |> assert-eq 10
+  end
+
+  test "double pipe feeds the last slot and ends the line" do
+    r = 3 |>> sub 1
+    r |> assert-eq -2
+    r2 = (2 |>> sub 10) |>> sub 100
+    r2 |> assert-eq 92
+    r3 = 2 |> add 1 |>> sub 100
+    r3 |> assert-eq 97
+  end
+
+  test "a callee in argument position consumes its own arguments" do
+    hold add 1 2 |> assert-eq 3
+    pair add 1 2 3 |> assert-eq {3 3}
+    pair 1 add 2 3 |> assert-eq {1 5}
+  end
+
+  test "calls inside collection literals wear parens" do
+    {(classify 0) (classify 3)} |> assert-eq {:zero :other}
+  end
+
+  test "too few arguments is a runtime crash" do
+    assert-raises (fn -> add 1)
+  end
+
+  test "recursion with an accumulator" do
+    sum-to 100 0 |> assert-eq 5050
+  end
+
+  test "recursion without one" do
+    fib 25 |> assert-eq 75025
+  end
+
+  test "a doc block above the definition is its help" do
+    assert-compiles "## Doubles whatever it is fed.\nspec doubled :: int -> int\ndefn doubled x -> mul x 2\nmatch (help &doubled) do\n  \"Doubles whatever it is fed.\" -> :ok\nend\n"
+  end
+end

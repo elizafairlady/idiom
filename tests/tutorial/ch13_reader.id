@@ -1,0 +1,91 @@
+use std/test
+use std/string
+
+activate Test
+
+defn roman-digit do
+  73 -> 1
+  86 -> 5
+  88 -> 10
+  76 -> 50
+  67 -> 100
+  68 -> 500
+  77 -> 1000
+end
+
+defn roman-fold do
+  s i n acc when i == n -> acc
+  s i n acc when (and ((i + 1) < n) ((roman-digit (byte s i)) < (roman-digit (byte s (i + 1))))) ->
+    roman-fold s (i + 1) n (acc - (roman-digit (byte s i)))
+  s i n acc -> roman-fold s (i + 1) n (acc + (roman-digit (byte s i)))
+end
+
+defn roman-value s -> roman-fold s 0 (byte-len s) 0
+
+protocol FallbackForty do
+  form _ stx -> %`40
+end
+
+suite "tutorial/ch13 grow your own skin" do
+  test "roman-value reads additive numerals" do
+    roman-value "III" |> assert-eq 3
+    roman-value "VIII" |> assert-eq 8
+    roman-value "MMXXVI" |> assert-eq 2026
+  end
+
+  test "roman-value reads subtractive numerals" do
+    roman-value "XIV" |> assert-eq 14
+    roman-value "IX" |> assert-eq 9
+    roman-value "IV" |> assert-eq 4
+    (roman-value "MMXXVI") - (roman-value "IV") |> assert-eq 2022
+  end
+
+  test "a well-formed grammar compiles to a reader artifact" do
+    assert-compiles "package greet_reader\ncore-grammar Greet :exclusive [\n  {:skip space {:regex \"[ \\t\\r\\n]+\"}}\n  {:token name {:regex \"(?<name_text>[A-Za-z]+)\"} {:capture-string name_text}}\n  {:form greeting {:capture who {:token name}} {:emit-form \"%-expr\" [{:emit-word \"println\"} {:capture who}]}}\n  {:form program {:repeat {:capture line {:ref greeting}}} {:emit-form \"%-package-begin\" [{:splice line}]}}\n]\n"
+  end
+
+  test "left recursion in a grammar is illegal" do
+    assert-expand-error "package bad_reader_left_recursion\ncore-grammar BadReaderLeftRecursion :exclusive [\n  {:token ident {:regex \"[A-Za-z]+\"} {:capture ident}}\n  {:form program {:seq {:optional {:token ident}} {:ref program}} {:emit-form \"%-package-begin\" []}}\n]\n" "left-recursive reader artifact rule 'program'"
+  end
+
+  test "a repeat that can match empty input is illegal" do
+    assert-expand-error "package bad_reader_nullable_repeat\ncore-grammar BadReaderNullableRepeat :exclusive [\n  {:token ident {:regex \"[A-Za-z]+\"} {:capture ident}}\n  {:form empty {:empty} {:emit-list []}}\n  {:form program {:repeat {:ref empty}} {:emit-form \"%-package-begin\" []}}\n]\n" "can match empty input"
+  end
+
+  test "the grammar surface sugar expands to core-grammar" do
+    assert-compiles "grammar Mini exclusive do\n  skip space {:regex \"[ \\t\\r\\n]+\"}\n  token word {:regex \"[A-Za-z]+\"} -> {:capture word}\n  form program {:repeat {:capture item {:token word}}} -> {:emit-form \"%-package-begin\" [{:splice item}]}\nend\n:ok\n"
+  end
+
+  test "a token rule rejects a bare string pattern" do
+    assert-expand-error "grammar Mini exclusive do\n  skip space \"[ ]+\"\n  token word {:regex \"[A-Za-z]+\"} -> {:capture word}\n  form program {:repeat {:capture item {:token word}}} -> {:emit-form \"%-package-begin\" [{:splice item}]}\nend\n:ok\n" "token pattern expects"
+  end
+
+  test "reader-form declares an enforest instruction for a tag" do
+    assert-compiles "package rf_graph_probe
+reader-form \"%-group\" {:value {:child 1}}
+print (1)
+"
+  end
+
+  test "reader-form transformer shadows a floor form in one package" do
+    assert-compiles "package rf_transform_probe
+reader-form \"%-group\" stx -> syntax-nth stx 1
+print (2)
+"
+  end
+
+  test "an unknown enforest instruction is rejected" do
+    assert-expand-error "package rf_bad_probe
+reader-form \"%-group\" {:frobnicate}
+print (3)
+" "unknown enforest instruction"
+  end
+
+  test "form declares the pinned fallback inside a protocol" do
+    got = do
+      activate FallbackForty
+      frobnicate the thing
+    end
+    got |> assert-eq 40
+  end
+end

@@ -1,0 +1,174 @@
+use std/test
+use std/string
+use std/system with [env-set]
+use std/port with [port-write]
+import app/iem/buffer as B
+use app/iem
+import app/iem/ish-buffer as Ish
+import std/list as List
+
+defn ish-frame -> register-command (frame-new) "ish" Ish.ish-command
+
+activate Test
+
+defn feed do
+  frame '() -> frame
+  frame '(k . rest) -> feed (drive frame {:tea-key k}) rest
+end
+
+defn typed text -> text |> runes-lossy |> List.map (fn r -> {:char (rune-str r)})
+defn key-m-x frame -> drive (drive frame {:tea-key :esc}) {:tea-key {:char "x"}}
+
+defn snap-text frame -> B.text-of (snap frame)
+
+defn await-closed do
+  _p 0 -> :never
+  p n -> match (port-write p "x") do
+    :closed -> :closed
+    _ -> do
+      receive do
+        {:iem-ish-never} -> :ok
+        after 25 -> :ok
+      end
+      await-closed p (n - 1)
+    end
+  end
+end
+
+defn await do
+  f _want 0 -> f
+  f want n -> match (contains? (snap-text f) want) do
+    :true -> f
+    _ -> do
+      receive do
+        {:iem-ish-never} -> :ok
+        after 50 -> :ok
+      end
+      await (drive f {:switch "*ish*"}) want (n - 1)
+    end
+  end
+end
+
+suite "ish lives in a buffer" do
+  test "m-x ish opens a shell buffer that round-trips lines" do
+    env-set "IEM_ISH" "/bin/cat"
+    f = drive (ish-frame) {:open "scratch" "" :nil}
+    f2 = feed (key-m-x f) (typed "ish")
+    f3 = drive f2 {:tea-key :enter}
+    current f3 |> assert-eq "*ish*"
+    mode-label f3 |> assert-eq "ish"
+    f4 = feed f3 (typed "hello")
+    f5 = drive f4 {:tea-key :enter}
+    f6 = await f5 "hello\nhello\n" 60
+    snap-text f6 |> assert-eq "hello\nhello\n"
+    B.mark-of (snap f6) |> assert-eq 12
+    f7 = feed f6 (typed "again")
+    f8 = drive f7 {:tea-key :enter}
+    f9 = await f8 "again\nagain\n" 60
+    snap-text f9 |> assert-eq "hello\nhello\nagain\nagain\n"
+  end
+
+  test "pending input survives output arriving at the mark" do
+    env-set "IEM_ISH" "/bin/cat"
+    f = drive (ish-frame) {:open "scratch" "" :nil}
+    f2 = drive (feed (key-m-x f) (typed "ish")) {:tea-key :enter}
+    f3 = drive (feed f2 (typed "first")) {:tea-key :enter}
+    f4 = feed f3 (typed "pend")
+    f5 = await f4 "first\nfirst\n" 60
+    snap-text f5 |> assert-eq "first\nfirst\npend"
+    B.point-of (snap f5) |> assert-eq 16
+    f6 = drive f5 {:tea-key :enter}
+    f7 = await f6 "pend\npend\n" 60
+    snap-text f7 |> assert-eq "first\nfirst\npend\npend\n"
+  end
+
+  test "the output cleaner strips escapes and carries split sequences" do
+    esc = byte-str 27
+    bel = byte-str 7
+    Ish.clean-output "" "plain\n" |> assert-eq {"plain\n" ""}
+    Ish.clean-output "" "a#{esc}[31mred#{esc}[0m\r\n" |> assert-eq {"ared\n" ""}
+    {t1 c1} = Ish.clean-output "" "a#{esc}[3"
+    t1 |> assert-eq "a"
+    Ish.clean-output c1 "1mred\r\n" |> assert-eq {"red\n" ""}
+    {t2 c2} = Ish.clean-output "" "x#{esc}"
+    t2 |> assert-eq "x"
+    Ish.clean-output c2 "[Kdone" |> assert-eq {"done" ""}
+    Ish.clean-output "" "#{esc}]0;title#{bel}after" |> assert-eq {"after" ""}
+    {t3 c3} = Ish.clean-output "" "#{esc}]0;ti"
+    t3 |> assert-eq ""
+    Ish.clean-output c3 "tle#{bel}ok" |> assert-eq {"ok" ""}
+    {t4 c4} = Ish.clean-output "" "#{esc}]2;t#{esc}"
+    t4 |> assert-eq ""
+    Ish.clean-output c4 "\\st-done" |> assert-eq {"st-done" ""}
+    Ish.clean-output "" "#{esc}P1$r0q#{esc}\\dcs-done" |> assert-eq {"dcs-done" ""}
+    Ish.clean-output "" "#{esc}(Bcharset" |> assert-eq {"charset" ""}
+    Ish.clean-output "" "#{esc}#(8multi" |> assert-eq {"multi" ""}
+    Ish.clean-output "" "cr\rmid\r\n" |> assert-eq {"crmid\n" ""}
+    Ish.clean-output "" "A#{esc}#{esc}[31mB" |> assert-eq {"AB" ""}
+    Ish.clean-output "" "abc#{byte-str 8}X" |> assert-eq {"abcX" ""}
+  end
+
+  test "ish buffer death kills the shell process and clears the wiring" do
+    env-set "IEM_ISH" "/bin/cat"
+    f = drive (ish-frame) {:open "scratch" "" :nil}
+    f2 = drive (feed (key-m-x f) (typed "ish")) {:tea-key :enter}
+    port = state-get f2 :ish-port :nil
+    neq? port :nil |> assert-eq :true
+    bufpid = buffer-pid f2 "*ish*"
+    f3 = drive f2 {:buffer-down bufpid :crashed}
+    state-get f3 :ish-port :nil |> assert-eq :nil
+    state-get f3 :ish-pump :nil |> assert-eq :nil
+    await-closed port 80 |> assert-eq :closed
+  end
+
+  test "abnormal pump death echoes and tears the shell down" do
+    env-set "IEM_ISH" "/bin/cat"
+    f = drive (ish-frame) {:open "scratch" "" :nil}
+    f2 = drive (feed (key-m-x f) (typed "ish")) {:tea-key :enter}
+    port = state-get f2 :ish-port :nil
+    pump = state-get f2 :ish-pump :nil
+    f3 = drive f2 {:buffer-down pump :killed}
+    contains? (echo-line f3) "pump died" |> assert-eq :true
+    state-get f3 :ish-port :nil |> assert-eq :nil
+    await-closed port 80 |> assert-eq :closed
+  end
+
+  test "normal shell exit tears the wiring down without an error echo" do
+    env-set "IEM_ISH" "/bin/cat"
+    f = drive (ish-frame) {:open "scratch" "" :nil}
+    f2 = drive (feed (key-m-x f) (typed "ish")) {:tea-key :enter}
+    port = state-get f2 :ish-port :nil
+    pump = state-get f2 :ish-pump :nil
+    f3 = drive f2 {:buffer-down pump :normal}
+    state-get f3 :ish-port :nil |> assert-eq :nil
+    state-get f3 :ish-pump :nil |> assert-eq :nil
+    echo-line f3 |> assert-eq ""
+    await-closed port 80 |> assert-eq :closed
+    f3a = feed f3 (typed "post")
+    B.mark-of (snap f3a) |> assert-eq 4
+    f3b = drive f3a {:tea-key :enter}
+    neq? (buffer-pid f3b "*ish*") :nil |> assert-eq :true
+    f3c = await f3b "post\n" 60
+    snap-text f3c |> assert-eq "post\n"
+    f4 = drive f3c {:window-size "*ish*" 40 5}
+    env-set "IEM_ISH" "/bin/sh"
+    f5 = drive (feed (key-m-x f4) (typed "ish")) {:tea-key :enter}
+    neq? (state-get f5 :ish-port :nil) :nil |> assert-eq :true
+    neq? (state-get f5 :ish-port :nil) port |> assert-eq :true
+    current f5 |> assert-eq "*ish*"
+    f6 = drive (feed f5 (typed "stty size")) {:tea-key :enter}
+    f7 = await f6 "4 40" 60
+    contains? (snap-text f7) "4 40" |> assert-eq :true
+  end
+
+  test "m-x ish switches to the existing shell buffer" do
+    env-set "IEM_ISH" "/bin/cat"
+    f = drive (ish-frame) {:open "scratch" "" :nil}
+    f2 = drive (feed (key-m-x f) (typed "ish")) {:tea-key :enter}
+    f3 = drive f2 {:switch "scratch"}
+    current f3 |> assert-eq "scratch"
+    f4 = drive (feed (key-m-x f3) (typed "ish")) {:tea-key :enter}
+    current f4 |> assert-eq "*ish*"
+  end
+end
+:ok

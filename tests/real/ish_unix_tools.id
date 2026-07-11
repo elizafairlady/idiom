@@ -1,0 +1,59 @@
+use std/test
+use std/string
+use app/ish
+activate Test
+activate Shell
+
+defn setup -> printf "gamma 3\nalpha 1\nbeta 2\nalpha 1\n" > "/tmp/ish-tools-src.txt"
+
+suite "ish drives the common unix tools" do
+  test "grep filters lines" do
+    setup
+    capture (grep alpha < "/tmp/ish-tools-src.txt") |> assert-eq "alpha 1\nalpha 1"
+  end
+
+  test "wc counts words and lines" do
+    setup
+    capture (wc -l < "/tmp/ish-tools-src.txt" | tr -d " ") |> assert-eq "4"
+    capture (printf "x y z\n" | wc -w | tr -d " ") |> assert-eq "3"
+  end
+
+  test "tr transliterates and deletes" do
+    capture (printf "hello\n" | tr a-z A-Z) |> assert-eq "HELLO"
+    capture (printf "a-b-c\n" | tr -d "-") |> assert-eq "abc"
+  end
+
+  test "sort and uniq deduplicate" do
+    setup
+    capture (sort < "/tmp/ish-tools-src.txt" | uniq | wc -l | tr -d " ") |> assert-eq "3"
+  end
+
+  test "cut selects a field" do
+    capture (printf "one:two:three\n" | cut -d ":" -f 2) |> assert-eq "two"
+  end
+
+  test "head and tail slice a stream" do
+    capture (printf "1\n2\n3\n4\n" | head -2) |> assert-eq "1\n2"
+    capture (printf "1\n2\n3\n4\n" | tail -1) |> assert-eq "4"
+  end
+
+  test "sed substitutes" do
+    capture (printf "cat dog cat\n" | sed "s/cat/fish/g") |> assert-eq "fish dog fish"
+  end
+
+  test "awk extracts and sums fields" do
+    setup
+    capture (awk "{ s += $2 } END { print s }" < "/tmp/ish-tools-src.txt") |> assert-eq "7"
+    capture (printf "a 1\nb 2\n" | awk "{ print $1 }") |> assert-eq "a\nb"
+  end
+
+  test "curl reads a file url" do
+    setup
+    capture (curl -s "file:///tmp/ish-tools-src.txt" | head -1) |> assert-eq "gamma 3"
+  end
+
+  test "a pipeline chains several tools" do
+    setup
+    capture (cat "/tmp/ish-tools-src.txt" | cut -d " " -f 1 | sort | uniq -c | sort -rn | head -1 | awk "{ print $2 }") |> assert-eq "alpha"
+  end
+end

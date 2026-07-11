@@ -1,0 +1,175 @@
+package range
+
+import std/enum as Enum
+import std/list as List
+import std/math as Math
+
+record Range do
+  field start :: int
+  field stop :: int
+  field step :: int
+  field closed :: atom
+end
+
+spec valid-int :: Any atom -> int
+defn valid-int do
+  value label when (int? value) -> value
+  value label -> error {:range-integer-required label value}
+end
+
+spec valid-step :: int -> int
+defn valid-step do
+  0 -> error {:range-step-zero}
+  step -> valid-int step :step
+end
+
+spec make :: int int int atom -> Range
+defn make start stop step closed ->
+  Range (valid-int start :start) (valid-int stop :stop) (valid-step step) closed
+
+export defn new do
+  first stop -> make first stop 1 :false
+  first stop step -> make first stop step :false
+end
+
+export defn inclusive do
+  first stop -> make first stop 1 :true
+  first stop step -> make first stop step :true
+end
+
+export defn exclusive do
+  first stop -> make first stop 1 :false
+  first stop step -> make first stop step :false
+end
+
+spec positive-step? :: Range -> atom
+defn positive-step? r -> r.step > 0
+
+spec done-exclusive? :: int Range -> atom
+defn done-exclusive? cur r ->
+  if positive-step? r do
+    cur >= r.stop
+  else do
+    cur <= r.stop
+  end
+
+spec done-inclusive? :: int Range -> atom
+defn done-inclusive? cur r ->
+  if positive-step? r do
+    cur > r.stop
+  else do
+    cur < r.stop
+  end
+
+spec done? :: int Range -> atom
+defn done? cur r ->
+  if r.closed == :true do
+    done-inclusive? cur r
+  else do
+    done-exclusive? cur r
+  end
+
+spec empty? :: Range -> atom
+export defn empty? r -> done? r.start r
+
+spec fold-range :: int Range a Any -> a
+defn fold-range cur r acc f ->
+  if done? cur r do
+    acc
+  else do
+    fold-range (cur + r.step) r (f cur acc) f
+  end
+
+spec reduce-range :: Range a Any -> a
+defn reduce-range r acc f -> fold-range r.start r acc f
+
+spec foldl :: Range a Any -> a
+export defn foldl r acc f -> reduce-range r acc f
+
+spec list-range :: Range -> list
+defn list-range r -> reduce-range r '() &cons |> List.reverse
+
+spec to-list :: Range -> list
+export defn to-list r -> list-range r
+
+spec distance :: Range -> int
+defn distance r ->
+  if positive-step? r do
+    r.stop - r.start
+  else do
+    r.start - r.stop
+  end
+
+spec span :: Range -> int
+defn span r ->
+  if r.closed == :true do
+    (distance r) + 1
+  else do
+    distance r
+  end
+
+defn ceil-div n d -> (n + d - 1) / d
+
+spec size-range :: Range -> int
+defn size-range r ->
+  if empty? r do
+    0
+  else do
+    ceil-div (span r) (Math.abs r.step)
+  end
+
+export defn size r -> size-range r
+
+spec first :: Range -> int | nil
+export defn first r ->
+  if empty? r do
+    :nil
+  else do
+    r.start
+  end
+
+spec last :: Range -> int | nil
+export defn last r ->
+  if empty? r do
+    :nil
+  else do
+    r.start + (r.step * ((size-range r) - 1))
+  end
+
+spec within-positive? :: Range int -> atom
+defn within-positive? r x ->
+  if r.closed == :true do
+    and (x >= r.start) (x <= r.stop)
+  else do
+    and (x >= r.start) (x < r.stop)
+  end
+
+spec within-negative? :: Range int -> atom
+defn within-negative? r x ->
+  if r.closed == :true do
+    and (x <= r.start) (x >= r.stop)
+  else do
+    and (x <= r.start) (x > r.stop)
+  end
+
+spec within? :: Range int -> atom
+defn within? r x ->
+  if positive-step? r do
+    within-positive? r x
+  else do
+    within-negative? r x
+  end
+
+spec contains? :: Range Any -> atom
+export defn contains? r x ->
+  and (int? x) (and (within? r x) (((x - r.start) %% (Math.abs r.step)) == 0))
+
+implement Enum.Iter on Range do
+  method foldl r acc f -> reduce-range r acc f
+end
+
+implement Enum.Enum on Range do
+  method to-list r -> list-range r
+  method length r -> size-range r
+  method count r -> size-range r
+end

@@ -1,0 +1,213 @@
+use std/enum
+use std/string
+use std/test
+use std/system with [time-ns]
+import std/list as L
+import std/dict as Dict
+import std/range as Range
+activate Test
+
+xs = Range.exclusive 0 400 |> Range.to-list
+
+defn build-dict do
+  acc 0 -> acc
+  acc n -> build-dict (dict-put acc n n) (sub n 1)
+end
+
+small-dict = build-dict %{} 64
+big-dict = build-dict %{} 640
+
+defn loop-get do
+  _d _i 0 -> :done
+  d i n -> do
+    dict-get d (add (mod i 64) 1) :nil
+    loop-get d (add i 1) (sub n 1)
+  end
+end
+
+defn build-str-dict do
+  acc 0 -> acc
+  acc n -> build-str-dict (dict-put acc "key-#{n}" n) (sub n 1)
+end
+
+small-str-dict = build-str-dict %{} 64
+big-str-dict = build-str-dict %{} 640
+str-dict = small-str-dict
+
+defn loop-str-get do
+  d acc 0 -> acc
+  d acc n -> loop-str-get d (add acc (dict-get d "key-33" 0)) (sub n 1)
+end
+
+defn dict-key n -> dict-put (dict-put %{} :a n) :b (add n 1)
+
+defn build-dict-key-dict do
+  acc 0 -> acc
+  acc n -> build-dict-key-dict (dict-put acc (dict-key n) n) (sub n 1)
+end
+
+small-dict-key-dict = build-dict-key-dict %{} 64
+big-dict-key-dict = build-dict-key-dict %{} 640
+dict-key-33 = dict-key 33
+
+defn loop-dict-key-get do
+  d acc 0 -> acc
+  d acc n -> loop-dict-key-get d (add acc (dict-get d dict-key-33 0)) (sub n 1)
+end
+
+defn dup-str do
+  s 0 -> s
+  s n -> dup-str (str s s) (sub n 1)
+end
+
+small-str = dup-str "abcdefgh" 13
+big-str = dup-str "abcdefgh" 17
+small-lines = dup-str "abcdefg\n" 13
+big-lines = dup-str "abcdefg\n" 17
+
+defn loop-line-of do
+  _s _m 0 -> :done
+  s m n -> do
+    line-of s m
+    loop-line-of s m (sub n 1)
+  end
+end
+
+case-cased = dup-str "ABCDEFGH" 8
+case-alt = dup-str "aBcDeFgH" 8
+
+defn edit-mid do
+  s 0 -> s
+  s n -> do
+    len = byte-len s
+    mid = floor-div len 2
+    edit-mid (str (byte-slice s 0 mid) "X" (byte-slice s mid len)) (sub n 1)
+  end
+end
+
+suite "collections" do
+  bench "range/foldl" expect: 19900 do
+    Range.exclusive 0 200 |> Range.foldl 0 &add
+  end
+
+  bench "list/map-filter-fold" expect: 26733 do
+    xs |> L.map (fn x -> x + 1) |> L.filter (fn x -> eq? (x %% 3) 0) |> L.foldl 0 &add
+  end
+
+  bench "vector/map-length" expect: 10 do
+    ([1 2 3 4 5 6 7 8 9 10].map (fn x -> x * 2)).length
+  end
+
+  bench "map/put-get" expect: 2 do
+    %{} |> Dict.put 1 2 |> Dict.get-or 1 0
+  end
+
+  bench "dict/string-key-get" expect: 9900 ops: 300 allocs: 0 do
+    loop-str-get str-dict 0 300
+  end
+
+  bench "dict/dict-key-get" expect: 9900 ops: 300 allocs: 0 do
+    loop-dict-key-get small-dict-key-dict 0 300
+  end
+
+  bench "dict/string-key-scaling-get" expect: :true do
+    t-small = do
+      s0 = time-ns
+      loop-str-get small-str-dict 0 500
+      (time-ns - s0)
+    end
+    t-big = do
+      s0 = time-ns
+      loop-str-get big-str-dict 0 500
+      (time-ns - s0)
+    end
+    lt? t-big (mul (add t-small 30000) 6)
+  end
+
+  bench "dict/dict-key-scaling-get" expect: :true do
+    t-small = do
+      s0 = time-ns
+      loop-dict-key-get small-dict-key-dict 0 500
+      (time-ns - s0)
+    end
+    t-big = do
+      s0 = time-ns
+      loop-dict-key-get big-dict-key-dict 0 500
+      (time-ns - s0)
+    end
+    lt? t-big (mul (add t-small 30000) 6)
+  end
+
+  bench "dict/scaling-get" expect: :true do
+    t-small = do
+      s0 = time-ns
+      loop-get small-dict 0 300
+      (time-ns - s0)
+    end
+    t-big = do
+      s0 = time-ns
+      loop-get big-dict 0 300
+      (time-ns - s0)
+    end
+    lt? t-big (mul (add t-small 30000) 6)
+  end
+
+  bench "string/scaling-edit" expect: :true do
+    t-small = do
+      s0 = time-ns
+      edit-mid small-str 300
+      (time-ns - s0)
+    end
+    t-big = do
+      s0 = time-ns
+      edit-mid big-str 300
+      (time-ns - s0)
+    end
+    lt? t-big (mul (add t-small 30000) 6)
+  end
+
+  bench "string/line-index" expect: 280 do
+    s = dup-str "abcdefg\n" 5
+    start = match (line-start s 31) do
+      :nil -> 0
+      off -> off
+    end
+    add (line-of s (byte-len s)) start
+  end
+
+  bench "string/scaling-line" expect: :true do
+    t-small = do
+      s0 = time-ns
+      loop-line-of small-lines (floor-div (byte-len small-lines) 2) 300
+      (time-ns - s0)
+    end
+    t-big = do
+      s0 = time-ns
+      loop-line-of big-lines (floor-div (byte-len big-lines) 2) 300
+      (time-ns - s0)
+    end
+    lt? t-big (mul (add t-small 30000) 6)
+  end
+
+  bench "string/case-spans" expect: :true do
+    t-ident = do
+      s0 = time-ns
+      upcase case-cased
+      (time-ns - s0)
+    end
+    t-alt = do
+      s0 = time-ns
+      upcase case-alt
+      (time-ns - s0)
+    end
+    lt? t-alt (add (mul t-ident 8) 30000)
+  end
+
+  bench "string/trim-split-join-reverse" expect: 44 do
+    s = " alpha,beta,gamma,delta "
+    parts = s |> trim |> split ","
+    out = parts |> join "|"
+    (byte-len out) + (byte-len (reverse-runes out))
+  end
+end
+:ok

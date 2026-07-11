@@ -1,0 +1,406 @@
+use std/test
+use std/string
+use std/file with [read! remove]
+import app/iem/buffer as B
+use app/iem
+import std/list as List
+
+activate Test
+
+defn feed do
+  frame '() -> frame
+  frame '(k . rest) -> feed (drive frame {:tea-key k}) rest
+end
+
+defn typed text -> text |> runes-lossy |> List.map (fn r -> {:char (rune-str r)})
+defn key-m-x frame -> drive (drive frame {:tea-key :esc}) {:tea-key {:char "x"}}
+
+defn snap-text frame -> B.text-of (snap frame)
+defn padded text n -> cond (lt? (byte-len text) n) (padded "${text} " n) text
+defn snap-point frame -> B.point-of (snap frame)
+
+suite "iem frame drives buffer actors in tea shape" do
+  test "keymaps are layered dicts with prefixes and defaults" do
+    stack = list global-keymap
+    lookup-key stack :enter |> assert-eq {:buf {:newline}}
+    lookup-key stack {:char "a"} |> assert-eq :self-insert
+    lookup-key stack :f9 |> assert-eq :nil
+    dict? (lookup-key stack :c-x) |> assert-eq :true
+    over = %{:c-z {:buf {:redo}}}
+    lookup-key (cons over stack) :c-z |> assert-eq {:buf {:redo}}
+    lookup-key (cons over stack) :c-r |> assert-eq {:buf {:redo}}
+  end
+
+  test "open spawns a buffer and snapshots it" do
+    f = drive (frame-new) {:open "scratch" "hello" :nil}
+    current f |> assert-eq "scratch"
+    snap-text f |> assert-eq "hello"
+    snap-point f |> assert-eq 0
+  end
+
+  test "typing edits through the buffer actor" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed f (typed "hi")
+    snap-text f2 |> assert-eq "hi"
+    snap-point f2 |> assert-eq 2
+    f3 = feed f2 (list :enter {:char "!"})
+    snap-text f3 |> assert-eq "hi\n!"
+    snap-point f3 |> assert-eq 4
+  end
+
+  test "backspace and motion move by rune" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed f (list {:char "h"} {:char "é"})
+    snap-point f2 |> assert-eq 3
+    f3 = feed f2 (list :left)
+    snap-point f3 |> assert-eq 1
+    f4 = feed f3 (list :right :backspace)
+    snap-text f4 |> assert-eq "h"
+  end
+
+  test "undo and redo travel through the actor" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed f (typed "abc")
+    f3 = feed f2 (list :c-z :c-z)
+    snap-text f3 |> assert-eq "a"
+    f4 = feed f3 (list :c-r)
+    snap-text f4 |> assert-eq "ab"
+  end
+
+  test "buffers switch and edits land in the current one" do
+    f = drive (frame-new) {:open "one" "first" :nil}
+    f2 = drive f {:open "two" "second" :nil}
+    current f2 |> assert-eq "one"
+    f3 = drive f2 {:switch "two"}
+    snap-text f3 |> assert-eq "second"
+    f4 = feed f3 (typed "!!")
+    snap-text f4 |> assert-eq "!!second"
+    f5 = drive f4 {:switch "one"}
+    snap-text f5 |> assert-eq "first"
+  end
+
+  test "view windows around the point" do
+    f = drive (frame-new) {:open "scratch" "a\nb\nc\nd\ne" :nil}
+    f2 = feed f (list :right :right :right :right)
+    match (frame-view f2 3) do
+      {lines cursor-line col} -> do
+        lines |> assert-eq '("a" "b" "c")
+        cursor-line |> assert-eq 2
+        col |> assert-eq 0
+      end
+    end
+  end
+
+  test "save writes the buffer through the actor" do
+    path = "/tmp/iem-frame-save-test.txt"
+    f = drive (frame-new) {:open "file" "" path}
+    f2 = feed f (typed "saved!")
+    f3 = drive f2 {:tea-key :c-s}
+    read! path |> assert-eq "saved!"
+    remove path
+    snap-text f3 |> assert-eq "saved!"
+  end
+
+  test "vertical motion keeps the goal column across short lines" do
+    f = drive (frame-new) {:open "scratch" "long line here\nab\nanother long one" :nil}
+    f2 = feed f (list :right :right :right :right :right :right :right :right :right :right)
+    snap-point f2 |> assert-eq 10
+    f3 = feed f2 (list :down)
+    snap-point f3 |> assert-eq 17
+    f4 = feed f3 (list :down)
+    snap-point f4 |> assert-eq 28
+    f5 = feed f4 (list :up :up)
+    snap-point f5 |> assert-eq 10
+  end
+
+  test "any other command resets the goal column" do
+    f = drive (frame-new) {:open "scratch" "long line here\nab\nanother long one" :nil}
+    f2 = feed f (list :right :right :right :right :right :right :right :right :right :right)
+    f3 = feed f2 (list :down :left)
+    snap-point f3 |> assert-eq 16
+    f4 = feed f3 (list :down)
+    snap-point f4 |> assert-eq 19
+  end
+
+  test "vertical motion counts display cells through wide runes" do
+    f = drive (frame-new) {:open "scratch" "日本語\nab\nabcdefg" :nil}
+    f2 = feed f (list :right :right :right :down :down)
+    snap-point f2 |> assert-eq 19
+  end
+
+  test "vertical motion clamps at the buffer edges" do
+    f = drive (frame-new) {:open "scratch" "ab\ncd" :nil}
+    f2 = feed f (list :up)
+    snap-point f2 |> assert-eq 0
+    f3 = feed f2 (list :down :down :down)
+    snap-point f3 |> assert-eq 5
+  end
+
+  test "screen fills the window with modeline and echo rows" do
+    f = drive (frame-new) {:open "scratch" "hello" :nil}
+    match (screen f 80 24) do
+      {lines crow ccol} -> do
+        List.length lines |> assert-eq 24
+        List.first! lines |> assert-eq (padded "hello" 80)
+        List.nth-or lines 12 "?" |> assert-eq (padded "" 80)
+        ml = List.nth-or lines 22 "?"
+        byte-len ml |> assert-eq 80
+        starts-with? ml " scratch" |> assert-eq :true
+        contains? ml "L1:C1  (fundamental)" |> assert-eq :true
+        List.last! lines |> assert-eq ""
+        crow |> assert-eq 0
+        ccol |> assert-eq 0
+      end
+    end
+  end
+
+  test "modeline shows modified and recording flags" do
+    f = drive (frame-new) {:open "scratch" "hi" :nil}
+    contains? (modeline f 60) "[+]" |> assert-eq :false
+    f2 = feed f (typed "x")
+    contains? (modeline f2 60) "[+]" |> assert-eq :true
+    f3 = feed f2 (list :c-x {:char "("})
+    contains? (modeline f3 60) "[REC]" |> assert-eq :true
+    f4 = feed f3 (list :c-x {:char ")"})
+    contains? (modeline f4 60) "[REC]" |> assert-eq :false
+  end
+
+  test "save clears the modified flag through the version" do
+    path = "/tmp/iem-frame-modified-test.txt"
+    f = drive (frame-new) {:open "file" "" path}
+    f2 = feed f (typed "data")
+    modified? f2 |> assert-eq :true
+    f3 = drive f2 {:tea-key :c-s}
+    modified? f3 |> assert-eq :false
+    echo-line f3 |> assert-eq "Wrote file"
+    remove path
+  end
+
+  test "pending prefixes echo like emacs" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    echo-line f |> assert-eq ""
+    f2 = drive f {:tea-key :c-x}
+    echo-line f2 |> assert-eq "C-x-"
+    f3 = drive f2 {:tea-key {:char "u"}}
+    echo-line f3 |> assert-eq ""
+  end
+
+  test "the minibuffer runs m-x commands" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = key-m-x f
+    echo-line f2 |> assert-eq "M-x "
+    f3 = feed f2 (typed "quit")
+    echo-line f3 |> assert-eq "M-x quit"
+    f4 = drive f3 {:tea-key :enter}
+    running f4 |> assert-eq :false
+  end
+
+  test "m-x rejects unknown commands with an echo" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed (key-m-x f) (typed "nope")
+    f3 = drive f2 {:tea-key :enter}
+    echo-line f3 |> assert-eq "Unknown command: nope"
+    running f3 |> assert-eq :true
+  end
+
+  test "c-x b switches buffers through the minibuffer" do
+    f = drive (frame-new) {:open "one" "first" :nil}
+    f2 = drive f {:open "two" "second" :nil}
+    f3 = feed f2 (list :c-x {:char "b"})
+    f4 = feed f3 (typed "two")
+    f5 = drive f4 {:tea-key :enter}
+    current f5 |> assert-eq "two"
+    snap-text f5 |> assert-eq "second"
+  end
+
+  test "c-g cancels the minibuffer" do
+    f = drive (frame-new) {:open "scratch" "keep" :nil}
+    f2 = feed (key-m-x f) (typed "qui")
+    f3 = drive f2 {:tea-key :c-g}
+    echo-line f3 |> assert-eq "Quit"
+    f4 = feed f3 (typed "!")
+    snap-text f4 |> assert-eq "!keep"
+  end
+
+  test "the minibuffer edits with the whole global keymap" do
+    f = drive (frame-new) {:open "one" "first" :nil}
+    f2 = drive f {:open "two" "second" :nil}
+    f3 = feed f2 (list :c-x {:char "b"})
+    f4 = feed f3 (typed "xtwo")
+    f5 = feed f4 (list :c-a :c-d)
+    f6 = drive f5 {:tea-key :enter}
+    current f6 |> assert-eq "two"
+  end
+
+  test "prompts nest and cancel pops one level" do
+    f = drive (frame-new) {:open "one" "first" :nil}
+    f2 = drive f {:open "two" "second" :nil}
+    f3 = key-m-x f2
+    f4 = feed f3 (list :c-x {:char "b"})
+    List.length (minis f4) |> assert-eq 2
+    f5 = drive f4 {:tea-key :c-g}
+    List.length (minis f5) |> assert-eq 1
+    echo-line f5 |> assert-eq "M-x "
+    f6 = drive (feed f5 (typed "switch-buffer")) {:tea-key :enter}
+    f7 = drive (feed f6 (typed "two")) {:tea-key :enter}
+    current f7 |> assert-eq "two"
+  end
+
+  test "a live mini is not listable and not switchable" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed (key-m-x (bind-key f :c-l "list-buffers")) (typed "qu")
+    mini-buffer? f2 " *mini*" |> assert-eq :true
+    f3 = drive f2 {:switch " *mini*"}
+    echo-line f3 |> assert-eq "M-x qu"
+    f4 = feed f3 (list :c-l)
+    current f4 |> assert-eq "*buffers*"
+    contains? (snap-text f4) "*mini*" |> assert-eq :false
+    contains? (snap-text f4) "scratch" |> assert-eq :true
+  end
+
+  test "an async mini edit re-syncs the prompt line" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed (key-m-x f) (typed "qu")
+    match (minis f2) do
+      '({_prompt _name pid _tag} . _) -> do
+        send pid {:type "z"}
+        msg = receive do
+          {:changed p} when (eq? p pid) -> {:buffer-changed p}
+          after 2000 -> :nil
+        end
+        msg |> assert-eq {:buffer-changed pid}
+        f3 = drive f2 msg
+        echo-line f3 |> assert-eq "M-x quz"
+      end
+    end
+  end
+
+  test "enable leaves a live mini's mode alone" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed (key-m-x f) (typed "qu")
+    silent = Mode "silent" %{default: :ignore} :nil
+    f3 = enable f2 (fn -> silent)
+    f4 = drive f3 {:tea-key :c-g}
+    echo f4 |> assert-eq "Quit"
+  end
+
+  test "window-sync converges when one buffer fills two unequal windows" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    counted = add-hook f :window-size (fn fr -> {(state-put fr :ws-count ((state-get fr :ws-count 0) + 1)) '()})
+    f2 = feed counted (list :c-x {:char "2"})
+    f3 = window-sync f2 80 24
+    first = state-get f3 :ws-count 0
+    gt? first 0 |> assert-eq :true
+    f4 = window-sync f3 80 24
+    state-get f4 :ws-count 0 |> assert-eq first
+  end
+
+  test "a mode set on the mini buffer shadows its keys" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed (key-m-x f) (typed "qu")
+    quiet = Mode "quiet" %{default: :ignore} :nil
+    f3 = drive f2 {:set-mode " *mini*" quiet}
+    f4 = feed f3 (typed "it")
+    echo-line f4 |> assert-eq "M-x qu"
+  end
+
+  test "screen clips long lines and measures the cursor in cells" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed f (typed "日本語のテキスト")
+    match (screen f2 10 4) do
+      {lines _crow ccol} -> do
+        List.first! lines |> assert-eq "日本語のテ"
+        ccol |> assert-eq 16
+        List.length lines |> assert-eq 4
+      end
+    end
+  end
+
+  test "prefix keys chord through pending state" do
+    f = drive (frame-new) {:open "scratch" "abc" :nil}
+    f2 = feed f (typed "z")
+    f3 = feed f2 (list :c-x {:char "u"})
+    snap-text f3 |> assert-eq "abc"
+    f4 = feed f3 (list :c-x :f9 {:char "!"})
+    snap-text f4 |> assert-eq "!abc"
+  end
+
+  test "shadowing keymaps rebind keys evil-style" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed f (typed "ab")
+    f3 = feed (drive f2 {:tea-key :c-z}) '()
+    snap-text f3 |> assert-eq "a"
+    over = %{:c-z {:buf {:redo}}}
+    f4 = drive (push-keymap f3 over) {:tea-key :c-z}
+    snap-text f4 |> assert-eq "ab"
+  end
+
+  test "keyboard macros record keys and replay through the loop" do
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = feed f (list :c-x {:char "("})
+    f3 = feed f2 (typed "ab")
+    f4 = feed f3 (list :c-x {:char ")"})
+    snap-text f4 |> assert-eq "ab"
+    f5 = feed f4 (list :c-x {:char "e"})
+    snap-text f5 |> assert-eq "abab"
+    f6 = feed f5 (list :c-x {:char "e"} :c-x {:char "e"})
+    snap-text f6 |> assert-eq "abababab"
+  end
+
+  test "macros capture prefix commands too" do
+    f = drive (frame-new) {:open "scratch" "xy" :nil}
+    f2 = feed f (list :c-x {:char "("} {:char "z"} :c-x {:char "u"} {:char "w"} :c-x {:char ")"})
+    snap-text f2 |> assert-eq "wxy"
+    f3 = feed f2 (list :c-x {:char "e"})
+    snap-text f3 |> assert-eq "wwxy"
+  end
+
+  test "a mode is a keymap layer plus a pure handler" do
+    defmode shout %{c-t: {:buf {:type "!"}}} do
+      {:type c} buf -> {:done (B.step buf (B.insert (B.point-of buf) (upcase c)))}
+    end
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = drive f {:set-mode "a" shout}
+    mode-label f2 |> assert-eq "shout"
+    f3 = feed f2 (typed "hi")
+    snap-text f3 |> assert-eq "HI"
+    f4 = feed f3 (list :c-t)
+    snap-text f4 |> assert-eq "HI!"
+    f5 = feed f4 (list :backspace :backspace)
+    snap-text f5 |> assert-eq "H"
+  end
+
+  test "modes are buffer-local" do
+    defmode shout %{} do
+      {:type c} buf -> {:done (B.step buf (B.insert (B.point-of buf) (upcase c)))}
+    end
+    f = drive (frame-new) {:open "plain" "" :nil}
+    f2 = drive f {:open "loud" "" :nil}
+    f3 = drive f2 {:set-mode "loud" shout}
+    f4 = feed f3 (typed "ab")
+    snap-text f4 |> assert-eq "ab"
+    f5 = feed (drive f4 {:switch "loud"}) (typed "cd")
+    snap-text f5 |> assert-eq "CD"
+    f6 = feed (drive f5 {:switch "plain"}) (typed "e")
+    snap-text f6 |> assert-eq "abe"
+    mode-label f6 |> assert-eq "fundamental"
+  end
+
+  test "mode keymaps shadow only in their buffer" do
+    quiet = Mode "quiet" %{c-t: {:buf {:type "."}}} :nil
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = drive f {:open "b" "" :nil}
+    f3 = drive f2 {:set-mode "a" quiet}
+    f4 = feed (drive f3 {:switch "a"}) (list :c-t)
+    snap-text f4 |> assert-eq "."
+    f5 = feed (drive f4 {:switch "b"}) (list :c-t)
+    snap-text f5 |> assert-eq ""
+  end
+
+  test "quit stops the loop flag" do
+    f = drive (frame-new) {:open "scratch" "x" :nil}
+    f2 = drive f {:tea-quit}
+    running f2 |> assert-eq :false
+  end
+end
+:ok

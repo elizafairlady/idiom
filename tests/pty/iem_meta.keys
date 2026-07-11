@@ -1,0 +1,8 @@
+w (fundamental)
+s \e
+p 200
+s x
+w M-x
+s quit
+w M-x quit
+s \r

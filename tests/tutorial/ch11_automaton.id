@@ -1,0 +1,99 @@
+use std/test
+activate Test
+
+defn shape do
+  '(h . t) -> {:list h t}
+  {a b} when (eq? a b) -> {:twins a}
+  %{:k v} -> {:dict v}
+  _ -> :miss
+end
+
+defn classify v -> match v do
+  {:ok x} -> x
+  {:error _} -> -1
+  _ -> 0
+end
+
+defn wait -> receive do
+  {:ping from} -> send from :pong
+  {:stop reason} when (eq? reason :now) -> :stopped
+  after 50 -> :timeout
+end
+
+defn risky do
+  x when (eq? (raise :guard-blew-up) :never) -> :guarded
+  x -> {:fell-through x}
+end
+
+defn spin n -> spin (n + 1)
+
+defn patient do
+  x when (eq? (spin 0) :never) -> :guarded
+  _ -> :fallback
+end
+
+defn hog do
+  x when (eq? (spin 0) :never) -> :guarded
+end
+
+defn head-guard do
+  '(h . _t) when (h > 10) -> :big-head
+  v -> {:small v}
+end
+
+defn wild do
+  _ -> 1
+end
+
+defn deep do
+  %{:kind :ok :value {a [b c . _] . _} . rest} -> a + b + c + (dict-size rest)
+  _ -> 0
+end
+
+suite "tutorial/ch11 the automaton in the basement" do
+  test "one defn, four shapes" do
+    shape '(1 2 3) |> assert-eq {:list 1 '(2 3)}
+    shape {4 4} |> assert-eq {:twins 4}
+    shape %{:k 9} |> assert-eq {:dict 9}
+    shape :nope |> assert-eq :miss
+  end
+
+  test "match rides the same selector" do
+    classify {:ok 7} |> assert-eq 7
+    classify {:error :nope} |> assert-eq -1
+    classify 42 |> assert-eq 0
+  end
+
+  test "receive rides the same selector" do
+    send (self) {:stop :now}
+    wait |> assert-eq :stopped
+    wait |> assert-eq :timeout
+  end
+
+  test "a raise inside a guard is a quiet no" do
+    risky 5 |> assert-eq {:fell-through 5}
+  end
+
+  test "a spinning guard is skipped at the budget" do
+    patient 1 |> assert-eq :fallback
+  end
+
+  test "with no clause left the budget is the reason" do
+    r = assert-raises (fn -> hog 1)
+    r |> assert-eq {:error {:runtime "guard of 'hog' exceeded its budget of 16384 reductions"}}
+  end
+
+  test "guard fall-through composes with structure fall-through" do
+    head-guard '(11 4) |> assert-eq :big-head
+    head-guard '(3 4) |> assert-eq {:small '(3 4)}
+    head-guard 42 |> assert-eq {:small 42}
+  end
+
+  bench "match/wildcard" expect: 1 do
+    wild %{:kind :ok :value {1 [2 3 4] :x} :extra 1}
+  end
+
+  bench "match/deep-dict-tuple-vector" expect: 7 do
+    deep %{:kind :ok :value {1 [2 3 4] :x} :extra 1}
+  end
+end

@@ -1,0 +1,101 @@
+use std/test
+
+activate Test
+
+suite "tutorial/ch01 values are just sitting there" do
+  test "atoms are their own value" do
+    inspect :hello |> assert-eq ":hello"
+    inspect :foo/bar? |> assert-eq ":foo/bar?"
+    eq? :hello :hello |> assert-eq :true
+  end
+
+  test "ints are transparent bignums" do
+    2 ** 64 |> assert-eq 18446744073709551616
+    big = mul 99999999999999999999 99999999999999999999
+    big |> assert-eq 9999999999999999999800000000000000000001
+  end
+
+  test "int division truncates and floor-div floors" do
+    1 / 3 |> assert-eq 0
+    7 / 2 |> assert-eq 3
+    -7 / 2 |> assert-eq -3
+    -7 // 2 |> assert-eq -4
+    10 % 3 |> assert-eq 1
+  end
+
+  test "floats mix with ints but never equal them" do
+    1.5 + 2 |> assert-eq 3.5
+    3.0e2 |> assert-eq 300.0
+    eq? 1 1.0 |> assert-eq :false
+  end
+
+  test "precedence is what arithmetic promised" do
+    2 + 3 * 4 |> assert-eq 14
+  end
+
+  test "interpolation has two spellings and one meaning" do
+    name = "world"
+    "hello ${name}" |> assert-eq "hello world"
+    "sum is #{add 1 2}" |> assert-eq "sum is 3"
+    "${add 1 2}" |> assert-eq "3"
+  end
+
+  test "str converts and concatenates" do
+    str "n=" 42 " ok" |> assert-eq "n=42 ok"
+    str :hello |> assert-eq "hello"
+    inspect "hello" |> assert-eq "\"hello\""
+  end
+
+  test "four containers no commas" do
+    '(1 2 3) |> assert-eq (list 1 2 3)
+    '(1 2 3) |> assert-eq (cons 1 (list 2 3))
+    inspect [1 2 3] |> assert-eq "[1 2 3]"
+    inspect {1 :two "three"} |> assert-eq "{1 :two \"three\"}"
+    seq-nth [10 20 30] 1 |> assert-eq 20
+    seq-count [10 20 30] |> assert-eq 3
+  end
+
+  test "dicts get with a default and put without mutation" do
+    d = %{:a 1 :b 2}
+    dict-get d :a :default |> assert-eq 1
+    dict-get d :zzz :default |> assert-eq :default
+    dict-put d :c 3 |> assert-eq %{:a 1 :b 2 :c 3}
+    d |> assert-eq %{:a 1 :b 2}
+  end
+
+  test "exactly three values are falsy" do
+    cond :false :a :b |> assert-eq :b
+    cond :nil :a :b |> assert-eq :b
+    empty = '()
+    cond empty :a :b |> assert-eq :b
+  end
+
+  test "zero and empty everything else are truthy" do
+    cond 0 :a :b |> assert-eq :a
+    cond "" :a :b |> assert-eq :a
+    cond [] :a :b |> assert-eq :a
+    cond %{} :a :b |> assert-eq :a
+    cond {} :a :b |> assert-eq :a
+    cond 0.0 :a :b |> assert-eq :a
+    not? :nil |> assert-eq :true
+    not? 0 |> assert-eq :false
+  end
+
+  test "if wants do end and missing else is nil" do
+    r = if :true do :a end
+    r |> assert-eq :a
+    r2 = if :false do :a end
+    r2 |> assert-eq :nil
+    n = -4
+    r3 = if n > 0 do
+      :pos
+    else if n < 0 do
+      :neg
+    else do
+      :zero
+    end
+    r3 |> assert-eq :neg
+    r4 = unless :false do :ran end
+    r4 |> assert-eq :ran
+  end
+end

@@ -1,0 +1,128 @@
+use std/test
+use std/string
+use std/file with [write! read!]
+use std/system with [pwd]
+use std/port with [port-read]
+import std/cmd as Cmd
+
+activate Test
+
+defn drain do
+  p acc -> match (port-read p :stdout 4096) do
+    {:data chunk} -> drain p "${acc}${chunk}"
+    :eof -> acc
+  end
+end
+
+defn reason-of graph -> do
+  p = spawn graph
+  ref = monitor p
+  receive do
+    {:down r t reason} when (and (eq? r ref) (eq? t p)) -> reason
+    after 5000 -> :timeout
+  end
+end
+
+defn quiet argv -> Cmd.command argv (Cmd.stdio :null :null :null)
+
+defn talky argv -> Cmd.command argv (Cmd.stdio :null :pipe :null)
+
+defn idiomc -> "#{pwd}/build/idiomc"
+
+defn seal do
+  src out -> do
+    path = "/tmp/idiom_ch14_#{out}.id"
+    bin = "/tmp/idiom_ch14_#{out}"
+    write! path src
+    built = reason-of (quiet (list (idiomc) "build" path "-o" bin))
+    {built bin}
+  end
+end
+
+defn run-sealed bin -> reason-of (quiet (list "env" "PATH=#{pwd}/build" bin))
+
+suite "tutorial/ch14 shipping it" do
+  test "build seals a wire container behind a shebang" do
+    {built bin} = seal "42" "seal"
+    built |> assert-eq :normal
+    bytes = read! bin
+    byte-slice bytes 0 21 |> assert-eq "#!/usr/bin/env idiomc"
+    byte-slice bytes 22 26 |> assert-eq "IDMW"
+  end
+
+  test "a sealed integer value becomes the exit code" do
+    {built bin} = seal "42" "e42"
+    built |> assert-eq :normal
+    run-sealed bin |> assert-eq {:exit-code 42}
+  end
+
+  test "exit codes wrap at the field width" do
+    {built bin} = seal "300" "e300"
+    built |> assert-eq :normal
+    run-sealed bin |> assert-eq {:exit-code 44}
+  end
+
+  test "a sealed crash exits 70" do
+    {built bin} = seal "error {:disk-full 1}" "boom"
+    built |> assert-eq :normal
+    run-sealed bin |> assert-eq {:exit-code 70}
+  end
+
+  test "exit-code reasons pass through silently" do
+    {built bin} = seal "exit self {:exit-code 12}" "e12"
+    built |> assert-eq :normal
+    run-sealed bin |> assert-eq {:exit-code 12}
+  end
+
+  test "plain run discards the final value" do
+    write! "/tmp/idiom_ch14_plain.id" "42"
+    reason-of (quiet (list (idiomc) "run" "/tmp/idiom_ch14_plain.id")) |> assert-eq :normal
+  end
+
+  test "plain run reports any error as exit 1" do
+    write! "/tmp/idiom_ch14_plainboom.id" "error {:disk-full 1}"
+    reason-of (quiet (list (idiomc) "run" "/tmp/idiom_ch14_plainboom.id")) |> assert-eq {:exit-code 1}
+  end
+
+  test "the exit vocabulary is the monitor vocabulary" do
+    {p ref} = spawn-monitor (fn -> exit self {:exit-code 12})
+    got = receive do
+      {:down r t reason} when (and (eq? r ref) (eq? t p)) -> reason
+      after 1000 -> :timeout
+    end
+    got |> assert-eq {:exit-code 12}
+  end
+
+  test "the harness passes a filtered file and exits 0" do
+    reason-of (quiet (list (idiomc) "test" "-run" "pass-only" "tests/cli/test_filter.id")) |> assert-eq :normal
+  end
+
+  test "the harness isolates a crashing test and keeps going" do
+    src = "use std/test\nactivate Test\n\nsuite \"isolation\" do\n  test \"survivor-before\" do\n    assert-eq (1 + 1) 2\n  end\n\n  test \"detonator\" do\n    exit self :kaboom\n  end\n\n  test \"survivor-after\" do\n    assert-eq (2 + 2) 4\n  end\nend\n"
+    write! "/tmp/idiom_ch14_crash_test.id" src
+    p = spawn talky (list "env" "IDIOM_TEST_VERBOSE=1" (idiomc) "test" "/tmp/idiom_ch14_crash_test.id")
+    ref = monitor p
+    out = drain p ""
+    reason = receive do
+      {:down r t rsn} when (and (eq? r ref) (eq? t p)) -> rsn
+      after 5000 -> :timeout
+    end
+    reason |> assert-eq {:exit-code 1}
+    byte-find out "test process crashed: :kaboom" 0 |> assert-neq :nil
+    byte-find out "pass survivor-before" 0 |> assert-neq :nil
+    byte-find out "pass survivor-after" 0 |> assert-neq :nil
+  end
+
+  test "json events are one object per line" do
+    write! "/tmp/idiom_ch14_json_test.id" "use std/test\nactivate Test\n\nsuite \"j\" do\n  test \"t\" do\n    :ok\n  end\nend\n"
+    p = spawn talky (list (idiomc) "test" "-json" "/tmp/idiom_ch14_json_test.id")
+    out = drain p ""
+    byte-find out "{\"action\":\"pass\",\"file\":\"/tmp/idiom_ch14_json_test.id\"" 0 |> assert-neq :nil
+  end
+
+  test "version names the build" do
+    p = spawn talky (list (idiomc) "version")
+    out = drain p ""
+    starts-with? out "idiomc 0." |> assert-eq :true
+  end
+end

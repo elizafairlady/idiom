@@ -1,0 +1,44 @@
+use std/test
+use std/string with [contains?]
+import std/cmd as Cmd
+
+activate Test
+
+suite "command graph job control" do
+  test "a background job stops on :stop and resumes on job-resume" do
+    graph = Cmd.bg (Cmd.command (list "sh" "-c" "sleep 5") (Cmd.stdio :null :null :null))
+    {port ref} = spawn-monitor graph
+    job-signal port :stop
+    got-stop = receive do
+      {:stopped r p} when (eq? r ref) -> {:stopped p}
+      {:down r _p reason} when (eq? r ref) -> {:early-down reason}
+      after 4000 -> :timeout
+    end
+    match got-stop do
+      {:stopped p} -> assert-eq p port
+      other -> assert-eq other :stopped-expected
+    end
+    job-resume port :bg
+    job-signal port :term
+    got-down = receive do
+      {:down r _p _reason} when (eq? r ref) -> :down
+      after 4000 -> :timeout
+    end
+    got-down |> assert-eq :down
+  end
+
+  test "an explicit foreground job completes with a down" do
+    graph = Cmd.fg (Cmd.command (list "true") (Cmd.stdio :null :null :null))
+    {_port ref} = spawn-monitor graph
+    got = receive do
+      {:down r _p reason} when (eq? r ref) -> reason
+      after 4000 -> :timeout
+    end
+    got |> assert-eq :normal
+  end
+
+  test "a malformed job policy is rejected before launch" do
+    reason = assert-raises (fn -> spawn {:exec {:stage (Cmd.words (list "true")) '() '()} (Cmd.stdio :null :null :null) :sideways})
+    inspect reason |> contains? "job policy" |> assert
+  end
+end

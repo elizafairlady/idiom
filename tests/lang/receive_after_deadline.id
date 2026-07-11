@@ -1,0 +1,24 @@
+use std/test
+use std/system with [time-ms]
+
+activate Test
+
+defn wait-at-least n do
+  start = time-ms
+  got = receive do
+    {:never} -> :bad
+    after n -> :ok
+  end
+  got |> assert-eq :ok
+  gte? (time-ms - start) n |> assert
+end
+
+suite "receive after waits at least its timeout" do
+  test "after 1 waits at least 1ms" do
+    wait-at-least 1
+  end
+
+  test "after 5 waits at least 5ms" do
+    wait-at-least 5
+  end
+end

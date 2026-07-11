@@ -1,0 +1,71 @@
+package path
+
+use std/string
+use std/system with [pwd]
+
+# Lexical path helpers. These do not normalize dot segments or query the filesystem.
+
+export defn join do
+  a b when (eq? a "") -> b
+  a b when (ends-with? a "/") -> "${a}${b}"
+  a b -> "${a}/${b}"
+end
+
+defn last-slash p -> scan-slash p (byte-len p)
+
+defn basename-start p -> match (last-slash p) do
+  :nil -> 0
+  i -> add i 1
+end
+
+defn scan-slash do
+  _p 0 -> :nil
+  p i -> cond (eq? (byte p (sub i 1)) 47) (sub i 1) (scan-slash p (sub i 1))
+end
+
+export defn dirname do
+  p -> match (last-slash p) do
+    :nil -> "."
+    0 -> "/"
+    i -> byte-slice p 0 i
+  end
+end
+
+export defn basename do
+  p -> match (last-slash p) do
+    :nil -> p
+    i -> byte-slice p (add i 1) (byte-len p)
+  end
+end
+
+defn last-dot do
+  _p 0 -> :nil
+  p i -> do
+    b = byte p (sub i 1)
+    if (eq? b 46) do
+      sub i 1
+    else if (eq? b 47) do
+      :nil
+    else do
+      last-dot p (sub i 1)
+    end
+  end
+end
+
+export defn extname do
+  p -> do
+    start = basename-start p
+    match (last-dot p (byte-len p)) do
+      :nil -> ""
+      i when (lte? i start) -> ""
+      i -> byte-slice p i (byte-len p)
+    end
+  end
+end
+
+export defn absolute? p -> starts-with? p "/"
+
+export defn expand do
+  p when (absolute? p) -> p
+  p -> join (pwd) p
+end

@@ -1,0 +1,68 @@
+package tea
+
+import std/list as List
+
+export defn none -> :tea-none
+
+export defn key msg -> {:tea-key msg}
+export defn window-size width height -> {:tea-window-size width height}
+export defn focus -> {:tea-focus}
+export defn blur -> {:tea-blur}
+export defn quit-msg -> {:tea-quit}
+export defn interrupt-msg -> {:tea-interrupt}
+export defn suspend-msg -> {:tea-suspend}
+export defn resume-msg -> {:tea-resume}
+
+export record Emit do
+  field msg
+end
+
+export record Batch do
+  field commands
+end
+
+export record Sequence do
+  field commands
+end
+
+export defn emit msg -> Emit msg
+
+defn command-list commands -> commands |> List.filter (fn cmd -> neq? cmd none)
+
+defn compact-command commands ctor -> match (command-list commands) do
+  '() -> none
+  '(only) -> &only
+  many -> ctor many
+end
+
+export defn batch commands -> compact-command commands &Batch
+export defn sequence commands -> compact-command commands &Sequence
+
+export defn quit -> emit quit-msg
+export defn interrupt -> emit interrupt-msg
+export defn suspend -> emit suspend-msg
+export defn resume -> emit resume-msg
+
+defn command-result do
+  cmd when (Emit? cmd) -> cmd.msg
+  cmd when (Batch? cmd) -> {:tea-batch cmd.commands}
+  cmd when (Sequence? cmd) -> {:tea-sequence cmd.commands}
+  cmd when (closure? cmd) -> '() |> apply cmd
+  cmd -> cmd
+end
+
+defn messages-rev-from-list do
+  '() acc -> acc
+  '(h . t) acc -> messages-rev-from-list t (List.foldl (command-messages h) acc &cons)
+end
+
+defn command-result-messages do
+  {:tea-batch commands} -> messages-rev-from-list commands '() |> List.reverse
+  {:tea-sequence commands} -> messages-rev-from-list commands '() |> List.reverse
+  msg -> list msg
+end
+
+export defn command-messages do
+  cmd when (eq? cmd none) -> '()
+  cmd -> command-result-messages (command-result cmd)
+end

@@ -1,0 +1,9 @@
+package point_a
+
+export record Point do
+  field x :: int
+end
+
+export defn make x -> Point x
+
+export defn own? v -> is-a? v :Point

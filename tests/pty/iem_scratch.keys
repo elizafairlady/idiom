@@ -1,0 +1,5 @@
+g tests/pty/iem_scratch_1.grid
+c 1 1
+s ok
+w ok
+s \x18\x03

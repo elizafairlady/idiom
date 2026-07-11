@@ -1,0 +1,13 @@
+use std/test
+
+import tests/pkg/multifile_order as Package
+
+activate Test
+
+suite "directory package" do
+  test "source files share imports and declarations without filename ordering" do
+    Package.flip (list 1 2 3) |> assert-eq (list 3 2 1)
+    Package.call-later 4 |> assert-eq 5
+    Package.initialized |> assert-eq 42
+  end
+end

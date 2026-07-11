@@ -1,0 +1,11 @@
+use app/iem
+use app/iem/ish-buffer
+use app/iem/evil
+
+fn frame -> frame
+  |> enable &evil-normal
+  |> register-command "ish" ish-command "Open or switch to the *ish* shell buffer"
+  |> register-command "evil" evil-command "Enter evil-mode in the current buffer"
+  |> bind-key :c-t "ish"
+  |> set-op :count-saves (fn f _gesture _op -> {(f.record-update (echo: "#{state-get f :saves 0} saves this session")) '()})
+  |> add-hook :saved (fn f -> {(state-put f :saves (add (state-get f :saves 0) 1)) '()})

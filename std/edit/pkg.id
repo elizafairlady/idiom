@@ -1,0 +1,328 @@
+package edit
+
+use std/string
+use std/string/runes with [width]
+use std/term
+import std/list as List
+use std/system with [env-get]
+
+
+spec history-of :: dict -> list
+export defn history-of state -> dict-get state :history '()
+
+export defn buffer-of state -> dict-get state :buffer ""
+export defn cursor-of state -> dict-get state :cursor 0
+
+defn imax do
+  a b when (gt? a b) -> a
+  _ b -> b
+end
+
+defn edited state -> {:render state}
+
+defn insert-text state text do
+  b = buffer-of state
+  c = cursor-of state
+  b2 = "#{byte-slice b 0 c}${text}#{byte-slice b c (byte-len b)}"
+  edited (state |> dict-put :buffer b2 |> dict-put :cursor (add c (byte-len text)))
+end
+
+defn move-to state c -> edited (dict-put state :cursor c)
+
+defn key-left state -> move-to state (rune-back (buffer-of state) (cursor-of state))
+defn key-right state -> move-to state (rune-fwd (buffer-of state) (cursor-of state))
+defn key-home state -> move-to state (line-start (buffer-of state) (cursor-of state))
+defn key-line-end state -> move-to state (line-stop (buffer-of state) (cursor-of state))
+defn key-word-back state -> move-to state (word-back (buffer-of state) (cursor-of state))
+defn key-word-fwd state -> move-to state (word-fwd (buffer-of state) (cursor-of state))
+
+defn delete-range state a z do
+  b = buffer-of state
+  edited (state |> dict-put :buffer "#{byte-slice b 0 a}#{byte-slice b z (byte-len b)}" |> dict-put :cursor a)
+end
+
+defn kill-range state a z do
+  b = buffer-of state
+  match (delete-range state a z) do
+    {:render st} -> edited (dict-put st :kill (byte-slice b a z))
+  end
+end
+
+defn key-backspace state do
+  c = cursor-of state
+  cond (eq? c 0) (edited state) (delete-range state (rune-back (buffer-of state) c) c)
+end
+
+defn key-delete state do
+  c = cursor-of state
+  cond (eq? c (byte-len (buffer-of state))) (edited state) (delete-range state c (rune-fwd (buffer-of state) c))
+end
+
+defn key-eof-or-delete do
+  state when (eq? (byte-len (buffer-of state)) 0) -> {:eof state}
+  state -> key-delete state
+end
+
+defn key-kill-line-end state do
+  b = buffer-of state
+  c = cursor-of state
+  e = line-stop b c
+  cond (and (eq? c e) (lt? c (byte-len b))) (kill-range state c (add c 1)) (kill-range state c e)
+end
+
+defn key-kill-line-start state -> kill-range state (line-start (buffer-of state) (cursor-of state)) (cursor-of state)
+
+defn key-kill-word state do
+  b = buffer-of state
+  c = cursor-of state
+  kill-range state (skip-back b (skip-back b c &space-byte?) &filled-byte?) c
+end
+
+defn key-yank state do
+  k = dict-get state :kill ""
+  cond (eq? k "") (edited state) (insert-text state k)
+end
+
+defn nth-entry do
+  '() _ -> ""
+  '(h . _) 0 -> h
+  '(_ . t) n -> nth-entry t (sub n 1)
+end
+
+defn show-history state pos text ->
+  edited (state |> dict-put :hist-pos pos |> dict-put :buffer text |> dict-put :cursor (byte-len text))
+
+defn key-history-back state do
+  h = history-of state
+  p = dict-get state :hist-pos (sub 0 1)
+  n = add p 1
+  if (lt? n (List.length h)) do
+    st = cond (eq? p (sub 0 1)) (dict-put state :saved (buffer-of state)) state
+    show-history st n (nth-entry h n)
+  else do
+    edited state
+  end
+end
+
+defn key-history-fwd state do
+  p = dict-get state :hist-pos (sub 0 1)
+  if (eq? p (sub 0 1)) do
+    edited state
+  else if (eq? p 0) do
+    show-history state (sub 0 1) (dict-get state :saved "")
+  else do
+    show-history state (sub p 1) (nth-entry (history-of state) (sub p 1))
+  end
+end
+
+defn search-scan do
+  '() _q _i -> :nil
+  '(h . _) q i when (contains? h q) -> {i h}
+  '(_ . t) q i -> search-scan t q (add i 1)
+end
+
+defn search-apply state from do
+  q = dict-get state :search ""
+  if (eq? q "") do
+    edited state
+  else do
+    match (search-scan (List.drop (history-of state) from) q from) do
+      :nil -> edited state
+      {i text} -> edited (state |> dict-put :search-idx i |> dict-put :buffer text |> dict-put :cursor (byte-len text))
+    end
+  end
+end
+
+defn search-exit state -> dict-put state :mode :edit
+
+defn key-search state ->
+  edited (state |> dict-put :mode :search |> dict-put :search "" |> dict-put :search-idx (sub 0 1) |> dict-put :saved-buffer (buffer-of state) |> dict-put :saved-cursor (cursor-of state))
+
+defn search-step state key -> match key do
+  {:char c} -> search-apply (dict-put state :search "#{dict-get state :search ""}${c}") (imax 0 (dict-get state :search-idx (sub 0 1)))
+  :c-r -> search-apply state (add (dict-get state :search-idx (sub 0 1)) 1)
+  :backspace -> do
+    q = dict-get state :search ""
+    q2 = cond (eq? q "") "" (byte-slice q 0 (sub (byte-len q) 1))
+    search-apply (state |> dict-put :search q2 |> dict-put :search-idx (sub 0 1)) 0
+  end
+  :enter -> {:submit (search-exit state)}
+  :c-c -> edited ((search-exit state) |> dict-put :buffer (dict-get state :saved-buffer "") |> dict-put :cursor (dict-get state :saved-cursor 0))
+  :c-g -> edited ((search-exit state) |> dict-put :buffer (dict-get state :saved-buffer "") |> dict-put :cursor (dict-get state :saved-cursor 0))
+  _ -> edited (search-exit state)
+end
+
+defn key-enter state -> {:submit state}
+defn key-cancel state -> {:cancel state}
+defn key-tab state -> edited state
+defn key-clear state -> {:clear state}
+
+export defn bind-key state key handler -> dict-put state :keymap (dict-put (dict-get state :keymap %{}) key handler)
+
+export defn new prompt ->
+  %{:buffer "" :cursor 0 :history '() :hist-pos (sub 0 1) :saved "" :kill "" :mode :edit :search "" :search-idx (sub 0 1) :saved-buffer "" :saved-cursor 0 :prompt prompt :cont-prompt "...> " :cols 80 :row 0 :below 0 :dumb :false :keymap %{:c-a &key-home :home &key-home :c-e &key-line-end :end &key-line-end :c-b &key-left :left &key-left :c-f &key-right :right &key-right {:meta {:char "b"}} &key-word-back {:meta {:char "f"}} &key-word-fwd :backspace &key-backspace :delete &key-delete :c-d &key-eof-or-delete :c-k &key-kill-line-end :c-u &key-kill-line-start :c-w &key-kill-word :c-y &key-yank :c-l &key-clear :up &key-history-back :c-p &key-history-back :down &key-history-fwd :c-n &key-history-fwd :c-r &key-search :enter &key-enter :c-c &key-cancel :tab &key-tab}}
+
+export defn step state key ->
+  if (eq? (dict-get state :mode :edit) :search) do
+    search-step state key
+  else do
+    match (dict-get (dict-get state :keymap %{}) key :nil) do
+      :nil -> match key do
+        {:char c} -> insert-text state c
+        _ -> edited state
+      end
+      handler -> handler state
+    end
+  end
+
+export defn reset state ->
+  state |> dict-put :buffer "" |> dict-put :cursor 0 |> dict-put :mode :edit |> dict-put :hist-pos (sub 0 1) |> dict-put :row 0 |> dict-put :below 0
+
+export defn continue state do
+  b = "#{buffer-of state}\n"
+  state |> dict-put :buffer b |> dict-put :cursor (byte-len b) |> dict-put :mode :edit
+end
+
+export defn push-history do
+  state "" -> state
+  state line -> match (history-of state) do
+    '(h . _) when (eq? h line) -> dict-put state :hist-pos (sub 0 1)
+    _ -> state |> dict-put :history (cons line (history-of state)) |> dict-put :hist-pos (sub 0 1)
+  end
+end
+
+defn locate do
+  '(h . t) c i when (gt? c (byte-len h)) -> locate t (sub c (add (byte-len h) 1)) (add i 1)
+  '(_ . _) c i -> {i c}
+  '() c i -> {i c}
+end
+
+defn prompt-for state i do
+  p = cond (eq? (dict-get state :mode :edit) :search) "(reverse-i-search)'#{dict-get state :search ""}': " (dict-get state :prompt "")
+  cond (eq? i 0) p (dict-get state :cont-prompt "")
+end
+
+defn rows-upto do
+  _state '() _i _cols _n acc -> acc
+  _state _lines _i _cols 0 acc -> acc
+  state '(h . t) i cols n acc -> rows-upto state t (add i 1) cols (sub n 1) (add acc (line-rows (add (visible-len (prompt-for state i)) (width h)) cols))
+end
+
+defn render-lines do
+  _state '() _i -> '()
+  state '(h . t) i -> cons "#{prompt-for state i}${h}" (render-lines state t (add i 1))
+end
+
+defn join-crlf do
+  '() -> ""
+  '(h) -> h
+  '(h . t) -> "${h}\r\n#{join-crlf t}"
+end
+
+export defn render state do
+  cols = imax 1 (dict-get state :cols 80)
+  b = buffer-of state
+  lines = split b "\n"
+  {li lc} = locate lines (cursor-of state) 0
+  line-li = nth-entry lines li
+  pw = visible-len (prompt-for state li)
+  coff = add pw (width (byte-slice line-li 0 lc))
+  cvis = add pw (width line-li)
+  {cr cc} = cond (eq? coff cvis) (end-pos coff cols) {(div coff cols) (mod coff cols)}
+  cursor-row = add (rows-upto state lines 0 cols li 0) cr
+  last-index = sub (List.length lines) 1
+  {er _ec} = end-pos (add (visible-len (prompt-for state last-index)) (width (nth-entry lines last-index))) cols
+  end-row = add (rows-upto state lines 0 cols last-index 0) er
+  up-old = cond (gt? (dict-get state :row 0) 0) (csi "#{dict-get state :row 0}A") ""
+  up-new = cond (gt? (sub end-row cursor-row) 0) (csi "#{sub end-row cursor-row}A") ""
+  right = cond (gt? cc 0) (csi "${cc}C") ""
+  clear = csi "J"
+  out = "\r${up-old}${clear}#{join-crlf (render-lines state lines 0)}${up-new}\r${right}"
+  {(state |> dict-put :row cursor-row |> dict-put :below (sub end-row cursor-row)) out}
+end
+
+defn paint state do
+  {st out} = render state
+  tty-write out
+  st
+end
+
+defn to-block-end state ->
+  cond (gt? (dict-get state :below 0) 0) (tty-write (csi "#{dict-get state :below 0}B")) :ok
+
+defn finish-line state do
+  to-block-end state
+  tty-write "\r\n"
+  {:line (buffer-of state) (state |> dict-put :row (add (dict-get state :row 0) (dict-get state :below 0)) |> dict-put :below 0)}
+end
+
+defn finish-cancel state do
+  to-block-end state
+  tty-write "\r\n"
+  {:cancel (reset state)}
+end
+
+defn edit-loop state -> match read-key do
+  :eof -> {:eof state}
+  {:signal :resize} -> dict-put state :cols term-cols |> paint |> edit-loop
+  {:signal _} -> finish-cancel state
+  :unknown -> edit-loop state
+  :esc -> edit-loop state
+  key -> match (step state key) do
+    {:render next} -> next |> paint |> edit-loop
+    {:clear st} -> do
+      home = csi "H"
+      clear = csi "2J"
+      tty-write "${home}${clear}"
+      dict-put st :row 0 |> paint |> edit-loop
+    end
+    {:submit next} -> finish-line next
+    {:cancel next} -> finish-cancel next
+    {:eof next} -> {:eof next}
+  end
+end
+
+defn raw-read state do
+  tty-raw!
+  r = edit-loop (paint state)
+  tty-restore!
+  r
+end
+
+defn cooked-line state -> match tty-read-line do
+  :eof -> {:eof state}
+  {:signal :interrupt} -> do
+    tty-write "\n"
+    {:cancel (reset state)}
+  end
+  {:signal _} -> cooked-line state
+  {:line l} -> do
+    full = "#{buffer-of state}${l}"
+    {:line full (dict-put state :buffer full)}
+  end
+end
+
+defn cooked-read state do
+  if (eq? (tty?) :true) do
+    tty-write (cond (eq? (buffer-of state) "") (dict-get state :prompt "") (dict-get state :cont-prompt ""))
+  else do
+    :ok
+  end
+  cooked-line state
+end
+
+export defn cooked? state -> or (or (eq? (dict-get state :dumb :false) :true) (eq? (env-get "TERM") "dumb")) (neq? (tty?) :true)
+
+defn guarded-raw state -> match (try do {:ok (raw-read state)}; rescue do r -> {:fallback r} end) do
+  {:ok result} -> result
+  {:fallback reason} -> do
+    tty-restore!
+    "edit: editor disabled, falling back to plain input: #{inspect reason}" |> eprintln
+    cooked-read (dict-put state :dumb :true)
+  end
+end
+
+export defn run state do
+  st = dict-put state :cols term-cols
+  cond (cooked? st) (cooked-read st) (guarded-raw st)
+end

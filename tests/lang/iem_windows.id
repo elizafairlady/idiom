@@ -1,0 +1,134 @@
+use std/test
+use std/string
+import app/iem/buffer as B
+use app/iem
+import std/list as List
+
+activate Test
+
+defn feed do
+  frame '() -> frame
+  frame '(k . rest) -> feed (drive frame {:tea-key k}) rest
+end
+
+defn typed text -> text |> runes-lossy |> List.map (fn r -> {:char (rune-str r)})
+defn key-m-x frame -> drive (drive frame {:tea-key :esc}) {:tea-key {:char "x"}}
+defn snap-text frame -> B.text-of (snap frame)
+
+defn modeline-rows do
+  '() acc -> acc
+  '(line . rest) acc -> modeline-rows rest (cond (contains? line "L1:C") (add acc 1) acc)
+end
+
+suite "windows are a value tree in the frame" do
+  test "split-below shows the same buffer twice and focus stays" do
+    f = drive (frame-new) {:open "a" "hi" :nil}
+    f2 = feed f (list :c-x {:char "2"})
+    List.length (window-paths (windows f2)) |> assert-eq 2
+    window-at (windows f2) '(:a) |> assert-eq "a"
+    window-at (windows f2) '(:b) |> assert-eq "a"
+    current f2 |> assert-eq "a"
+    focus f2 |> assert-eq '(:a)
+  end
+
+  test "edits land in the focused window and both windows share the buffer" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = feed f (list :c-x {:char "2"})
+    f3 = feed f2 (typed "shared")
+    snap-text f3 |> assert-eq "shared"
+    window-at (windows f3) '(:b) |> assert-eq "a"
+  end
+
+  test "other-window cycles focus through leaves in order" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = drive f {:open "b" "" :nil}
+    f3 = feed f2 (list :c-x {:char "2"})
+    f4 = feed f3 (list :c-x {:char "o"})
+    focus f4 |> assert-eq '(:b)
+    f5 = feed f4 (list :c-x {:char "o"})
+    focus f5 |> assert-eq '(:a)
+  end
+
+  test "switch changes only the focused leaf" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = drive f {:open "b" "" :nil}
+    f3 = feed f2 (list :c-x {:char "2"})
+    f4 = drive f3 {:switch "b"}
+    window-at (windows f4) '(:a) |> assert-eq "b"
+    window-at (windows f4) '(:b) |> assert-eq "a"
+    current f4 |> assert-eq "b"
+  end
+
+  test "delete-window keeps the sibling; delete-other-windows keeps one" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = feed f (list :c-x {:char "2"} :c-x {:char "3"})
+    List.length (window-paths (windows f2)) |> assert-eq 3
+    f3 = feed f2 (list :c-x {:char "0"})
+    List.length (window-paths (windows f3)) |> assert-eq 2
+    f4 = feed f3 (list :c-x {:char "1"})
+    windows f4 |> assert-eq "a"
+    focus f4 |> assert-eq '()
+  end
+
+  test "a vertical split renders two modelines in one screen" do
+    f = drive (frame-new) {:open "scratch" "hello" :nil}
+    f2 = feed f (list :c-x {:char "2"})
+    match (screen f2 80 24) do
+      {lines _crow _ccol} -> do
+        List.length lines |> assert-eq 24
+        modeline-rows lines 0 |> assert-eq 2
+      end
+    end
+  end
+
+  test "a horizontal split renders a divider column" do
+    f = drive (frame-new) {:open "scratch" "hi" :nil}
+    f2 = feed f (list :c-x {:char "3"})
+    match (screen f2 80 24) do
+      {lines _crow _ccol} -> do
+        List.length lines |> assert-eq 24
+        row = List.first! lines
+        byte-len row |> assert-eq 80
+        contains? row "|" |> assert-eq :true
+      end
+    end
+  end
+
+  test "a dead buffer is scrubbed out of every window" do
+    f = drive (frame-new) {:open "keep" "" :nil}
+    f2 = drive f {:open "doomed" "" :nil}
+    f3 = drive f2 {:switch "doomed"}
+    f4 = feed f3 (list :c-x {:char "2"})
+    pid = buffer-pid f4 "doomed"
+    send pid {:step {:replace 5 99 ""}}
+    reason = receive do
+      {:down _ref p r} when (eq? p pid) -> r
+      after 2000 -> :no-down
+    end
+    f5 = drive f4 {:buffer-down pid reason}
+    window-at (windows f5) '(:a) |> assert-eq "keep"
+    window-at (windows f5) '(:b) |> assert-eq "keep"
+  end
+
+  test "the buffer list is a buffer wearing a mode; enter switches" do
+    f = drive (frame-new) {:open "alpha" "" :nil}
+    f2 = drive f {:open "beta" "" :nil}
+    f3 = feed f2 (list :c-x :c-b)
+    current f3 |> assert-eq "*buffers*"
+    mode-label f3 |> assert-eq "buffers-mode"
+    contains? (snap-text f3) "alpha" |> assert-eq :true
+    contains? (snap-text f3) "beta" |> assert-eq :true
+    f4 = feed f3 (typed "zzz")
+    snap-text f4 |> assert-eq (snap-text f3)
+    f5 = feed f4 (list :enter)
+    current f5 |> assert-eq "beta"
+  end
+
+  test "enter in the buffer list switches to the named buffer" do
+    f = drive (frame-new) {:open "alpha" "aaa" :nil}
+    f2 = feed f (list :c-x :c-b)
+    f3 = feed f2 (list :enter)
+    current f3 |> assert-eq "alpha"
+    snap-text f3 |> assert-eq "aaa"
+  end
+end

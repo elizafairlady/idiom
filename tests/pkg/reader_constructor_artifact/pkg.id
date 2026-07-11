@@ -1,0 +1,53 @@
+package reader_constructor_artifact
+
+core-grammar ReaderConstructorArtifact :exclusive [
+  {:skip space {:regex "[ \t\r\n]+"}}
+  {:token cap_tok {:regex "(?<cap_text>[A-Za-z]+)"} {:capture cap_text}}
+  {:token atom_tok {:regex "(?<atom_text>[A-Za-z]+)"} {:capture-atom atom_text}}
+  {:token word_tok {:regex "(?<word_text>[A-Za-z]+)"} {:capture-word word_text}}
+  {:token string_tok {:regex "(?<string_text>[A-Za-z]+)"} {:capture-string string_text}}
+  {:token quoted_tok {:string} {:interp-string quoted_tok}}
+  {:token literal_ctor_tok {:literal "!"} {:literal :literal-tail}}
+  {:token emit_atom_tok {:literal "@"} {:emit-atom atom-tail}}
+  {:token emit_word_tok {:literal "#"} {:emit-word word-tail}}
+  {:token emit_string_tok {:literal "$"} {:emit-string "string-tail"}}
+  {:token emit_int_tok {:literal "%"} {:emit-int 42}}
+  {:form literal_form {:literal :literal-tail} {:literal :literal-tail}}
+  {:form lit_nil {:literal :nil} {:literal :nil}}
+  {:form lit_word {:literal literal_word} {:literal literal_word}}
+  {:form lit_atom {:literal :literal-atom} {:literal :literal-atom}}
+  {:form lit_int {:literal 123} {:literal 123}}
+  {:form lit_bigint {:literal 9223372036854775808} {:literal 9223372036854775808}}
+  {:form lit_float {:literal 3.5} {:literal 3.5}}
+  {:form lit_string {:literal "literal-string"} {:literal "literal-string"}}
+  {:form lit_list {:literal (literal-list :a)} {:literal (literal-list :a)}}
+  {:form lit_vector {:literal [1 :v]} {:literal [1 :v]}}
+  {:form lit_tuple {:literal {2 "tuple-lit"}} {:literal {2 "tuple-lit"}}}
+  {:form lit_dict {:literal %{:dict-key 9}} {:literal %{:dict-key 9}}}
+  {:form item {:alt
+    {:capture value {:token cap_tok}}
+    {:capture value {:token atom_tok}}
+    {:capture value {:token word_tok}}
+    {:capture value {:token string_tok}}
+    {:capture value {:token quoted_tok}}
+    {:capture value {:token literal_ctor_tok}}
+    {:capture value {:ref literal_form}}
+    {:capture value {:token emit_atom_tok}}
+    {:capture value {:token emit_word_tok}}
+    {:capture value {:token emit_string_tok}}
+    {:capture value {:token emit_int_tok}}} {:capture value}}
+  {:form program {:repeat {:capture item {:ref item}}} {:emit-form "%-package-begin" [
+    {:emit-form "println" [
+      {:emit-form "inspect" [
+        {:emit-list [
+          {:splice item}
+          {:emit-vector []}
+          {:emit-tuple []}
+          {:emit-dict []}]}]}]}]}}
+]
+
+
+export defn main _args do
+  println "reader-constructor-artifact"
+  :ok
+end

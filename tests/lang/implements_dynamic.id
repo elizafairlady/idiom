@@ -1,0 +1,92 @@
+use std/test
+activate Test
+
+record Coat do
+  field warmth :: int
+end
+
+record Tagged do
+  field tag :: atom
+end
+
+record Plain do
+  field n :: int
+end
+
+trait Wearable do
+  method wear x
+end
+
+implement Wearable on Coat do
+  method wear x -> x.warmth
+end
+
+implement Wearable on int do
+  method wear x -> x
+end
+
+defn wearable? x -> implements? Wearable x
+
+trait Labeled do
+  method label x -> x.tag
+end
+
+implement Labeled on _.tag :: atom
+
+defn labeled? x -> implements? Labeled x
+
+trait Greeter do
+  method greet _x -> :hello
+end
+
+implement Greeter on int
+
+defn frozen-greeter? x -> implements? Greeter x
+
+implement Greeter on atom
+
+defn greeter? x -> implements? Greeter x
+
+trait Hermit do
+  method hermit x
+end
+
+defn hermit? x -> implements? Hermit x
+
+suite do
+  test "dynamic receiver answers from the impl table" do
+    wearable? (Coat 3) |> assert
+    wearable? 5 |> assert
+    wearable? "hat" |> not? |> assert
+    wearable? :hat |> not? |> assert
+  end
+
+  test "dynamic implements? works inside a closure" do
+    f = fn x -> implements? Wearable x
+    f (Coat 3) |> assert
+    f 5 |> assert
+    f '(1 2) |> not? |> assert
+  end
+
+  test "structural impl admits field-satisfying records" do
+    labeled? (Tagged :a) |> assert
+    labeled? (Plain 1) |> not? |> assert
+    labeled? 7 |> not? |> assert
+  end
+
+  test "bare implement with defaults counts as membership" do
+    greeter? 3 |> assert
+    greeter? "s" |> not? |> assert
+  end
+
+  test "body declarations are visible independent of position" do
+    frozen-greeter? :late |> assert
+    greeter? :late |> assert
+    implements? Greeter :late |> assert
+  end
+
+  test "trait with no impls answers false for everything" do
+    hermit? 1 |> not? |> assert
+    hermit? :x |> not? |> assert
+  end
+end

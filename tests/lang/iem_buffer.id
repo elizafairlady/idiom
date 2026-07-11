@@ -1,0 +1,131 @@
+use std/test
+use std/string
+import app/iem/buffer as B
+import std/list as List
+
+activate Test
+
+defn feed do
+  buf '() -> buf
+  buf '(msg . rest) -> feed (B.step buf msg) rest
+end
+
+defn type-at-point do
+  buf '() -> buf
+  buf '(ch . rest) -> type-at-point (B.step buf (B.insert (B.point-of buf) ch)) rest
+end
+
+defn dup-str do
+  s 0 -> s
+  s n -> dup-str (str s s) (n - 1)
+end
+
+suite "iem buffer is a pure editor core" do
+  test "typing at point inserts and advances" do
+    buf = type-at-point (B.new "") (list "h" "e" "l" "l" "o")
+    B.text-of buf |> assert-eq "hello"
+    B.point-of buf |> assert-eq 5
+  end
+
+  test "replace swaps a range and reports one version step" do
+    buf = B.new "one two three"
+    v0 = B.version-of buf
+    buf2 = B.step buf {:replace 4 7 "2"}
+    B.text-of buf2 |> assert-eq "one 2 three"
+    B.version-of buf2 |> assert-eq (v0 + 1)
+  end
+
+  test "delete collapses point inside the removed range" do
+    buf = feed (B.new "abcdef") (list {:goto 4})
+    buf2 = B.step buf (B.delete 2 5)
+    B.text-of buf2 |> assert-eq "abf"
+    B.point-of buf2 |> assert-eq 2
+  end
+
+  test "edits before point shift it and edits after leave it" do
+    buf = feed (B.new "abcdef") (list {:goto 4})
+    before = B.step buf (B.insert 1 "XY")
+    B.point-of before |> assert-eq 6
+    after = B.step buf (B.insert 5 "XY")
+    B.point-of after |> assert-eq 4
+  end
+
+  test "mark shifts with edits and region normalizes" do
+    buf = feed (B.new "abcdef") (list {:mark 5} {:goto 2})
+    B.region buf |> assert-eq {2 5}
+    buf2 = B.step buf (B.insert 0 "..")
+    B.region buf2 |> assert-eq {4 7}
+    buf3 = B.step buf2 {:mark-clear}
+    B.region buf3 |> assert-eq :nil
+  end
+
+  test "goto clamps to the buffer bounds" do
+    buf = B.new "abc"
+    B.point-of (B.step buf {:goto 99}) |> assert-eq 3
+    B.point-of (B.step buf {:goto -5}) |> assert-eq 0
+  end
+
+  test "undo restores text point and mark" do
+    buf = feed (B.new "hello") (list {:goto 5} {:mark 0})
+    buf2 = B.step buf (B.delete 0 5)
+    B.text-of buf2 |> assert-eq ""
+    buf3 = B.step buf2 {:undo}
+    B.text-of buf3 |> assert-eq "hello"
+    B.point-of buf3 |> assert-eq 5
+    B.mark-of buf3 |> assert-eq 0
+  end
+
+  test "redo replays and a fresh edit clears it" do
+    buf = B.step (B.new "ab") (B.insert 2 "c")
+    buf2 = B.step buf {:undo}
+    B.text-of buf2 |> assert-eq "ab"
+    buf3 = B.step buf2 {:redo}
+    B.text-of buf3 |> assert-eq "abc"
+    buf4 = B.step (B.step buf3 {:undo}) (B.insert 0 "z")
+    B.text-of buf4 |> assert-eq "zab"
+    B.text-of (B.step buf4 {:redo}) |> assert-eq "zab"
+  end
+
+  test "undo depth walks the whole history" do
+    buf = type-at-point (B.new "") (list "a" "b" "c" "d")
+    rewound = feed buf (list {:undo} {:undo} {:undo} {:undo})
+    B.text-of rewound |> assert-eq ""
+    B.text-of (feed rewound (list {:redo} {:redo})) |> assert-eq "ab"
+  end
+
+  test "motion does not bump the version or the history" do
+    buf = B.step (B.new "abc") (B.insert 3 "d")
+    v = B.version-of buf
+    moved = feed buf (list {:goto 1} {:mark 2} {:mark-clear})
+    B.version-of moved |> assert-eq v
+    B.text-of (B.step moved {:undo}) |> assert-eq "abc"
+  end
+
+  test "line queries answer count text and position" do
+    buf = B.new "alpha\nbeta\ngamma"
+    B.line-count buf |> assert-eq 3
+    B.line-text buf 0 |> assert-eq "alpha"
+    B.line-text buf 1 |> assert-eq "beta"
+    B.line-text buf 2 |> assert-eq "gamma"
+    B.line-text buf 3 |> assert-eq :nil
+    B.line-at buf 0 |> assert-eq 0
+    B.line-at buf 6 |> assert-eq 1
+    B.line-at buf 99 |> assert-eq 2
+  end
+
+  test "big buffers answer line queries through the rope" do
+    big = B.new (dup-str "seven7\n" 14)
+    B.line-count big |> assert-eq 16385
+    B.line-text big 10000 |> assert-eq "seven7"
+    edited = B.step big (B.insert 35 "\n")
+    B.line-count edited |> assert-eq 16386
+    B.line-text edited 5 |> assert-eq ""
+  end
+
+  test "bad edit ranges raise" do
+    buf = B.new "abc"
+    assert-raises (fn -> B.step buf (B.delete 2 1)) |> assert-eq {:error {:buffer :bad-range 2 1}}
+    assert-raises (fn -> B.step buf (B.insert 9 "x")) |> assert-eq {:error {:buffer :bad-range 9 9}}
+  end
+end
+:ok

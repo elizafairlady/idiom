@@ -1,0 +1,156 @@
+use std/test
+use std/string
+use std/file with [read! write! remove]
+import app/iem/buffer as B
+use app/iem
+import app/iem/evil as E
+import std/list as List
+
+activate Test
+
+defn feed do
+  frame '() -> frame
+  frame '(k . rest) -> feed (drive frame {:tea-key k}) rest
+end
+
+defn typed text -> text |> runes-lossy |> List.map (fn r -> {:char (rune-str r)})
+defn key-m-x frame -> drive (drive frame {:tea-key :esc}) {:tea-key {:char "x"}}
+
+defn snap-text frame -> B.text-of (snap frame)
+defn snap-point frame -> B.point-of (snap frame)
+
+defn evil-frame text -> do
+  f = drive (register-command (frame-new) "evil" E.evil-command) {:open "scratch" text :nil}
+  f2 = feed (key-m-x f) (typed "evil")
+  drive f2 {:tea-key :enter}
+end
+
+suite "evil states are modes that become each other" do
+  test "the ex line lives in evil alone: :w writes, :q quits" do
+    path = "/tmp/iem_ex_test.txt"
+    remove path
+    f = drive (frame-new) {:open path "" path}
+    f2 = drive f {:set-mode path (E.evil-normal)}
+    f3 = feed f2 (typed "ihello")
+    f4 = feed f3 (list :esc)
+    f5 = feed f4 (append (typed ":w") (list :enter))
+    read! path |> assert-eq "hello"
+    f6 = feed f5 (append (typed ":q") (list :enter))
+    running f6 |> assert-eq :false
+    remove path
+  end
+
+  test ":e opens a file from the ex line" do
+    path = "/tmp/iem_ex_open.txt"
+    write! path "from disk"
+    f = drive (frame-new) {:open "scratch" "" :nil}
+    f2 = drive f {:set-mode "scratch" (E.evil-normal)}
+    f3 = feed f2 (append (typed ":e ${path}") (list :enter))
+    current f3 |> assert-eq path
+    snap-text f3 |> assert-eq "from disk"
+    remove path
+  end
+
+  test "an unknown ex command echoes" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = drive f {:set-mode "a" (E.evil-normal)}
+    f3 = feed f2 (append (typed ":frobnicate") (list :enter))
+    echo-line f3 |> assert-eq "Unknown ex command: frobnicate"
+  end
+
+  test "enable is the posture: existing and future buffers open evil" do
+    f = drive (frame-new) {:open "before" "" :nil}
+    f2 = enable f &E.evil-normal
+    mode-label f2 |> assert-eq "evil-normal"
+    f3 = drive f2 {:open "after" "" :nil}
+    f4 = drive f3 {:switch "after"}
+    mode-label f4 |> assert-eq "evil-normal"
+    f5 = feed f4 (typed "x")
+    snap-text f5 |> assert-eq ""
+  end
+
+  test "m-x evil enters normal state" do
+    f = evil-frame "hello"
+    mode-label f |> assert-eq "evil-normal"
+  end
+
+  test "hjkl move and unbound keys do nothing" do
+    f = evil-frame "ab\ncd"
+    f2 = feed f (list {:char "l"} {:char "j"})
+    snap-point f2 |> assert-eq 4
+    f3 = feed f2 (list {:char "k"} {:char "h"})
+    snap-point f3 |> assert-eq 0
+    f4 = feed f3 (typed "zqw")
+    snap-text f4 |> assert-eq "ab\ncd"
+  end
+
+  test "i enters insert and esc returns to normal" do
+    f = evil-frame "world"
+    f2 = feed f (list {:char "i"})
+    mode-label f2 |> assert-eq "evil-insert"
+    f3 = feed f2 (typed "hello ")
+    snap-text f3 |> assert-eq "hello world"
+    f4 = drive f3 {:tea-key :esc}
+    mode-label f4 |> assert-eq "evil-normal"
+    f5 = feed f4 (list {:char "x"})
+    snap-text f5 |> assert-eq "hello orld"
+  end
+
+  test "a appends after point and A at line end" do
+    f = evil-frame "xz"
+    f2 = feed f (list {:char "a"})
+    mode-label f2 |> assert-eq "evil-insert"
+    f3 = feed f2 (typed "y")
+    snap-text f3 |> assert-eq "xyz"
+    f4 = feed (drive f3 {:tea-key :esc}) (list {:char "A"})
+    f5 = feed f4 (typed "!")
+    snap-text f5 |> assert-eq "xyz!"
+  end
+
+  test "o opens a line below in insert state" do
+    f = evil-frame "one\ntwo"
+    f2 = feed f (list {:char "o"})
+    f3 = feed f2 (typed "mid")
+    snap-text f3 |> assert-eq "one\nmid\ntwo"
+  end
+
+  test "motions 0 and dollar work with x" do
+    f = evil-frame "abcdef"
+    f2 = feed f (list {:char "l"} {:char "l"} {:char "$"})
+    snap-point f2 |> assert-eq 6
+    f3 = feed f2 (list {:char "0"} {:char "x"})
+    snap-text f3 |> assert-eq "bcdef"
+  end
+
+  test "dd deletes the whole line and u undoes" do
+    f = evil-frame "aa\nbb\ncc"
+    f2 = feed f (list {:char "j"} {:char "d"} {:char "d"})
+    snap-text f2 |> assert-eq "aa\ncc"
+    f3 = feed f2 (list {:char "u"})
+    snap-text f3 |> assert-eq "aa\nbb\ncc"
+  end
+
+  test "evil state is per buffer" do
+    f = evil-frame "vi"
+    f2 = drive f {:open "plain" "" :nil}
+    f3 = drive f2 {:switch "plain"}
+    mode-label f3 |> assert-eq "fundamental"
+    f4 = feed f3 (typed "x")
+    snap-text f4 |> assert-eq "x"
+    f5 = drive f4 {:switch "scratch"}
+    mode-label f5 |> assert-eq "evil-normal"
+  end
+
+  test "emacs bindings still work in fundamental" do
+    f = drive (frame-new) {:open "scratch" "abc\ndef" :nil}
+    f2 = feed f (list :c-e)
+    snap-point f2 |> assert-eq 3
+    f3 = feed f2 (list :c-a :c-d)
+    snap-text f3 |> assert-eq "bc\ndef"
+    f4 = feed f3 (list :c-k)
+    snap-text f4 |> assert-eq "\ndef"
+    f5 = feed f4 (list :c-k)
+    snap-text f5 |> assert-eq "def"
+  end
+end
+:ok

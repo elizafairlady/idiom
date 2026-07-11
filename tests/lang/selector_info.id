@@ -1,0 +1,40 @@
+use std/test
+use std/compile
+import std/list as List
+
+activate Test
+
+defn route do
+  0 -> :zero
+  {a _} -> a
+  _ -> :other
+end
+
+suite "selector-info makes the match automaton auditable" do
+  test "a multi-clause defn exposes arities, accesses, and nodes" do
+    info = selector-info &route
+    arities = dict-get info :arities '()
+    assert-eq (List.length arities) 1
+    nodes = dict-get info :nodes '()
+    switches = List.filter nodes (fn n -> eq? (dict-get n :kind :nil) :switch)
+    match switches do
+      '(sw . _) -> do
+        cases = dict-get sw :cases '()
+        lits = List.filter cases (fn c -> eq? (dict-get (dict-get c :ctor %{}) :kind :nil) :literal)
+        assert-eq (gt? (List.length lits) 0) :true
+        tuples = List.filter cases (fn c -> eq? (dict-get (dict-get c :ctor %{}) :kind :nil) :tuple-exact)
+        assert-eq (gt? (List.length tuples) 0) :true
+      end
+    end
+  end
+
+  test "a regex exposes its byte automaton" do
+    info = selector-info r"ab+c"
+    assert-eq (gt? (dict-get info :captures 0) 0) :true
+    assert-eq (gt? (List.length (dict-get info :nodes '())) 0) :true
+  end
+
+  test "a non-matcher is a type error" do
+    assert-expand-error "use std/compile\ndefn f -> selector-info 5\nf\n" "type mismatch for 'selector-info'"
+  end
+end

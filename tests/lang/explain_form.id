@@ -1,0 +1,32 @@
+use std/test
+use std/string
+import std/list as List
+
+activate Test
+
+suite "explain is a form that reports expansion edges" do
+  test "an operator edge carries kind, name, provider, and value context" do
+    edges = explain (1 |> add 2)
+    ops = List.filter edges (fn e -> eq? (dict-get e :kind :nil) :operator)
+    assert-eq (List.length ops) 1
+    match ops do
+      '(op . _) -> do
+        assert-eq (dict-get op :name :nil) "|>"
+        assert-eq (contains? (dict-get op :provider "") "IdiomOperators") :true
+        assert-eq (dict-get op :value-context :nil) :true
+      end
+    end
+  end
+
+  test "a macro edge carries the rewrite" do
+    edges = explain (unless :false :ok)
+    macros = List.filter edges (fn e -> eq? (dict-get e :kind :nil) :macro)
+    match macros do
+      '(m . _) -> do
+        assert-eq (dict-get m :name :nil) "unless"
+        assert-eq (contains? (dict-get m :provider "") "IdiomControl") :true
+        assert-eq (contains? (dict-get m :before "") "unless") :true
+      end
+    end
+  end
+end

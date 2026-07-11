@@ -1,0 +1,68 @@
+use std/port with [port-close-input port-write]
+use std/string
+use std/test
+import std/cmd as Cmd
+activate Test
+
+defn send-skips do
+  0 _payload -> :ok
+  n payload -> do
+    send self {:skip payload n}
+    send-skips (n - 1) payload
+  end
+end
+
+defn busy-loop parent n -> do
+  payload = repeat "k" 4096
+  cond (eq? (n %% 64) 0) (send parent {:tick self (byte-len payload)}) :nil
+  busy-loop parent (n + 1)
+end
+
+defn port-write-twice parent -> do
+  p = spawn Cmd.command (list "sh" "-c" "sleep 0.1; cat >/dev/null") (Cmd.stdio :pipe :null :null)
+  payload = repeat "p" 131072
+  first = port-write p payload
+  second = port-write p payload
+  port-close-input p
+  send parent {:port-root first second}
+end
+
+suite "actor-gc-stress" do
+  test "active gc preserves mailbox message removed by selective receive" do
+    payload = repeat "m" 4096
+    send-skips 260 payload
+    send self {:keep payload}
+    got = receive do
+      {:keep value} -> byte-len value
+      after 1000 -> 0
+    end
+    got |> assert-eq 4096
+  end
+
+  test "active gc preserves blocked port write payload" do
+    parent = self
+    spawn (fn -> port-write-twice parent)
+    got = receive do
+      {:port-root {:wrote _a} {:wrote _b}} -> :ok
+      {:port-root _first _second} -> :bad-result
+      after 4500 -> :timeout
+    end
+    got |> assert-eq :ok
+  end
+
+  test "active gc cancels cleanly when running linked actor is killed" do
+    trap-exit :true
+    parent = self
+    pid = spawn-link (fn -> busy-loop parent 0)
+    receive do
+      {:tick p 4096} when (eq? p pid) -> exit pid :kill
+      after 1000 -> :timeout
+    end |> assert-eq :ok
+    reason = receive do
+      {:exit p value} when (eq? p pid) -> value
+      after 1000 -> :timeout
+    end
+    trap-exit :false
+    reason |> assert-eq :killed
+  end
+end

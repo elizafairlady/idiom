@@ -1,0 +1,10 @@
+w L1:C1
+s hi\r
+s there
+g tests/pty/iem_screen_1.grid
+c 2 6
+s \e[A
+c 1 3
+s \e[B
+c 2 6
+s \x18\x03

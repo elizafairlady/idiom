@@ -1,0 +1,70 @@
+use std/test
+use std/string
+use app/iem
+
+activate Test
+
+## Answers with its argument doubled.
+## Works on any number.
+spec doubled :: int -> int
+defn doubled x -> mul x 2
+
+## Greets by name.
+defn greet name -> "hi ${name}"
+
+defn quiet x -> x
+
+## Every state of this mode ignores typing.
+defmode silent %{
+  default: :ignore
+}
+
+suite "doc comments live in the signature and help reads them back" do
+  test "a doc block above spec and defn is the docstring" do
+    help &doubled |> assert-eq "Answers with its argument doubled.\nWorks on any number."
+    doubled 4 |> assert-eq 8
+  end
+
+  test "a doc without a spec attaches too" do
+    help &greet |> assert-eq "Greets by name."
+  end
+
+  test "an undocumented defn has no doc" do
+    help &quiet |> assert-eq :nil
+  end
+
+  test "a bareword names the function when its arity forbids the call" do
+    help doubled |> assert-eq "Answers with its argument doubled.\nWorks on any number."
+  end
+
+  test "a computed value has no doc and pays no lie" do
+    f = fn x -> x
+    help f |> assert-eq :nil
+    help 42 |> assert-eq :nil
+  end
+
+  test "a doc rides through defmode to the emitted defn" do
+    help &silent |> assert-eq "Every state of this mode ignores typing."
+    mode-name (silent) |> assert-eq "silent"
+  end
+
+  test "a doc before a plain expression is an error" do
+    assert-expand-error "## lost\nprintln 1\n" "must precede a definition"
+  end
+
+  test "a doc at the end of a body documents nothing" do
+    assert-expand-error "defn f -> :ok\n## trailing\n" "documents nothing"
+  end
+
+  test "a doc cannot attach to defmacro yet" do
+    assert-expand-error "## macro doc\ndefmacro m do\n  stx -> stx\nend\n:ok\n" "cannot attach to 'defmacro'"
+  end
+
+  test "a doc comment cannot share a line with code" do
+    assert-expand-error "x = 1 ## not a comment\nx\n" "cannot share a line"
+  end
+
+  test "a doc comment position comes from the reader span" do
+    assert-expand-error "x = do\n  1\nend\n## lost\nprintln 1\n" "must precede a definition"
+  end
+end

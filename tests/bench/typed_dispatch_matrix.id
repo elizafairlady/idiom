@@ -1,0 +1,131 @@
+use std/regex
+use std/test
+activate Test
+
+record PairBox do
+  field left
+  field right
+end
+
+record SharedA do
+  field shared
+end
+
+record SharedB do
+  field shared
+end
+
+record TypedPair do
+  field left :: int
+  field right :: int
+end
+
+trait BenchDispatch do
+  method bench-dispatch do
+    x -> {:default-one x}
+    x y -> {:default-two x y}
+  end
+end
+
+implement BenchDispatch on int do
+  method bench-dispatch do
+    x -> x + 1
+    x y -> x + y
+  end
+end
+
+implement BenchDispatch on PairBox do
+  method bench-dispatch do
+    box -> box.left + box.right
+    box delta -> box.left + box.right + delta
+  end
+end
+
+trait BenchBase do
+  method bench-base x -> x
+end
+
+trait BenchDerived do
+  require BenchBase
+  method bench-derived x -> x
+end
+
+implement BenchBase on PairBox do
+  method bench-base box -> box.left
+end
+
+implement BenchDerived on PairBox do
+  method bench-derived box -> box.right
+end
+
+rx = r"x"
+match = rx.scan-full "x"
+box = PairBox 1 2
+
+suite "typed-dispatch" do
+  bench "record/construct-field" expect: 15 do
+    box = PairBox 7 8
+    box.left + box.right
+  end
+
+  bench "record/typed-construct-field" expect: 15 allocs: 1 do
+    box = TypedPair 7 8
+    box.left + box.right
+  end
+
+  bench "record/update-field" expect: 11 allocs: 1 do
+    b2 = box.record-update left: 9
+    b2.left + b2.right
+  end
+
+  bench "record-field/shared-name" expect: 15 do
+    a = SharedA 7
+    b = SharedB 8
+    (shared a) + (shared b)
+  end
+
+  bench "predicate/record-predicate" expect: 3 do
+    box = PairBox 7 8
+    (cond (PairBox? box) 1 0) + (cond (is-a? box :record) 1 0) + (cond (not? (PairBox? :no)) 1 0)
+  end
+
+  bench "trait/int-dispatch" expect: 16 do
+    (bench-dispatch 7) + (bench-dispatch 7 1)
+  end
+
+  bench "trait/record-dispatch" expect: 21 do
+    box = PairBox 7 2
+    (bench-dispatch box) + (bench-dispatch box 3)
+  end
+
+  bench "trait/requirement" expect: 17 do
+    box = PairBox 7 8
+    (cond (implements? BenchBase box) 1 0) + (cond (implements? BenchDerived box) 1 0) + (bench-base box) + (bench-derived box)
+  end
+
+  bench "type/membership" expect: 22 do
+    s0 = cond (nil? :nil) 1 0
+    s1 = s0 + (cond (atom? :atom) 1 0)
+    s2 = s1 + (cond (word? 'word) 1 0)
+    s3 = s2 + (cond (int? 42) 1 0)
+    s4 = s3 + (cond (float? 3.5) 1 0)
+    s5 = s4 + (cond (string? "x") 1 0)
+    s6 = s5 + (cond (pair? '(1 2)) 1 0)
+    s7 = s6 + (cond (empty-list? '()) 1 0)
+    s8 = s7 + (cond (list? '(1 2)) 1 0)
+    s9 = s8 + (cond (tuple? {1 2}) 1 0)
+    s10 = s9 + (cond (vector? [1 2]) 1 0)
+    s11 = s10 + (cond (dict? %{:a 1}) 1 0)
+    s12 = s11 + (cond (syntax? %'word) 1 0)
+    s13 = s12 + (cond (closure? (fn x -> x)) 1 0)
+    s14 = s13 + (cond (pid? self) 1 0)
+    s15 = s14 + (cond (regex? rx) 1 0)
+    s16 = s15 + (cond (regex-result? match) 1 0)
+    s17 = s16 + (cond (is-a? box :record) 1 0)
+    s18 = s17 + (cond (is-a? '(1 2) :list) 1 0)
+    s19 = s18 + (cond (is-a? '() :empty-list) 1 0)
+    s20 = s19 + (cond (is-a? 42 :int) 1 0)
+    s20 + (cond (is-a? box :record) 1 0)
+  end
+end
+:ok

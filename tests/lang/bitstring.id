@@ -1,0 +1,90 @@
+use std/test
+activate Test
+
+value-first-byte = fn %<a:8 . _> -> a
+
+spec spec-first-byte :: bitstring -> int
+spec-first-byte = fn %<a:8 . _> -> a
+
+suite do
+  test "single-segment constructors, length, append, string reinterpret" do
+    b = bits-of-int 72 8 :big
+    bits? b |> assert
+    bits? "72" |> assert-eq :false
+    bits-len b |> assert-eq 8
+    hel = bits-append (bits-append b (bits-of-int 101 8 :big)) (bits-of-int 108 8 :big)
+    bits-len hel |> assert-eq 24
+    bits-string hel |> assert-eq "Hel"
+    eq? (string-bits "Hel") hel |> assert
+    bits-len (bits-append (bits-of-int 5 3 :big) (bits-of-int 1 2 :big)) |> assert-eq 5
+  end
+
+  test "inspect writes the %<...> container form" do
+    inspect (string-bits "Hel") |> assert-eq "%<72 101 108>"
+    inspect (bits-of-int 5 3 :big) |> assert-eq "%<5:3>"
+    inspect (bits-of-int 0 0 :big) |> assert-eq "%<>"
+    inspect (bits-append (string-bits "H") (bits-of-int 3 3 :big)) |> assert-eq "%<72 3:3>"
+  end
+
+  test "bits-slice is a zero-copy view with value equality" do
+    s = string-bits "Hel"
+    v = bits-slice s 4 8
+    bits-len v |> assert-eq 8
+    eq? v (bits-of-int 134 8 :big) |> assert
+    eq? (bits-slice s 0 24) s |> assert
+    neq? (bits-slice s 3 8) v |> assert
+    d = dict (bits-slice s 4 8) :hit
+    dict-get d (bits-of-int 134 8 :big) :miss |> assert-eq :hit
+  end
+
+  test "integer extraction covers sign, endianness, and bignum widths" do
+    b = bits-of-int 5 3 :big
+    bits-int b 0 3 :unsigned |> assert-eq 5
+    bits-int b 0 3 :signed |> assert-eq -3
+    l = bits-of-int 5 11 :little
+    bits-int l 0 11 :little |> assert-eq 5
+    bits-int l 0 11 :big |> assert-eq 40
+    m = bits-of-int -1 16 '(:little :signed)
+    bits-int m 0 16 '(:little :signed) |> assert-eq -1
+    bits-int m 0 16 :unsigned |> assert-eq 65535
+    n = bits-of-int (pow 2 100) 128 :big
+    bits-len n |> assert-eq 128
+    bits-int n 0 128 :unsigned |> assert-eq (pow 2 100)
+    bits-int n 0 128 :signed |> assert-eq (pow 2 100)
+    bits-int (bits-of-int -1 128 :big) 0 128 :signed |> assert-eq -1
+  end
+
+  test "float extraction is IEEE754 in both widths and endiannesses" do
+    bits-float (bits-of-float 1.5 64 :big) 0 64 :big |> assert-eq 1.5
+    bits-float (bits-of-float 1.5 64 :little) 0 64 :little |> assert-eq 1.5
+    bits-float (bits-of-float 1.5 32 :big) 0 32 :big |> assert-eq 1.5
+    bits-float (bits-of-float 1.5 32 :little) 0 32 :little |> assert-eq 1.5
+    bits-of-float 1.5 64 :big |> inspect |> assert-eq "%<63 248 0 0 0 0 0 0>"
+  end
+
+  test "errors carry structured reasons" do
+    send (self) "x"
+    escaped = receive do
+      s -> s
+    end
+    assert-raises (fn -> bits-slice (bits-of-int 0 8 :big) 4 8) |> assert-eq {:error {:slice-out-of-range 4 8 8}}
+    assert-raises (fn -> bits-int (bits-of-int 0 8 :big) 0 9 :big) |> assert-eq {:error {:slice-out-of-range 0 9 8}}
+    assert-raises (fn -> bits-string (bits-of-int 5 3 :big)) |> assert-eq {:error {:not-byte-aligned 3}}
+    assert-raises (fn -> bits-len escaped) |> assert-eq {:error {:type-error :bits-len "x"}}
+    assert-raises (fn -> bits-float (bits-of-int 0 16 :big) 0 16 :big) |> assert-eq {:error {:type-error :bits-float 16}}
+    assert-raises (fn -> bits-int (bits-of-int 0 8 :big) 0 8 :fast) |> assert-eq {:error {:type-error :bits-int :fast}}
+  end
+
+  test "top-level fn values with bitstring patterns typecheck and run" do
+    value-first-byte %<72 101 108> |> assert-eq 72
+    spec-first-byte %<72 101 108> |> assert-eq 72
+  end
+
+  test "bitstrings order lexicographically by bits and are truthy" do
+    compare (bits-of-int 1 2 :big) (bits-of-int 2 2 :big) |> assert-eq :lt
+    compare (bits-of-int 2 2 :big) (bits-of-int 1 2 :big) |> assert-eq :gt
+    compare (bits-of-int 1 2 :big) (bits-of-int 1 2 :big) |> assert-eq :eq
+    compare (bits-of-int 1 1 :big) (bits-of-int 2 2 :big) |> assert-eq :lt
+    cond (bits-of-int 0 0 :big) :truthy :falsy |> assert-eq :truthy
+  end
+end

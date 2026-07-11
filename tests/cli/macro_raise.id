@@ -1,0 +1,2 @@
+defmacro boom stx -> match 1 do 2 -> stx end
+boom x

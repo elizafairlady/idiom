@@ -1,0 +1,17 @@
+use std/test
+use std/compile with [compile abort]
+
+activate Test
+
+suite "compile and abort home in the compile package" do
+  test "compile and abort are not ambient — they resolve only through std/compile" do
+    assert-expand-error "compile \"1\"" "unbound identifier 'compile'"
+    assert-expand-error "abort 0" "unbound identifier 'abort'"
+  end
+
+  test "compile produces a value token that abort discards" do
+    match (compile ":ok") do
+      {:ok _thunk token} -> abort token |> assert-eq :ok
+    end
+  end
+end

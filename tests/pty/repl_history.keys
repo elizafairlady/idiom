@@ -1,0 +1,7 @@
+w idiom repl
+s add 1 2\r
+w 3
+s \x1b[A
+s \r
+w 3
+s :q\r

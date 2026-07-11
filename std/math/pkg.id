@@ -1,0 +1,75 @@
+package math
+
+export defn pi -> 3.141592653589793
+
+export defn tau -> 6.283185307179586
+
+export defn e -> 2.718281828459045
+
+export defn quot x y -> x |> div y
+
+export defn rem x y -> x |> mod y
+
+export defn quot-rem x y -> {(x |> quot y) (x |> rem y)}
+
+export defn zero? n -> n |> eq? 0
+
+export defn positive? n -> n |> gt? 0
+
+export defn negative? n -> n |> lt? 0
+
+export defn nonnegative? n -> n |> gte? 0
+
+export defn nonpositive? n -> n |> lte? 0
+
+export defn even? n -> n |> floor-mod 2 |> eq? 0
+
+export defn odd? n -> n |> floor-mod 2 |> neq? 0
+
+export defn min a b -> cond (a |> lt? b) a b
+
+export defn max a b -> cond (a |> gt? b) a b
+
+export defn clamp x lo hi -> x |> max lo |> min hi
+
+export defn between? x lo hi -> and (x |> gte? lo) (x |> lte? hi)
+
+export defn sign do
+  n when (n |> lt? 0) -> -1
+  0 -> 0
+  _ -> 1
+end
+
+defn gcd-loop do
+  a 0 -> a |> abs
+  a b -> gcd-loop b (a |> floor-mod b)
+end
+
+export defn gcd a b -> a |> abs |> gcd-loop (b |> abs)
+
+export defn lcm do
+  0 _ -> 0
+  _ 0 -> 0
+  a b -> a |> floor-div (gcd a b) |> mul b |> abs
+end
+
+export defn square n -> mul n n
+
+export defn cube n -> n |> mul n |> mul n
+
+defn pow-int-loop do
+  _ 0 acc -> acc
+  base exponent acc when ((exponent |> floor-mod 2) |> eq? 0) -> pow-int-loop (base * base) (exponent // 2) acc
+  base exponent acc -> pow-int-loop (base * base) (exponent // 2) (acc * base)
+end
+
+export defn pow-int do
+  _ n when (n |> lt? 0) -> error {:negative-exponent n}
+  x n -> pow-int-loop x n 1
+end
+
+export defn factorial do
+  n when (n |> lt? 0) -> error {:negative-factorial n}
+  0 -> 1
+  n -> n |> mul (factorial (n - 1))
+end

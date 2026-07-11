@@ -1,0 +1,201 @@
+use std/test
+activate Test
+
+defn value-shape do
+  '(h . t) -> {:list h t}
+  [a b . rest] -> {:vector a b rest}
+  {a b . rest} -> {:tuple a b rest}
+  %{:kind :ok :value v . rest} -> {:dict v rest}
+  _ -> :miss
+end
+
+defn same-pair do
+  {x x} -> :same
+  {_ _} -> :diff
+end
+
+defn pin-pair do
+  {x ^x} -> :pin
+  {_ _} -> :miss
+end
+
+defn guard-value do
+  {a b} when (eq? a b) -> :guard
+  {a b} -> {:pair a b}
+end
+
+defn match-guard value do
+  match value do
+    {a b} when (eq? a b) -> {:direct a}
+    {a b} -> {:direct a b}
+    _ -> :miss
+  end
+end
+
+defn retry-dict-rest do
+  %{:a a . rest} when (eq? a :never) -> {:bad rest}
+  %{:a a . rest} -> {:ok a rest}
+  _ -> :miss
+end
+
+defn syntax-shape do
+  %`%{:a %,a . %,rest} -> {:syntax-dict (syntax-int-value a) (syntax-kind rest) (syntax-length rest)}
+  %`[%,head %,@tail] -> {:syntax-vector (syntax-int-value head) (inspect tail)}
+  %`(pair %,a %,b) -> {:syntax-list (syntax-int-value a) (syntax-int-value b)}
+  _ -> :miss
+end
+
+suite do
+  test "compiled selector covers value structural residuals" do
+    value-shape '(1 2 3) |> assert-eq {:list 1 '(2 3)}
+    value-shape [1 2 3 4] |> assert-eq {:vector 1 2 [3 4]}
+    value-shape {1 2 3 4} |> assert-eq {:tuple 1 2 {3 4}}
+    value-shape %{:kind :ok :value 7 :extra 9} |> assert-eq {:dict 7 %{:extra 9}}
+    value-shape :none |> assert-eq :miss
+  end
+
+  test "compiled selector covers nonlinear pin and guard actions" do
+    same-pair {4 4} |> assert-eq :same
+    same-pair {4 5} |> assert-eq :diff
+    pin-pair {9 9} |> assert-eq :pin
+    pin-pair {9 8} |> assert-eq :miss
+    guard-value {5 5} |> assert-eq :guard
+    guard-value {5 6} |> assert-eq {:pair 5 6}
+  end
+
+  test "external pins inside collection patterns match on bind and match rails" do
+    k = :a
+    {^k} = {:a}
+    [^k] = [:a]
+    '(^k) = '(:a)
+    %{:value ^k} = %{:value :a}
+
+    match {:a} do
+      {^k} -> :tuple
+      _ -> :miss
+    end |> assert-eq :tuple
+
+    match [:a] do
+      [^k] -> :vector
+      _ -> :miss
+    end |> assert-eq :vector
+
+    match '(:a) do
+      '(^k) -> :list
+      _ -> :miss
+    end |> assert-eq :list
+
+    match %{:value :a} do
+      %{:value ^k} -> :dict
+      _ -> :miss
+    end |> assert-eq :dict
+
+    match {:b} do
+      {^k} -> :bad
+      _ -> :miss
+    end |> assert-eq :miss
+  end
+
+  test "compiled selector uses one guard path for direct match and closures" do
+    match-guard {7 7} |> assert-eq {:direct 7}
+    match-guard {7 8} |> assert-eq {:direct 7 8}
+    closure-guard = fn do
+      {a b} when (eq? a b) -> {:closure a}
+      {a b} -> {:closure a b}
+    end
+    closure-guard {9 9} |> assert-eq {:closure 9}
+    closure-guard {9 10} |> assert-eq {:closure 9 10}
+  end
+
+  test "compiled selector retries guarded dict rest through shared access" do
+    retry-dict-rest %{:a 11 :b 22} |> assert-eq {:ok 11 %{:b 22}}
+  end
+
+  test "compiled selector covers syntax structural residuals" do
+    syntax-shape %'%{:a 1 :b 2} |> assert-eq {:syntax-dict 1 :dict 2}
+    syntax-shape %'[1 2 3] |> assert-eq {:syntax-vector 1 "(#<syntax> #<syntax>)"}
+    syntax-shape %'(pair 20 22) |> assert-eq {:syntax-list 20 22}
+    syntax-shape %'other |> assert-eq :miss
+  end
+
+  test "a pinned dict key binds in a '=' binding" do
+    k = :a
+    %{^k v} = %{:a 1 :b 2}
+    v |> assert-eq 1
+    k2 = :b
+    %{^k x ^k2 y :c z} = %{:a 10 :b 20 :c 30}
+    {x y z} |> assert-eq {10 20 30}
+  end
+
+  test "a pinned dict key is excluded from the rest binding" do
+    k = :a
+    %{^k v . rest} = %{:a 1 :b 2 :c 3}
+    {v rest} |> assert-eq {1 %{:b 2 :c 3}}
+  end
+
+  test "a pinned dict key binds through nesting" do
+    k = :inner
+    {tag %{^k v}} = {:wrap %{:inner 9}}
+    {tag v} |> assert-eq {:wrap 9}
+  end
+
+  test "an absent pinned key fails the binding" do
+    got = assert-raises (fn do
+      -> do
+        k = :missing
+        %{^k _v} = %{:a 1}
+        :unreachable
+      end
+    end)
+    tuple-get got 0 |> assert-eq :error
+    match got do
+      {:error {:no-clause _sel {{:dict-key :missing :false}}}} -> :ok
+      other -> error {:pinned-key-failure-shape other}
+    end
+  end
+
+  test "the body after a destructuring bind is typechecked" do
+    assert-expand-error "defn g do\n  {a _b} = {1 2}\n  add \"s\" 1\nend\n" "type mismatch for 'add'"
+  end
+
+  test "a user shadow of the dict prims cannot capture the pinned-key rewrite" do
+    dict-get = fn _d _k _def -> 999
+    dict-has? = fn _d _k -> :false
+    dict-del = fn d _k -> d
+    k = :a
+    %{^k v . r} = %{:a 1 :b 2}
+    {v r} |> assert-eq {1 %{:b 2}}
+    dict-get %{:a 1} :a 0 |> assert-eq 999
+  end
+
+  test "a pinned dict key binds at package level" do
+    assert-compiles "package p\nk = :a\n%{^k v . r} = %{:a 4 :b 5}\nexport defn picked -> {v r}\n"
+  end
+
+  test "a computed dict key outside a '=' binding states the rule" do
+    assert-expand-error "f = fn %{^k v} -> v" "dict pattern key must be a literal; a computed key binds with ^name in a '=' binding"
+  end
+
+  test "a '=' pin against the enclosing clause's own binder is an enclosing pin" do
+    picker = fn k -> do
+      {^k} = {:a}
+      :ok
+    end
+    picker :a |> assert-eq :ok
+    assert-raises (fn -> do
+      p2 = fn k -> do
+        {^k} = {:a}
+        :ok
+      end
+      p2 :b
+    end)
+  end
+
+  test "an enclosing pin in a fn head states the rule" do
+    assert-expand-error "k = :a\nf = fn {^k} -> :hit" "pin ^k targets an enclosing binding"
+  end
+
+  test "a nested fn head cannot hoist a pin into an enclosing match" do
+    assert-expand-error "k = :a\nmatch {:b} do\n  {_x} -> do\n    h = fn {^k} -> :inner end\n    h {:a}\n  end\nend\n" "pin ^k targets an enclosing binding"
+  end
+end

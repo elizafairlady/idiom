@@ -1,0 +1,157 @@
+use std/test
+use std/enum
+activate Test
+
+record Point do
+  field x :: int
+  field y :: int
+end
+
+record Circle do
+  field radius :: float
+end
+
+trait Area do
+  method area shape
+end
+
+implement Area on Circle do
+  method area c -> 3.14159265 * c.radius * c.radius
+end
+
+implement Area on int do
+  method area n -> mul n n
+end
+
+trait Greet do
+  method hello x -> {:hello x}
+end
+
+implement Greet on atom
+
+implement Greet on int do
+  method hello n -> {:number n}
+end
+
+trait Sound do
+  method noise x
+  method loud x -> "#{(noise x)}!"
+end
+
+implement Sound on int do
+  method noise _n -> "beep"
+end
+
+trait Sizey do
+  method size x
+end
+
+trait Doubler do
+  require Sizey
+  method double-size x -> 2 * (size x)
+end
+
+implement Sizey on int do
+  method size n -> n
+end
+
+implement Doubler on int
+
+record Countdown do
+  field from :: int
+end
+
+implement Iter on Countdown do
+  method foldl c acc f -> do
+    defn go n acc2 -> match n do
+      0 -> acc2
+      _ -> go (n - 1) (f n acc2)
+    end
+    go c.from acc
+  end
+end
+
+implement Enum on Countdown
+
+protocol Maths do
+  core-operator <+> 10 "left" "infix" add
+end
+
+suite "tutorial/ch09 a record wearing a trait" do
+  test "constructor, predicate, both field spellings" do
+    p = Point 3 4
+    Point? p |> assert
+    Point? :nope |> not? |> assert
+    p.x |> assert-eq 3
+    y p |> assert-eq 4
+  end
+
+  test "records compare structurally" do
+    assert-eq (Point 1 2) (Point 1 2)
+    assert-neq (Point 1 2) (Point 1 3)
+  end
+
+  test "record-update builds the next record from the last, dot or head" do
+    p = Point 3 4
+    q = (p.record-update x: 30)
+    q.x |> assert-eq 30
+    q.y |> assert-eq 4
+    p.x |> assert-eq 3
+    assert-eq (record-update p x: 1 y: 2) (Point 1 2)
+    assert-eq (p |> record-update x: 1) (Point 1 4)
+    step = fn rec d -> record-update rec d
+    (step p %{y: 0}).y |> assert-eq 0
+  end
+
+  test "guards refine records in match" do
+    got = match (Point 3 4) do
+      q when Point? q -> {:point q.x q.y}
+      _ -> :other
+    end
+    got |> assert-eq {:point 3 4}
+  end
+
+  test "one trait, two receivers" do
+    area (Circle 2.0) |> assert-eq 12.5663706
+    area 3 |> assert-eq 9
+  end
+
+  test "default method rides along, override wins" do
+    hello :world |> assert-eq {:hello :world}
+    hello 7 |> assert-eq {:number 7}
+  end
+
+  test "a default may call its sibling method" do
+    loud 3 |> assert-eq "beep!"
+  end
+
+  test "the standard library eats the same cooking" do
+    sum [1 2 3] |> assert-eq 6
+  end
+
+  test "require reaches across traits" do
+    double-size 21 |> assert-eq 42
+  end
+
+  test "one foldl buys countdown the pantry" do
+    c = Countdown 5
+    sum c |> assert-eq 15
+    c.to-list |> assert-eq '(5 4 3 2 1)
+    c.length |> assert-eq 5
+    map c (fn x -> x * x) |> assert-eq '(25 16 9 4 1)
+  end
+
+  test "implements? answers at compile time" do
+    implements? Area (Circle 1.0) |> assert
+    implements? Greet :hi |> assert
+    implements? Area "rope" |> not? |> assert
+  end
+
+  test "activate splices a protocol into one scope" do
+    got = do
+      activate Maths
+      20 <+> 22
+    end
+    got |> assert-eq 42
+  end
+end

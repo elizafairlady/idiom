@@ -1,0 +1,355 @@
+package test
+
+use std/enum
+use std/string
+use std/compile with [expand-check]
+use std/file with [append!]
+use std/system with [env-get time-ms time-ns total-allocs total-alloc-bytes]
+
+defn verbose? -> neq? (env-get "IDIOM_TEST_VERBOSE") :nil
+
+defn events-path -> env-get "IDIOM_TEST_EVENTS"
+
+defn emit-event e -> match events-path do
+  :nil -> :nil
+  "" -> :nil
+  path -> try do
+    append! path "#{json-string e}\n"
+    rescue do _r -> :nil
+  end
+end
+
+defn test-name do
+  {:test name _thunk} -> name
+end
+
+defn event-of do
+  suite-name {:pass name ms} -> %{:event :pass :suite suite-name :test name :ms ms}
+  suite-name {:fail name ms reason} -> %{:event :fail :suite suite-name :test name :ms ms :reason reason}
+end
+
+defn describe-failure do
+  {:error inner} -> describe-failure inner
+  {:assert-eq :got g :want w} -> "  not equal:\n    got:  #{inspect g}\n    want: #{inspect w}"
+  {:assert-neq a _b} -> "  should differ, but both are:\n    #{inspect a}"
+  {:assert-inspect :got g :want w} -> "  inspect mismatch:\n    got:  #{g}\n    want: #{w}"
+  {:assert-failed v} -> "  expected a truthy value, got #{inspect v}"
+  {:assert-raises :nothing-raised} -> "  expected an error to be raised, but none was"
+  {:assert-expand-error :got m :want w} -> "  expand-error message mismatch:\n    got:  #{m}\n    want substring: #{w}"
+  {:assert-expand-error :compiled s} -> "  expected expansion to fail, but it compiled:\n    #{s}"
+  {:assert-expand-error-at :got m :want w} -> "  expand-error mismatch:\n    got:  #{m}\n    want: #{w}"
+  {:assert-compiles :failed m :source s} -> "  expected to compile, but it failed:\n    #{m}\n    source: #{s}"
+  {:test-timeout _name ms} -> "  timed out after #{ms}ms"
+  {:test-process-down _name r} -> "  test process crashed: #{inspect r}"
+  other -> "  raised: #{inspect other}"
+end
+
+defn drain-down ref pid -> receive do
+  {:down r p _reason} when (and (eq? r ref) (eq? p pid)) -> :ok
+  after 0 -> :ok
+end
+
+defn run-one do
+  {:test name thunk} timeout-ms -> do
+    start = time-ms
+    parent = self
+    {pid ref} = spawn-monitor (fn do
+      outcome = try do
+        '() |> apply thunk
+        :ok
+        rescue do r -> {:failed r}
+      end
+      send parent {:test-outcome self outcome}
+    end)
+    outcome = receive do
+      {:test-outcome p o} when (eq? p pid) -> do
+        demonitor ref
+        drain-down ref pid
+        o
+      end
+      {:down r p reason} when (and (eq? r ref) (eq? p pid)) -> {:failed {:test-process-down name reason}}
+      after timeout-ms -> do
+        exit pid :kill
+        drain-down ref pid
+        {:failed {:test-timeout name timeout-ms}}
+      end
+    end
+    elapsed = (time-ms - start)
+    match outcome do
+      :ok -> {:pass name elapsed}
+      {:failed r} -> {:fail name elapsed r}
+    end
+  end
+end
+
+defn report-one do
+  v? {:pass name ms} -> cond v? (println "pass #{name} (#{ms}ms)") :nil
+  _v? {:fail name ms reason} -> println "FAIL #{name} (#{ms}ms)\n#{describe-failure reason}"
+end
+
+defn fail-delta do
+  {:pass _name _ms} -> 0
+  {:fail _name _ms _reason} -> 1
+end
+
+defn name-match? do
+  _name :nil -> :true
+  _name "" -> :true
+  _name "." -> :true
+  name pat -> neq? (byte-find name pat 0) :nil
+end
+
+defn suite-item-name do
+  "" name -> name
+  suite-name name -> "#{suite-name}/#{name}"
+end
+
+defn run-count -> match (env-get "IDIOM_TEST_COUNT") do
+  :nil -> 1
+  "" -> 1
+  value -> parse-int! value
+end
+
+defn test-active? do
+  suite-name {:test name _thunk} -> name-match? (suite-item-name suite-name name) (env-get "IDIOM_TEST_RUN")
+  _suite-name _ -> :false
+end
+
+defn run-filtered do
+  _suite-name '() failures total _v? _timeout-ms -> {failures total}
+  suite-name '(t . rest) failures total v? timeout-ms -> if (test-active? suite-name t) do
+    emit-event %{:event :start :suite suite-name :test (test-name t)}
+    result = run-one t timeout-ms
+    report-one v? result
+    emit-event (event-of suite-name result)
+    run-filtered suite-name rest (add failures (fail-delta result)) (add total 1) v? timeout-ms
+  else do
+    run-filtered suite-name rest failures total v? timeout-ms
+  end
+end
+
+defn run-filtered-repeat do
+  _suite-name _tests 0 failures total _v? _timeout-ms -> {failures total}
+  suite-name tests n failures total v? timeout-ms -> do
+    {next-failures next-total} = run-filtered suite-name tests 0 0 v? timeout-ms
+    run-filtered-repeat suite-name tests (n - 1) (add failures next-failures) (add total next-total) v? timeout-ms
+  end
+end
+
+spec run-test-suite-with-timeout :: Enum a => string a int -> atom
+export defn run-test-suite-with-timeout suite-name tests timeout-ms do
+  v? = verbose?
+  start = time-ms
+  {failures total} = run-filtered-repeat suite-name (tests.to-list) (run-count) 0 0 v? timeout-ms
+  wall = (time-ms - start)
+  match failures do
+    0 -> do
+      cond v? (println "ok  #{total} tests (#{wall}ms)") :nil
+      :ok
+    end
+    _ -> do
+      println "FAIL  #{failures} of #{total} tests (#{wall}ms)"
+      error {:suite-failed failures :of total}
+    end
+  end
+end
+
+export defn run-suite-with-timeout tests timeout-ms -> run-test-suite-with-timeout "" tests timeout-ms
+
+export defn run-suite tests -> run-suite-with-timeout tests 5000
+
+defn bench-mode? -> eq? (env-get "IDIOM_TEST_MODE") "bench"
+
+defn bench-count -> run-count
+
+defn bench-goal -> match (env-get "IDIOM_TEST_BENCHTIME") do
+  :nil -> {:time 200000000}
+  "" -> {:time 200000000}
+  value -> if (ends-with? value "x") do
+    {:fixed (parse-int! (byte-slice value 0 ((byte-len value) - 1)))}
+  else do
+    {:time (mul (parse-int! value) 1000000)}
+  end
+end
+
+defn bench-active? do
+  suite-name {:bench name _meta _runner} -> name-match? (suite-item-name suite-name name) (env-get "IDIOM_TEST_BENCH")
+  _suite-name _ -> :false
+end
+
+defn bench-throughput meta total elapsed -> match (dict-get meta :bytes :nil) do
+  :nil -> ""
+  per-op -> " MB/s=#{div (mul (mul per-op total) 1000) (cond (gt? elapsed 0) elapsed 1)}"
+end
+
+export defn bench-report suite-name name meta result elapsed allocs bytes do
+  expected = dict-get meta :expect :nil
+  n = dict-get meta :n 0
+  total = mul n (dict-get meta :ops 1)
+  full-name = suite-item-name suite-name name
+  per-op = cond (gt? total 0) (div elapsed total) elapsed
+  allocs-op = cond (gt? total 0) (div allocs total) allocs
+  bytes-op = cond (gt? total 0) (div bytes total) bytes
+  expected-allocs = dict-get meta :allocs allocs-op
+  if (and (eq? result expected) (eq? allocs-op expected-allocs)) do
+    emit-event %{:event :bench :suite suite-name :name full-name :n n :ns elapsed :ns-op per-op :allocs-op allocs-op :b-op bytes-op :result (inspect result) :expect (inspect expected)}
+    println "bench name=#{full-name} suite=#{suite-name} n=#{n} ns=#{elapsed} ns/op=#{per-op} allocs/op=#{allocs-op} B/op=#{bytes-op}#{bench-throughput meta total elapsed} result=#{inspect result} expect=#{inspect expected}"
+    result
+  else do
+    error {:bench-mismatch :name full-name :suite suite-name :n n :got result :want expected :allocs-op allocs-op :want-allocs expected-allocs}
+  end
+end
+
+defn bench-run-n runner n -> do
+  a0 = total-allocs
+  b0 = total-alloc-bytes
+  start = time-ns
+  result = runner n
+  elapsed = (time-ns - start)
+  {n elapsed result (total-allocs - a0) (total-alloc-bytes - b0)}
+end
+
+defn predict-n goal-ns n elapsed -> do
+  safe = cond (gt? elapsed 0) elapsed 1
+  scaled = div (mul goal-ns n) safe
+  grown = add scaled (div scaled 5)
+  cap = mul n 100
+  capped = cond (lt? grown cap) grown cap
+  floor = add n 1
+  cond (gt? capped floor) capped floor
+end
+
+defn bench-scale runner goal-ns n -> do
+  {ran elapsed result allocs bytes} = bench-run-n runner n
+  cond (or (gte? elapsed goal-ns) (gte? ran 1000000000)) {ran elapsed result allocs bytes} do
+    bench-scale runner goal-ns (predict-n goal-ns ran elapsed)
+  end
+end
+
+defn bench-measure do
+  runner {:fixed n} -> bench-run-n runner n
+  runner {:time goal-ns} -> bench-scale runner goal-ns 1
+end
+
+defn bench-reps do
+  _suite-name _name _meta _runner _goal 0 -> :ok
+  suite-name name meta runner goal k -> do
+    {n elapsed result allocs bytes} = bench-measure runner goal
+    bench-report suite-name name (dict-put meta :n n) result elapsed allocs bytes
+    bench-reps suite-name name meta runner goal (k - 1)
+  end
+end
+
+defn run-bench-one do
+  suite-name reps {:bench name meta runner} -> do
+    runner 1
+    bench-reps suite-name name meta runner (bench-goal) reps
+  end
+end
+
+defn run-bench-all do
+  _suite-name '() _n total -> total
+  suite-name '(item . rest) n total -> if (bench-active? suite-name item) do
+    run-bench-one suite-name n item
+    run-bench-all suite-name rest n (add total 1)
+  else do
+    run-bench-all suite-name rest n total
+  end
+end
+
+spec run-bench-suite :: Enum a => string a -> atom
+export defn run-bench-suite suite-name items do
+  total = run-bench-all suite-name (items.to-list) (bench-count) 0
+  cond (verbose?) (println "ok  #{total} benchmarks") :nil
+  :ok
+end
+
+export defn run-named-suite suite-name items -> cond (bench-mode?) (run-bench-suite suite-name items) (run-test-suite-with-timeout suite-name items 5000)
+
+export protocol Test do
+  export defmacro test %`(test %,name %,body) -> %`{:test %,name (fn %,body)}
+
+  export defmacro bench %`(bench (%,name %,meta) %,body) -> %`{:bench %,name %,meta (fn bench-n -> do
+    defn bench-loop do
+      0 result -> result
+      i _result -> bench-loop (i - 1) %,body
+    end
+    bench-loop bench-n :nil
+  end)}
+
+  export defmacro suite do
+    %`(suite %,name do %,@tests end) -> %`(run-named-suite %,name (list %,@tests))
+    %`(suite do %,@tests end) -> %`(run-suite (list %,@tests))
+    %`(suite %,tests) -> %`(run-suite %,tests)
+  end
+end
+
+export defn assert do
+  :false -> error {:assert-failed :false}
+  :nil -> error {:assert-failed :nil}
+  v -> :ok
+end
+
+export defn assert-eq do
+  a b when (eq? a b) -> :ok
+  a b -> error {:assert-eq :got a :want b}
+end
+
+export defn assert-neq do
+  a b when (neq? a b) -> :ok
+  a b -> error {:assert-neq a b}
+end
+
+export defn assert-inspect do
+  v expected when (eq? (inspect v) expected) -> :ok
+  v expected -> error {:assert-inspect :got (inspect v) :want expected}
+end
+
+export defn assert-raises thunk do
+  caught = try do
+    '() |> apply thunk
+    :no-raise
+    rescue do r -> {:raised r}
+  end
+  match caught do
+    {:raised r} -> r
+    _ -> error {:assert-raises :nothing-raised}
+  end
+end
+
+export defn assert-expand-error do
+  source expected -> match (expand-check source) do
+    {:error {:expand msg _line _column _file _reason}} ->
+      cond (contains? msg expected) :ok (error {:assert-expand-error :got msg :want expected})
+    {:error {:expand msg}} ->
+      cond (contains? msg expected) :ok (error {:assert-expand-error :got msg :want expected})
+    :ok -> error {:assert-expand-error :compiled source}
+  end
+end
+
+export defn expand-error-detail source -> match (expand-check source) do
+  {:error {:expand msg line column file reason}} ->
+    %{:message msg :line line :column column :file file :reason reason}
+  {:error {:expand msg}} ->
+    %{:message msg :line :nil :column :nil :file "" :reason :nil}
+  :ok -> error {:expand-error-detail :compiled source}
+end
+
+export defn assert-expand-error-at source expected line column do
+  detail = expand-error-detail source
+  msg = dict-get detail :message ""
+  if (contains? msg expected) do
+    assert-eq (dict-get detail :line :nil) line
+    assert-eq (dict-get detail :column :nil) column
+  else do
+    error {:assert-expand-error-at :got msg :want expected}
+  end
+end
+
+export defn assert-compiles do
+  source -> match (expand-check source) do
+    :ok -> :ok
+    {:error {:expand msg _line _column _file _reason}} -> error {:assert-compiles :failed msg :source source}
+    {:error {:expand msg}} -> error {:assert-compiles :failed msg :source source}
+  end
+end

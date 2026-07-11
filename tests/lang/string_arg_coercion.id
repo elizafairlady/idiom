@@ -1,0 +1,19 @@
+use std/test
+use std/string
+use std/system
+use std/regex
+activate Test
+
+suite do
+  test "string argument failures share structured type-error reason" do
+    send (self) 1
+    one = receive do
+      v -> v
+    end
+    assert-raises (fn -> contains? one "x") |> assert-eq {:error {:type-error :contains? 1}}
+    assert-raises (fn -> env-get one) |> assert-eq {:error {:type-error :env-get 1}}
+    assert-raises (fn -> syntax-property %'x one) |> assert-eq {:error {:type-error :syntax-property 1}}
+    assert-raises (fn -> escape one) |> assert-eq {:error {:type-error :raw-escape 1}}
+    assert-raises (fn -> compile one) |> assert-eq {:error {:type-error :raw-compile 1}}
+  end
+end

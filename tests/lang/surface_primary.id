@@ -1,0 +1,121 @@
+use std/test
+import std/cmd as Cmd
+activate Test
+
+core-operator $> 10 "left" "infix" add
+core-operator <-> 255 "left" "infix" sub
+
+defn hold x -> x
+defn arity-nullary-probe -> 42
+defn call-nullary-through-value f -> '() |> apply f
+
+protocol LocalPrimarySurface do
+  core-operator <++> 10 "left" "infix" add
+end
+
+protocol LocalRuntimeSurface do
+  export defn local-protocol-value -> 42
+  export defmacro local-runtime-macro %`(local-runtime-macro) -> %`(local-protocol-value)
+end
+
+suite do
+  test "left-assoc operator at max precedence groups left" do
+    100 <-> 10 <-> 5 |> assert-eq 85
+  end
+
+  test "body-primary-pipes-after-match" do
+    match 1 do
+      1 -> 41
+      _ -> 0
+    end |> assert-eq 41
+  end
+
+  test "body-primary-keeps-condition-operators-inside-if" do
+    if 2 > 1 do
+      :ok
+    else do
+      :bad
+    end |> assert-eq :ok
+  end
+
+  test "expression-call-primary-pipes-as-one-left-operand" do
+    not? :false |> assert-eq :true
+  end
+
+  test "colon atoms read punctuation until delimiter" do
+    :> |> assert-eq :>
+    :&> |> assert-eq :&>
+    :>> |> assert-eq :>>
+    :< |> assert-eq :<
+    :foo/bar? |> assert-eq :foo/bar?
+    got = :foo#comment
+    got |> assert-eq :foo
+  end
+
+  test "layout groups application arguments everywhere" do
+    [
+      add
+        1
+        2
+    ] |> assert-eq [3]
+
+    got = hold
+      x:
+        add 1 2
+    got |> assert-eq %{:x 3}
+  end
+
+  test "qualified callee application does not require grouping" do
+    expected = Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+    hold Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null) |> assert-eq expected
+  end
+
+  test "layout groups nested qualified callee arguments" do
+    expected = Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+    got = hold
+      Cmd.command
+        list "printf" "ok"
+        Cmd.stdio :null :pipe :null
+    got |> assert-eq expected
+  end
+
+  test "thread pipe captures application lhs" do
+    expected = Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+    Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null) |> hold |> assert-eq expected
+  end
+
+  test "function values keep application shape under unary call" do
+    hold &add 1 2 |> assert-eq 3
+  end
+
+  test "arity metadata owns zero argument surface calls" do
+    escaped-nullary = &arity-nullary-probe
+    escaped-nullary |> assert-eq 42
+    '() |> apply &escaped-nullary |> assert-eq 42
+    {pattern-nullary} = {&arity-nullary-probe}
+    pattern-nullary |> assert-eq 42
+    call-nullary-through-value &arity-nullary-probe |> assert-eq 42
+    list |> closure? |> assert
+    list 1 2 |> assert-eq '(1 2)
+  end
+
+  test "escaped-word-operator-token-resolves" do
+    19 $> 23 |> assert-eq 42
+  end
+
+  test "local protocol activation owns operator surface" do
+    got = do
+      activate LocalPrimarySurface
+      20 <++> 22
+    end
+    got |> assert-eq 42
+  end
+
+  test "local protocol activation owns runtime surface" do
+    got = do
+      activate LocalRuntimeSurface
+      local-runtime-macro
+    end
+    got |> assert-eq 42
+  end
+end

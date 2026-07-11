@@ -1,0 +1,71 @@
+use std/test
+use std/string with [repeat trim]
+import std/cmd as Cmd
+import std/file as File
+
+activate Test
+
+defn run-and-wait argv do
+  {_port ref} = spawn-monitor (Cmd.command argv (Cmd.stdio :null :null :null))
+  receive do
+    {:down r _p reason} when (eq? r ref) -> reason
+    after 4000 -> :timeout
+  end
+end
+
+defn make-fifo path do
+  run-and-wait (list "sh" "-c" (str "rm -f " path "; mkfifo " path)) |> assert-eq :normal
+end
+
+suite "file port IO survives signals" do
+  test "a blocked FIFO read completes across a child exit" do
+    fifo = "/tmp/idm-eintr-read-fifo"
+    make-fifo fifo
+    _writer = spawn (Cmd.command (list "sh" "-c" (str "exec 3>" fifo "; sleep 0.6; printf hello >&3")) (Cmd.stdio :null :null :null))
+    _quick = spawn (Cmd.command (list "sleep" "0.2") (Cmd.stdio :null :null :null))
+    port = File.open! fifo :read
+    File.read-port port 64 |> assert-eq {:data "hello"}
+    File.close port
+    File.remove fifo
+  end
+
+  test "a blocked FIFO write delivers every byte across child exits" do
+    fifo = "/tmp/idm-eintr-write-fifo"
+    count-file = "/tmp/idm-eintr-write-count"
+    make-fifo fifo
+    {_reader ref} = spawn-monitor (Cmd.command (list "sh" "-c" (str "exec 3<" fifo "; sleep 0.6; wc -c <&3 > " count-file)) (Cmd.stdio :null :null :null))
+    _quick = spawn (Cmd.command (list "sleep" "0.2") (Cmd.stdio :null :null :null))
+    _quick2 = spawn (Cmd.command (list "sleep" "0.4") (Cmd.stdio :null :null :null))
+    port = File.open! fifo :write
+    data = repeat "0123456789abcdef" 8192
+    File.write-port port data |> assert-eq {:wrote 131072}
+    File.close port
+    receive do
+      {:down r _p reason} when (eq? r ref) -> reason
+      after 4000 -> :timeout
+    end |> assert-eq :normal
+    File.read! count-file |> trim |> assert-eq "131072"
+    File.remove count-file
+    File.remove fifo
+  end
+
+  test "a small write behind a full pipe delivers every byte across child exits" do
+    fifo = "/tmp/idm-eintr-tail-fifo"
+    count-file = "/tmp/idm-eintr-tail-count"
+    make-fifo fifo
+    {_reader ref} = spawn-monitor (Cmd.command (list "sh" "-c" (str "exec 3<" fifo "; sleep 0.6; wc -c <&3 > " count-file)) (Cmd.stdio :null :null :null))
+    _quick = spawn (Cmd.command (list "sleep" "0.2") (Cmd.stdio :null :null :null))
+    _quick2 = spawn (Cmd.command (list "sleep" "0.4") (Cmd.stdio :null :null :null))
+    port = File.open! fifo :write
+    File.write-port port (repeat "0123456789abcdef" 4096) |> assert-eq {:wrote 65536}
+    File.write-port port "0123456789abcdef" |> assert-eq {:wrote 16}
+    File.close port
+    receive do
+      {:down r _p reason} when (eq? r ref) -> reason
+      after 4000 -> :timeout
+    end |> assert-eq :normal
+    File.read! count-file |> trim |> assert-eq "65552"
+    File.remove count-file
+    File.remove fifo
+  end
+end

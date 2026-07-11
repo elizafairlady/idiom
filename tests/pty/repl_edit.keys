@@ -1,0 +1,6 @@
+w idiom repl
+s add 20 23
+s \x7f
+s 2\r
+w 42
+s :q\r

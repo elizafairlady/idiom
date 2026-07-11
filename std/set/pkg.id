@@ -1,0 +1,49 @@
+package set
+
+use std/enum
+
+record Set do
+  field dict
+end
+
+export defn empty -> %{} |> Set
+
+export defn from-list xs -> xs.foldl empty (fn x acc -> acc.dict |> dict-put &x :true |> Set)
+
+export defn new xs -> xs |> from-list
+
+export defn to-list s -> s.dict |> dict-keys
+
+export defn size s -> s.dict |> dict-size
+
+export defn empty? s -> s |> size |> eq? 0
+
+export defn has? s x -> s.dict |> dict-has? &x
+
+export defn add s x -> s.dict |> dict-put &x :true |> Set
+
+export defn del s x -> s.dict |> dict-del &x |> Set
+
+export defn union a b -> (b |> to-list).foldl a (fn x acc -> acc |> add &x)
+
+export defn intersection a b ->
+  (a |> to-list).foldl empty (fn x acc -> cond (b |> has? &x) (acc |> add &x) &acc)
+
+export defn difference a b ->
+  (a |> to-list).foldl empty (fn x acc -> cond (b |> has? &x) &acc (acc |> add &x))
+
+export defn subset? a b -> (a |> to-list).all? (fn x -> b |> has? &x)
+
+export defn disjoint? a b -> (a |> to-list).all? (fn x -> cond (b |> has? &x) :false :true)
+
+export defn equal? a b -> and (a |> subset? b) (b |> subset? a)
+
+export defn filter s f -> (s |> to-list).foldl empty (fn x acc -> cond (f &x) (acc |> add &x) &acc)
+
+export defn map s f -> (s |> to-list).foldl empty (fn x acc -> acc |> add (f &x))
+
+implement Iter on Set do
+  method foldl s acc f -> (s |> to-list).foldl acc f
+end
+
+implement Enum on Set

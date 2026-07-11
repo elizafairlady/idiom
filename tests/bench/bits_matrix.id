@@ -1,0 +1,63 @@
+use std/test
+activate Test
+
+pkt = bits-append (bits-of-int 5 8 :big) (bits-append (bits-of-int 258 16 :big) (bits-of-int 7 32 :big))
+small8 = bits-of-int 200 8 :big
+mid32 = bits-of-int 123456789 32 :big
+sparse512 = bits-of-int 7 512 :big
+dense512 = bits-of-int ((pow 2 512) - 1) 512 :big
+small-bits = bits-of-int 7 512 :big
+big-bits = bits-of-int 7 65536 :big
+chunk = bits-of-int 7 256 :big
+
+defn parse-header do
+  %<a:8 v:16 . _rest> -> add a v
+end
+
+defn append-chain do
+  acc 0 -> bits-len acc
+  acc k -> append-chain (bits-append acc chunk) (sub k 1)
+end
+
+suite "bits" do
+  bench "calibrate/empty" expect: :nil do
+    :nil
+  end
+
+  bench "match/parse-header" expect: 263 allocs: 0 do
+    parse-header pkt
+  end
+
+  bench "int/8" expect: 200 allocs: 0 bytes: 1 do
+    bits-int small8 0 8 :unsigned
+  end
+
+  bench "int/32" expect: 123456789 allocs: 0 bytes: 4 do
+    bits-int mid32 0 32 :unsigned
+  end
+
+  bench "int/512-sparse" expect: 7 allocs: 0 bytes: 64 do
+    bits-int sparse512 0 512 :unsigned
+  end
+
+  bench "int/512-dense" expect: ((pow 2 512) - 1) allocs: 1 bytes: 64 do
+    bits-int dense512 0 512 :unsigned
+  end
+
+  bench "slice/512b-parent" expect: 256 allocs: 1 do
+    bits-len (bits-slice small-bits 8 256)
+  end
+
+  bench "slice/64KB-parent" expect: 256 allocs: 1 do
+    bits-len (bits-slice big-bits 8 256)
+  end
+
+  bench "append/chain-100" expect: 25600 ops: 100 do
+    append-chain %<> 100
+  end
+
+  bench "append/chain-800" expect: 204800 ops: 800 do
+    append-chain %<> 800
+  end
+end
+:ok

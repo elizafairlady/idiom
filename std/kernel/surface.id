@@ -1,0 +1,10 @@
+package kernel
+
+export protocol Idiom do
+  activate IdiomReader
+  activate IdiomControl
+  activate IdiomExpander
+  activate IdiomOperators
+end
+
+activate Idiom

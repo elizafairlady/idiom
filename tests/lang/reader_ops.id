@@ -1,0 +1,18 @@
+use std/test
+use std/compile
+
+activate Test
+
+suite "not and repeat1 reader ops" do
+  test "repeat1 accepts one or more and its grammar compiles" do
+    assert-compiles "grammar Ones exclusive do\n  skip space {:regex \"[ \\t\\r\\n]+\"}\n  token word {:regex \"[A-Za-z]+\"} -> {:capture word}\n  form program {:repeat1 {:capture item {:token word}}} -> {:emit-form \"%-package-begin\" [{:splice item}]}\nend\n:ok\n"
+  end
+
+  test "repeat1 over a nullable child is refused like repeat" do
+    assert-expand-error "grammar Bad exclusive do\n  skip space {:regex \"[ \\t\\r\\n]+\"}\n  token word {:regex \"[A-Za-z]+\"} -> {:capture word}\n  form program {:repeat1 {:optional {:capture item {:token word}}}} -> {:emit-form \"%-package-begin\" [{:splice item}]}\nend\n:ok\n" "can match empty input"
+  end
+
+  test "not compiles as negative lookahead" do
+    assert-compiles "grammar Guarded exclusive do\n  skip space {:regex \"[ \\t\\r\\n]+\"}\n  token word {:regex \"[A-Za-z]+\"} -> {:capture word}\n  token stop {:regex \"end\"} -> {:capture stop}\n  form item {:seq {:not {:token stop}} {:capture w {:token word}}} -> {:capture w}\n  form program {:repeat {:capture item {:ref item}}} -> {:emit-form \"%-package-begin\" [{:splice item}]}\nend\n:ok\n"
+  end
+end

@@ -1,0 +1,124 @@
+use std/test
+use std/string
+use std/cmd
+use std/port with [port-read port-write port-resize port-close-input]
+
+activate Test
+
+defn drain do
+  p acc -> match (port-read p :stdout 4096) do
+    {:data s} -> drain p "${acc}${s}"
+    :eof -> acc
+    :closed -> acc
+    :again -> drain p acc
+  end
+end
+
+defn until-closed do
+  _p 0 -> :never
+  p n -> match (port-resize p 80 24) do
+    :closed -> :closed
+    _ -> do
+      receive do
+        {:pty-stdio-never} -> :ok
+        after 25 -> :ok
+      end
+      until-closed p (n - 1)
+    end
+  end
+end
+
+defn drain-until do
+  _p acc _want 0 -> acc
+  p acc want n -> cond (contains? acc want) acc (match (port-read p :stdout 4096) do
+    {:data s} -> drain-until p "${acc}${s}" want (n - 1)
+    :again -> drain-until p acc want (n - 1)
+    _ -> acc
+  end)
+end
+
+suite "pty stdio gives the child a real terminal" do
+  test "the child sees a tty on all three fds" do
+    p = spawn (command (list "sh" "-c" "test -t 0 && test -t 1 && test -t 2 && echo ALL-TTY || echo NOT-TTY") (stdio :pty :pty :pty))
+    contains? (drain p "") "ALL-TTY" |> assert-eq :true
+  end
+
+  test "the terminal is born 80x24 and port-resize changes it live" do
+    p = spawn (command (list "sh" "-c" "stty size; read line; stty size") (stdio :pty :pty :pty))
+    first = match (port-read p :stdout 4096) do
+      {:data s} -> s
+      other -> other
+    end
+    contains? "#{first}" "24 80" |> assert-eq :true
+    port-resize p 132 50
+    port-write p "go\n"
+    contains? (drain p "") "50 132" |> assert-eq :true
+  end
+
+  test "the pty does not echo written input back" do
+    p = spawn (command (list "sh" "-c" "read line; echo got-$line") (stdio :pty :pty :pty))
+    port-write p "quiet\n"
+    out = drain p ""
+    contains? out "got-quiet" |> assert-eq :true
+    contains? out "quiet\nquiet" |> assert-eq :false
+  end
+
+  test "pty output arrives without carriage returns" do
+    p = spawn (command (list "printf" "a\\nb\\n") (stdio :pty :pty :pty))
+    drain p "" |> assert-eq "a\nb\n"
+  end
+
+  test "a pipeline cannot wear a pty" do
+    assert-raises (fn -> spawn {:pipeline (list (stage (list "echo" "x")) (stage (list "cat"))) (stdio :pty :pty :pty) :false})
+  end
+
+  test "pty on stderr or stdin requires the pty on stdout" do
+    assert-raises (fn -> spawn (command (list "cat") (stdio :pipe :pipe :pty)))
+    assert-raises (fn -> spawn (command (list "cat") (stdio :pty :pipe :pipe)))
+  end
+
+  test "the child owns its terminal as session leader" do
+    p = spawn (command (list "sh" "-c" "ps -o tpgid= -p $$ | grep -qv -- -1 && echo CTTY-OK || echo CTTY-BAD") (stdio :pty :pty :pty))
+    contains? (drain p "") "CTTY-OK" |> assert-eq :true
+  end
+
+  test "writing after the child died reports closed, not an error" do
+    p = spawn (command (list "true") (stdio :pty :pty :pty))
+    drain p "" |> assert-eq ""
+    port-write p "late\n" |> assert-eq :closed
+  end
+
+  test "close-input sends eof through the terminal" do
+    p = spawn (command (list "cat") (stdio :pty :pty :pty))
+    port-write p "last-line\n"
+    first = drain-until p "" "last-line" 40
+    contains? first "last-line" |> assert-eq :true
+    port-close-input p
+    contains? "#{drain p ""}" "last-line" |> assert-eq :false
+  end
+
+  test "close-input on a raw-mode pty injects no VEOF bytes" do
+    p = spawn (command (list "sh" "-c" "stty raw min 0 time 20; echo READY; head -c 4 | od -An -tx1") (stdio :pty :pty :pty))
+    ready = drain-until p "" "READY" 80
+    contains? ready "READY" |> assert-eq :true
+    port-write p "AB"
+    port-close-input p
+    out = drain-until p "" "41" 80
+    contains? out "41 42" |> assert-eq :true
+    contains? out "04" |> assert-eq :false
+  end
+
+  test "resize rejects a non-pty port and zero dimensions" do
+    p = spawn (command (list "cat") (stdio :pipe :pipe :pipe))
+    assert-raises (fn -> port-resize p 80 24)
+    assert-raises (fn -> port-resize p 0 24)
+    assert-raises (fn -> port-resize p 80 0)
+    exit p :kill
+  end
+
+  test "resize after the child died reports closed, not an error" do
+    p = spawn (command (list "true") (stdio :pty :pty :pty))
+    drain p "" |> assert-eq ""
+    until-closed p 80 |> assert-eq :closed
+  end
+end

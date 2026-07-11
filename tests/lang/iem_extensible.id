@@ -1,0 +1,166 @@
+use std/test
+use std/string
+import app/iem/buffer as B
+use app/iem
+import std/list as List
+
+activate Test
+
+defn feed do
+  frame '() -> frame
+  frame '(k . rest) -> feed (drive frame {:tea-key k}) rest
+end
+
+defn typed text -> text |> runes-lossy |> List.map (fn r -> {:char (rune-str r)})
+defn key-m-x frame -> drive (drive frame {:tea-key :esc}) {:tea-key {:char "x"}}
+defn snap-point frame -> B.point-of (snap frame)
+defn snap-text frame -> B.text-of (snap frame)
+
+## Does the documented thing.
+defn documented-op frame -> {frame '()}
+
+suite "the editor's meaning is tables in the frame" do
+  test "a keymap binds a command by name and the same name answers M-x" do
+    f = drive (frame-new) {:open "a" "ab" :nil}
+    f2 = bind-key f :c-f "forward-char"
+    f3 = feed f2 (list :c-f)
+    snap-point f3 |> assert-eq 1
+    f4 = feed (key-m-x f3) (append (typed "forward-char") (list :enter))
+    snap-point f4 |> assert-eq 2
+  end
+
+  test "an unknown command name echoes instead of crashing" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = feed (bind-key f {:char "z"} "no-such-command") (list {:char "z"})
+    echo-line f2 |> assert-eq "Unknown command: no-such-command"
+  end
+
+  test "commands carry documentation" do
+    f = register-command (frame-new) "greet" {:frame :quit} "Says hello"
+    describe-command f "greet" |> assert-eq "Says hello"
+    describe-command f "forward-char" |> assert-eq "Move point right one rune"
+    describe-command f "no-such" |> assert-eq :nil
+  end
+
+  test "a default frame op can be redefined" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = set-op f :save (fn frame _gesture _op -> {(state-put frame :saved-count (add (state-get frame :saved-count 0) 1)) '()})
+    f3 = feed f2 (list :c-s :c-s)
+    state-get f3 :saved-count 0 |> assert-eq 2
+  end
+
+  test "a new frame op is one dict-put and keys can carry it payload" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = set-op f :shout (fn frame _gesture {:shout word} -> {(frame.record-update (echo: "${word}!")) '()})
+    f3 = bind-key f2 {:char "s"} {:frame {:shout "bang"}}
+    f4 = feed f3 (list {:char "s"})
+    echo-line f4 |> assert-eq "bang!"
+    f5 = bind-key f2 {:char "t"} {:shout "bare"}
+    f6 = feed f5 (list {:char "t"})
+    echo-line f6 |> assert-eq "bare!"
+  end
+
+  test "an unknown frame op echoes its tag" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = feed (bind-key f {:char "q"} {:frame {:warp 9}}) (list {:char "q"})
+    echo-line f2 |> assert-eq "Unknown op: warp"
+  end
+
+  test "a new frame message is one dict-put on the updates table" do
+    f = set-update (frame-new) :ping (fn frame {:ping n} -> {(state-put frame :pings n) '()})
+    f2 = drive f {:ping 42}
+    state-get f2 :pings 0 |> assert-eq 42
+  end
+
+  test "hooks run entries through the same interpreter" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    counter = fn frame -> {(state-put frame :switches (add (state-get frame :switches 0) 1)) '()}
+    f2 = add-hook f :switch counter
+    f3 = drive (drive f2 {:open "b" "" :nil}) {:switch "a"}
+    f4 = drive f3 {:switch "b"}
+    state-get f4 :switches 0 |> assert-eq 2
+  end
+
+  test "hooks see the event through the frame while they run" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    pid = buffer-pid f "a"
+    spy = fn fr -> {(state-put fr :saw (state-get fr :hook-event :nil)) '()}
+    f2 = add-hook f :saved spy
+    f3 = drive f2 {:saved pid 3}
+    state-get f3 :saw :nil |> assert-eq {:saved pid 3}
+    state-get f3 :hook-event :missing |> assert-eq :missing
+  end
+
+  test "hooks may emit commands as data" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = add-hook f :saved {:buf {:type "*"}}
+    pid = buffer-pid f2 "a"
+    f3 = drive f2 {:saved pid 0}
+    snap-text f3 |> assert-eq "*"
+  end
+
+  test "a pushed buffer handler shadows a built-in op and passes the rest" do
+    pid = spawn-buffer ""
+    send pid {:push-handler (fn do
+      {:type c} buf -> {:done (B.step buf (B.insert (B.point-of buf) (upcase c)))}
+      _m _b -> :pass
+    end)}
+    send pid {:type "a"}
+    send pid {:newline}
+    send pid {:type "b"}
+    send pid {:snapshot self}
+    text = receive do
+      {:snapshot p b} when (eq? p pid) -> B.text-of b
+      after 2000 -> :nil
+    end
+    text |> assert-eq "A\nB"
+    send pid {:stop}
+  end
+
+  test "buffer-local state lives on the loop" do
+    pid = spawn-buffer ""
+    send pid {:state-put :marker 7}
+    send pid {:state-get :marker self}
+    got = receive do
+      {:state :marker v} -> v
+      after 2000 -> :nil
+    end
+    got |> assert-eq 7
+    send pid {:stop}
+  end
+
+  test "describe-key answers for the next key pressed" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = feed (bind-key f {:char "g"} "forward-char") (list :c-h {:char "k"})
+    echo-line f2 |> assert-eq "Describe key: press a key"
+    f3 = feed f2 (list {:char "g"})
+    echo-line f3 |> assert-eq "g runs the command forward-char: Move point right one rune"
+    snap-point f3 |> assert-eq 0
+  end
+
+  test "where-is finds the keys a command is bound to" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = bind-key f {:char "g"} "forward-char"
+    contains? (where-is f2 "forward-char") "g" |> assert-eq :true
+    where-is f2 "no-such" |> assert-eq "no-such is not on any key"
+  end
+
+  test "describe-command speaks through the minibuffer" do
+    f = drive (frame-new) {:open "a" "" :nil}
+    f2 = feed f (list :c-h {:char "f"})
+    f3 = feed f2 (append (typed "kill-line") (list :enter))
+    echo-line f3 |> assert-eq "kill-line: Kill to the end of the line"
+  end
+
+  test "register-command pulls the doc off a documented entry" do
+    f = register-command (frame-new) "my-op" &documented-op
+    describe-command f "my-op" |> assert-eq "Does the documented thing."
+  end
+
+  test "frame state survives the pipeline like any other value" do
+    f = state-put (frame-new) :theme :dark
+    state-get f :theme :light |> assert-eq :dark
+    g = (f.record-update (echo: "x"))
+    state-get g :theme :light |> assert-eq :dark
+  end
+end

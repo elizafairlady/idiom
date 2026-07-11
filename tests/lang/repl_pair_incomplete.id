@@ -1,0 +1,29 @@
+use std/test
+use std/compile with [compile]
+
+activate Test
+
+suite "a declared terminator pair holds the winning parse open" do
+  test "an unbalanced pair opener continues; a balanced stream reports its error" do
+    match (compile "protocol Pairish do\n  grammar Paired exclusive do\n    skip space {:regex \"[ \\t\\r\\n]+\"}\n    pair open close\n    token open {:literal \"<<<\"} -> {:emit-atom open}\n    token close {:literal \">>>\"} -> {:emit-atom close}\n    token name {:regex \"(?<name_text>[A-Za-z-]+)\"} -> {:capture-word name_text}\n    form opener {:capture a {:token open}} -> {:capture a}\n    form stmt {:alt {:seq {:capture a {:token name}} {:capture b {:token name}}} {:capture a {:ref opener}} {:capture a {:token name}}} -> {:emit-form \"%-expr\" [{:capture a} {:splice b}]}\n    form program {:repeat {:capture s {:ref stmt}}} -> {:emit-form \"%-package-begin\" [{:splice s}]}\n  end\nend\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:pairish-define other}
+    end
+    match (compile "activate Pairish\n") do
+      {:ok _thunk _token} -> :ok
+      other -> error {:pairish-activate other}
+    end
+    match (compile "nosuchword") do
+      {:error _detail} -> :ok
+      other -> error {:balanced-pair-errors other}
+    end
+    match (compile "nosuchword <<<") do
+      :incomplete -> :ok
+      other -> error {:open-pair-continues other}
+    end
+    match (compile "nosuchword <<< words >>>") do
+      {:error _detail} -> :ok
+      other -> error {:closed-pair-errors other}
+    end
+  end
+end

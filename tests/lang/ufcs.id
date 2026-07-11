@@ -1,0 +1,47 @@
+use std/test
+use std/string
+import std/list as List
+import std/dict as Dict
+
+activate Test
+
+record Boxed do
+  field size :: int
+end
+
+defn double x -> mul x 2
+
+defn describe rec extra -> "#{rec.size}:${extra}"
+
+suite "the dot reaches bindings when no member answers" do
+  test "a plain defn answers at the dot with the receiver first" do
+    5 |> double |> assert-eq 10
+    (5).double |> assert-eq 10
+    ((5).double).double |> assert-eq 20
+  end
+
+  test "extra arguments follow the receiver by arity" do
+    b = Boxed 3
+    b.describe "wide" |> assert-eq "3:wide"
+    describe b "wide" |> assert-eq "3:wide"
+  end
+
+  test "kernel primitives answer at the dot" do
+    m = %{a: 1}
+    m.dict-get :a 0 |> assert-eq 1
+    m.dict-put :b 2 |> dict-get :b 0 |> assert-eq 2
+  end
+
+  test "qualified names still chain" do
+    (list 1 2 3).List.reverse |> assert-eq (list 3 2 1)
+  end
+
+  test "members win over bindings" do
+    b = Boxed 9
+    b.size |> assert-eq 9
+  end
+
+  test "unbound names after the dot are still errors" do
+    assert-expand-error "x = 1\nx.frobnicate 2\n" "unbound method 'frobnicate'"
+  end
+end

@@ -1,0 +1,92 @@
+use std/test
+use std/compile
+
+activate Test
+
+suite "try sections are grammar words and rescue is match clauses" do
+  test "rescue matches the raised value by pattern" do
+    r = try do
+      raise {:boom 7}
+      :no
+    rescue do
+      {:boom n} -> {:caught n}
+    end
+    r |> assert-eq {:caught 7}
+  end
+
+  test "an unmatched reason re-raises the original value" do
+    r = try do
+      try do
+        raise {:inner :detail}
+      rescue do
+        {:never} -> :wrong
+      end
+    rescue do
+      outer -> {:outer-saw outer}
+    end
+    r |> assert-eq {:outer-saw {:inner :detail}}
+  end
+
+  test "rescue clauses take guards" do
+    r = try do
+      raise {:code 42}
+    rescue do
+      {:code n} when (gt? n 40) -> :big
+      {:code _} -> :small
+    end
+    r |> assert-eq :big
+  end
+
+  test "a trailing bind clause catches everything without reraise" do
+    r = try do
+      error :anything
+    rescue do
+      {:specific} -> :wrong
+      e -> {:caught e}
+    end
+    r |> assert-eq {:caught {:error :anything}}
+  end
+
+  test "ensure takes a multi-statement body and the value passes through" do
+    me = self
+    r = try do
+      :value
+    ensure do
+      send me :one
+      send me :two
+    end
+    r |> assert-eq :value
+    receive do
+      :one -> :ok
+      after 100 -> error :ensure-first-statement-missing
+    end
+    receive do
+      :two -> :ok
+      after 100 -> error :ensure-second-statement-missing
+    end
+  end
+
+  test "one try carries body, rescue, and ensure; ensure runs on the rescued path" do
+    me = self
+    r = try do
+      error :kaboom
+    rescue do
+      e -> e
+    ensure do
+      send me :cleanup-ran
+    end
+    r |> assert-eq {:error :kaboom}
+    receive do
+      :cleanup-ran -> :ok
+      after 100 -> error :ensure-did-not-run
+    end
+  end
+
+  test "rescue after ensure is rejected" do
+    assert-expand-error "x = try do :a ensure do :b end rescue do e -> e end\n" "rescue must come before ensure"
+  end
+
+  test "the old clause spelling is rejected with the new shape named" do
+    assert-expand-error "x = try do :a\nrescue e -> e\nend\n" "rescue takes a do/end clause body"
+  end
+end

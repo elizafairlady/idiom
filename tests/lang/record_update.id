@@ -1,0 +1,144 @@
+use std/test
+use std/string
+
+activate Test
+
+record Pt do
+  field x :: int
+  field y :: int
+end
+
+record Big do
+  field a :: int
+  field b
+  field c
+  field d :: string
+end
+
+record Left do
+  field shared
+  field only-left
+end
+
+record Right do
+  field shared
+  field only-right
+end
+
+defn bump p -> p.record-update x: (add (p.x) 1)
+
+defn observed log v -> do
+  send log {:saw v}
+  v
+end
+
+suite "record update builds a new record from an old one" do
+  test "one field replaced, others copied, source untouched" do
+    p = Pt 1 2
+    q = (p.record-update x: 10)
+    q.x |> assert-eq 10
+    q.y |> assert-eq 2
+    p.x |> assert-eq 1
+  end
+
+  test "head form and dot form are the same call" do
+    p = Pt 1 2
+    assert-eq (record-update p x: 10) (p.record-update x: 10)
+    h = (record-update p y: 5)
+    h.y |> assert-eq 5
+  end
+
+  test "update composes in a pipe" do
+    out = (Pt 1 2 |> record-update y: 42)
+    out.y |> assert-eq 42
+    out2 = (Pt 1 2 |> record-update y: 3 |> record-update x: 4)
+    {out2.x out2.y} |> assert-eq {4 3}
+  end
+
+  test "many fields in one update, spelled order" do
+    b = Big 1 :two "three" "four"
+    b2 = (b.record-update d: "D" a: 9)
+    b2.a |> assert-eq 9
+    b2.b |> assert-eq :two
+    b2.c |> assert-eq "three"
+    b2.d |> assert-eq "D"
+  end
+
+  test "updates chain" do
+    p = Pt 1 2
+    q = ((p.record-update x: 5).record-update y: 6)
+    q.x |> assert-eq 5
+    q.y |> assert-eq 6
+  end
+
+  test "an untyped receiver goes through the runtime primitive" do
+    q = bump (Pt 41 0)
+    q.x |> assert-eq 42
+  end
+
+  test "the primitive is a value: generic record code works on any record" do
+    swap = fn rec d -> record-update rec d
+    a = swap (Pt 1 2) %{y: 9}
+    b = swap (Big 1 :b :c "d") %{a: 5}
+    a.y |> assert-eq 9
+    b.a |> assert-eq 5
+  end
+
+  test "the runtime path enforces field contracts and field existence" do
+    swap = fn rec d -> record-update rec d
+    assert-raises (fn -> swap (Pt 1 2) %{x: "nope"})
+    assert-raises (fn -> swap (Pt 1 2) %{zzz: 1})
+  end
+
+  test "receiver is evaluated exactly once" do
+    me = self
+    q = ((observed me (Pt 1 2)).record-update y: 7)
+    q.y |> assert-eq 7
+    n = receive do
+      {:saw _} -> receive do
+        {:saw _} -> 2
+        after 50 -> 1
+      end
+      after 200 -> 0
+    end
+    n |> assert-eq 1
+  end
+
+  test "field contracts hold at update exactly as at construction" do
+    assert-raises (fn -> (Pt 1 2).record-update x: "nope")
+  end
+
+  test "unknown field is a compile error naming record and field" do
+    assert-expand-error "record P do\n  field a\nend\np = P 1\np.record-update z: 2\n" "has no field 'z'"
+  end
+
+  test "duplicate keys keep dict semantics: last wins" do
+    p = Pt 1 2
+    (p.record-update x: 5 x: 6).x |> assert-eq 6
+  end
+
+  test "non-record receiver raises at runtime" do
+    assert-raises (fn -> record-update 5 %{a: 1})
+  end
+
+  test "missing field dict is an arity error" do
+    assert-raises (fn -> apply (list (Pt 1 2)) &record-update)
+  end
+
+  test "no name is stolen: a field named update is an ordinary field" do
+    assert-compiles "record P do\n  field update\nend\np = P 7\np.update\n:ok\n"
+  end
+
+  test "shared field sets are no puzzle: the runtime primitive serves both" do
+    setter = fn r -> r.record-update shared: 42
+    (setter (Left 1 2)).shared |> assert-eq 42
+    (setter (Right 1 2)).shared |> assert-eq 42
+  end
+
+  test "a known receiver type disambiguates a shared field" do
+    l = Left 1 2
+    l2 = (l.record-update shared: 9)
+    l2.shared |> assert-eq 9
+    l2.only-left |> assert-eq 2
+  end
+end

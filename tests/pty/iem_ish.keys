@@ -1,0 +1,18 @@
+w (evil-normal)
+s \ex
+w M-x
+s ish\r
+w (ish)
+w % 
+s echo shell-roundtrip | tr a-z A-Z\r
+w SHELL-ROUNDTRIP
+s cut -d" " -f8 /proc/self/stat | grep -q -- -1 || echo CTTY-OK\r
+w CTTY-OK
+s stty size\r
+w 22 80
+r 100 12
+s stty size\r
+w 10 100
+s exit\r
+w [ish exited]
+s \x18\x03

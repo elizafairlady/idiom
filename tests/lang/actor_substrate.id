@@ -1,0 +1,551 @@
+use std/test
+use std/file with [open! read! remove]
+use std/port with [port-close-input port-read port-write]
+use std/string
+import std/cmd as Cmd
+activate Test
+
+record ActorBox do
+  field value
+end
+
+defn drain-stdout do
+  p acc -> match (port-read p :stdout 8192) do
+    {:data chunk} -> drain-stdout p (acc + (byte-len chunk))
+    :eof -> acc
+    value -> value
+  end
+end
+
+defn spin-forever n -> spin-forever (n + 1)
+
+defn fill-seq do
+  i n when (eq? i n) -> :ok
+  i n -> do
+    send self {:seq i}
+    fill-seq (add i 1) n
+  end
+end
+
+defn check-seq do
+  i n when (eq? i n) -> :ok
+  i n -> receive do
+    {:seq got} when (eq? got i) -> check-seq (add i 1) n
+    {:seq got} -> {:out-of-order i got}
+    after 500 -> :timeout
+  end
+end
+
+defn idiom-fd-count -> do
+  p = spawn Cmd.command (list "sh" "-c" "p=$PPID; exit $(ls /proc/$p/fd | wc -l)") (Cmd.stdio :null :null :null)
+  ref = monitor p
+  receive do
+    {:down r target v} when (and (eq? r ref) (eq? target p)) -> match v do
+      {:exit-code n} -> n
+      :normal -> 0
+      _ -> -1
+    end
+    after 2000 -> -1
+  end
+end
+
+defn churn-pty-ports do
+  0 -> :ok
+  n -> do
+    p = spawn Cmd.command (list "true") (Cmd.stdio :null :pty :null)
+    drain-stdout p 0
+    churn-pty-ports (sub n 1)
+  end
+end
+
+suite do
+  test "spawn send receive resumes waiter" do
+    parent = self
+    spawn (fn do
+      send parent {:pong 7}
+    end)
+    got = receive do
+      {:pong n} -> n
+      after 500 -> :timeout
+    end
+    got |> assert-eq 7
+  end
+
+  test "receive timeout uses shared wait deadline" do
+    got = receive do
+      {:never _} -> :bad
+      after 0 -> :timeout
+    end
+    got |> assert-eq :timeout
+  end
+
+  test "spinning actor yields at its slice" do
+    parent = self
+    hog = spawn (fn -> spin-forever 0)
+    spawn (fn -> send parent :ran)
+    got = receive do
+      :ran -> :ok
+      after 500 -> :timeout
+    end
+    exit hog :kill
+    got |> assert-eq :ok
+  end
+
+  test "spawn-monitor emits down signal" do
+    {pid ref} = spawn-monitor (fn -> :ok)
+    reason = receive do
+      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      after 500 -> :timeout
+    end
+    reason |> assert-eq :normal
+  end
+
+  test "monitored runtime crash carries structured reason with trace" do
+    {pid ref} = spawn-monitor (fn -> match 1 do
+      2 -> :ok
+    end)
+    reason = receive do
+      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      after 500 -> :timeout
+    end
+    {:error detail trace} = reason
+    detail |> assert-eq {:no-clause :match {1}}
+    '({:frame _ {:span file line _ _ _}} . _) = trace
+    file |> assert-eq "tests/lang/actor_substrate.id"
+    (gt? line 0) |> assert-eq :true
+  end
+
+  test "reading a finished empty-output port yields :eof not :closed" do
+    p = spawn Cmd.command (list "true") (Cmd.stdio :null :pipe :null)
+    ref = monitor p
+    receive do
+      {:down r target _v} when (and (eq? r ref) (eq? target p)) -> :ok
+      after 1000 -> :timeout
+    end |> assert-eq :ok
+    port-read p :stdout 64 |> assert-eq :eof
+  end
+
+  test "two-pipe port yields :eof on the empty stderr after stdout drained" do
+    p = spawn Cmd.command (list "sh" "-c" "printf hi") (Cmd.stdio :null :pipe :pipe)
+    ref = monitor p
+    drain-stdout p 0 |> assert-eq 2
+    receive do
+      {:down r target _v} when (and (eq? r ref) (eq? target p)) -> :ok
+      after 1000 -> :timeout
+    end |> assert-eq :ok
+    port-read p :stderr 64 |> assert-eq :eof
+  end
+
+  test "pty port churn reclaims master fds without leaking" do
+    churn-pty-ports 5
+    before = idiom-fd-count
+    churn-pty-ports 25
+    after = idiom-fd-count
+    (gt? before 0) |> assert-eq :true
+    (lt? (sub after before) 12) |> assert-eq :true
+  end
+
+  test "mailbox drains in FIFO order across a long run" do
+    fill-seq 0 300
+    check-seq 0 300 |> assert-eq :ok
+  end
+
+  test "selective receive removes a middle message and keeps FIFO order" do
+    send self :a
+    send self :b
+    send self :c
+    receive do
+      :b -> :ok
+      after 200 -> :timeout
+    end |> assert-eq :ok
+    receive do
+      m -> m
+      after 200 -> :timeout
+    end |> assert-eq :a
+    receive do
+      m -> m
+      after 200 -> :timeout
+    end |> assert-eq :c
+  end
+
+  test "re-monitor of a dead-and-gone actor is :noproc, never its exit reason" do
+    {pid ref} = spawn-monitor (fn -> div 1 0)
+    first = receive do
+      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      after 500 -> :timeout
+    end
+    (match first do {:error _ _} -> :true; _ -> :false end) |> assert-eq :true
+    ref2 = monitor pid
+    second = receive do
+      {:down r p value} when (and (eq? r ref2) (eq? p pid)) -> value
+      after 500 -> :timeout
+    end
+    second |> assert-eq :noproc
+  end
+
+  test "link to a dead-and-gone actor delivers :noproc with no trace" do
+    trap-exit :true
+    {pid ref} = spawn-monitor (fn -> div 1 0)
+    receive do
+      {:down r p _value} when (and (eq? r ref) (eq? p pid)) -> :ok
+      after 500 -> :timeout
+    end |> assert-eq :ok
+    link pid
+    got = receive do
+      {:exit p value} when (eq? p pid) -> value
+      after 500 -> :timeout
+    end
+    trap-exit :false
+    got |> assert-eq :noproc
+  end
+
+  test "error-message renders every reason shape the repl prints" do
+    {pid ref} = spawn-monitor (fn -> div 1 0)
+    crash = receive do
+      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      after 500 -> :timeout
+    end
+    crash_text = error-message crash
+    (contains? crash_text "division by zero") |> assert-eq :true
+    (contains? crash_text "actor_substrate.id") |> assert-eq :true
+
+    caught = assert-raises (fn -> match 1 do 2 -> :ok end)
+    (contains? (error-message caught) "no clause") |> assert-eq :true
+
+    (error-message :boom) |> assert-eq ":boom"
+  end
+
+  test "actor message copy keeps record shape metadata" do
+    parent = self
+    spawn (fn do
+      send parent (ActorBox 42)
+    end)
+    got = receive do
+      box -> {(ActorBox? box) box.value}
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:true 42}
+  end
+
+  test "demonitor removes monitor peer" do
+    parent = self
+    {pid ref} = spawn-monitor (fn do
+      receive do
+        {:stop} -> do
+          send parent {:child-exiting self}
+          :ok
+        end
+        after 500 -> :late
+      end
+    end)
+    demonitor ref |> assert-eq :ok
+    send pid {:stop}
+    receive do
+      {:child-exiting p} when (eq? p pid) -> :ok
+      after 500 -> :timeout
+    end |> assert-eq :ok
+    receive do
+      {:down r _p _reason} when (eq? r ref) -> :down
+      after 100 -> :quiet
+    end |> assert-eq :quiet
+  end
+
+  test "trap exit receives linked child reason" do
+    trap-exit :true
+    spawn-link (fn -> exit :boom)
+    reason = receive do
+      {:exit _pid value} -> value
+      after 500 -> :timeout
+    end
+    trap-exit :false
+    reason |> assert-eq :boom
+  end
+
+  test "link chain carries a crash reason and trace across two non-trapping hops" do
+    {c ref} = spawn-monitor (fn do
+      spawn-link (fn do
+        spawn-link (fn -> match 1 do
+          2 -> :ok
+        end)
+        receive do
+          {:never} -> :ok
+          after 2000 -> :timeout
+        end
+      end)
+      receive do
+        {:never} -> :ok
+        after 2000 -> :timeout
+      end
+    end)
+    reason = receive do
+      {:down r p value} when (and (eq? r ref) (eq? p c)) -> value
+      after 1000 -> :timeout
+    end
+    {:error detail trace} = reason
+    detail |> assert-eq {:no-clause :match {1}}
+    '({:frame _ {:span file line _ _ _}} . _) = trace
+    file |> assert-eq "tests/lang/actor_substrate.id"
+    (gt? line 0) |> assert-eq :true
+  end
+
+  test "exit to a non-trapping peer carries a boxed reason unchanged" do
+    {c ref} = spawn-monitor (fn do
+      receive do
+        {:never} -> :ok
+        after 2000 -> :timeout
+      end
+    end)
+    exit c {:boom 42} |> assert-eq :ok
+    reason = receive do
+      {:down r p value} when (and (eq? r ref) (eq? p c)) -> value
+      after 1000 -> :timeout
+    end
+    reason |> assert-eq {:boom 42}
+  end
+
+  test "monitor observes clean port completion" do
+    p = spawn
+      Cmd.command
+        list "printf" "hi"
+        Cmd.stdio :null :pipe :null
+    ref = monitor p
+    reason = receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end
+    reason |> assert-eq :normal
+    port-read p :stdout 2 |> assert-eq {:data "hi"}
+  end
+
+  test "monitor wakes from child signal without port fds" do
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 7") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:exit-code 7}
+  end
+
+  test "spawn-monitor accepts command graph" do
+    {p ref} = spawn-monitor Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq :normal
+    port-read p :stdout 2 |> assert-eq {:data "ok"}
+  end
+
+  test "spawn-link accepts command graph" do
+    trap-exit :true
+    p = spawn-link Cmd.command (list "sh" "-c" "sleep 0.05; exit 6") (Cmd.stdio :null :null :null)
+    receive do
+      {:exit target value} when (eq? target p) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:exit-code 6}
+    trap-exit :false
+  end
+
+  test "pipeline status follows pipefail flag" do
+    stages = list (Cmd.stage (list "sh" "-c" "exit 7")) (Cmd.stage (list "true"))
+    no_pipefail = spawn Cmd.pipeline stages (Cmd.stdio :null :null :null)
+    ref1 = monitor no_pipefail
+    receive do
+      {:down r target value} when (and (eq? r ref1) (eq? target no_pipefail)) -> value
+      after 500 -> :timeout
+    end |> assert-eq :normal
+
+    with_pipefail = spawn Cmd.pipefail stages (Cmd.stdio :null :null :null)
+    ref2 = monitor with_pipefail
+    receive do
+      {:down r target value} when (and (eq? r ref2) (eq? target with_pipefail)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:exit-code 7}
+  end
+
+  test "monitor observes port completion" do
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 9") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    reason = receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end
+    reason |> assert-eq {:exit-code 9}
+  end
+
+  test "demonitor removes port down signal" do
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 8") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    demonitor ref |> assert-eq :ok
+    receive do
+      {:down r _target _value} when (eq? r ref) -> :down
+      after 200 -> :quiet
+    end |> assert-eq :quiet
+  end
+
+  test "exit port shutdown sends termination signal" do
+    p = spawn Cmd.command (list "sleep" "5") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    exit p :shutdown |> assert-eq :ok
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:exit-code 143}
+  end
+
+  test "exit port kill sends kill signal" do
+    p = spawn Cmd.command (list "sleep" "5") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    exit p :kill |> assert-eq :ok
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq {:exit-code 137}
+  end
+
+  test "linked port failure sends exit signal" do
+    trap-exit :true
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 3") (Cmd.stdio :null :null :null)
+    link p |> assert-eq :ok
+    reason = receive do
+      {:exit target value} when (eq? target p) -> value
+      after 500 -> :timeout
+    end
+    trap-exit :false
+    reason |> assert-eq {:exit-code 3}
+  end
+
+  test "unlink removes port exit signal" do
+    trap-exit :true
+    p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 4") (Cmd.stdio :null :null :null)
+    link p |> assert-eq :ok
+    unlink p |> assert-eq :ok
+    receive do
+      {:exit target _value} when (eq? target p) -> :exit
+      after 200 -> :quiet
+    end |> assert-eq :quiet
+    trap-exit :false
+    ref = monitor p
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq :noproc
+  end
+
+  test "port read returns stdout data" do
+    p = spawn Cmd.command (list "printf" "hello") (Cmd.stdio :null :pipe :null)
+    port-read p :stdout 5 |> assert-eq {:data "hello"}
+  end
+
+  test "port write close read uses same port io path" do
+    p = spawn Cmd.command (list "cat") (Cmd.stdio :pipe :pipe :null)
+    port-write p "ok" |> assert-eq {:wrote 2}
+    port-close-input p |> assert-eq :ok
+    port-read p :stdout 2 |> assert-eq {:data "ok"}
+  end
+
+  test "port read streams large stdout" do
+    p = spawn Cmd.command (list "sh" "-c" "yes x | head -c 131072") (Cmd.stdio :null :pipe :null)
+    ref = monitor p
+    drain-stdout p 0 |> assert-eq 131072
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 1000 -> :timeout
+    end |> assert-eq :normal
+  end
+
+  test "cmd constructors cover redirection and env word parts" do
+    path = "build/cmd-graph-redir.txt"
+    stage = Cmd.stage (list "sh" "-c" "printf %s \"$IDM_CMD_PROBE\"") (list (Cmd.redir 1 :> path)) (list (Cmd.assign "IDM_CMD_PROBE" (Cmd.cat (list "o" "k"))))
+    p = spawn Cmd.job stage (Cmd.stdio :null :null :null)
+    ref = monitor p
+    receive do
+      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      after 500 -> :timeout
+    end |> assert-eq :normal
+    read! path |> assert-eq "ok"
+    remove path
+  end
+
+  test "command graph rejects malformed parts before launch" do
+    {:error bad_word} = assert-raises (fn -> spawn Cmd.command (list (Cmd.lit 42)) (Cmd.stdio :null :null :null))
+    bad_word |> assert-eq {:runtime "invalid command stage"}
+    {:error bad_redir} = assert-raises (fn -> spawn Cmd.job (Cmd.stage (list "true") (list (Cmd.redir 1 42 "build/nope"))) (Cmd.stdio :null :null :null))
+    bad_redir |> assert-eq {:runtime "invalid command stage"}
+    {:error missing_pipefail} = assert-raises (fn -> spawn {:pipeline (list (Cmd.stage (list "true"))) (Cmd.stdio :null :null :null)})
+    missing_pipefail |> assert-eq {:runtime "invalid command graph"}
+    {:error improper_argv} = assert-raises (fn -> spawn {:exec {:stage (cons (Cmd.lit "true") 42) '() '()} (Cmd.stdio :null :null :null)})
+    improper_argv |> assert-eq {:runtime "invalid command stage"}
+  end
+
+  test "open file port does not mask receive timeout" do
+    _p = open! "TASKS.md" :read
+    receive do
+      {:never} -> :bad
+      after 0 -> :ok
+    end |> assert-eq :ok
+  end
+
+  test "file ports are not processes" do
+    p = open! "TASKS.md" :read
+    assert-raises (fn -> monitor p) |> assert-eq {:error {:runtime "monitor expects a process"}}
+    assert-raises (fn -> link p) |> assert-eq {:error {:runtime "link expects a process"}}
+    assert-raises (fn -> unlink p) |> assert-eq {:error {:runtime "unlink expects a process"}}
+    assert-raises (fn -> exit p :shutdown) |> assert-eq {:error {:runtime "exit expects a process"}}
+  end
+
+  test "exec primitive surface is removed" do
+    assert-expand-error "exec {:exec {:stage '({:lit \"true\"}) '() '()} {:stdio :null :null :null}}\n" "unbound identifier 'exec'"
+  end
+
+  test "exit self normal terminates a non-trapping caller before it returns" do
+    parent = self
+    {pid ref} = spawn-monitor (fn do
+      send parent :before
+      exit (self) :normal
+      send parent :after
+    end)
+    receive do
+      :before -> :ok
+      after 500 -> :timeout
+    end |> assert-eq :ok
+    reason = receive do
+      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      after 500 -> :timeout
+    end
+    reason |> assert-eq :normal
+    receive do
+      :after -> :bad
+      after 150 -> :quiet
+    end |> assert-eq :quiet
+  end
+
+  test "interrupt is a first-class trappable reason in the closed vocabulary" do
+    trap-exit :true
+    spawn-link (fn -> exit :interrupt)
+    reason = receive do
+      {:exit _pid value} -> value
+      after 500 -> :timeout
+    end
+    trap-exit :false
+    reason |> assert-eq :interrupt
+  end
+
+  test "port-read :stderr on a pty port raises rather than reporting closed" do
+    p = spawn Cmd.command (list "sh" "-c" "sleep 1") (Cmd.stdio :null :pty :pty)
+    assert-raises (fn -> port-read p :stderr 16) |> assert-eq {:error {:type-error :port-read :stderr}}
+    exit p :kill |> assert-eq :ok
+  end
+
+  test "vm intercepted primitives share arity reason" do
+    assert-raises (fn -> apply '()) |> assert-eq {:error {:arity :apply 1 2 2}}
+    assert-raises (fn -> send self) |> assert-eq {:error {:arity :send 1 2 2}}
+    assert-raises (fn -> port-read :stdout :stdout) |> assert-eq {:error {:arity :port-read 2 3 3}}
+    trap-exit :true
+    spawn-link (fn x -> x)
+    receive do
+      {:exit _pid reason} -> reason
+      after 500 -> :timeout
+    end |> assert-eq {:error {:arity :fn 0 1 1}}
+    trap-exit :false
+  end
+end

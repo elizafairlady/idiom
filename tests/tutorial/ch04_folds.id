@@ -1,0 +1,158 @@
+use std/test
+use std/enum
+use std/string
+import std/list as L
+import std/range as Range
+import std/dict as Dict
+import std/set as Set
+
+activate Test
+
+defn square x -> x * x
+
+defn build-dict do
+  acc 0 -> acc
+  acc n -> build-dict (dict-put acc n (n * n)) (n - 1)
+end
+
+defn put-kv kv acc -> do
+  {k v} = kv
+  dict-put acc k v
+end
+
+suite "tutorial/ch04 one fold to rule them" do
+  test "foldl walks left to right" do
+    L.foldl '(1 2 3 4) 0 &add |> assert-eq 10
+  end
+
+  test "std list speaks cons lists only" do
+    assert-expand-error "import std/list as L\nL.foldl [1 2 3 4] 0 &add\n" "expected list, got vector"
+  end
+
+  test "foldl and foldr build in opposite directions" do
+    L.foldl '(1 2 3) '() &cons |> assert-eq '(3 2 1)
+    L.foldr '(1 2 3) '() &cons |> assert-eq '(1 2 3)
+  end
+
+  test "the list classics" do
+    L.map '(1 2 3) &square |> assert-eq '(1 4 9)
+    L.reverse '(1 2 3) |> assert-eq '(3 2 1)
+    L.append '(1 2) '(3 4) |> assert-eq '(1 2 3 4)
+    L.zip '(1 2 3) '(:a :b :c :d) |> assert-eq '({1 :a} {2 :b} {3 :c})
+  end
+
+  test "three answers to a missing index" do
+    L.nth '(:a :b :c) 1 |> assert-eq :b
+    L.nth '(:a :b :c) 9 |> assert-eq :nil
+    L.nth-or '(:a :b :c) 9 :fallback |> assert-eq :fallback
+    reason = assert-raises (fn -> L.nth! '(:a :b :c) 9)
+    reason |> assert-eq {:error {:index-out-of-range 9}}
+  end
+
+  test "one foldl per shape buys everything" do
+    [1 2 3 4].foldl 0 &add |> assert-eq 10
+    '(1 2 3 4).sum |> assert-eq 10
+    sum {1 2 3} |> assert-eq 6
+    {1 2 3}.to-list |> assert-eq '(1 2 3)
+    '().sum |> assert-eq 0
+  end
+
+  test "dot call and bare call are the same call" do
+    map [1 2 3] (fn x -> x * 10) |> assert-eq '(10 20 30)
+    [1 2 3].map (fn x -> x * 10) |> assert-eq '(10 20 30)
+  end
+
+  test "enum methods return lists whatever went in" do
+    [1 2 3].reverse |> assert-eq '(3 2 1)
+    "abc".map (fn b -> b + 1) |> assert-eq '(98 99 100)
+    [10 20 30].nth 1 |> assert-eq 20
+    [10 20 30].take 2 |> assert-eq '(10 20)
+    [10 20 30].drop 1 |> assert-eq '(20 30)
+  end
+
+  test "strings fold as bytes" do
+    "abc".foldl '() &cons |> assert-eq '(99 98 97)
+    "héllo".length |> assert-eq 6
+    byte-len "héllo" |> assert-eq 6
+  end
+
+  test "group-by and frequencies return dicts" do
+    group-by '(1 2 3 4 5 6 7) (fn x -> x %% 3) |> assert-eq %{0 '(6 3) 1 '(7 4 1) 2 '(5 2)}
+    frequencies "aba" |> assert-eq %{97 2 98 1}
+  end
+
+  test "ranges fold without materializing" do
+    r = Range.exclusive 0 5
+    Range.to-list r |> assert-eq '(0 1 2 3 4)
+    Range.first r |> assert-eq 0
+    Range.last r |> assert-eq 4
+    Range.size r |> assert-eq 5
+    (Range.inclusive 1 10).sum |> assert-eq 55
+    (Range.exclusive 10 0 -2).to-list |> assert-eq '(10 8 6 4 2)
+    (Range.exclusive 0 1000000).length |> assert-eq 1000000
+    assert-raises (fn -> Range.new 0 10 0)
+  end
+
+  test "four ways to ask a dict" do
+    m = %{:a 1 :b 2}
+    Dict.get m :a |> assert-eq 1
+    Dict.get m :zzz |> assert-eq :nil
+    Dict.get-or m :zzz 42 |> assert-eq 42
+    Dict.fetch m :missing |> assert-eq {:error {:key-not-found :missing}}
+    reason = assert-raises (fn -> Dict.get! m :missing)
+    reason |> assert-eq {:error {:key-not-found :missing}}
+  end
+
+  test "put and del pipe through" do
+    %{:a 1} |> Dict.put :b 2 |> Dict.del :a |> assert-eq %{:b 2}
+  end
+
+  test "merge is a foldl you write yourself" do
+    %{:b 99 :c 3}.foldl %{:a 1 :b 2} &put-kv |> assert-eq %{:a 1 :b 99 :c 3}
+  end
+
+  test "dict iteration yields pairs in hash order" do
+    kvs = %{:a 1 :b 2}.map (fn kv -> do
+      {k v} = kv
+      {k (v * 10)}
+    end)
+    kvs.foldl %{} &put-kv |> assert-eq %{:a 10 :b 20}
+  end
+
+  test "dict equality ignores insertion order" do
+    eq? %{:a 1 :b 2} (%{} |> dict-put :b 2 |> dict-put :a 1) |> assert-eq :true
+  end
+
+  test "the trie in the basement holds ten thousand keys" do
+    d = build-dict %{} 10000
+    dict-size d |> assert-eq 10000
+    dict-get d 9999 :nil |> assert-eq 99980001
+    dict-get d 1 :nil |> assert-eq 1
+    dict-size (dict-del d 5000) |> assert-eq 9999
+  end
+
+  test "sets forget duplicates and remember members" do
+    s = Set.from-list [1 2 3 2 1]
+    Set.size s |> assert-eq 3
+    Set.has? s 2 |> assert-eq :true
+    Set.has? s 9 |> assert-eq :false
+    a = Set.from-list [1 2 3]
+    b = Set.from-list [3 4]
+    Set.size (Set.union a b) |> assert-eq 4
+    Set.to-list (Set.intersection a b) |> assert-eq '(3)
+    Set.size (Set.difference a b) |> assert-eq 2
+    s.sum |> assert-eq 6
+  end
+
+  test "a pipeline is a sentence" do
+    [1 2 3 4 5 6] |> filter (fn x -> eq? (x %% 2) 0) |> map &square |> sum |> assert-eq 56
+    Range.inclusive 1 100 |> filter (fn x -> eq? (x %% 15) 0) |> to-list |> assert-eq '(15 30 45 60 75 90)
+    "one,two,three" |> split "," |> map upcase |> join "+" |> assert-eq "ONE+TWO+THREE"
+  end
+
+  test "the last-slot pipe is the wrong slot for enum" do
+    assert-raises (fn -> '(1 2 3) |>> map &square)
+    r = '(2 3) |>> cons 1
+    r |> assert-eq '(1 2 3)
+  end
+end

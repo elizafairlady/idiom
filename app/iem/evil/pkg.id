@@ -1,0 +1,51 @@
+package evil
+
+use std/string
+use std/file with [read]
+use app/iem
+
+export defmode evil-insert %{
+  esc: {:frame {:become &evil-normal}}
+}
+
+defn ex-open path -> match (read path) do
+  {:ok text} -> list {:open path text path} {:switch path}
+  _ -> list {:open path "" path} {:switch path}
+end
+
+defn ex-handler frame text -> match text do
+  "w" -> run-entry frame '() {:frame :save}
+  "q" -> run-entry frame '() {:frame :quit}
+  "wq" -> match (run-entry frame '() {:frame :save}) do
+    {f2 cmds} -> match (run-entry f2 '() {:frame :quit}) do
+      {f3 more} -> {f3 (append cmds more)}
+    end
+  end
+  _ -> cond (and (gt? (byte-len text) 2) (eq? (byte-slice text 0 2) "e "))
+    {frame (list {:do (fn -> ex-open (byte-slice text 2 (byte-len text)))})}
+    {(frame.record-update (echo: "Unknown ex command: ${text}")) '()}
+end
+
+export defmode evil-normal %{
+  default: :ignore
+  {:char "h"} {:buf {:left}}
+  {:char "j"} {:buf {:down}}
+  {:char "k"} {:buf {:up}}
+  {:char "l"} {:buf {:right}}
+  {:char "i"} {:frame {:become &evil-insert}}
+  {:char "a"} {:seq (list {:buf {:right}} {:frame {:become &evil-insert}})}
+  {:char "A"} {:seq (list {:buf {:eol}} {:frame {:become &evil-insert}})}
+  {:char "I"} {:seq (list {:buf {:bol}} {:frame {:become &evil-insert}})}
+  {:char "o"} {:seq (list {:buf {:eol}} {:buf {:newline}} {:frame {:become &evil-insert}})}
+  {:char "x"} {:buf {:delete-fwd}}
+  {:char "0"} {:buf {:bol}}
+  {:char "$"} {:buf {:eol}}
+  {:char "u"} {:buf {:undo}}
+  {:char "D"} {:buf {:kill-line}}
+  {:char "d"} %{
+    {:char "d"} {:buf {:del-line}}
+  }
+  {:char ":"} {:frame {:mini ":" &ex-handler}}
+}
+
+export defn evil-command -> fn frame -> frame-update frame {:set-mode frame.current (evil-normal)}

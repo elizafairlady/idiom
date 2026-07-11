@@ -1,0 +1,69 @@
+use std/test
+use std/string
+import std/list as List
+
+activate Test
+
+defn req url opts -> {url (dict-get opts :method "?") (dict-get (dict-get opts :headers %{}) :content-type "?") (dict-get (dict-get opts :body %{}) :fieldname "?")}
+
+defn pipe-body v -> v
+  |> add 10
+  |> mul 2
+
+suite "layout continuations" do
+  test "operator continuation lines enforest infix" do
+    x = 1
+      |> add 2
+      |> add 3
+    x |> assert-eq 6
+  end
+
+  test "operator continuation works in defn bodies" do
+    pipe-body 5 |> assert-eq 30
+  end
+
+  test "operator continuation works inside do blocks" do
+    y = do
+      base = 4
+      base
+        |> mul 5
+    end
+    y |> assert-eq 20
+  end
+
+  test "plain indented lines stay one argument each" do
+    d = dict-put %{} :k
+      42
+    dict-get d :k 0 |> assert-eq 42
+  end
+
+  test "mixed operator and argument continuation" do
+    d = %{}
+      |> dict-put :a 1
+    d2 = dict-put d :b
+      2
+    add (dict-get d2 :a 0) (dict-get d2 :b 0) |> assert-eq 3
+  end
+
+  test "trailing keyword dicts nest by indentation" do
+    r = req "https://example.com"
+      method: "POST"
+      headers:
+        content-type: "application/json"
+      body:
+        fieldname: "value"
+    r |> assert-eq {"https://example.com" "POST" "application/json" "value"}
+  end
+
+  test "keyword blocks dedent back to siblings" do
+    defn peek opts -> {(dict-get (dict-get opts :headers %{}) :flat 0) (dict-get opts :method "?")}
+    r = peek
+      headers:
+        outer:
+          inner: 1
+        flat: 2
+      method: "GET"
+    r |> assert-eq {2 "GET"}
+  end
+end
+:ok

@@ -1,0 +1,34 @@
+use std/test
+use std/compile
+
+activate Test
+
+suite "match usefulness by witness search on selector matrices" do
+  test "nested refutable pattern leaves the pair member uncovered" do
+    assert-expand-error "package p\nspec f :: list -> int\nexport defn f xs -> match xs do\n  '(1 . _t) -> 0\n  '() -> 1\nend\n" "non-exhaustive match: pair is not covered"
+  end
+
+  test "irrefutable subpatterns cover the pair member" do
+    assert-compiles "package p\nspec f :: list -> int\nexport defn f xs -> match xs do\n  '(_h . _t) -> 0\n  '() -> 1\nend\n"
+  end
+
+  test "clause shadowed by earlier type coverage is unreachable" do
+    assert-expand-error "package p\nspec f :: (int | nil) -> int\nexport defn f v -> match v do\n  (_ :: int) -> 0\n  :nil -> 1\n  (_ :: int) -> 2\nend\n" "match clause is unreachable"
+  end
+
+  test "clause shadowed by earlier constructor coverage is unreachable" do
+    assert-expand-error "package p\nspec f :: list -> int\nexport defn f xs -> match xs do\n  '(_h . _t) -> 0\n  '(1 . _) -> 1\n  '() -> 2\nend\n" "match clause is unreachable"
+  end
+
+  test "guarded clause does not force non-exhaustive" do
+    assert-compiles "package p\nspec f :: (int | nil) -> int\nexport defn f v -> match v do\n  n when (gt? n 0) -> 0\n  (_ :: int) -> 1\n  :nil -> 2\nend\n"
+  end
+
+  test "guarded clause does not shadow later clauses" do
+    assert-compiles "package p\nspec f :: (int | nil) -> int\nexport defn f v -> match v do\n  n when (gt? n 0) -> 0\n  _ -> 1\nend\n"
+  end
+
+  test "guarded clause after a catchall is unreachable" do
+    assert-expand-error "package p\nspec f :: (int | nil) -> int\nexport defn f v -> match v do\n  _ -> 0\n  n when (gt? n 0) -> 1\nend\n" "match clause is unreachable"
+  end
+end

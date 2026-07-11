@@ -1,0 +1,91 @@
+use std/regex
+use std/string
+use std/system with [time-ns]
+use std/test
+import std/list as L
+activate Test
+
+capture-rx = compile! "^(?<word>[a-z]+)-([0-9]+)$"
+guard-rx = compile! "\\ba(?=b)b\\z"
+lookbehind-rx = compile! "(?<=aaaaaaaa)b"
+scan-rx = compile! "[a-z]+([0-9]+)"
+split-rx = compile! ","
+linear-rx = compile! "a*c"
+anchored-miss-rx = compile! "^z[a-z]+"
+small-as = repeat "a" 20000
+big-as = repeat "a" 80000
+lookbehind-subject = str (repeat "a" 80001) "b"
+
+defn time-scan subject -> do
+  s0 = time-ns
+  linear-rx |> scan subject
+  (time-ns - s0)
+end
+
+defn time-anchored-miss subject -> do
+  s0 = time-ns
+  anchored-miss-rx |> test? subject
+  (time-ns - s0)
+end
+
+defn time-lookbehind offset -> do
+  s0 = time-ns
+  lookbehind-rx |> scan-at lookbehind-subject offset
+  (time-ns - s0)
+end
+
+defn imin3 a b c -> do
+  ab = cond (lt? a b) a b
+  cond (lt? ab c) ab c
+end
+
+suite "regex" do
+  bench "compile/literal-captures" expect: 2 do
+    rx = compile! "^(?<word>[a-z]+)-([0-9]+)$"
+    group-count rx
+  end
+
+  bench "match/test-full" expect: 1 do
+    cond (capture-rx |> test? "abc-123") 1 0
+  end
+
+  bench "capture/numeric-named" expect: 123 do
+    m = capture-rx |> scan-full "abc-123"
+    capture m 2 |> parse-int!
+  end
+
+  bench "replace/capture-expand" expect: 7 do
+    byte-len (capture-rx.sub "abc-123" "$1:$2")
+  end
+
+  bench "split/separator" expect: 4 do
+    L.length (split-rx.split-on "a,b,c,d")
+  end
+
+  bench "assertion/boundary-lookahead" expect: 1 do
+    cond (guard-rx |> test? "ab") 1 0
+  end
+
+  bench "assertion/lookbehind-window" expect: :true do
+    t-near = imin3 (time-lookbehind 10000) (time-lookbehind 10000) (time-lookbehind 10000)
+    t-far = imin3 (time-lookbehind 70000) (time-lookbehind 70000) (time-lookbehind 70000)
+    lt? t-far (mul (add t-near 50000) 4)
+  end
+
+  bench "scan/scan-all" expect: 4 do
+    L.length (scan-rx.scan-all "a1 b22 c333 d4444")
+  end
+
+  bench "match/anchored-miss-constant" expect: :true do
+    t-small = imin3 (time-anchored-miss small-as) (time-anchored-miss small-as) (time-anchored-miss small-as)
+    t-big = imin3 (time-anchored-miss big-as) (time-anchored-miss big-as) (time-anchored-miss big-as)
+    lt? t-big (mul (add t-small 5000) 2)
+  end
+
+  bench "scan/unanchored-linear" expect: :true do
+    t-small = imin3 (time-scan small-as) (time-scan small-as) (time-scan small-as)
+    t-big = imin3 (time-scan big-as) (time-scan big-as) (time-scan big-as)
+    lt? t-big (mul (add t-small 100000) 8)
+  end
+end
+:ok

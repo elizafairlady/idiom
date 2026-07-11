@@ -1,0 +1,233 @@
+package ish-buffer
+
+use std/string
+use std/port with [port-read port-resize]
+use std/system with [env-get]
+import std/cmd as Cmd
+use app/iem
+import app/iem/buffer as B
+
+export defmode ish port %{} do
+  {:type c} buf -> do
+    m = B.mark-of buf
+    p = B.point-of buf
+    buf2 = B.step buf (B.insert p c)
+    match (eq? p m) do
+      :true -> {:done (B.step buf2 {:mark m})}
+      _ -> {:done buf2}
+    end
+  end
+  {:ish-out chunk} buf -> do
+    m = B.mark-of buf
+    {:done (B.step buf {:replace m m chunk})}
+  end
+  {:newline} buf -> do
+    text = B.text-of buf
+    len = byte-len text
+    m = B.mark-of buf
+    input = byte-slice text m len
+    buf2 = B.step buf (B.insert len "\n")
+    buf3 = B.step buf2 {:mark (len + 1)}
+    buf4 = B.step buf3 {:goto (len + 1)}
+    {:done buf4 (list {:write port "${input}\n"})}
+  end
+end
+
+export defn ish-argv -> match (env-get "IEM_ISH") do
+  :nil -> list "ish"
+  bin -> list bin
+end
+
+export defn spawn-ish -> spawn (Cmd.job (Cmd.stage ish-argv '() (list (Cmd.assign "TERM" "dumb"))) (Cmd.stdio :pty :pty :pty))
+
+esc-s = byte-str 27
+cr-s = "\r"
+bel-s = byte-str 7
+bs-s = byte-str 8
+
+defn flush-span s j i acc -> cond (eq? j i) acc "${acc}#{byte-slice s j i}"
+
+defn tail-open s start n -> byte-slice s start (cond (lt? (start + 2) n) (start + 2) n)
+
+defn found do
+  :nil -> :none
+  i -> i
+end
+
+defn refresh do
+  :none _s _needle _j -> :none
+  :unknown s needle j -> found (byte-find s needle j)
+  p s needle j -> cond (gte? p j) p (found (byte-find s needle j))
+end
+
+defn pick do
+  :none :none -> :nil
+  :none c -> c
+  e :none -> e
+  e c -> cond (lt? e c) e c
+end
+
+defn join-hit do
+  :nil b -> b
+  a :nil -> a
+  a b -> cond (lt? a b) a b
+end
+
+defn string-opener? do
+  93 -> :true
+  80 -> :true
+  88 -> :true
+  94 -> :true
+  95 -> :true
+  _ -> :false
+end
+
+defn seq-end s i n -> cond (gte? (i + 1) n) {:tail (byte-slice s i n)} (seq-kind s i n (byte s (i + 1)))
+
+defn seq-kind do
+  s i n 27 -> seq-end s (i + 1) n
+  s i n 91 -> csi-end s (i + 2) n i
+  s i n b when (string-opener? b) -> str-end s (i + 2) n i
+  s i n b when (and (gte? b 32) (lte? b 47)) -> esc-final-end s (i + 2) n i
+  _s i _n _b -> {:pos (i + 2)}
+end
+
+defn esc-final-end s i n start -> cond (gte? i n) {:tail (tail-open s start n)} (esc-final-byte s i n start (byte s i))
+
+defn esc-final-byte s i n start b -> cond (and (gte? b 32) (lte? b 47)) (esc-final-end s (i + 1) n start) {:pos (i + 1)}
+
+defn csi-end s i n start -> match (byte-find-range s 64 126 i) do
+  :nil -> {:tail (tail-open s start n)}
+  f -> {:pos (f + 1)}
+end
+
+defn str-end s i n start -> str-hit s n start (byte-find s bel-s i) (byte-find s esc-s i)
+
+defn str-hit do
+  s n start :nil :nil -> {:tail (tail-open s start n)}
+  _s _n _start bpos :nil -> {:pos (bpos + 1)}
+  s n start :nil epos -> str-esc s n start epos
+  s n start bpos epos -> cond (lt? bpos epos) {:pos (bpos + 1)} (str-esc s n start epos)
+end
+
+defn str-esc s n start epos -> cond (gte? (epos + 1) n) {:tail "#{tail-open s start n}#{esc-s}"}
+  (cond (eq? (byte s (epos + 1)) 92) {:pos (epos + 2)} (seq-end s epos n))
+
+defn scan s j n acc caches -> match caches do
+  {ec cc bc hc} -> do
+    ec2 = refresh ec s esc-s j
+    cc2 = refresh cc s cr-s j
+    bc2 = refresh bc s bel-s j
+    hc2 = refresh hc s bs-s j
+    match (join-hit (pick ec2 cc2) (pick bc2 hc2)) do
+      :nil -> {(flush-span s j n acc) ""}
+      i -> scan-hit s n (flush-span s j i acc) {ec2 cc2 bc2 hc2} i
+    end
+  end
+end
+
+defn scan-hit s n acc caches i -> match caches do
+  {ec _cc _bc _hc} -> cond (eq? i ec)
+    (match (seq-end s i n) do
+      {:pos p} -> scan s p n acc caches
+      {:tail t} -> {acc t}
+    end)
+    (scan s (i + 1) n acc caches)
+end
+
+export defn clean-output carry chunk -> do
+  s = "${carry}${chunk}"
+  scan s 0 (byte-len s) "" {:unknown :unknown :unknown :unknown}
+end
+
+export defn pump port buf tail -> match (port-read port :stdout 65536) do
+  {:data chunk} -> match (clean-output tail chunk) do
+    {"" rest} -> pump port buf rest
+    {text rest} -> do
+      send buf {:ish-out text}
+      pump port buf rest
+    end
+  end
+  _done -> send buf {:ish-out "\n[ish exited]\n"}
+end
+
+defn ish-open-msgs -> do
+  port = spawn-ish
+  bufpid = spawn-buffer "" self
+  send bufpid {:step {:mark 0}}
+  mode = ish port
+  send bufpid {:set-handler (mode-handler mode)}
+  {pump-pid _ref} = spawn-monitor (fn -> pump port bufpid "")
+  list {:ish-wire port pump-pid bufpid} {:opened "*ish*" bufpid :nil} {:set-mode "*ish*" mode} {:switch "*ish*"}
+end
+
+defn ish-respawn-msgs bufpid -> do
+  port = spawn-ish
+  mode = ish port
+  send bufpid {:set-handler (mode-handler mode)}
+  {pump-pid _ref} = spawn-monitor (fn -> pump port bufpid "")
+  list {:ish-wire port pump-pid bufpid} {:set-mode "*ish*" mode} {:switch "*ish*"}
+end
+
+defn resize-cmds port w h -> do
+  rows = cond (gt? h 1) (h - 1) 1
+  list {:do (fn -> do
+    port-resize port w rows
+    '()
+  end)}
+end
+
+defn ish-store frame msg -> match msg do
+  {:ish-wire port pump-pid bufpid} -> do
+    wired = state-put (state-put (state-put frame :ish-port port) :ish-pump pump-pid) :ish-buf bufpid
+    match (dict-get (state-get wired :win-sizes %{}) "*ish*" :nil) do
+      :nil -> {wired '()}
+      {w h} -> {wired (resize-cmds port w h)}
+    end
+  end
+end
+
+defn ish-teardown frame msg -> do
+  port = state-get frame :ish-port :nil
+  buf = state-get frame :ish-buf :nil
+  cleared = state-put (state-put (state-put frame :ish-port :nil) :ish-buf :nil) :ish-pump :nil
+  noted = cond (eq? msg :nil) cleared (cleared.record-update (echo: msg))
+  unhook = cond (eq? buf :nil) '() (list {:send buf {:set-handler :nil}})
+  kill = cond (eq? port :nil) '() (list {:do (fn -> do
+    exit port :kill
+    '()
+  end)})
+  {noted (append unhook kill)}
+end
+
+defn ish-down-hook frame -> match (state-get frame :hook-event :nil) do
+  {:buffer-down pid reason} -> cond (eq? pid (state-get frame :ish-buf :nil)) (ish-teardown frame :nil)
+    (cond (eq? pid (state-get frame :ish-pump :nil))
+      (cond (eq? reason :normal) (ish-teardown frame :nil) (ish-teardown frame "ish output pump died: #{reason}"))
+      {frame '()})
+  _ -> {frame '()}
+end
+
+defn ish-resize-hook frame -> match (state-get frame :hook-event :nil) do
+  {:window-size "*ish*" w h} -> match (state-get frame :ish-port :nil) do
+    :nil -> {frame '()}
+    port -> {frame (resize-cmds port w h)}
+  end
+  _ -> {frame '()}
+end
+
+defn ensure-wired frame -> match (state-get frame :ish-wired :nil) do
+  :nil -> do
+    wired = add-hook (add-hook (set-update frame :ish-wire &ish-store) :window-size &ish-resize-hook) :buffer-down &ish-down-hook
+    state-put wired :ish-wired :true
+  end
+  _ -> frame
+end
+
+export defn ish-command -> fn frame -> match (buffer-pid frame "*ish*") do
+  :nil -> {(ensure-wired frame) (list {:do &ish-open-msgs})}
+  pid -> match (state-get frame :ish-port :nil) do
+    :nil -> {(ensure-wired frame) (list {:do (fn -> ish-respawn-msgs pid)})}
+    _ -> frame-update frame {:switch "*ish*"}
+  end
+end

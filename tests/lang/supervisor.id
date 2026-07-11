@@ -1,0 +1,162 @@
+use std/test
+import std/supervisor as Supervisor
+
+activate Test
+
+defn up-pid -> receive do
+  {:up _tag p} -> p
+  after 2000 -> :timeout
+end
+
+defn tagged-up tag -> receive do
+  {:up t p} when (eq? t tag) -> p
+  after 2000 -> :timeout
+end
+
+defn quiet-on tag -> receive do
+  {:up t p} when (eq? t tag) -> {:restarted p}
+  after 300 -> :quiet
+end
+
+defn both-down a b n -> if (eq? n 2) do
+  :both
+else do
+  receive do
+    {:down r _p _reason} when (or (eq? r a) (eq? r b)) -> both-down a b (add n 1)
+    after 2000 -> {:only n}
+  end
+end
+
+test "a trapping child gets its graceful shutdown window" do
+  parent = self
+  worker = fn do
+    trap-exit :true
+    send parent {:up :w (self)}
+    receive do
+      {:exit _from _reason} -> do
+        send parent {:cleaned (self)}
+        :ok
+      end
+    end
+  end
+  sup = Supervisor.start (list {:w &worker :permanent})
+  up = tagged-up :w
+  Supervisor.stop sup |> assert-eq :ok
+  cleaned = receive do
+    {:cleaned p} -> p
+    after 2000 -> :timeout
+  end
+  cleaned |> assert-eq up
+end
+
+test "a stubborn child is killed after its graceful window" do
+  parent = self
+  stubborn = fn do
+    trap-exit :true
+    send parent {:up :s (self)}
+    receive do
+      :__idle -> :ok
+      after 60000 -> :ok
+    end
+  end
+  sup = Supervisor.start (list {:s &stubborn :temporary 50})
+  _s = tagged-up :s
+  Supervisor.stop sup |> assert-eq :ok
+end
+
+test "a supervisor does not outlive its parent" do
+  tester = self
+  root = spawn (fn do
+    worker = fn do
+      send tester {:up :c (self)}
+      receive do
+      :__idle -> :ok
+      after 60000 -> :ok
+    end
+    end
+    sup = Supervisor.start (list {:c &worker :permanent})
+    send tester {:tree sup}
+    receive do
+      :die -> :ok
+      after 60000 -> :ok
+    end
+  end)
+  cpid = up-pid
+  sup = receive do
+    {:tree s} -> s
+    after 2000 -> :timeout
+  end
+  cref = monitor cpid
+  sref = monitor sup
+  send root :die
+  both-down cref sref 0 |> assert-eq :both
+end
+
+test "one_for_all restarts every child when one dies" do
+  parent = self
+  make = fn tag -> fn do
+    send parent {:up tag (self)}
+    receive do
+      :crash -> error :boom
+      after 60000 -> :ok
+    end
+  end
+  a = make :a
+  b = make :b
+  sup = Supervisor.start (list {:a &a :permanent} {:b &b :permanent}) :one-for-all 5 5000
+  a1 = tagged-up :a
+  b1 = tagged-up :b
+  send a1 :crash
+  a2 = tagged-up :a
+  b2 = tagged-up :b
+  eq? a1 a2 |> assert-eq :false
+  eq? b1 b2 |> assert-eq :false
+  Supervisor.stop sup |> assert-eq :ok
+end
+
+test "rest_for_one restarts the failed child and those started after it" do
+  parent = self
+  make = fn tag -> fn do
+    send parent {:up tag (self)}
+    receive do
+      :crash -> error :boom
+      after 60000 -> :ok
+    end
+  end
+  a = make :a
+  b = make :b
+  c = make :c
+  sup = Supervisor.start (list {:a &a :permanent} {:b &b :permanent} {:c &c :permanent}) :rest-for-one 5 5000
+  a1 = tagged-up :a
+  b1 = tagged-up :b
+  c1 = tagged-up :c
+  send b1 :crash
+  b2 = tagged-up :b
+  c2 = tagged-up :c
+  eq? b1 b2 |> assert-eq :false
+  eq? c1 c2 |> assert-eq :false
+  quiet-on :a |> assert-eq :quiet
+  Supervisor.stop sup |> assert-eq :ok
+end
+
+test "simple_one_for_one starts and restarts dynamic children" do
+  parent = self
+  tmpl = fn tag -> do
+    send parent {:up tag (self)}
+    receive do
+      :crash -> error :boom
+      after 60000 -> :ok
+    end
+  end
+  sup = Supervisor.start {:worker &tmpl :permanent} :simple-one-for-one 5 5000
+  {:ok p1} = Supervisor.start-child sup (list :x)
+  {:ok _p2} = Supervisor.start-child sup (list :y)
+  Supervisor.count sup |> assert-eq 2
+  _u1 = up-pid
+  _u2 = up-pid
+  send p1 :crash
+  np = up-pid
+  eq? np p1 |> assert-eq :false
+  pid? np |> assert-eq :true
+  Supervisor.stop sup |> assert-eq :ok
+end

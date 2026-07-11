@@ -1,0 +1,193 @@
+use std/port with [port-read port-write]
+use std/string
+use std/test
+import std/cmd as Cmd
+activate Test
+
+printf-ok-graph = Cmd.command (list "printf" "ok") (Cmd.stdio :null :null :null)
+printf-ok-pipe-graph = Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
+cat-graph = Cmd.command (list "cat") (Cmd.stdio :pipe :pipe :null)
+
+tuple2-msg = {1 2}
+str1k-msg = repeat "x" 1024
+
+defn mklist do
+  acc 0 -> acc
+  acc n -> mklist (cons n acc) (sub n 1)
+end
+list256-msg = mklist '() 256
+
+defn ponger -> receive do
+  {:ping from} -> do
+    send from :pong
+    ponger
+  end
+  :stop -> :ok
+end
+
+defn noise-flood do
+  _pid 0 -> :ok
+  pid k -> do
+    send pid {:noise}
+    noise-flood pid (sub k 1)
+  end
+end
+
+defn send-pings do
+  '() -> :ok
+  '(p . rest) -> do
+    send p {:ping self}
+    send-pings rest
+  end
+end
+
+defn recv-pongs do
+  acc 0 -> acc
+  acc k -> receive do
+    :pong -> recv-pongs (add acc 1) (sub k 1)
+  end
+end
+
+defn spawn-pongers do
+  acc 0 -> acc
+  acc k -> spawn-pongers (cons (spawn (fn -> ponger)) acc) (sub k 1)
+end
+
+defn fill-self do
+  0 -> :ok
+  k -> do
+    send self {:m}
+    fill-self (sub k 1)
+  end
+end
+
+defn drain-self do
+  acc 0 -> acc
+  acc k -> receive do
+    {:m} -> drain-self (add acc 1) (sub k 1)
+  end
+end
+
+defn drain-stdout do
+  p acc -> match (port-read p :stdout 8192) do
+    {:data chunk} -> drain-stdout p (acc + (byte-len chunk))
+    :eof -> acc
+  end
+end
+
+pair-peer = spawn (fn -> ponger)
+noisy-peer = spawn (fn -> ponger)
+noise-flood noisy-peer 4096
+peers8 = spawn-pongers '() 8
+idler = spawn (fn -> receive do :never -> :ok end)
+cat-port = spawn cat-graph
+
+suite "actor-port" do
+  bench "calibrate/empty" expect: :nil do
+    :nil
+  end
+
+  bench "spawn/nop" expect: :ok do
+    spawn (fn -> :ok)
+    :ok
+  end
+
+  bench "send-recv/immediate" expect: 1 do
+    send self {:im}
+    receive do
+      {:im} -> 1
+    end
+  end
+
+  bench "send-recv/copy-tuple2" expect: 1 do
+    send self {:msg tuple2-msg}
+    receive do
+      {:msg _} -> 1
+    end
+  end
+
+  bench "send-recv/copy-str1k" expect: 1 bytes: 1024 do
+    send self {:msg str1k-msg}
+    receive do
+      {:msg _} -> 1
+    end
+  end
+
+  bench "send-recv/copy-list256" expect: 1 do
+    send self {:msg list256-msg}
+    receive do
+      {:msg _} -> 1
+    end
+  end
+
+  bench "pingpong/1pair" expect: 1 do
+    send pair-peer {:ping self}
+    receive do
+      :pong -> 1
+    end
+  end
+
+  bench "pingpong/behind-4096" expect: 1 do
+    send noisy-peer {:ping self}
+    receive do
+      :pong -> 1
+    end
+  end
+
+  bench "pingpong/8pairs" expect: 8 ops: 8 do
+    send-pings peers8
+    recv-pongs 0 8
+  end
+
+  bench "mailbox/drain-1k" expect: 1000 ops: 1000 do
+    fill-self 1000
+    drain-self 0 1000
+  end
+
+  bench "mailbox/drain-4k" expect: 4096 ops: 4096 do
+    fill-self 4096
+    drain-self 0 4096
+  end
+
+  bench "mailbox/drain-16k" expect: 16384 ops: 16384 do
+    fill-self 16384
+    drain-self 0 16384
+  end
+
+  bench "monitor/mon-demon" expect: :ok do
+    demonitor (monitor idler)
+  end
+
+  bench "monitor/spawn-monitor-down" expect: 1 do
+    {_pid ref} = spawn-monitor (fn -> 1)
+    receive do
+      {:down r _p :normal} when (eq? r ref) -> 1
+    end
+  end
+
+  bench "port/launch-null-churn" expect: 1 do
+    p = spawn printf-ok-graph
+    ref = monitor p
+    receive do
+      {:down r target :normal} when (and (eq? r ref) (eq? target p)) -> 1
+    end
+  end
+
+  bench "port/pipe-drain-churn" expect: :true do
+    p = spawn printf-ok-pipe-graph
+    ref = monitor p
+    receive do
+      {:down r target :normal} when (and (eq? r ref) (eq? target p)) -> :down
+    end
+    drain-stdout p 0 |> eq? 2
+  end
+
+  bench "port/write-read-live" expect: 1 do
+    port-write cat-port "x"
+    match (port-read cat-port :stdout 1) do
+      {:data "x"} -> 1
+      _ -> 0
+    end
+  end
+end
+:ok

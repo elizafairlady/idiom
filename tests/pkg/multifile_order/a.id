@@ -1,0 +1,9 @@
+package multifile_order
+
+export defn flip xs -> List.reverse xs
+
+export defn call-later x -> later x
+
+first = add second 1
+
+export defn initialized -> first

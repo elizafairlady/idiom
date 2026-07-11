@@ -1,0 +1,272 @@
+use std/test
+activate Test
+
+defn parse-ip %<version:4 ihl:4 . rest> -> {version ihl (bits-len rest)}
+
+defn classify %<0:8 . rest> -> {:zero (bits-len rest)}
+defn classify %<255:8 . rest> -> {:ff (bits-len rest)}
+defn classify %<n:8 . rest> -> {:other n (bits-len rest)}
+
+defn route %<"GET " . path> -> {:get (bits-string path)}
+defn route %<"PUT " . path> -> {:put (bits-string path)}
+defn route _ -> :unknown
+
+defn parse-tlv %<tag:8 len:8 v:(len * 8)/bits . rest> -> {tag len (bits-string v) (bits-len rest)}
+
+defn sized w -> match %<5:8> do
+  %<v:w> -> v
+  _ -> :no
+end
+
+suite do
+  test "all-literal segments build a constant bitstring" do
+    %<72 101 108> |> inspect |> assert-eq "%<72 101 108>"
+    eq? %<72 101 108> (string-bits "Hel") |> assert
+    %<5:3> |> inspect |> assert-eq "%<5:3>"
+    %<> |> inspect |> assert-eq "%<>"
+    %<72 3:3> |> inspect |> assert-eq "%<72 3:3>"
+    bits-len %<> |> assert-eq 0
+  end
+
+  test "inspect output reads back as an equal literal" do
+    b = string-bits "Hel"
+    inspect b |> assert-eq "%<72 101 108>"
+    eq? %<72 101 108> b |> assert
+    part = bits-of-int 5 3 :big
+    inspect part |> assert-eq "%<5:3>"
+    eq? %<5:3> part |> assert
+  end
+
+  test "endian and sign options" do
+    %<255:8/little,signed> |> bits-int 0 8 :signed |> assert-eq -1
+    %<255:8/signed> |> bits-int 0 8 :signed |> assert-eq -1
+    %<5:11/little> |> bits-int 0 11 :little |> assert-eq 5
+    %<5:11/little> |> bits-int 0 11 :big |> assert-eq 40
+  end
+
+  test "float segments are IEEE754" do
+    %<1.5:64/float> |> inspect |> assert-eq "%<63 248 0 0 0 0 0 0>"
+    %<1.5:32/float> |> bits-float 0 32 :big |> assert-eq 1.5
+    %<1.5:64/little,float> |> bits-float 0 64 :little |> assert-eq 1.5
+  end
+
+  test "string literal segment and splices" do
+    %<"GET "> |> bits-string |> assert-eq "GET "
+    hdr = string-bits "AB"
+    %<hdr/bits 33> |> bits-string |> assert-eq "AB!"
+    x = %<3:8>
+    %<x/bits x/bits> |> bits-len |> assert-eq 16
+  end
+
+  test "defn head pattern extracts sub-byte fields" do
+    packet = bits-append %<4:4 5:4> (string-bits "payload")
+    parse-ip packet |> assert-eq {4 5 56}
+  end
+
+  test "literal segments dispatch across clauses" do
+    classify %<0 9 9> |> assert-eq {:zero 16}
+    classify %<255 9> |> assert-eq {:ff 8}
+    classify %<7> |> assert-eq {:other 7 0}
+  end
+
+  test "string literal segments dispatch and bind the rest" do
+    route (string-bits "GET /index") |> assert-eq {:get "/index"}
+    route (string-bits "PUT /x") |> assert-eq {:put "/x"}
+    route (string-bits "ZAP /x") |> assert-eq :unknown
+  end
+
+  test "fn literal pattern" do
+    add-bytes = fn %<a:8 b:8> -> add a b
+    add-bytes %<10 20> |> assert-eq 30
+  end
+
+  test "match pattern binds sub-byte flags" do
+    got = match %<1:1 42:7> do
+      %<flag:1 code:7> -> {flag code}
+      _ -> :no
+    end
+    got |> assert-eq {1 42}
+  end
+
+  test "receive clause pattern" do
+    self-pid = self
+    send self-pid %<9 8 7>
+    got = receive do
+      %<a:8 b:8 c:8> -> {a b c}
+    end
+    got |> assert-eq {9 8 7}
+  end
+
+  test "nested in a tuple pattern hoists the guard" do
+    got = match {:packet (string-bits "AB")} do
+      {:packet %<a:8 . rest>} -> {a (bits-string rest)}
+      _ -> :no
+    end
+    got |> assert-eq {65 "B"}
+  end
+
+  test "trailing rest is a zero-copy view" do
+    got = match (string-bits "ABCD") do
+      %<h:8 . tl> -> {h (bits-len tl)}
+    end
+    got |> assert-eq {65 24}
+  end
+
+  test "size feasibility falls through to the catchall" do
+    got = match %<1:4> do
+      %<a:8> -> a
+      _ -> :short
+    end
+    got |> assert-eq :short
+  end
+
+  test "wildcard segment advances the offset without binding" do
+    got = match %<1:4 2:4> do
+      %<_:4 low:4> -> low
+    end
+    got |> assert-eq 2
+  end
+
+  test "dependent sizes parse a length-prefixed payload" do
+    msg = bits-append %<1 3> (string-bits "abcXYZ")
+    parse-tlv msg |> assert-eq {1 3 "abc" 24}
+  end
+
+  test "a sibling binder sizes the next segment" do
+    got = match %<2:8 3:2> do
+      %<len:8 v:len> -> {len v}
+      _ -> :no
+    end
+    got |> assert-eq {2 3}
+  end
+
+  test "an infeasible dependent size falls through" do
+    got = match %<1 200 65> do
+      %<_t:8 len:8 v:(len * 8)/bits . _r> -> {:len len}
+      _ -> :short
+    end
+    got |> assert-eq :short
+  end
+
+  test "dynamic sizes must be non-negative ints or the clause fails" do
+    sized 8 |> assert-eq 5
+    sized 1.5 |> assert-eq :no
+    sized -3 |> assert-eq :no
+  end
+
+  test "a binder from an earlier parameter sizes a later one" do
+    pair = fn %<n:8> %<v:n> -> {n v}
+    pair %<3> %<5:3> |> assert-eq {3 5}
+  end
+
+  test "duplicate binders unify instead of shadowing" do
+    same = fn b -> match b do
+      %<a:8 a:8> -> {:eq a}
+      _ -> :ne
+    end
+    same %<5 5> |> assert-eq {:eq 5}
+    same %<5 6> |> assert-eq :ne
+  end
+
+  test "a nested clause inside a segment size expands safely" do
+    got = match %<7:8 9:8> do
+      %<a:(match %<8:8> do %<n:8> -> n end) b:8> -> {a b}
+      _ -> :no
+    end
+    got |> assert-eq {7 9}
+  end
+
+  test "a sole bare splice keeps the bitstring type check" do
+    x = %<3:8>
+    %<x/bits> |> bits? |> assert
+    eq? %<x/bits> x |> assert
+    %<. x> |> bits? |> assert
+    send (self) 5
+    five = receive do
+      v -> v
+    end
+    assert-raises (fn -> %<five/bits>) |> assert-eq {:error {:type-error :bits-len 5}}
+    assert-raises (fn -> %<72 . five>) |> assert-eq {:error {:type-error :bits-len 5}}
+  end
+
+  test "a bitstring pattern binds on the left of '='" do
+    %<x:8 y:8> = %<65 66>
+    {x y} |> assert-eq {65 66}
+    %<h:8 . rest> = string-bits "ABC"
+    {h (bits-string rest)} |> assert-eq {65 "BC"}
+    %<n:8 v:(n * 8)/bits . _> = bits-append %<2> (string-bits "hi!")
+    bits-string v |> assert-eq "hi"
+  end
+
+  test "a package-level bitstring '=' binding compiles" do
+    assert-compiles "package p\n%<hi:4 lo:4> = %<4:4 5:4>\nexport defn nibbles -> {hi lo}\n"
+  end
+
+  test "a failed bitstring '=' binding raises" do
+    got = assert-raises (fn do
+      -> do
+        %<_a:8 _b:8> = %<7>
+        :unreachable
+      end
+    end)
+    tuple-get got 0 |> assert-eq :error
+  end
+
+  test "conflicting segment options raise" do
+    assert-raises (fn -> %<5:8/big,little>) |> assert-eq {:error {:runtime "bits-of-int endianness is set twice"}}
+    assert-raises (fn -> bits-of-int 5 8 '(:little :signed :unsigned)) |> assert-eq {:error {:runtime "bits-of-int signedness is set twice"}}
+  end
+end
+
+suite "bitstring surface diagnostics" do
+  test "reader rejects an unterminated literal" do
+    assert-expand-error "x = %<72 101" "unterminated bitstring literal, expected closing '>'"
+  end
+
+  test "rest may contain only one dot" do
+    assert-expand-error "x = %<a:8 . b . c>" "bitstring rest pattern may contain only one dot"
+  end
+
+  test "rest must be the final segment" do
+    assert-expand-error "x = %<a:8 . b c:8>" "bitstring rest pattern must have form %<seg ... . rest>"
+  end
+
+  test "unknown option is rejected with its name" do
+    assert-expand-error "x = %<5:8/weird>" "unknown bitstring option 'weird'"
+  end
+
+  test "a bare bits segment in a pattern needs a size" do
+    assert-expand-error "defn f %<x/bits> -> x" "bitstring pattern segment requires a size"
+  end
+
+  test "a float segment always needs a size" do
+    assert-expand-error "defn f %<x/float> -> x" "bitstring float segment requires a size"
+  end
+
+  test "a pattern segment is a binder or a literal" do
+    assert-expand-error "defn f %<(add 1 2):8> -> :x" "bitstring pattern segment must be a binder or a literal"
+  end
+
+  test "a user guard sees segment binders like any pattern binder" do
+    classify = fn b -> match b do
+      %<a:8> when (gt? a 9) -> {:big a}
+      %<a:8> -> {:small a}
+      _ -> :none
+    end
+    classify %<200:8> |> assert-eq {:big 200}
+    classify %<3:8> |> assert-eq {:small 3}
+  end
+
+  test "a size cannot reference a later binder" do
+    assert-expand-error "defn f %<v:len len:8> -> v" "unbound identifier 'len'"
+  end
+
+  test "a negative literal size is rejected" do
+    assert-expand-error "defn f %<v:-3> -> v" "bitstring segment size must be non-negative"
+  end
+
+  test "a bitstring spec is honoured" do
+    assert-compiles "package p\nspec bit-width :: bitstring -> int\nexport defn bit-width b -> bits-len b\nexport defn probe -> bit-width %<5:3>\n"
+    assert-expand-error "package p\nspec bit-width :: bitstring -> int\nexport defn bit-width b -> bits-len b\nexport defn oops -> bit-width 7\n" "type mismatch for 'bit-width': expected bitstring, got int"
+  end
+end

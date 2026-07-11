@@ -1,0 +1,209 @@
+use std/test
+use std/port with [port-read port-write port-close-input]
+use std/file with [open! close read-port write-port-all read!]
+use std/system with [cd pwd env-set env-get]
+import std/cmd as Cmd
+import std/supervisor as Supervisor
+import std/path as P
+
+activate Test
+
+defn drain do
+  p chan acc -> match (port-read p chan 4096) do
+    {:data chunk} -> drain p chan "${acc}${chunk}"
+    :eof -> acc
+  end
+end
+
+defn read-all p -> drain p :stdout ""
+
+defn down-reason do
+  p ref -> receive do
+    {:down r t reason} when (and (eq? r ref) (eq? t p)) -> reason
+    after 3000 -> :timeout
+  end
+end
+
+defn reason-of graph -> do
+  p = spawn graph
+  ref = monitor p
+  down-reason p ref
+end
+
+defn watch do
+  ref n -> receive do
+    {:attempt _pid} -> watch ref (n + 1)
+    {:down r _p reason} when (eq? r ref) -> {n reason}
+    after 2000 -> {n :timeout}
+  end
+end
+
+suite "tutorial/ch08 the world is also an actor" do
+  test "a command graph is plain data" do
+    g = Cmd.command (list "printf" "hi") (Cmd.stdio :null :pipe :null)
+    inspect g |> assert-eq "{:exec {:stage ({:lit \"printf\"} {:lit \"hi\"}) :nil :nil} {:stdio :null :pipe :null}}"
+  end
+
+  test "spawn a process and monitor its death like any actor" do
+    got = reason-of (Cmd.command (list "true") (Cmd.stdio :null :null :null))
+    got |> assert-eq :normal
+  end
+
+  test "port-read loops to eof" do
+    p = spawn Cmd.command (list "echo" "hello, world") (Cmd.stdio :null :pipe :null)
+    read-all p |> assert-eq "hello, world\n"
+  end
+
+  test "port-write feeds a process stdin" do
+    p = spawn Cmd.command (list "tr" "a-z" "A-Z") (Cmd.stdio :pipe :pipe :null)
+    port-write p "shout this" |> assert-eq {:wrote 10}
+    port-close-input p
+    read-all p |> assert-eq "SHOUT THIS"
+  end
+
+  test "stderr is its own channel" do
+    p = spawn Cmd.command (list "sh" "-c" "echo oops >&2") (Cmd.stdio :null :null :pipe)
+    drain p :stderr "" |> assert-eq "oops\n"
+  end
+
+  test "exit codes arrive in the down reason" do
+    one = reason-of (Cmd.command (list "false") (Cmd.stdio :null :null :null))
+    one |> assert-eq {:exit-code 1}
+    seven = reason-of (Cmd.command (list "sh" "-c" "exit 7") (Cmd.stdio :null :null :null))
+    seven |> assert-eq {:exit-code 7}
+    missing = reason-of (Cmd.command (list "no-such-program-xyz") (Cmd.stdio :null :null :null))
+    missing |> assert-eq {:exit-code 127}
+  end
+
+  test "kill a process and unix answers 137" do
+    p = spawn Cmd.command (list "sleep" "60") (Cmd.stdio :null :null :null)
+    ref = monitor p
+    exit p :kill
+    down-reason p ref |> assert-eq {:exit-code 137}
+  end
+
+  test "pipelines connect stages" do
+    stages = list (Cmd.stage (list "printf" "wide load")) (Cmd.stage (list "tr" "a-z" "A-Z"))
+    p = spawn Cmd.pipeline stages (Cmd.stdio :null :pipe :null)
+    read-all p |> assert-eq "WIDE LOAD"
+  end
+
+  test "pipeline swallows early failure unless pipefail" do
+    broken = list (Cmd.stage (list "sh" "-c" "exit 7")) (Cmd.stage (list "true"))
+    lax = reason-of (Cmd.pipeline broken (Cmd.stdio :null :null :null))
+    lax |> assert-eq :normal
+    strict = reason-of (Cmd.pipefail broken (Cmd.stdio :null :null :null))
+    strict |> assert-eq {:exit-code 7}
+  end
+
+  test "env words resolve from the actor environment" do
+    env-set "CH08_WHO" "chameleon"
+    p = spawn Cmd.command (list "printf" "%s" (Cmd.var "CH08_WHO")) (Cmd.stdio :null :pipe :null)
+    read-all p |> assert-eq "chameleon"
+  end
+
+  test "malformed graphs are rejected before launch" do
+    bad = assert-raises (fn -> spawn (Cmd.command (list (Cmd.lit 42)) (Cmd.stdio :null :null :null)))
+    bad |> assert-eq {:error {:runtime "invalid command stage"}}
+  end
+
+  test "cwd and env are actor state" do
+    home = pwd
+    cd "/tmp"
+    pwd |> assert-eq "/tmp"
+    env-set "CH08_MOOD" "sunny"
+    env-get "CH08_MOOD" |> assert-eq "sunny"
+    env-get "CH08_NO_SUCH_VAR" |> assert-eq :nil
+    p = spawn Cmd.command (list "sh" "-c" "pwd") (Cmd.stdio :null :pipe :null)
+    read-all p |> assert-eq "/tmp\n"
+    cd home
+  end
+
+  test "children inherit cwd but changes never leak back" do
+    parent = self
+    before = pwd
+    spawn (fn do
+      cd "/tmp"
+      send parent {:child-pwd (pwd)}
+    end)
+    got = receive do
+      {:child-pwd d} -> d
+      after 1000 -> :timeout
+    end
+    got |> assert-eq "/tmp"
+    pwd |> assert-eq before
+  end
+
+  test "file ports read and write in chunks" do
+    path = "/tmp/idiom_ch08_lines.txt"
+    w = open! path :write
+    write-port-all w "one\ntwo\nthree\n" |> assert-eq {:ok 14}
+    close w
+    p = open! path :read
+    read-port p 7 |> assert-eq {:data "one\ntwo"}
+    read-port p 4096 |> assert-eq {:data "\nthree\n"}
+    read-port p 4096 |> assert-eq :eof
+    close p
+    read! path |> assert-eq "one\ntwo\nthree\n"
+  end
+
+  test "a file port is not a process" do
+    p = open! "/tmp/idiom_ch08_lines.txt" :read
+    m = assert-raises (fn -> monitor p)
+    m |> assert-eq {:error {:runtime "monitor expects a process"}}
+    l = assert-raises (fn -> link p)
+    l |> assert-eq {:error {:runtime "link expects a process"}}
+    e = assert-raises (fn -> exit p :shutdown)
+    e |> assert-eq {:error {:runtime "exit expects a process"}}
+    close p
+  end
+
+  test "path helpers are lexical only" do
+    P.join "docs" "tutorial/ch08.md" |> assert-eq "docs/tutorial/ch08.md"
+    P.join "docs/" "ch08.md" |> assert-eq "docs/ch08.md"
+    P.dirname "/a/b/pkg.id" |> assert-eq "/a/b"
+    P.basename "/a/b/pkg.id" |> assert-eq "pkg.id"
+    P.extname "pkg.id" |> assert-eq ".id"
+    P.extname "Makefile" |> assert-eq ""
+    P.absolute? "std/path" |> assert-eq :false
+  end
+
+  test "a supervisor restarts a permanent child with a fresh pid" do
+    parent = self
+    worker = fn do
+      send parent {:hello self}
+      receive do
+        :crash -> error :kaboom
+        :retire -> :ok
+        after 5000 -> :ok
+      end
+    end
+    sup = Supervisor.start (list {:greeter &worker :permanent})
+    first = receive do
+      {:hello pid} -> pid
+      after 1000 -> :timeout
+    end
+    send first :crash
+    second = receive do
+      {:hello pid} -> pid
+      after 1000 -> :timeout
+    end
+    eq? first second |> assert-eq :false
+    pid? second |> assert-eq :true
+    Supervisor.count sup |> assert-eq 1
+    Supervisor.stop sup |> assert-eq :ok
+  end
+
+  test "restart intensity gives up loudly" do
+    trap-exit :true
+    parent = self
+    hopeless = fn do
+      send parent {:attempt self}
+      error :kaboom
+    end
+    sup = Supervisor.start (list {:doomed &hopeless :permanent}) 3 5000
+    ref = monitor sup
+    watched = watch ref 0
+    watched |> assert-eq {4 {:shutdown :max-restart-intensity}}
+  end
+end

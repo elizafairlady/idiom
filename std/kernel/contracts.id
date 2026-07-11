@@ -1,0 +1,141 @@
+package kernel
+
+export trait Number do
+  method number? x -> :true
+  method neg a -> neg a
+  operator "+" precedence: 50 assoc: left capture: :infix a b -> add a b
+  operator "-" precedence: 50 assoc: left capture: :infix a b -> sub a b
+  operator "*" precedence: 60 assoc: left capture: :infix a b -> mul a b
+  operator "/" precedence: 60 assoc: left capture: :infix a b -> div a b
+  operator "**" precedence: 70 assoc: right capture: :infix a b -> pow a b
+  operator "-" precedence: 80 capture: :prefix -> neg
+end
+
+implement Number on int
+implement Number on float
+
+export trait Integer do
+  require Number
+  method integer? x -> :true
+  operator "%" precedence: 60 assoc: left capture: :infix a b -> mod a b
+  operator "//" precedence: 60 assoc: left capture: :infix a b -> floor-div a b
+  operator "%%" precedence: 60 assoc: left capture: :infix a b -> floor-mod a b
+end
+
+implement Integer on int
+
+export trait Eq do
+  operator "==" precedence: 30 assoc: left capture: :infix a b -> eq? a b
+  operator "!=" precedence: 30 assoc: left capture: :infix a b -> neq? a b
+end
+
+implement Eq on nil
+implement Eq on atom
+implement Eq on word
+implement Eq on int
+implement Eq on float
+implement Eq on string
+implement Eq on empty-list
+implement Eq on pair
+implement Eq on tuple
+implement Eq on vector
+implement Eq on dict
+implement Eq on bitstring
+implement Eq on pid
+implement Eq on ref
+implement Eq on port
+implement Eq on record
+
+export trait Ord do
+  require Eq
+  operator "<" precedence: 30 assoc: left capture: :infix a b -> eq? (compare a b) :lt
+  operator ">" precedence: 30 assoc: left capture: :infix a b -> eq? (compare a b) :gt
+  operator "<=" precedence: 30 assoc: left capture: :infix a b -> neq? (compare a b) :gt
+  operator ">=" precedence: 30 assoc: left capture: :infix a b -> neq? (compare a b) :lt
+end
+
+implement Ord on int do
+  method < a b -> lt? a b
+  method > a b -> gt? a b
+  method <= a b -> lte? a b
+  method >= a b -> gte? a b
+end
+
+implement Ord on float do
+  method < a b -> lt? a b
+  method > a b -> gt? a b
+  method <= a b -> lte? a b
+  method >= a b -> gte? a b
+end
+
+implement Ord on string
+implement Ord on atom
+implement Ord on empty-list
+implement Ord on pair
+implement Ord on tuple
+implement Ord on vector
+implement Ord on dict
+implement Ord on bitstring
+
+export trait Length do
+  method length x
+end
+
+implement Length on string do
+  method length s -> seq-count s
+end
+
+implement Length on empty-list do
+  method length _x -> 0
+end
+
+implement Length on pair do
+  method length x -> seq-count x
+end
+
+implement Length on tuple do
+  method length x -> seq-count x
+end
+
+implement Length on vector do
+  method length x -> seq-count x
+end
+
+implement Length on dict do
+  method length d -> dict-size d
+end
+
+implement Length on bitstring do
+  method length b -> bits-len b
+end
+
+export trait Index do
+  method at x key
+end
+
+implement Index on tuple do
+  method at x i -> tuple-get x i
+end
+
+implement Index on vector do
+  method at x i -> seq-nth x i
+end
+
+implement Index on dict do
+  method at d key -> dict-get d key :nil
+end
+
+export trait Show do
+  method show x -> str x
+end
+
+implement Show on int
+implement Show on float
+implement Show on string
+implement Show on atom
+implement Show on empty-list
+implement Show on pair
+implement Show on tuple
+implement Show on vector
+implement Show on dict
+implement Show on bitstring

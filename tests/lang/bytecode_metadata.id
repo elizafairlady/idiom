@@ -1,0 +1,89 @@
+use std/test
+use tests/pkg/bytecode_shape
+activate Test
+
+suite do
+  test "package-variable-width-bytecode-relocates" do
+    p = Packet :sum 10 32
+    p |> Packet? |> assert
+    p.tag |> assert-eq :sum
+    p.left |> assert-eq 10
+    p.right |> assert-eq 32
+  end
+
+  test "relocated-multi-closures-dispatch" do
+    f = selector 40
+    f 0 |> assert-eq 40
+    f 1 |> assert-eq 41
+    f 2 |> assert-eq 42
+  end
+
+  test "relocated-match-payloads-dispatch" do
+    score {3 4} |> assert-eq 7
+    score [1 2 3] |> assert-eq 6
+    score :other |> assert-eq 0
+    classify 0 |> assert-eq :zero
+    classify 9 |> assert-eq :positive
+    classify -1 |> assert-eq :negative
+  end
+
+  test "local-recursive-cells-dispatch" do
+    local-parity 0 |> assert-eq :even
+    local-parity 7 |> assert-eq :odd
+    local-parity 10 |> assert-eq :even
+  end
+
+  test "tail calls reinstall frame registers" do
+    tail-register-sum 0 0 |> assert-eq 0
+    tail-register-sum 5 0 |> assert-eq 15
+    tail-register-sum 9 3 |> assert-eq 48
+  end
+
+  test "captured-single-closure-dispatch" do
+    add9 = captured-adder 9
+    add9 33 |> assert-eq 42
+  end
+
+  test "bignum constants use limb bytecode encoding" do
+    big = 9223372036854775808
+    big |> assert-inspect "9223372036854775808"
+    big + 1 |> assert-inspect "9223372036854775809"
+    syntax-int-value %'9223372036854775808 |> assert-inspect "9223372036854775808"
+  end
+
+  test "quasiquote-list-cons-and-splice-dispatch" do
+    quasi-list '(2 3) 1 |> assert-inspect "(head 1 2 3 tail)"
+  end
+
+  test "quasiquote-value-sequences-dispatch" do
+    quasi-vector 2 |> assert-eq [1 2 3]
+    quasi-tuple 2 |> assert-eq {1 2 3}
+    quasi-dict 5 |> assert-eq %{:n 5 :x 1}
+  end
+
+  test "runtime-quasisyntax-builds-syntax" do
+    match syntax-form do
+      %`(add %,a %,b) -> {(syntax-int-value a) (syntax-int-value b)}
+      _ -> :bad
+    end |> assert-eq {1 2}
+    syntax-body |> syntax? |> assert
+  end
+
+  test "syntax-wire-codec-covers-value-and-pattern-kinds" do
+    syntax-value-matrix |> assert-inspect "[:nil \"syntax_word\" \"syntax-atom\" 42 9223372036854775808 3.5 \"syntax-string\" 2 2 2 2]"
+    syntax-pattern-matrix |> assert-eq [:word :atom :int :bigint :float :string :list :vector :tuple :dict :nonlinear-same :nonlinear-diff "(#<syntax> #<syntax> #<syntax>)" 1]
+    syntax-wire-ok |> assert
+  end
+
+  test "string-interpolation-dispatch" do
+    interpolated "sum" 42 |> assert-eq "sum:42"
+  end
+
+  test "receive-timeout-dispatch" do
+    receive-timeout |> assert-eq :timeout
+  end
+
+  test "ensure-reraises-through-guard-opcode" do
+    ensure-reraises :boom |> assert-eq :boom
+  end
+end

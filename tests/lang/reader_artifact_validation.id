@@ -1,0 +1,20 @@
+use std/test
+activate Test
+
+suite do
+  test "reader artifact rejects nullable repeat after reduction compile" do
+    assert-expand-error "package bad_reader_nullable_repeat\ncore-grammar BadReaderNullableRepeat :exclusive [\n  {:token ident {:regex \"[A-Za-z]+\"} {:capture ident}}\n  {:form empty {:empty} {:emit-list []}}\n  {:form program {:repeat {:ref empty}} {:emit-form \"%-package-begin\" []}}\n]\n" "can match empty input"
+  end
+
+  test "reader artifact detects left recursion through nullable prefix" do
+    assert-expand-error "package bad_reader_left_recursion\ncore-grammar BadReaderLeftRecursion :exclusive [\n  {:token ident {:regex \"[A-Za-z]+\"} {:capture ident}}\n  {:form program {:seq {:optional {:token ident}} {:ref program}} {:emit-form \"%-package-begin\" []}}\n]\n" "left-recursive"
+  end
+
+  test "reader artifact accepts nonnullable repeated form" do
+    assert-compiles "package good_reader_repeat\ncore-grammar GoodReaderRepeat :exclusive [\n  {:token ident {:regex \"[A-Za-z]+\"} {:capture ident}}\n  {:form word {:capture ident {:token ident}} {:emit-form \"%-expr\" [{:capture-word ident}]}}\n  {:form program {:repeat {:capture item {:ref word}}} {:emit-form \"%-package-begin\" [{:splice item}]}}\n]\n"
+  end
+
+  test "reader artifact constructor program covers all tail fields" do
+    assert-compiles "use tests/pkg/reader_constructor_artifact\nmain '()\n"
+  end
+end

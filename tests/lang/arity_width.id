@@ -1,0 +1,32 @@
+use std/test
+
+activate Test
+
+defn many do
+  -> 0
+  _a -> 1
+  _a _b -> 2
+  _a _b _c -> 3
+  _a _b _c _d -> 4
+  _a _b _c _d _e -> 5
+  _a _b _c _d _e _f -> 6
+  _a _b _c _d _e _f _g -> 7
+  _a _b _c _d _e _f _g _h -> 8
+  _a _b _c _d _e _f _g _h _i -> 9
+  _a _b _c _d _e _f _g _h _i _j -> 10
+  _a _b _c _d _e _f _g _h _i _j _k -> 11
+  _a _b _c _d _e _f _g _h _i _j _k _l -> 12
+  _a _b _c _d _e _f _g _h _i _j _k _l _m -> 13
+  _a _b _c _d _e _f _g _h _i _j _k _l _m _n -> 14
+  _a _b _c _d _e _f _g _h _i _j _k _l _m _n _o -> 15
+  _a _b _c _d _e _f _g _h _i _j _k _l _m _n _o _p -> 16
+  _a _b _c _d _e _f _g _h _i _j _k _l _m _n _o _p _q -> 17
+end
+
+suite "inference has no arity ceiling" do
+  test "eighteen distinct arities all infer and dispatch" do
+    many |> assert-eq 0
+    (many 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16) |> assert-eq 16
+    (many 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17) |> assert-eq 17
+  end
+end

@@ -1,0 +1,100 @@
+use std/test
+use std/string
+import std/edit as Edit
+import std/list as List
+
+activate Test
+
+defn feed do
+  state '() -> state
+  state '(k . t) -> match (Edit.step state k) do
+    {_tag st} -> feed st t
+  end
+end
+
+defn typed text -> text |> runes-lossy |> List.map (fn r -> {:char (rune-str r)})
+
+suite "std/edit is a pure editor" do
+  test "typing inserts at the cursor" do
+    st = feed (Edit.new "> ") (typed "hello")
+    Edit.buffer-of st |> assert-eq "hello"
+    Edit.cursor-of st |> assert-eq 5
+  end
+
+  test "home, end, and arrows move by rune" do
+    st = feed (Edit.new "> ") (typed "héllo")
+    st2 = feed st (list :c-a)
+    Edit.cursor-of st2 |> assert-eq 0
+    st3 = feed st2 (list :right :right)
+    Edit.cursor-of st3 |> assert-eq 3
+    st4 = feed st3 (list :c-e)
+    Edit.cursor-of st4 |> assert-eq 6
+  end
+
+  test "backspace deletes the rune before the cursor" do
+    st = feed (Edit.new "> ") (typed "héllo")
+    st2 = feed st (list :backspace :backspace)
+    Edit.buffer-of st2 |> assert-eq "hél"
+  end
+
+  test "kill to line end and yank round-trip" do
+    st = feed (Edit.new "> ") (typed "hello world")
+    st2 = feed st (list :c-a :c-k)
+    Edit.buffer-of st2 |> assert-eq ""
+    st3 = feed st2 (list :c-y :c-y)
+    Edit.buffer-of st3 |> assert-eq "hello worldhello world"
+  end
+
+  test "kill word takes the previous word" do
+    st = feed (Edit.new "> ") (typed "one two three")
+    st2 = feed st (list :c-w)
+    Edit.buffer-of st2 |> assert-eq "one two "
+  end
+
+  test "history walks back and forward" do
+    base = Edit.new "> "
+    st = Edit.push-history (Edit.push-history base "first") "second"
+    st2 = feed st (typed "draft")
+    st3 = feed st2 (list :up)
+    Edit.buffer-of st3 |> assert-eq "second"
+    st4 = feed st3 (list :up)
+    Edit.buffer-of st4 |> assert-eq "first"
+    st5 = feed st4 (list :down :down)
+    Edit.buffer-of st5 |> assert-eq "draft"
+  end
+
+  test "enter submits and c-c cancels" do
+    st = feed (Edit.new "> ") (typed "x")
+    match (Edit.step st :enter) do
+      {tag _} -> tag |> assert-eq :submit
+    end
+    match (Edit.step st :c-c) do
+      {tag _} -> tag |> assert-eq :cancel
+    end
+  end
+
+  test "c-d on empty is eof, otherwise deletes" do
+    match (Edit.step (Edit.new "> ") :c-d) do
+      {tag _} -> tag |> assert-eq :eof
+    end
+    st = feed (Edit.new "> ") (typed "ab")
+    st2 = feed st (list :c-a :c-d)
+    Edit.buffer-of st2 |> assert-eq "b"
+  end
+
+  test "reverse search finds a history entry" do
+    base = Edit.push-history (Edit.push-history (Edit.new "> ") "make bread") "make tea"
+    st = feed base (list :c-r)
+    st2 = feed st (typed "bread")
+    Edit.buffer-of st2 |> assert-eq "make bread"
+  end
+
+  test "render paints prompt, buffer, and continuation rows" do
+    st = feed (Edit.new "> ") (typed "ab")
+    {_st2 out} = Edit.render st
+    contains? out "> ab" |> assert
+    stm = feed (Edit.continue st) (typed "cd")
+    {_st3 out2} = Edit.render stm
+    contains? out2 "...> cd" |> assert
+  end
+end

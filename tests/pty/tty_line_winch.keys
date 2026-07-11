@@ -1,0 +1,8 @@
+w ready
+s hel
+s \x04
+p 30
+r 70 20
+s lo\n
+w got=hello
+w resize-latched

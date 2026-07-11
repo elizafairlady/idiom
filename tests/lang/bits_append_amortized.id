@@ -1,0 +1,43 @@
+use std/test
+use std/system with [total-alloc-bytes]
+activate Test
+
+chunk = bits-of-int 7 256 :big
+
+defn append-chain do
+  acc 0 -> acc
+  acc k -> append-chain (bits-append acc chunk) (sub k 1)
+end
+
+suite do
+  test "append bytes per op stay flat as the chain grows" do
+    b0 = total-alloc-bytes
+    r1 = append-chain %<> 100
+    b1 = total-alloc-bytes
+    r2 = append-chain %<> 800
+    b2 = total-alloc-bytes
+    assert-eq (bits-len r1) 25600
+    assert-eq (bits-len r2) 204800
+    per100 = div (b1 - b0) 100
+    per800 = div (b2 - b1) 800
+    assert (lt? per800 (mul per100 2))
+  end
+
+  test "appends diverging from one base stay independent" do
+    base = bits-append (bits-of-int 1 8 :big) (bits-of-int 2 8 :big)
+    c1 = bits-append base (bits-of-int 170 8 :big)
+    c2 = bits-append base (bits-of-int 85 8 :big)
+    assert-eq (bits-int c1 16 8 :unsigned) 170
+    assert-eq (bits-int c2 16 8 :unsigned) 85
+    assert-eq (bits-len base) 16
+    assert-eq (bits-int base 0 8 :unsigned) 1
+  end
+
+  test "self-append reads its own earlier bits" do
+    z = bits-of-int 3 8 :big
+    s = bits-append (bits-append z z) (bits-append z z)
+    assert-eq (bits-len s) 32
+    assert-eq (bits-int s 24 8 :unsigned) 3
+  end
+end
+:ok

@@ -1,0 +1,99 @@
+use std/test
+use std/system with [time-ms]
+
+activate Test
+
+defn counter n -> receive do
+  {:inc} -> counter (n + 1)
+  {:get from} -> do
+    send from {:count self n}
+    counter n
+  end
+  {:stop} -> :done
+end
+
+suite "tutorial/ch06 mail for a tiny ghost" do
+  test "spawn send receive round trip" do
+    parent = self
+    spawn (fn -> send parent {:pong 7})
+    got = receive do
+      {:pong n} -> {:got n}
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:got 7}
+  end
+
+  test "after 0 polls an empty mailbox" do
+    got = receive do
+      {:never _} -> :bad
+      after 0 -> :empty-mailbox
+    end
+    got |> assert-eq :empty-mailbox
+  end
+
+  test "after really waits" do
+    start = time-ms
+    got = receive do
+      {:never} -> :bad
+      after 50 -> :ok
+    end
+    got |> assert-eq :ok
+    gte? (time-ms - start) 50 |> assert-eq :true
+  end
+
+  test "an actor can mail itself" do
+    me = self
+    send me {:note :hi}
+    got = receive do
+      {:note x} -> x
+      after 100 -> :timeout
+    end
+    got |> assert-eq :hi
+  end
+
+  test "selective receive takes the middle letter first" do
+    me = self
+    send me {:a 1}
+    send me {:b 2}
+    send me {:c 3}
+    mid = receive do
+      {:b n} -> n
+      after 100 -> :timeout
+    end
+    first = receive do
+      m -> m
+      after 100 -> :timeout
+    end
+    second = receive do
+      m -> m
+      after 100 -> :timeout
+    end
+    {mid first second} |> assert-eq {2 {:a 1} {:c 3}}
+  end
+
+  test "counter actor is a tail recursive state machine" do
+    c = spawn (fn -> counter 0)
+    send c {:inc}
+    send c {:inc}
+    send c {:inc}
+    send c {:get self}
+    total = receive do
+      {:count p n} when (eq? p c) -> n
+      after 500 -> :timeout
+    end
+    send c {:stop}
+    total |> assert-eq 3
+  end
+
+  test "pids are values you can compare and inspect" do
+    parent = self
+    p = spawn (fn -> send parent {:iam self})
+    got = receive do
+      {:iam q} -> q
+      after 500 -> :timeout
+    end
+    eq? got p |> assert-eq :true
+    pid? p |> assert-eq :true
+    eq? p parent |> assert-eq :false
+  end
+end

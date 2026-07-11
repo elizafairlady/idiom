@@ -1,0 +1,132 @@
+use std/test
+use std/regex
+use tests/pkg/forward_type_scope
+activate Test
+
+record T01 do
+  field x :: int
+end
+
+record T02 do
+  field x :: int
+end
+
+record T03 do
+  field x :: int
+end
+
+record T04 do
+  field x :: int
+end
+
+record T05 do
+  field x :: int
+end
+
+record T06 do
+  field x :: int
+end
+
+record T07 do
+  field x :: int
+end
+
+record T08 do
+  field x :: int
+end
+
+record T09 do
+  field x :: int
+end
+
+record T10 do
+  field x :: int
+end
+
+record T11 do
+  field x :: int
+end
+
+record T12 do
+  field x :: int
+end
+
+record T13 do
+  field x :: int
+end
+
+record T14 do
+  field x :: int
+end
+
+record T15 do
+  field x :: int
+end
+
+record T16 do
+  field x :: int
+end
+
+record T17 do
+  field x :: int
+end
+
+type Seventeen :: T01 | T02 | T03 | T04 | T05 | T06 | T07 | T08 | T09 | T10 | T11 | T12 | T13 | T14 | T15 | T16 | T17
+
+suite do
+  test "forward type members patch in their own scope only" do
+    forward-scope-check |> assert-eq :ok
+  end
+
+  test "syntax-kind names come from one datum vocabulary" do
+    syntax-kind %'nil |> assert-eq :word
+    syntax-kind %':atom |> assert-eq :atom
+    syntax-kind %'42 |> assert-eq :int
+    syntax-kind %'3.5 |> assert-eq :float
+    syntax-kind %'"x" |> assert-eq :string
+    syntax-kind %'(a b) |> assert-eq :list
+    syntax-kind %'[a b] |> assert-eq :vector
+    syntax-kind %'{a b} |> assert-eq :tuple
+    syntax-kind %'%{:a 1} |> assert-eq :dict
+  end
+
+  test "value predicates route through type-name membership" do
+    nil? :nil |> assert
+    atom? :atom |> assert
+    word? 'word |> assert
+    int? 42 |> assert
+    float? 3.5 |> assert
+    string? "x" |> assert
+    pair? '(1 2) |> assert
+    empty-list? '() |> assert
+    list? '(1 2) |> assert
+    tuple? {1 2} |> assert
+    vector? [1 2] |> assert
+    dict? %{:a 1} |> assert
+    syntax? %'word |> assert
+    closure? (fn x -> x) |> assert
+    pid? self |> assert
+    rx = r"x"
+    rx |> regex? |> assert
+    rx.scan-full "x" |> regex-result? |> assert
+    bits? (string-bits "x") |> assert
+    is-a? '(1 2) :list |> assert
+    is-a? '(1 2) "list" |> assert
+    is-a? '() :empty-list |> assert
+    is-a? 42 :int |> assert
+    is-a? (string-bits "x") :bitstring |> assert
+    is-a? "x" :bitstring |> assert-eq :false
+  end
+
+  test "is-a? rewrites unions past sixteen members" do
+    dyn = fn v -> is-a? v :Seventeen
+    dyn (T17 1) |> assert
+    dyn (T01 1) |> assert
+    dyn (T09 1) |> assert
+    dyn 5 |> assert-eq :false
+  end
+
+  test "is-a? on an unrewritable union is a compile error" do
+    assert-expand-error "type Three :: t01 | t02 | t03\nx = is-a? :t01 :Three" "is-a? cannot compile a runtime type test for type 'Three'"
+  end
+end

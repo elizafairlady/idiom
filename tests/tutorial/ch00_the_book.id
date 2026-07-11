@@ -1,0 +1,13 @@
+use std/test
+
+activate Test
+
+suite "tutorial/ch00 the book" do
+  test "eval's first feeling" do
+    1 + 2 |> assert-eq 3
+  end
+
+  test "run is a program being a program" do
+    "hello, chameleon" |> assert-eq "hello, chameleon"
+  end
+end

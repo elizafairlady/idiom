@@ -1,0 +1,79 @@
+use std/math
+use std/test
+activate Test
+
+defn bench-add x acc -> acc + x
+
+bench-add-f = &bench-add
+
+defn make-adder x -> fn y -> x + y
+
+defn countdown do
+  0 -> :ok
+  n -> countdown (sub n 1)
+end
+
+defn bxor-fold do
+  acc 0 -> acc
+  acc n -> bxor-fold (bit-xor (bit-and acc 4095) (bit-or n 1)) (sub n 1)
+end
+
+defn float-fold do
+  acc 0 -> acc
+  acc n -> float-fold (add acc 0.25) (sub n 1)
+end
+
+big-a = pow 2 200
+big-b = (pow 2 100) + 7
+
+suite "core" do
+  bench "arithmetic/int-add" expect: 3 do
+    1 + 2
+  end
+
+  bench "vm/countdown" expect: :ok do
+    countdown 2000
+  end
+
+  bench "arithmetic/fixnum-bitwise" expect: 2000 ops: 2000 allocs: 0 do
+    bxor-fold 0 2000
+  end
+
+  bench "rescue/raise" expect: 0 do
+    try do
+      error {:bench 1}
+      rescue do _reason -> 0
+    end
+  end
+
+  bench "arithmetic/float-fold" expect: 500.0 ops: 2000 allocs: 1 do
+    float-fold 0.0 2000
+  end
+
+  bench "arithmetic/bignum-mul-div" expect: 0 do
+    mod (div (mul big-a big-b) big-b) big-a
+  end
+
+  bench "arithmetic/bignum-bitwise" expect: big-a allocs: 1 do
+    bit-and big-a big-a
+  end
+
+  bench "closure/direct-call" expect: 3 do
+    bench-add-f 1 2
+  end
+
+  bench "closure/capture-call" expect: 9 allocs: 1 do
+    f = make-adder 4
+    f 5
+  end
+
+  bench "apply/list-args" expect: 3 do
+    '(1 2) |> apply &add
+  end
+
+  bench "pipeline/primitive-chain" expect: 22 do
+    7 |> add 1 |> mul 3 |> sub 2
+  end
+
+end
+:ok

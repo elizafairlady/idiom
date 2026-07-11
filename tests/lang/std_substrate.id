@@ -1,0 +1,133 @@
+use std/test
+use std/enum
+use std/string
+import std/list as L
+import std/dict as Dict
+import std/path as Path
+import std/range as Range
+import std/term as Term
+import std/tea as Tea
+activate Test
+
+suite do
+  test "list kernel operations share one behavior" do
+    xs = '(1 2 3 4)
+    L.reverse xs |> assert-eq '(4 3 2 1)
+    L.concat-all '((1 2) (3) (4)) |> assert-eq '(1 2 3 4)
+    xs |> L.map (fn x -> x * 2) |> assert-eq '(2 4 6 8)
+    xs |> L.filter (fn x -> eq? (x %% 2) 0) |> assert-eq '(2 4)
+    xs |> L.take 2 |> assert-eq '(1 2)
+    xs |> L.drop 2 |> assert-eq '(3 4)
+    xs |> L.split-at 2 |> assert-eq {'(1 2) '(3 4)}
+    L.zip '(1 2) '(:a :b) |> assert-eq '({1 :a} {2 :b})
+    L.intersperse '(1 2 3) :x |> assert-eq '(1 :x 2 :x 3)
+    L.last xs |> assert-eq 4
+  end
+
+  test "enum sequence methods delegate to list surface" do
+    [1 2 3].foldl 0 &add |> assert-eq 6
+    '(1 2 3).foldl 0 &add |> assert-eq 6
+    {1 2 3}.foldl 1 &mul |> assert-eq 6
+    [1 2 3].to-list |> assert-eq '(1 2 3)
+    {1 2 3}.reverse |> assert-eq '(3 2 1)
+    '(1 2 3 4).take-while (fn x -> lt? x 3) |> assert-eq '(1 2)
+    [1 2 3 4].drop 2 |> assert-eq '(3 4)
+    {1 2 3 4}.partition (fn x -> eq? (x %% 2) 0) |> assert-eq {'(2 4) '(1 3)}
+    "abc".map (fn b -> b + 1) |> assert-eq '(98 99 100)
+  end
+
+  test "range remains one explicit range substrate" do
+    r = Range.new 1 5
+    implements? Enum r |> assert
+    r.to-list |> assert-eq '(1 2 3 4)
+    r.length |> assert-eq 4
+    Range.inclusive 1 5 2 |> Range.to-list |> assert-eq '(1 3 5)
+    Range.exclusive 5 1 -2 |> Range.to-list |> assert-eq '(5 3)
+    Range.contains? (Range.inclusive 1 5 2) 3 |> assert-eq :true
+    Range.contains? (Range.inclusive 1 5 2) 4 |> assert-eq :false
+  end
+
+  test "string rune operations use list helpers" do
+    "héllo" |> reverse-runes |> assert-eq "olléh"
+    "héllo" |> take-runes 2 |> assert-eq "hé"
+    "héllo" |> drop-runes 2 |> assert-eq "llo"
+    "héllo" |> last-rune |> assert-eq 111
+    (list "a" "b" "c") |> join "-" |> assert-eq "a-b-c"
+    "  x\n" |> trim |> assert-eq "x"
+    " \t\n" |> blank? |> assert-eq :true
+  end
+
+  test "case ops sweep spans across leaf boundaries" do
+    s = repeat "aB" 3000
+    upcase s |> assert-eq (repeat "AB" 3000)
+    downcase s |> assert-eq (repeat "ab" 3000)
+    upcase "MIXED case, 123 UPPER" |> assert-eq "MIXED CASE, 123 UPPER"
+    downcase "MIXED case, 123 UPPER" |> assert-eq "mixed case, 123 upper"
+    upcase "" |> assert-eq ""
+    upcase "NO CHANGE" |> assert-eq "NO CHANGE"
+    upcase "a#{byte-str 255}b" |> assert-eq "A#{byte-str 255}B"
+    downcase "A#{byte-str 255}B" |> assert-eq "a#{byte-str 255}b"
+  end
+
+  test "capitalize maps ASCII case only, downcases the tail, and passes raw bytes through" do
+    capitalize "hello" |> assert-eq "Hello"
+    capitalize "hELLO" |> assert-eq "Hello"
+    capitalize "école" |> assert-eq "école"
+    capitalize "ÉCOLE" |> assert-eq "École"
+    capitalize "日本" |> assert-eq "日本"
+    capitalize (byte-str 255) |> assert-eq (byte-str 255)
+    capitalize "a#{byte-str 255}" |> assert-eq "A#{byte-str 255}"
+    capitalize "É#{byte-str 255}" |> assert-eq "É#{byte-str 255}"
+  end
+
+  test "byte-find-range scans a byte class from a clamped start" do
+    byte-find-range "abcDEF" 65 90 0 |> assert-eq 3
+    byte-find-range "abcdef" 65 90 0 |> assert-eq :nil
+    byte-find-range "abcDEF" 65 90 4 |> assert-eq 4
+    byte-find-range "abcDEF" 65 90 -5 |> assert-eq 3
+    byte-find-range "abcDEF" 65 90 99 |> assert-eq :nil
+    byte-find-range "abcDEF" 90 65 0 |> assert-eq :nil
+    long = repeat "x" 3000
+    byte-find-range "#{long}Q" 81 81 0 |> assert-eq 3000
+    assert-raises (fn -> byte-find-range "abc" 300 90 0)
+  end
+
+  test "byte whitespace predicate is shared" do
+    space? 32 |> assert-eq :true
+    space? 13 |> assert-eq :true
+    Term.space-byte? 13 |> assert-eq :true
+    Term.filled-byte? 13 |> assert-eq :false
+    Term.filled-byte? 65 |> assert-eq :true
+  end
+
+  test "map current exported surface is covered" do
+    m = %{:a 1 :b 2}
+    Dict.get m :a |> assert-eq 1
+    Dict.get-or m :z 9 |> assert-eq 9
+    Dict.fetch m :b |> assert-eq {:ok 2}
+    Dict.fetch m :z |> assert-eq {:error {:key-not-found :z}}
+    Dict.has? m :a |> assert-eq :true
+    Dict.empty? %{} |> assert-eq :true
+    m |> Dict.put :c 3 |> Dict.size |> assert-eq 3
+    m |> Dict.del :a |> assert-eq %{:b 2}
+    m |> Dict.update :a 0 (fn v -> v + 10) |> assert-eq %{:a 11 :b 2}
+    Dict.pop m :a |> assert-eq {1 %{:b 2}}
+    Dict.pop-result m :z |> assert-eq {:error {:key-not-found :z}}
+  end
+
+  test "path lexical helpers stay pure" do
+    Path.join "/tmp" "x" |> assert-eq "/tmp/x"
+    Path.join "/tmp/" "x" |> assert-eq "/tmp/x"
+    Path.dirname "/tmp/x.txt" |> assert-eq "/tmp"
+    Path.basename "/tmp/x.txt" |> assert-eq "x.txt"
+    Path.extname "/tmp/x.txt" |> assert-eq ".txt"
+    Path.extname "/tmp/.profile" |> assert-eq ""
+    Path.absolute? "/tmp/x" |> assert-eq :true
+    Path.absolute? "tmp/x" |> assert-eq :false
+  end
+
+  test "tea command batching uses std list fold order" do
+    Tea.command-messages (Tea.batch (list (Tea.emit :a) (Tea.emit :b))) |> assert-eq '(:a :b)
+    Tea.command-messages (Tea.sequence (list (Tea.emit :c) (Tea.emit :d))) |> assert-eq '(:c :d)
+  end
+end

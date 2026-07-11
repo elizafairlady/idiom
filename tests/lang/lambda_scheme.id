@@ -1,0 +1,55 @@
+use std/test
+activate Test
+
+defn chain do
+  '() _m _b -> :pass
+  '(h . rest) m b -> match (h m b) do
+    :pass -> chain rest m b
+    r -> r
+  end
+end
+
+defn either do
+  :left x _ -> x
+  :right _ y -> y
+end
+
+suite "lambda scheme inference" do
+  test "a handler-chain result keeps the invocation alternative" do
+    r = match (chain (list (fn _m _b -> {:done 7})) 1 2) do
+      {:done x} -> x
+      :pass -> :none
+    end
+    r |> assert-eq 7
+    chain '() 1 2 |> assert-eq :pass
+  end
+
+  test "branch variables stay distinct across clauses" do
+    either :left 1 "s" |> assert-eq 1
+    either :right 1 "s" |> assert-eq "s"
+    either :left :a 2.0 |> assert-eq :a
+  end
+
+  test "identity lambda binds polymorphic" do
+    id = fn x -> x
+    id 42 |> assert-eq 42
+    id "s" |> assert-eq "s"
+    id :atom |> assert-eq :atom
+  end
+
+  test "body constraints pin open params" do
+    inc = fn x -> add x 1
+    inc 41 |> assert-eq 42
+  end
+
+  test "projection keeps distinct params" do
+    first-of = fn a b -> a
+    first-of 1 "x" |> assert-eq 1
+    first-of "y" 2 |> assert-eq "y"
+  end
+
+  test "cross-linked params stay linked" do
+    pair-list = fn a b -> list a b
+    pair-list 1 2 |> assert-eq (list 1 2)
+  end
+end

@@ -1,0 +1,106 @@
+use std/test
+use std/regex
+import std/list as L
+activate Test
+
+suite do
+  test "regex literal captures named and numeric groups" do
+    rx = r"(?<word>[a-z]+)-([0-9]+)"
+    rx |> regex? |> assert
+    rx |> group-count |> assert-eq 2
+    m = rx |> scan-full! "abc-42"
+    m |> result? |> assert
+    m |> text-of |> assert-eq "abc-42"
+    m |> capture 1 |> assert-eq "abc"
+    m |> capture 2 |> assert-eq "42"
+    m |> capture-named :word |> assert-eq "abc"
+    m |> capture-range 2 |> assert-eq {4 6}
+    m |> captures |> assert-eq '("abc" "42")
+  end
+
+  test "regex replacement expands captures" do
+    rx = compile! "(?<name>[a-z]+)=([0-9]+)"
+    rx.sub "foo=7" "$1:$2" |> assert-eq "foo:7"
+  end
+
+  test "regex byte classes use shared byte class" do
+    (compile! "[a-c]+") |> scan-full "abc" |> result? |> assert
+    (compile! "[^0-9]+") |> scan-full "abc" |> result? |> assert
+    (compile! "\\d\\w\\s") |> scan-full "7a " |> result? |> assert
+    (compile! "[[:alpha:]][[:xdigit:]]") |> scan-full "fA" |> result? |> assert
+    (compile! "[a-c]+" :i) |> scan-full "ABC" |> result? |> assert
+    (compile! ".") |> scan-full "\n" |> result? |> assert-eq :false
+    (compile! "." :s) |> scan-full "\n" |> result? |> assert
+  end
+
+  test "byte automaton guard path is shared by test and capture scan" do
+    (compile! "^a" :m) |> test? "x\na" |> assert
+    (compile! "a$" :m) |> test? "a\nx" |> assert
+    (compile! "\\Aa") |> test? "a" |> assert
+    (compile! "a\\z") |> test? "a" |> assert
+    (compile! "a\\Z") |> test? "a" |> assert
+    (compile! "\\ba") |> test? "a" |> assert
+    (compile! "b\\Ba") |> test? "ba" |> assert
+    (compile! "a(?=b)b") |> test? "ab" |> assert
+    (compile! "a(?!c)b") |> test? "ab" |> assert
+    (compile! "a(?<=a)b") |> test? "ab" |> assert
+    (compile! "a(?<!c)b") |> test? "ab" |> assert
+    (compile! "^a" :m) |> scan-full "a" |> result? |> assert
+    (compile! "a$" :m) |> scan-full "a" |> result? |> assert
+    (compile! "\\Aa") |> scan-full "a" |> result? |> assert
+    (compile! "a\\z") |> scan-full "a" |> result? |> assert
+    (compile! "a\\Z") |> scan-full "a" |> result? |> assert
+    (compile! "\\ba") |> scan-full "a" |> result? |> assert
+    (compile! "b\\Ba") |> scan-full "ba" |> result? |> assert
+    (compile! "a(?=b)b") |> scan-full "ab" |> result? |> assert
+    (compile! "a(?!c)b") |> scan-full "ab" |> result? |> assert
+    (compile! "a(?<=a)b") |> scan-full "ab" |> result? |> assert
+    (compile! "a(?<!c)b") |> scan-full "ab" |> result? |> assert
+    guarded = (compile! "^(?<cap>a)(?=b)b" :m) |> scan-full "ab"
+    guarded |> result? |> assert
+    guarded |> capture-named :cap |> assert-eq "a"
+    guarded |> capture-range 1 |> assert-eq {0 1}
+  end
+
+  test "unanchored search continues past a failing zero-width guard" do
+    m = (compile! "\\bx") |> scan "ax x"
+    m |> result? |> assert
+    m |> capture-range 0 |> assert-eq {3 4}
+    lb = (compile! "(?<=a)b") |> scan "cb ab"
+    lb |> result? |> assert
+    lb |> capture-range 0 |> assert-eq {4 5}
+    vb = (compile! "(?<=a{1,3})b") |> scan "xaaab"
+    vb |> result? |> assert
+    vb |> capture-range 0 |> assert-eq {4 5}
+    la = (compile! "(?=xy)x") |> scan "xz xy"
+    la |> result? |> assert
+    la |> capture-range 0 |> assert-eq {3 4}
+    (compile! "\\bx") |> test? "ax x" |> assert
+    (compile! "\\bx") |> scan-all "ax x xy" |> L.length |> assert-eq 2
+  end
+
+  test "unanchored search is leftmost-longest across starting positions" do
+    m = (compile! "bb|a") |> scan "xbba"
+    m |> capture 0 |> assert-eq "bb"
+    m |> capture-range 0 |> assert-eq {1 3}
+    (compile! "a+|b+") |> scan "abbb" |> capture 0 |> assert-eq "a"
+    (compile! "x*") |> scan "aaxx" |> capture-range 0 |> assert-eq {0 0}
+  end
+
+  test "backreferences in patterns are a compile error" do
+    compile "a\\1b" |> assert-eq {:error {:regex :compile "regex parse error at byte 3: backreferences are not supported" "a\\1b"}}
+    compile "a\\9b" |> assert-eq {:error {:regex :compile "regex parse error at byte 3: backreferences are not supported" "a\\9b"}}
+    compile "(?<x>a)\\k<x>" |> assert-eq {:error {:regex :compile "regex parse error at byte 9: backreferences are not supported" "(?<x>a)\\k<x>"}}
+    assert-raises (fn -> compile! "\\1") |> assert-eq {:error {:regex :compile "regex parse error at byte 2: backreferences are not supported" "\\1"}}
+    (compile! "(?<name>[a-z]+)=([0-9]+)").sub "foo=7" "\\k<name>!" |> assert-eq "foo!"
+  end
+
+  test "nested counted repeats hit one compiled size budget" do
+    compile "(a{3000}){3000}" |> assert-eq {:error {:regex :compile "regex size-budget exceeded (limit 100000 byte automaton nodes)" "(a{3000}){3000}"}}
+  end
+
+  test "unbounded lookbehind is a compile error" do
+    compile "(?<=a*)b" |> assert-eq {:error {:regex :compile "regex lookbehind requires bounded length" "(?<=a*)b"}}
+    compile "(?<!.*)b" |> assert-eq {:error {:regex :compile "regex lookbehind requires bounded length" "(?<!.*)b"}}
+  end
+end

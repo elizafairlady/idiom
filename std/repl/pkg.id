@@ -1,0 +1,101 @@
+package repl
+
+use std/string with [trim]
+use std/term with [tty?]
+use std/compile with [compile abort]
+import std/edit as Edit
+
+defn quit-line? line do
+  clean = trim line
+  or (eq? clean ":quit") (eq? clean ":q")
+end
+
+defn drain-normal pid -> receive do
+  {:exit p _reason} when (eq? p pid) -> :ok
+end
+
+defn print-value value ->
+  if (neq? value :nil) do
+    value |> inspect |> println
+  else do
+    :ok
+  end
+
+defn print-diag reason -> reason |> error-message |> eprintln
+
+defn eval-down reason token do
+  abort token
+  match reason do
+    :interrupt -> do
+      eprintln "^C"
+      :error
+    end
+    :killed -> do
+      eprintln "^C"
+      :error
+    end
+    other -> do
+      print-diag other
+      :error
+    end
+  end
+end
+
+defn observe pid token -> receive do
+  {:repl-value p value} when (eq? p pid) -> do
+    drain-normal pid
+    print-value value
+    0
+  end
+  {:exit p reason} when (and (eq? p pid) (neq? reason :normal)) -> eval-down reason token
+end
+
+defn dispatch result -> match result do
+  {:error diag} -> do
+    eprintln diag
+    :error
+  end
+  {:ok thunk token} -> do
+    session = self
+    pid = spawn-link (fn do
+      value = '() |> apply &thunk
+      send session {:repl-value (self) &value}
+    end)
+    observe pid token
+  end
+end
+
+defn eval-source source -> match (compile source) do
+  :incomplete -> :incomplete
+  result -> dispatch result
+end
+
+defn loop ed do
+  match (Edit.run ed) do
+    {:eof _st} -> 0
+    {:cancel st} -> do
+      eprintln "^C"
+      loop (Edit.reset st)
+    end
+    {:line line st} -> do
+      if (quit-line? line) do
+        0
+      else do
+        match (eval-source line) do
+          :incomplete -> loop (Edit.continue st)
+          _status -> loop (Edit.reset (Edit.push-history st line))
+        end
+      end
+    end
+  end
+end
+
+export defn main do
+  trap-exit :true
+  if (eq? (tty?) :true) do
+    println "idiom repl"
+  else do
+    :ok
+  end
+  loop (Edit.new "idiom> ")
+end

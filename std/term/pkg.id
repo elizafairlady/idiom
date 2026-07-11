@@ -1,0 +1,179 @@
+package term
+
+use std/string
+use std/string/runes
+
+export defn csi text -> "#{byte-str 27}[${text}"
+
+export defn word-byte? do
+  :nil -> :false
+  b when (and (gte? b 48) (lte? b 57)) -> :true
+  b when (and (gte? b 65) (lte? b 90)) -> :true
+  b when (and (gte? b 97) (lte? b 122)) -> :true
+  b when (gte? b 128) -> :true
+  _ -> :false
+end
+
+export defn plain-byte? do
+  :nil -> :false
+  b -> cond (word-byte? b) :false :true
+end
+
+export defn space-byte? b -> space? &b
+
+export defn filled-byte? do
+  :nil -> :false
+  b -> cond (space-byte? b) :false :true
+end
+
+export defn cont-byte? b -> and (gte? b 128) (lt? b 192)
+
+export defn skip-back do
+  b i pred when (and (gt? i 0) (pred (byte b (sub i 1)))) -> skip-back b (sub i 1) pred
+  _b i _pred -> i
+end
+
+export defn skip-fwd do
+  b i pred when (and (lt? i (byte-len b)) (pred (byte b i))) -> skip-fwd b (add i 1) pred
+  _b i _pred -> i
+end
+
+export defn line-start do
+  _b 0 -> 0
+  b i when (eq? (byte b (sub i 1)) 10) -> i
+  b i -> line-start b (sub i 1)
+end
+
+export defn line-stop do
+  b i when (eq? i (byte-len b)) -> i
+  b i when (eq? (byte b i) 10) -> i
+  b i -> line-stop b (add i 1)
+end
+
+export defn word-back b i -> skip-back b (skip-back b i &plain-byte?) &word-byte?
+export defn word-fwd b i -> skip-fwd b (skip-fwd b i &plain-byte?) &word-byte?
+
+defn rune-back-lead do
+  _b 0 -> 0
+  b j when (cont-byte? (byte b j)) -> rune-back-lead b (sub j 1)
+  _b j -> j
+end
+
+export defn rune-back do
+  _b 0 -> 0
+  b i -> rune-back-lead b (sub i 1)
+end
+
+defn rune-fwd-next do
+  b i when (gte? i (byte-len b)) -> i
+  b i when (cont-byte? (byte b i)) -> rune-fwd-next b (add i 1)
+  _b i -> i
+end
+
+export defn rune-fwd do
+  b i when (gte? i (byte-len b)) -> byte-len b
+  b i -> rune-fwd-next b (add i 1)
+end
+
+defn skip-csi-bytes do
+  s i when (eq? i (byte-len s)) -> i
+  s i when (and (gte? (byte s i) 64) (lte? (byte s i) 126)) -> add i 1
+  s i -> skip-csi-bytes s (add i 1)
+end
+
+export defn strip-csi do
+  s i acc when (eq? i (byte-len s)) -> acc
+  s i acc when (and (eq? (byte s i) 27) (eq? (byte s (add i 1)) 91)) -> strip-csi s (skip-csi-bytes s (add i 2)) acc
+  s i acc -> strip-csi s (add i 1) "${acc}#{byte-str (byte s i)}"
+end
+
+export defn visible-len s -> width (strip-csi s 0 "")
+
+export defn end-pos off cols ->
+  cond (and (gt? off 0) (eq? (mod off cols) 0)) {(sub (div off cols) 1) cols} {(div off cols) (mod off cols)}
+
+export defn line-rows len cols -> match (end-pos len cols) do
+  {r _} -> add r 1
+end
+
+export defn decode-byte do
+  1 -> :c-a
+  2 -> :c-b
+  3 -> :c-c
+  4 -> :c-d
+  5 -> :c-e
+  6 -> :c-f
+  7 -> :c-g
+  9 -> :tab
+  10 -> :enter
+  11 -> :c-k
+  12 -> :c-l
+  13 -> :enter
+  14 -> :c-n
+  15 -> :c-o
+  16 -> :c-p
+  17 -> :c-q
+  18 -> :c-r
+  19 -> :c-s
+  21 -> :c-u
+  22 -> :c-v
+  23 -> :c-w
+  24 -> :c-x
+  25 -> :c-y
+  26 -> :c-z
+  8 -> :backspace
+  127 -> :backspace
+  b when (gte? b 32) -> {:char (byte-str b)}
+  _ -> :unknown
+end
+
+export defn csi-key do
+  65 _ -> :up
+  66 _ -> :down
+  67 _ -> :right
+  68 _ -> :left
+  72 _ -> :home
+  70 _ -> :end
+  126 "3" -> :delete
+  126 "1" -> :home
+  126 "7" -> :home
+  126 "4" -> :end
+  126 "8" -> :end
+  126 "5" -> :page-up
+  126 "6" -> :page-down
+  _ _ -> :unknown
+end
+
+defn read-csi-seq acc -> match (tty-read 50) do
+  {:byte b} when (and (gte? b 64) (lte? b 126)) -> csi-key b acc
+  {:byte b} -> read-csi-seq "${acc}#{byte-str b}"
+  :timeout -> read-csi-seq acc
+  other -> other
+end
+
+defn read-ss3 -> match (tty-read 50) do
+  {:byte b} -> csi-key b ""
+  :timeout -> read-ss3
+  other -> other
+end
+
+defn read-escape -> match (tty-read 50) do
+  :timeout -> :esc
+  :eof -> :eof
+  {:byte 91} -> read-csi-seq ""
+  {:byte 79} -> read-ss3
+  {:byte b} -> {:meta (decode-byte b)}
+  other -> other
+end
+
+export defn read-key -> match (tty-read :nil) do
+  :eof -> :eof
+  {:signal s} -> {:signal s}
+  {:byte 27} -> read-escape
+  {:byte b} -> decode-byte b
+  _ -> :unknown
+end
+
+export defn term-cols -> match tty-size do
+  {c _r} -> c
+end

@@ -1,0 +1,9 @@
+w (evil-normal)
+s ihello
+w (evil-insert)
+p 120
+s \e
+w (evil-normal)
+s 0x
+g tests/pty/iem_evil_1.grid
+s \x18\x03

@@ -1,0 +1,118 @@
+use std/test
+use std/enum
+activate Test
+
+record Coat do
+  field warmth :: int
+end
+
+trait Wearable do
+  method wear x
+end
+
+implement Wearable on Coat do
+  method wear c -> c.warmth
+end
+
+implement Wearable on int do
+  method wear x -> x
+end
+
+defn check x -> implements? Wearable x
+
+trait Frozen do
+  method freeze x
+end
+
+implement Frozen on int do
+  method freeze x -> x
+end
+
+defn frozen-check x -> implements? Frozen x
+
+implement Frozen on string do
+  method freeze s -> s
+end
+
+suite "tutorial/ch10 make it illegal" do
+  test "the well-typed package compiles" do
+    assert-compiles "package p\nspec double :: int -> int\nexport defn double x -> mul x 2\nexport defn fine -> double 21\n"
+  end
+
+  test "calling double with a string is illegal" do
+    assert-expand-error "package p\nspec double :: int -> int\nexport defn double x -> mul x 2\nexport defn oops -> double \"nope\"\n" "type mismatch for 'double': expected int, got string"
+  end
+
+  test "an arity that disagrees with its signature is illegal" do
+    assert-expand-error "package p\nspec bad :: int -> int\nexport defn bad -> 7\n" "signature for 'bad' expects arity 1, definition has 0"
+  end
+
+  test "conjuring a b from an a is illegal" do
+    assert-expand-error "package p\nspec conjure :: a -> b\nexport defn conjure x -> x\n" "type mismatch for 'conjure': expected b, got a"
+  end
+
+  test "adding unconstrained type variables is illegal" do
+    assert-expand-error "package p\nspec twice :: a -> a\nexport defn twice x -> add x x\n" "unsolved typeclass 'Number' for a"
+  end
+
+  test "a constrained spec rejects the wrong caller" do
+    assert-expand-error "package p\nspec twice :: Number a => a -> a\nexport defn twice x -> add x x\nexport defn oops -> twice \"hi\"\n" "typeclass 'Number' is not implemented for string"
+  end
+
+  test "forgetting the pair case is illegal" do
+    assert-expand-error "package p\nspec count :: list -> int\nexport defn count xs -> match xs do\n  '() -> 0\nend\n" "non-exhaustive match: pair is not covered"
+  end
+
+  test "forgetting the int half of a union is illegal" do
+    assert-expand-error "package p\nspec describe :: (int | nil) -> string\nexport defn describe v -> match v do\n  :nil -> \"nothing\"\nend\n" "non-exhaustive match: int is not covered"
+  end
+
+  test "covering the union compiles" do
+    assert-compiles "package p\nspec describe :: (int | nil) -> string\nexport defn describe v -> match v do\n  :nil -> \"nothing\"\n  _n -> \"number\"\nend\n"
+  end
+
+  test "an argument union without parens is illegal" do
+    assert-expand-error "package p\nspec f :: int | nil -> string\nexport defn f x -> \"y\"\n" "empty type union member"
+  end
+
+  test "a clause after the catchall is illegal" do
+    assert-expand-error "package p\nspec pick :: int -> int\nexport defn pick n -> match n do\n  _ -> 0\n  1 -> 1\nend\n" "match clause is unreachable"
+  end
+
+  test "a clause the scrutinee can never be is illegal" do
+    assert-expand-error "package p\nspec pick :: string -> int\nexport defn pick s -> match s do\n  '() -> 0\n  _ -> 1\nend\n" "match clause on 'empty-list' is unreachable for scrutinee type string"
+  end
+
+  test "handing a union function a non-member is illegal" do
+    assert-expand-error "package p\nrecord Circle do\n  field radius :: float\nend\nrecord Square do\n  field side :: float\nend\ntype Shape :: Circle | Square\nspec area :: Shape -> float\nexport defn area s -> match s do\n  c when Circle? c -> 3.14159265 * c.radius * c.radius\n  q when Square? q -> q.side * q.side\nend\nexport defn total -> area 42\n" "type mismatch for 'area': expected Shape"
+  end
+
+  test "field access without refinement is illegal" do
+    assert-expand-error "package p\nrecord Circle do\n  field radius :: float\nend\nrecord Square do\n  field side :: float\nend\ntype Shape :: Circle | Square\nspec area :: Shape -> float\nexport defn area s -> 3.14159265 * s.radius * s.radius\n" "field 'radius' is not available on receiver type 'Shape"
+  end
+
+  test "guarded clauses give up the exhaustiveness proof" do
+    assert-compiles "package p\nrecord Circle do\n  field radius :: float\nend\nrecord Square do\n  field side :: float\nend\ntype Shape :: Circle | Square\nspec area :: Shape -> float\nexport defn area s -> match s do\n  c when Circle? c -> 3.14159265 * c.radius * c.radius\nend\n"
+  end
+
+  test "implementing Derived without Base is illegal" do
+    assert-expand-error "trait NeedBase do\n  method need-base x -> x\nend\ntrait NeedDerived do\n  require NeedBase\n  method need-derived x -> x\nend\nimplement NeedDerived on int do\n  method need-derived x -> x\nend\n" "is not implemented on type 'int'"
+  end
+
+  test "implements? answers a dynamic receiver from the filed impls" do
+    check (Coat 9) |> assert
+    check 5 |> assert
+    check "rope" |> not? |> assert
+  end
+
+  test "a dynamic implements? chain sees the whole body" do
+    frozen-check 5 |> assert
+    frozen-check "rope" |> assert
+    implements? Frozen "rope" |> assert
+  end
+
+  test "implements? folds to a literal on static receivers" do
+    implements? Iter [1 2] |> assert
+    implements? Iter :some-atom |> not? |> assert
+  end
+end

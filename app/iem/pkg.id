@@ -1,0 +1,1282 @@
+package iem
+
+use std/string
+use std/string/runes with [width char-width]
+use std/term with [read-key csi rune-back rune-fwd tty? tty-raw! tty-restore! tty-write tty-size]
+use std/file with [write! read]
+use std/port with [port-write]
+import app/iem/buffer as B
+import std/list as List
+
+export defn col-of text off -> do
+  start = match (line-start text (line-of text off)) do
+    :nil -> 0
+    s -> s
+  end
+  width (byte-slice text start off)
+end
+
+defn walk-to-col do
+  '() at _cells _goal -> at
+  '(r . rest) at cells goal -> do
+    s = rune-str r
+    w = width s
+    cond (gt? (cells + w) goal) at (walk-to-col rest (at + (byte-len s)) (cells + w) goal)
+  end
+end
+
+export defn offset-at text line goal -> match (line-start text line) do
+  :nil -> byte-len text
+  start -> do
+    stop = match (line-start text (line + 1)) do
+      :nil -> byte-len text
+      after -> after - 1
+    end
+    walk-to-col (runes-lossy (byte-slice text start stop)) start 0 goal
+  end
+end
+
+defn vertical buf goal delta -> do
+  text = B.text-of buf
+  line = B.line-at buf (B.point-of buf)
+  col = match goal do
+    :nil -> col-of text (B.point-of buf)
+    g -> g
+  end
+  target = line + delta
+  moved = cond (lt? target 0) (B.step buf {:goto 0}) (B.step buf {:goto (offset-at text target col)})
+  {moved col}
+end
+
+export record Loop do
+  field buf
+  field goal
+  field handlers :: list
+  field watcher
+  field state
+end
+
+spec try-handlers :: list a b -> (atom | tuple)
+defn try-handlers do
+  '() _msg _buf -> :pass
+  '(h . rest) msg buf -> match (h msg buf) do
+    :pass -> try-handlers rest msg buf
+    r -> r
+  end
+end
+
+defn line-bounds buf which -> do
+  text = B.text-of buf
+  line = B.line-at buf (B.point-of buf)
+  start = match (line-start text line) do
+    :nil -> 0
+    v -> v
+  end
+  stop = match (line-start text (line + 1)) do
+    :nil -> byte-len text
+    after -> after - 1
+  end
+  cond (eq? which 0) start stop
+end
+
+defn serve-default loop msg -> do
+  buf = loop.buf
+  match msg do
+    {:step m} -> continue-buffer loop (loop.record-update (buf: (B.step buf m) goal: :nil))
+    {:type text} -> continue-buffer loop (loop.record-update (buf: (B.step buf (B.insert (B.point-of buf) text)) goal: :nil))
+    {:newline} -> continue-buffer loop (loop.record-update (buf: (B.step buf (B.insert (B.point-of buf) "\n")) goal: :nil))
+    {:backspace} -> do
+      p = B.point-of buf
+      q = rune-back (B.text-of buf) p
+      continue-buffer loop (loop.record-update (buf: (cond (lt? q p) (B.step buf (B.delete q p)) buf) goal: :nil))
+    end
+    {:left} -> continue-buffer loop (loop.record-update (buf: (B.step buf {:goto (rune-back (B.text-of buf) (B.point-of buf))}) goal: :nil))
+    {:right} -> continue-buffer loop (loop.record-update (buf: (B.step buf {:goto (rune-fwd (B.text-of buf) (B.point-of buf))}) goal: :nil))
+    {:delete-fwd} -> do
+      p = B.point-of buf
+      q = rune-fwd (B.text-of buf) p
+      continue-buffer loop (loop.record-update (buf: (cond (gt? q p) (B.step buf (B.delete p q)) buf) goal: :nil))
+    end
+    {:bol} -> continue-buffer loop (loop.record-update (buf: (B.step buf {:goto (line-bounds buf 0)}) goal: :nil))
+    {:eol} -> continue-buffer loop (loop.record-update (buf: (B.step buf {:goto (line-bounds buf 1)}) goal: :nil))
+    {:kill-line} -> do
+      p = B.point-of buf
+      e = line-bounds buf 1
+      len = byte-len (B.text-of buf)
+      next = cond (and (eq? p e) (lt? p len)) (B.step buf (B.delete p (p + 1))) (cond (lt? p e) (B.step buf (B.delete p e)) buf)
+      continue-buffer loop (loop.record-update (buf: next goal: :nil))
+    end
+    {:del-line} -> do
+      text = B.text-of buf
+      s = line-bounds buf 0
+      e = match (line-start text ((B.line-at buf (B.point-of buf)) + 1)) do
+        :nil -> byte-len text
+        after -> after
+      end
+      continue-buffer loop (loop.record-update (buf: (cond (lt? s e) (B.step buf (B.delete s e)) buf) goal: :nil))
+    end
+    {:up} -> match (vertical buf loop.goal (0 - 1)) do
+      {moved col} -> continue-buffer loop (loop.record-update (buf: moved goal: col))
+    end
+    {:down} -> match (vertical buf loop.goal 1) do
+      {moved col} -> continue-buffer loop (loop.record-update (buf: moved goal: col))
+    end
+    {:undo} -> continue-buffer loop (loop.record-update (buf: (B.step buf {:undo}) goal: :nil))
+    {:redo} -> continue-buffer loop (loop.record-update (buf: (B.step buf {:redo}) goal: :nil))
+    _other -> buffer-serve loop
+  end
+end
+
+defn run-outs do
+  '() -> :ok
+  '({:send pid m} . rest) -> do
+    send pid m
+    run-outs rest
+  end
+  '({:write port text} . rest) -> do
+    port-write port text
+    run-outs rest
+  end
+end
+
+defn notify do
+  :nil -> :ok
+  watcher -> send watcher {:changed self}
+end
+
+defn continue-buffer loop next -> do
+  cond (neq? (B.version-of loop.buf) (B.version-of next.buf)) (notify loop.watcher) :ok
+  buffer-serve next
+end
+
+export defn buffer-serve loop -> do
+  msg = receive do
+    m -> m
+  end
+  match msg do
+    {:snapshot reply} -> do
+      send reply {:snapshot self loop.buf}
+      buffer-serve loop
+    end
+    {:set-handler :nil} -> buffer-serve (loop.record-update (handlers: '()))
+    {:set-handler h} -> buffer-serve (loop.record-update (handlers: (list h)))
+    {:push-handler h} -> buffer-serve (loop.record-update (handlers: (cons h loop.handlers)))
+    {:watch pid} -> buffer-serve (loop.record-update (watcher: pid))
+    {:state-put k v} -> buffer-serve (loop.record-update (state: (dict-put loop.state k v)))
+    {:state-get k reply} -> do
+      send reply {:state k (dict-get loop.state k :nil)}
+      buffer-serve loop
+    end
+    {:stop} -> :ok
+    _ -> match (try-handlers loop.handlers msg loop.buf) do
+      {:done next} -> do
+        continue-buffer loop (loop.record-update (buf: next goal: :nil))
+      end
+      {:done next outs} -> do
+        run-outs outs
+        continue-buffer loop (loop.record-update (buf: next goal: :nil))
+      end
+      :pass -> serve-default loop msg
+    end
+  end
+end
+
+export defn spawn-buffer do
+  text -> spawn-buffer text :nil
+  text watcher -> match (spawn-monitor (fn -> buffer-serve (Loop (B.new text) :nil '() watcher %{}))) do
+    {pid _ref} -> pid
+  end
+end
+
+export record Mode do
+  field mode-name :: string
+  field mode-keymap
+  field mode-handler
+end
+
+export defmacro defmode do
+  stx -> do
+    defn rev do
+      '() acc -> acc
+      '(h . t) acc -> rev t (cons h acc)
+    end
+    defn params-to do
+      _s i stop acc when (eq? i stop) -> rev acc '()
+      s i stop acc -> params-to s (add i 1) stop (cons (syntax-nth s i) acc)
+    end
+    defn head-at do
+      s i n when (eq? i n) -> syntax-error s "defmode expects 'defmode NAME PARAM* KEYMAP' with an optional do CLAUSES end handler"
+      s i n -> cond (and (syntax-word? (syntax-nth s i)) (eq? (syntax-word-text (syntax-nth s i)) "defmode")) i (head-at s (add i 1) n)
+    end
+    defn keymap-at do
+      s i n when (eq? i n) -> syntax-error s "defmode expects a keymap"
+      s i n -> cond (syntax-word? (syntax-nth s i)) (keymap-at s (add i 1) n) i
+    end
+    defn items-from do
+      _b i n acc when (eq? i n) -> acc
+      b i n acc -> items-from b (add i 1) n (cons (syntax-nth b (sub n i)) acc)
+    end
+    n = syntax-length stx
+    hd = head-at stx 0 n
+    expkw = cond (and (gt? hd 0) (and (syntax-word? (syntax-nth stx (sub hd 1))) (eq? (syntax-word-text (syntax-nth stx (sub hd 1))) "export")))
+      (list (syntax-nth stx (sub hd 1)))
+      '()
+    defn expr-group? v -> and (syntax-list? v) (and (gt? (syntax-length v) 0) (and (syntax-word? (syntax-nth v 0)) (eq? (syntax-word-text (syntax-nth v 0)) "%-expr")))
+    grouped = and (gt? n (add hd 1)) (expr-group? (syntax-nth stx (add hd 1)))
+    src = cond grouped (syntax-nth stx (add hd 1)) stx
+    lo = cond grouped 1 (add hd 1)
+    m = cond grouped (syntax-length src) n
+    name = syntax-nth src lo
+    at = keymap-at src (add lo 1) m
+    params = params-to src (add lo 1) at '()
+    keymap = syntax-nth src at
+    label = make-syntax-string name (syntax-word-text name)
+    handler = cond grouped
+      do
+        body = syntax-nth stx (add hd 2)
+        items = items-from body 1 (syntax-length body) '()
+        %`(fn do
+          %,@items
+          _m _b -> :pass
+        end)
+      end
+      %`:nil
+    %`do
+      %,@expkw defn %,name %,@params -> Mode %,label %,keymap %,handler
+    end
+  end
+end
+
+export record Frame do
+  field bufs :: list
+  field current
+  field snap
+  field running :: atom
+  field keymaps :: list
+  field pending
+  field recording
+  field last-macro :: list
+  field echo :: string
+  field minis :: list
+  field commands
+  field ops
+  field updates
+  field hooks
+  field state
+  field birth-mode
+  field windows
+  field focus
+end
+
+defn m-x-entry -> {:frame {:mini "M-x " :m-x}}
+
+export defn global-keymap -> %{
+  default: :self-insert
+  enter: {:buf {:newline}}
+  backspace: {:buf {:backspace}}
+  left: {:buf {:left}}
+  right: {:buf {:right}}
+  up: {:buf {:up}}
+  down: {:buf {:down}}
+  c-a: {:buf {:bol}}
+  c-e: {:buf {:eol}}
+  c-d: {:buf {:delete-fwd}}
+  c-k: {:buf {:kill-line}}
+  c-z: {:buf {:undo}}
+  c-r: {:buf {:redo}}
+  c-s: {:frame :save}
+  c-q: {:frame :quit}
+  esc: %{
+    {:char "x"} m-x-entry
+  }
+  c-h: %{
+    {:char "k"} "describe-key"
+    {:char "f"} "describe-command"
+    {:char "w"} "where-is"
+  }
+  c-x: %{
+    c-s: {:frame :save}
+    c-c: {:frame :quit}
+    {:char "b"} {:frame {:mini "Switch to buffer: " :switch}}
+    {:char "("} {:frame :macro-start}
+    {:char ")"} {:frame :macro-end}
+    {:char "e"} {:frame :macro-play}
+    {:char "u"} {:buf {:undo}}
+    {:char "2"} "split-window-below"
+    {:char "3"} "split-window-right"
+    {:char "o"} "other-window"
+    {:char "0"} "delete-window"
+    {:char "1"} "delete-other-windows"
+    c-b: "list-buffers"
+  }
+}
+
+defmode mini-mode %{
+  enter: {:frame :mini-submit}
+  c-g: {:frame :mini-cancel}
+}
+
+defn default-commands -> %{
+  "quit" {{:frame :quit} "Stop the editor and every buffer"}
+  "save-buffer" {{:frame :save} "Write the current buffer to its file"}
+  "switch-buffer" {{:frame {:mini "Switch to buffer: " :switch}} "Prompt for a buffer and switch to it"}
+  "undo" {{:buf {:undo}} "Undo the last edit in the current buffer"}
+  "redo" {{:buf {:redo}} "Redo the last undone edit"}
+  "forward-char" {{:buf {:right}} "Move point right one rune"}
+  "backward-char" {{:buf {:left}} "Move point left one rune"}
+  "next-line" {{:buf {:down}} "Move point down one line, keeping the goal column"}
+  "previous-line" {{:buf {:up}} "Move point up one line, keeping the goal column"}
+  "beginning-of-line" {{:buf {:bol}} "Move point to the start of the line"}
+  "end-of-line" {{:buf {:eol}} "Move point to the end of the line"}
+  "delete-char" {{:buf {:delete-fwd}} "Delete the rune after point"}
+  "kill-line" {{:buf {:kill-line}} "Kill to the end of the line"}
+  "split-window-below" {{:frame :split-below} "Split the focused window into two, stacked"}
+  "split-window-right" {{:frame :split-right} "Split the focused window into two, side by side"}
+  "other-window" {{:frame :other-window} "Move focus to the next window"}
+  "delete-window" {{:frame :delete-window} "Close the focused window, keeping its buffer"}
+  "delete-other-windows" {{:frame :delete-other-windows} "Make the focused window the only one"}
+  "list-buffers" {&list-buffers-cmd "List every buffer; enter switches to the one at point"}
+  "describe-key" {{:frame :describe-key} "Describe what the next key you press would do"}
+  "describe-command" {{:frame {:mini "Describe command: " &describe-command-tag}} "Show a command's documentation"}
+  "where-is" {{:frame {:mini "Where is command: " &where-is-tag}} "Show which keys run a command"}
+}
+
+export defn frame-new -> Frame '() :nil :nil :true (list global-keymap) :nil :nil '() "" '() (default-commands) (default-ops) (default-updates) %{} %{} :nil :nil '()
+
+defn entry-doc entry -> match (help entry) do
+  :nil -> ""
+  d -> d
+end
+
+export defn register-command do
+  frame name entry -> frame.record-update (commands: (dict-put frame.commands name {entry (entry-doc entry)}))
+  frame name entry doc -> frame.record-update (commands: (dict-put frame.commands name {entry doc}))
+end
+
+export defn describe-entry frame entry -> match entry do
+  :nil -> "is undefined"
+  name when (string? name) -> match (dict-get frame.commands name :nil) do
+    :nil -> "runs the unknown command ${name}"
+    {_e ""} -> "runs the command ${name}"
+    {_e doc} -> "runs the command ${name}: ${doc}"
+  end
+  e when (closure? e) -> match (help e) do
+    :nil -> "runs an undocumented function"
+    doc -> doc
+  end
+  e when (dict? e) -> "is a prefix key"
+  :self-insert -> "inserts itself"
+  :ignore -> "does nothing"
+  e -> "runs #{e}"
+end
+
+export defn describe-key frame k -> "#{key-text k} ${describe-entry frame (lookup-key (active-stack frame) k)}"
+
+defn where-scan map want prefix acc -> dict-keys map |> List.foldl acc (fn k acc2 -> do
+  entry = dict-get map k :nil
+  label = cond (eq? prefix "") (key-text k) "${prefix} #{key-text k}"
+  cond (eq? entry want) (cons label acc2)
+    (cond (dict? entry) (where-scan entry want label acc2) acc2)
+end)
+
+defn where-stack do
+  '() _want acc -> acc
+  '(m . rest) want acc -> where-stack rest want (where-scan m want "" acc)
+end
+
+export defn where-is frame name -> match (where-stack (active-stack frame) name '()) do
+  '() -> "${name} is not on any key"
+  keys -> "${name} is on #{keys}"
+end
+
+export defn describe-command frame name -> match (dict-get frame.commands name :nil) do
+  :nil -> :nil
+  {_entry doc} -> doc
+end
+
+export defn set-op frame tag f -> frame.record-update (ops: (dict-put frame.ops tag f))
+
+export defn set-update frame tag f -> frame.record-update (updates: (dict-put frame.updates tag f))
+
+export defn add-hook frame tag entry -> frame.record-update (hooks: (dict-put frame.hooks tag (cons entry (dict-get frame.hooks tag '()))))
+
+spec state-get :: Frame a b -> Any
+export defn state-get frame k d -> dict-get frame.state k d
+
+export defn state-put frame k v -> frame.record-update (state: (dict-put frame.state k v))
+
+defn win-leaf? w -> string? w
+
+export defn window-at do
+  tree '() -> tree
+  {:v a _b} '(:a . rest) -> window-at a rest
+  {:v _a b} '(:b . rest) -> window-at b rest
+  {:h a _b} '(:a . rest) -> window-at a rest
+  {:h _a b} '(:b . rest) -> window-at b rest
+end
+
+defn window-set do
+  _tree '() v -> v
+  {:v a b} '(:a . rest) v -> {:v (window-set a rest v) b}
+  {:v a b} '(:b . rest) v -> {:v a (window-set b rest v)}
+  {:h a b} '(:a . rest) v -> {:h (window-set a rest v) b}
+  {:h a b} '(:b . rest) v -> {:h a (window-set b rest v)}
+end
+
+defn window-paths-acc do
+  tree prefix acc when (win-leaf? tree) -> cons (List.reverse prefix) acc
+  {:v a b} prefix acc -> window-paths-acc b (cons :b prefix) (window-paths-acc a (cons :a prefix) acc)
+  {:h a b} prefix acc -> window-paths-acc b (cons :b prefix) (window-paths-acc a (cons :a prefix) acc)
+end
+
+export defn window-paths tree -> List.reverse (window-paths-acc tree '() '())
+
+defn path-index do
+  '() _want _i -> 0
+  '(p . rest) want i -> cond (eq? p want) i (path-index rest want (add i 1))
+end
+
+defn drop-last do
+  '(_x) -> '()
+  '(h . t) -> cons h (drop-last t)
+end
+
+defn window-next frame -> do
+  paths = window-paths frame.windows
+  at = path-index paths frame.focus 0
+  List.nth-or paths (mod (add at 1) (List.length paths)) '()
+end
+
+defn window-scrub do
+  tree old new when (win-leaf? tree) -> cond (eq? tree old) new tree
+  {:v a b} old new -> {:v (window-scrub a old new) (window-scrub b old new)}
+  {:h a b} old new -> {:h (window-scrub a old new) (window-scrub b old new)}
+end
+
+defn window-first-leaf do
+  tree prefix when (win-leaf? tree) -> List.reverse prefix
+  {:v a _b} prefix -> window-first-leaf a (cons :a prefix)
+  {:h a _b} prefix -> window-first-leaf a (cons :a prefix)
+end
+
+defn window-visible? frame name -> window-paths frame.windows |> List.any? (fn p -> eq? (window-at frame.windows p) name)
+
+defn focus-window frame path -> do
+  name = window-at frame.windows path
+  f2 = frame.record-update (focus: path current: name snap: (buf-snap frame.bufs name))
+  match (buf-pid f2.bufs name) do
+    :nil -> {f2 '()}
+    pid -> {f2 (list {:sync pid})}
+  end
+end
+
+defn enable-existing do
+  frame '() acc -> {frame (List.reverse acc)}
+  frame '({name _pid _path _mode _saved _snap} . rest) acc -> cond (mini-named? frame.minis name)
+    (enable-existing frame rest acc)
+    (match (frame-update frame {:set-mode name (apply '() frame.birth-mode)}) do
+      {next cmds} -> enable-existing next rest (append (List.reverse cmds) acc)
+    end)
+end
+
+export defn enable frame thunk -> do
+  {next cmds} = enable-existing (frame.record-update (birth-mode: thunk)) frame.bufs '()
+  drive-all next (dispatch cmds '())
+end
+
+export defn bind-key frame k entry -> push-keymap frame %{k entry}
+
+export defn buffer-pid frame name -> buf-pid frame.bufs name
+
+export defn push-keymap frame map -> frame.record-update (keymaps: (cons map frame.keymaps))
+
+defn keymap-find do
+  '() _k -> :nil
+  '(m . rest) k -> match (dict-get m k :nil) do
+    :nil -> keymap-find rest k
+    entry -> entry
+  end
+end
+
+export defn lookup-key stack k -> match (keymap-find stack k) do
+  :nil -> match k do
+    {:char _c} -> keymap-find stack :default
+    _ -> :nil
+  end
+  entry -> entry
+end
+
+defn buf-name do
+  '() _pid -> :nil
+  '({name pid _path _mode _saved _snap} . _rest) want when (eq? pid want) -> name
+  '(_h . rest) want -> buf-name rest want
+end
+
+defn drop-buf do
+  '() _pid -> '()
+  '({_name pid _path _mode _saved _snap} . rest) want when (eq? pid want) -> rest
+  '(h . rest) want -> cons h (drop-buf rest want)
+end
+
+defn buf-pid do
+  '() _name -> :nil
+  '({name pid _path _mode _saved _snap} . _rest) want when (eq? name want) -> pid
+  '(_h . rest) want -> buf-pid rest want
+end
+
+defn buf-path do
+  '() _name -> :nil
+  '({name _pid path _mode _saved _snap} . _rest) want when (eq? name want) -> path
+  '(_h . rest) want -> buf-path rest want
+end
+
+defn buf-mode do
+  '() _name -> :nil
+  '({name _pid _path mode _saved _snap} . _rest) want when (eq? name want) -> mode
+  '(_h . rest) want -> buf-mode rest want
+end
+
+defn buf-saved do
+  '() _name -> 0
+  '({name _pid _path _mode saved _snap} . _rest) want when (eq? name want) -> saved
+  '(_h . rest) want -> buf-saved rest want
+end
+
+defn buf-snap do
+  '() _name -> :nil
+  '({name _pid _path _mode _saved snap} . _rest) want when (eq? name want) -> snap
+  '(_h . rest) want -> buf-snap rest want
+end
+
+defn set-buf-mode do
+  '() _name _mode -> '()
+  '({name pid path _old saved snap} . rest) want mode when (eq? name want) -> cons {name pid path mode saved snap} rest
+  '(h . rest) want mode -> cons h (set-buf-mode rest want mode)
+end
+
+defn set-buf-saved do
+  '() _pid _v -> '()
+  '({name pid path mode _old snap} . rest) want v when (eq? pid want) -> cons {name pid path mode v snap} rest
+  '(h . rest) want v -> cons h (set-buf-saved rest want v)
+end
+
+defn set-buf-snap do
+  '() _pid _v -> '()
+  '({name pid path mode saved _old} . rest) want v when (eq? pid want) -> cons {name pid path mode saved v} rest
+  '(h . rest) want v -> cons h (set-buf-snap rest want v)
+end
+
+defn mini-name seq -> cond (eq? seq 0) " *mini*" " *mini-#{seq}*"
+
+defn mini-seq-normalize frame -> cond (eq? frame.minis '()) (state-put frame :mini-seq 0) frame
+
+defn minis-drop do
+  '() _want -> '()
+  '({_p _n pid _t} . rest) want when (eq? pid want) -> rest
+  '(h . rest) want -> cons h (minis-drop rest want)
+end
+
+defn mini-named? do
+  '() _want -> :false
+  '({_p name _pid _t} . rest) want -> cond (eq? name want) :true (mini-named? rest want)
+end
+
+defn focused-name frame -> match frame.minis do
+  '() -> frame.current
+  '({_prompt name _pid _tag} . _rest) -> name
+end
+
+export defn mini-buffer? frame name -> mini-named? frame.minis name
+
+defn first-real do
+  '() _minis -> :nil
+  '({name _p _pa _m _s _sn} . rest) minis -> cond (mini-named? minis name) (first-real rest minis) name
+end
+
+export defn mode-label frame -> match (buf-mode frame.bufs frame.current) do
+  :nil -> "fundamental"
+  m -> mode-name m
+end
+
+defn active-stack frame -> match (buf-mode frame.bufs (focused-name frame)) do
+  :nil -> frame.keymaps
+  m -> cons (mode-keymap m) frame.keymaps
+end
+
+defn active-pid frame -> buf-pid frame.bufs (focused-name frame)
+
+export defn modified? frame -> match frame.snap do
+  :nil -> :false
+  buf -> neq? (B.version-of buf) (buf-saved frame.bufs frame.current)
+end
+
+defn record-gesture frame gesture -> match frame.recording do
+  {:rec keys} -> frame.record-update (recording: {:rec (append gesture keys)})
+  _ -> frame
+end
+
+defn buf-cmds frame msg -> match (active-pid frame) do
+  :nil -> '()
+  pid -> list {:send pid msg} {:sync pid}
+end
+
+defn buffer-lines do
+  '() _minis acc -> acc
+  '({name _pid _path _mode _saved _snap} . rest) minis acc -> cond (mini-named? minis name) (buffer-lines rest minis acc) (buffer-lines rest minis "${acc}${name}\n")
+end
+
+defn buffers-enter frame -> match frame.snap do
+  :nil -> {frame '()}
+  buf -> do
+    text = B.text-of buf
+    ln = line-of text (B.point-of buf)
+    s = match (line-start text ln) do
+      :nil -> 0
+      v -> v
+    end
+    e = match (line-start text (ln + 1)) do
+      :nil -> byte-len text
+      after -> after - 1
+    end
+    name = byte-slice text s e
+    cond (eq? name "") {frame '()} (frame-update frame {:switch name})
+  end
+end
+
+defmode buffers-mode %{
+  default: :ignore
+  enter: &buffers-enter
+}
+
+defn describe-command-tag frame text -> match (dict-get frame.commands text :nil) do
+  :nil -> {(frame.record-update (echo: "No command named ${text}")) '()}
+  {_e ""} -> {(frame.record-update (echo: "${text} has no documentation")) '()}
+  {_e doc} -> {(frame.record-update (echo: "${text}: ${doc}")) '()}
+end
+
+defn where-is-tag frame text -> {(frame.record-update (echo: (where-is frame text))) '()}
+
+defn list-buffers-cmd frame -> do
+  text = buffer-lines frame.bufs frame.minis ""
+  match (buf-pid frame.bufs "*buffers*") do
+    :nil -> {frame (list {:spawn "*buffers*" text :nil} {:do (fn -> list {:set-mode "*buffers*" (buffers-mode)} {:switch "*buffers*"})})}
+    pid -> do
+      old = match (buf-snap frame.bufs "*buffers*") do
+        :nil -> 0
+        snap -> byte-len (B.text-of snap)
+      end
+      {frame (list {:send pid {:step {:replace 0 old text}}} {:do (fn -> list {:switch "*buffers*"})})}
+    end
+  end
+end
+
+defn tag-of do
+  t when (tuple? t) -> tuple-get t 0
+  t -> t
+end
+
+defn apply-op frame gesture op -> match (dict-get frame.ops (tag-of op) :nil) do
+  :nil -> {(frame.record-update (echo: "Unknown op: #{tag-of op}")) '()}
+  f -> f frame gesture op
+end
+
+export defn run-entry do
+  frame _gesture :nil -> {frame '()}
+  frame gesture entry when (string? entry) -> match (dict-get frame.commands entry :nil) do
+    :nil -> {(frame.record-update (echo: "Unknown command: ${entry}")) '()}
+    {resolved _doc} -> run-entry frame gesture resolved
+  end
+  frame gesture entry when (dict? entry) -> {(frame.record-update (pending: {entry gesture})) '()}
+  frame gesture entry when (closure? entry) -> match (entry frame) do
+    {next cmds} -> {(record-gesture next gesture) cmds}
+  end
+  frame gesture entry -> apply-op frame gesture entry
+end
+
+
+defn default-ops -> %{
+  :frame (fn frame gesture {:frame op} -> apply-op frame gesture op)
+  :buf (fn frame gesture {:buf msg} -> {(record-gesture frame gesture) (buf-cmds frame msg)})
+  :self-insert (fn frame gesture _op -> match gesture do
+    '({:char c} . _) -> {(record-gesture frame gesture) (buf-cmds frame {:type c})}
+    _ -> {frame '()}
+  end)
+  :ignore (fn frame _gesture _op -> {frame '()})
+  :seq (fn frame gesture {:seq entries} -> seq-entries frame gesture entries '())
+  :do (fn frame gesture {:do thunk} -> {(record-gesture frame gesture) (list {:do thunk})})
+  :split-below (fn frame _gesture _op -> match frame.windows do
+    :nil -> {frame '()}
+    tree -> {(frame.record-update (windows: (window-set tree frame.focus {:v frame.current frame.current}) focus: (append frame.focus (list :a)))) '()}
+  end)
+  :split-right (fn frame _gesture _op -> match frame.windows do
+    :nil -> {frame '()}
+    tree -> {(frame.record-update (windows: (window-set tree frame.focus {:h frame.current frame.current}) focus: (append frame.focus (list :a)))) '()}
+  end)
+  :other-window (fn frame _gesture _op -> match frame.windows do
+    :nil -> {frame '()}
+    _ -> focus-window frame (window-next frame)
+  end)
+  :delete-window (fn frame _gesture _op -> match frame.focus do
+    '() -> {frame '()}
+    path -> do
+      parent = drop-last path
+      sibling = match (window-at frame.windows parent) do
+        {:v a b} -> cond (eq? (window-at frame.windows path) a) b a
+        {:h a b} -> cond (eq? (window-at frame.windows path) a) b a
+      end
+      pruned = frame.record-update (windows: (window-set frame.windows parent sibling))
+      focus-window pruned (append parent (window-first-leaf sibling '()))
+    end
+  end)
+  :delete-other-windows (fn frame _gesture _op -> match frame.windows do
+    :nil -> {frame '()}
+    _ -> {(frame.record-update (windows: frame.current focus: '())) '()}
+  end)
+  :become (fn frame gesture {:become thunk} -> {(record-gesture frame gesture) (list {:become-do thunk frame.current})})
+  :quit (fn frame _gesture _op -> frame-update frame {:tea-quit})
+  :save (fn frame gesture _op -> match (buf-pid frame.bufs frame.current) do
+    :nil -> {frame '()}
+    pid -> match (buf-path frame.bufs frame.current) do
+      :nil -> {((record-gesture frame gesture).record-update (echo: "No file for buffer")) '()}
+      path -> {(record-gesture frame gesture) (list {:save pid path})}
+    end
+  end)
+  :macro-start (fn frame _gesture _op -> {(frame.record-update (recording: {:rec '()})) '()})
+  :macro-end (fn frame _gesture _op -> match frame.recording do
+    {:rec keys} -> {(frame.record-update (recording: :nil last-macro: (List.reverse keys))) '()}
+    _ -> {frame '()}
+  end)
+  :macro-play (fn frame _gesture _op -> match frame.last-macro do
+    '() -> {frame '()}
+    keys -> {frame (list {:replay keys})}
+  end)
+  :mini (fn frame gesture {:mini prompt tag} -> {(record-gesture frame gesture) (list {:mini-open prompt tag})})
+  :mini-submit (fn frame _gesture _op -> match frame.minis do
+    '() -> {frame '()}
+    '({_prompt name pid tag} . rest) -> do
+      text = match (buf-snap frame.bufs name) do
+        :nil -> ""
+        b -> B.text-of b
+      end
+      cleared = mini-seq-normalize (frame.record-update (minis: rest bufs: (drop-buf frame.bufs pid)))
+      {done cmds} = mini-tag cleared tag text
+      {done (cons {:send pid {:stop}} cmds)}
+    end
+  end)
+  :mini-cancel (fn frame _gesture _op -> match frame.minis do
+    '() -> {frame '()}
+    '({_prompt _name pid _tag} . rest) -> {(mini-seq-normalize (frame.record-update (minis: rest bufs: (drop-buf frame.bufs pid) echo: "Quit"))) (list {:send pid {:stop}})}
+  end)
+  :describe-key (fn frame _gesture _op -> {(state-put (frame.record-update (echo: "Describe key: press a key")) :describe-next :true) '()})
+}
+
+defn seq-entries do
+  frame _gesture '() acc -> {frame (List.reverse acc)}
+  frame gesture '(entry . rest) acc -> match (run-entry frame gesture entry) do
+    {next cmds} -> seq-entries next gesture rest (append (List.reverse cmds) acc)
+  end
+end
+
+defn run-command frame text -> run-entry frame '() text
+
+defn mini-tag frame tag text -> cond (closure? tag) (tag frame text)
+  (match tag do
+    :m-x -> run-command frame text
+    :switch -> frame-update frame {:switch text}
+    _ -> {(frame.record-update (echo: "Unknown mini tag: #{tag}")) '()}
+  end)
+
+export defn frame-update frame msg -> match (dict-get frame.updates (tag-of msg) :nil) do
+  :nil -> {frame '()}
+  f -> f frame msg
+end
+
+defn default-updates -> %{
+  :open (fn frame {:open name text path} -> {frame (list {:spawn name text path})})
+  :opened (fn frame {:opened name pid path} -> do
+    bufs = cons {name pid path :nil 0 :nil} frame.bufs
+    cur = cond (eq? frame.current :nil) name frame.current
+    wins = cond (eq? frame.current :nil) name frame.windows
+    foc = cond (eq? frame.current :nil) '() frame.focus
+    f2 = frame.record-update (bufs: bufs current: cur windows: wins focus: foc)
+    match f2.birth-mode do
+      :nil -> {f2 (list {:sync pid})}
+      thunk -> match (frame-update f2 {:set-mode name (apply '() thunk)}) do
+        {f3 mcmds} -> {f3 (cons {:sync pid} mcmds)}
+      end
+    end
+  end)
+  :switch (fn frame {:switch name} -> match (buf-pid frame.bufs name) do
+    :nil -> {(frame.record-update (echo: "No buffer: ${name}")) '()}
+    pid -> cond (mini-named? frame.minis name)
+      {(frame.record-update (echo: "No buffer: ${name}")) '()}
+      {(frame.record-update (current: name windows: (window-set frame.windows frame.focus name) snap: (buf-snap frame.bufs name))) (list {:sync pid})}
+  end)
+  :snapshot (fn frame {:snapshot pid buf} -> do
+    stored = frame.record-update (bufs: (set-buf-snap frame.bufs pid buf))
+    match (eq? pid (buf-pid stored.bufs stored.current)) do
+      :true -> {(stored.record-update (snap: buf)) '()}
+      _ -> {stored '()}
+    end
+  end)
+  :set-mode (fn frame {:set-mode bname mode} -> match (buf-pid frame.bufs bname) do
+    :nil -> {frame '()}
+    pid -> {(frame.record-update (bufs: (set-buf-mode frame.bufs bname mode))) (list {:send pid {:set-handler (mode-handler mode)}} {:sync pid})}
+  end)
+  :saved (fn frame {:saved pid version} -> {(frame.record-update (bufs: (set-buf-saved frame.bufs pid version) echo: "Wrote file")) '()})
+  :mini-opened (fn frame {:mini-opened prompt pid tag} -> do
+    seq = state-get frame :mini-seq 0
+    name = mini-name seq
+    seeded = state-put frame :mini-seq (seq + 1)
+    based = seeded.record-update (minis: (cons {prompt name pid tag} seeded.minis) bufs: (cons {name pid :nil :nil 0 :nil} seeded.bufs))
+    frame-update based {:set-mode name (mini-mode)}
+  end)
+  :buffer-down (fn frame {:buffer-down pid reason} -> match (buf-name frame.bufs pid) do
+    :nil -> {frame '()}
+    name -> do
+      cleared = state-put frame :win-sizes (dict-del (state-get frame :win-sizes %{}) name)
+      pruned = mini-seq-normalize (cleared.record-update (bufs: (drop-buf cleared.bufs pid) minis: (minis-drop cleared.minis pid) echo: "Buffer ${name} died: #{reason}"))
+      cond (mini-named? frame.minis name)
+        {pruned '()}
+        (cond (eq? pruned.current name)
+          (match (first-real pruned.bufs pruned.minis) do
+            :nil -> {(pruned.record-update (current: :nil snap: :nil windows: :nil focus: '())) '()}
+            next-name -> frame-update (pruned.record-update (snap: :nil windows: (window-scrub pruned.windows name next-name))) {:switch next-name}
+          end)
+          {(pruned.record-update (windows: (window-scrub pruned.windows name pruned.current))) '()})
+    end
+  end)
+  :buffer-changed (fn frame {:buffer-changed pid} -> match (buf-name frame.bufs pid) do
+    :nil -> {frame '()}
+    name -> cond (or (window-visible? frame name) (mini-named? frame.minis name)) {frame (list {:sync pid})} {frame '()}
+  end)
+  :window-size (fn frame {:window-size name w h} -> {(state-put frame :win-sizes (dict-put (state-get frame :win-sizes %{}) name {w h})) '()})
+  :tea-key (fn frame {:tea-key k} -> match (state-get frame :describe-next :nil) do
+    :nil -> do
+      f = (frame.record-update (echo: ""))
+      match f.pending do
+        :nil -> run-entry f (list k) (lookup-key (active-stack f) k)
+        {pmap keys} -> run-entry (f.record-update (pending: :nil)) (cons k keys) (dict-get pmap k :nil)
+      end
+    end
+    _ -> {(state-put (frame.record-update (echo: (describe-key frame k))) :describe-next :nil) '()}
+  end)
+  :tea-quit (fn frame _msg -> do
+    stops = frame.bufs |> List.map (fn entry -> match entry do
+      {_name pid _path _mode _saved _snap} -> {:send pid {:stop}}
+    end)
+    {(frame.record-update (running: :false)) stops}
+  end)
+}
+
+defn view-lines do
+  _buf _from 0 acc -> acc
+  buf from rows acc -> match (B.line-text buf from) do
+    :nil -> acc
+    line -> view-lines buf (from + 1) (rows - 1) (cons line acc)
+  end
+end
+
+spec view-of :: (nil | B.Buffer) int -> tuple
+defn view-of snap rows -> match snap do
+  :nil -> {'() 0}
+  buf -> do
+    line = B.line-at buf (B.point-of buf)
+    from = cond (lt? line rows) 0 (line - rows + 1)
+    lines = List.reverse (view-lines buf from rows '())
+    {lines (line - from)}
+  end
+end
+
+export defn frame-view frame rows -> do
+  {lines cline} = view-of frame.snap rows
+  {_line col} = point-place frame.snap
+  {lines cline col}
+end
+
+defn clip-runes do
+  '() _left acc -> from-runes (List.reverse acc)
+  '(r . rest) left acc -> do
+    w = char-width r
+    cond (gt? w left) (from-runes (List.reverse acc)) (clip-runes rest (left - w) (cons r acc))
+  end
+end
+
+defn clip-line line cols -> cond (lte? (width line) cols) line (clip-runes (runes-lossy line) cols '())
+
+blank-run = repeat " " 512
+
+defn spaces n -> cond (lte? n 512) (byte-slice blank-run 0 n) (repeat " " n)
+
+defn blanks do
+  0 acc -> acc
+  n acc -> blanks (n - 1) (cons "" acc)
+end
+
+defn pad-body lines n -> do
+  missing = n - (List.length lines)
+  cond (gt? missing 0) (append lines (blanks missing '())) lines
+end
+
+defn point-place do
+  :nil -> {0 0}
+  buf -> do
+    line = B.line-at buf (B.point-of buf)
+    start = match (line-start (B.text-of buf) line) do
+      :nil -> 0
+      st -> st
+    end
+    {line (width (byte-slice (B.text-of buf) start (B.point-of buf)))}
+  end
+end
+
+defn modeline-at frame name snap place cols -> do
+  {bline wcol} = place
+  flag = match snap do
+    :nil -> ""
+    buf -> cond (neq? (B.version-of buf) (buf-saved frame.bufs name)) " [+]" ""
+  end
+  rec = cond (eq? name frame.current)
+    (match frame.recording do
+      {:rec _keys} -> "  [REC]"
+      _ -> ""
+    end)
+    ""
+  label = match (buf-mode frame.bufs name) do
+    :nil -> "fundamental"
+    m -> mode-name m
+  end
+  left = " #{name}${flag}${rec}"
+  right = "L#{bline + 1}:C#{wcol + 1}  (${label}) "
+  gap = cols - (width left) - (width right)
+  filler = cond (gt? gap 0) (spaces gap) " "
+  clip-line "${left}${filler}${right}" cols
+end
+
+export defn modeline frame cols -> modeline-at frame frame.current frame.snap (point-place frame.snap) cols
+
+export defn key-text do
+  {:char c} -> c
+  :enter -> "RET"
+  :backspace -> "DEL"
+  k -> do
+    t = "#{k}"
+    "#{upcase (byte-slice t 0 1)}#{byte-slice t 1 (byte-len t)}"
+  end
+end
+
+defn gesture-echo do
+  '() -> ""
+  '(k . rest) -> "#{gesture-echo rest}#{key-text k}-"
+end
+
+export defn echo-line frame -> match frame.minis do
+  '({prompt name _pid _tag} . _rest) -> match (buf-snap frame.bufs name) do
+    :nil -> prompt
+    buf -> "${prompt}#{B.text-of buf}"
+  end
+  _ -> match frame.pending do
+    {_pmap keys} -> gesture-echo keys
+    _ -> frame.echo
+  end
+end
+
+defn pad-to line w -> do
+  cw = width line
+  cond (gt? cw w) (pad-to (clip-runes (runes-lossy line) w '()) w) (cond (lt? cw w) "${line}#{spaces (w - cw)}" line)
+end
+
+defn zip-rows do
+  '() '() acc -> List.reverse acc
+  '(la . ra) '(lb . rb) acc -> zip-rows ra rb (cons "${la}|${lb}" acc)
+  _a _b acc -> List.reverse acc
+end
+
+defn pick-cursor do
+  :nil b -> b
+  a _b -> a
+end
+
+defn leaf-render frame name path x y w h -> do
+  snap = cond (eq? name frame.current) frame.snap (buf-snap frame.bufs name)
+  {lines cline} = view-of snap (h - 1)
+  body = List.map (pad-body lines (h - 1)) (fn l -> pad-to l w)
+  place = point-place snap
+  ml = pad-to (modeline-at frame name snap place w) w
+  cursor = cond (eq? path frame.focus)
+    (match place do
+      {_bline wcol} -> {(y + cline) (x + wcol)}
+    end)
+    :nil
+  {(append body (list ml)) cursor}
+end
+
+defn win-render frame tree path x y w h -> match tree do
+  {:v a b} -> do
+    ha = div h 2
+    {la ca} = win-render frame a (append path (list :a)) x y w ha
+    {lb cb} = win-render frame b (append path (list :b)) x (y + ha) w (h - ha)
+    {(append la lb) (pick-cursor ca cb)}
+  end
+  {:h a b} -> do
+    wa = div (w - 1) 2
+    {la ca} = win-render frame a (append path (list :a)) x y wa h
+    {lb cb} = win-render frame b (append path (list :b)) (x + wa + 1) y (w - 1 - wa) h
+    {(zip-rows la lb '()) (pick-cursor ca cb)}
+  end
+  name -> leaf-render frame name path x y w h
+end
+
+defn rects-of tree x y w h acc -> match tree do
+  {:v a b} -> do
+    ha = div h 2
+    rects-of b x (y + ha) w (h - ha) (rects-of a x y w ha acc)
+  end
+  {:h a b} -> do
+    wa = div (w - 1) 2
+    rects-of b (x + wa + 1) y (w - 1 - wa) h (rects-of a x y wa h acc)
+  end
+  name -> cons {name w h} acc
+end
+
+export defn window-rects frame cols rows -> match frame.windows do
+  :nil -> '()
+  tree -> rects-of tree 0 0 cols rows '()
+end
+
+export defn screen frame cols rows -> do
+  area = rows - 1
+  {wlines cursor} = match frame.windows do
+    :nil -> leaf-render frame frame.current '() 0 0 cols area
+    tree -> win-render frame tree '() 0 0 cols area
+  end
+  eline = clip-line (echo-line frame) cols
+  {crow ccol} = match frame.minis do
+    '({prompt name _pid _tag} . _rest) -> do
+      mcol = match (buf-snap frame.bufs name) do
+        :nil -> 0
+        mbuf -> col-of (B.text-of mbuf) (B.point-of mbuf)
+      end
+      {(rows - 1) ((width prompt) + mcol)}
+    end
+    _ -> match cursor do
+      :nil -> {0 0}
+      {r c} -> {r c}
+    end
+  end
+  {(append wlines (list eline)) crow ccol}
+end
+
+export defn dispatch do
+  '() acc -> List.reverse acc
+  '(cmd . rest) acc -> match cmd do
+    {:spawn name text path} -> dispatch rest (cons {:opened name (spawn-buffer text self) path} acc)
+    {:send pid msg} -> do
+      send pid msg
+      dispatch rest acc
+    end
+    {:sync pid} -> do
+      send pid {:snapshot self}
+      got = receive do
+        {:snapshot p b} when (eq? p pid) -> {:snapshot p b}
+        after 2000 -> :nil
+      end
+      cond (eq? got :nil) (dispatch rest acc) (dispatch rest (cons got acc))
+    end
+    {:save pid path} -> do
+      send pid {:snapshot self}
+      saved = receive do
+        {:snapshot p b} when (eq? p pid) -> do
+          write! path (B.text-of b)
+          {:saved pid (B.version-of b)}
+        end
+        after 2000 -> :nil
+      end
+      cond (eq? saved :nil) (dispatch rest acc) (dispatch rest (cons saved acc))
+    end
+    {:mini-open prompt tag} -> dispatch rest (cons {:mini-opened prompt (spawn-buffer "" self) tag} acc)
+    {:become-do thunk bname} -> dispatch rest (cons {:set-mode bname (apply '() thunk)} acc)
+    {:do thunk} -> do
+      msgs = apply '() thunk
+      dispatch rest (append (List.reverse msgs) acc)
+    end
+    {:replay keys} -> dispatch rest (append (List.reverse (keys |> List.map (fn k -> {:tea-key k}))) acc)
+    _ -> dispatch rest acc
+  end
+end
+
+defn drive-all do
+  frame '() -> frame
+  frame '(msg . rest) -> drive-all (drive frame msg) rest
+end
+
+defn run-hook-entries do
+  frame '() acc -> {frame (List.reverse acc)}
+  frame '(entry . rest) acc -> match (run-entry frame '() entry) do
+    {next cmds} -> run-hook-entries next rest (append (List.reverse cmds) acc)
+  end
+end
+
+export defn run-hooks frame tag msg -> match (dict-get frame.hooks tag '()) do
+  '() -> {frame '()}
+  entries -> do
+    {f cmds} = run-hook-entries (state-put frame :hook-event msg) entries '()
+    {(f.record-update (state: (dict-del f.state :hook-event))) cmds}
+  end
+end
+
+export defn drive frame msg -> do
+  {next cmds} = frame-update frame msg
+  {hooked hcmds} = run-hooks next (tag-of msg) msg
+  drive-all hooked (dispatch (append cmds hcmds) '())
+end
+
+defn row-patch i line -> do
+  move = csi "#{i};1H"
+  clear = csi "K"
+  "${move}${clear}${line}"
+end
+
+defn diff-rows do
+  '() _prev _i acc -> acc
+  '(l . rest) '(p . prest) i acc -> cond (eq? l p) (diff-rows rest prest (i + 1) acc) (diff-rows rest prest (i + 1) "${acc}#{row-patch i l}")
+  '(l . rest) '() i acc -> diff-rows rest '() (i + 1) "${acc}#{row-patch i l}"
+end
+
+defn paint frame prev -> match tty-size do
+  {cols rows} -> do
+    {lines crow ccol} = screen frame cols rows
+    old = match prev do
+      {pc pr plines} -> cond (and (eq? pc cols) (eq? pr rows)) plines '()
+      _ -> '()
+    end
+    wipe = cond (eq? old '()) "#{csi "H"}#{csi "J"}" ""
+    body = diff-rows lines old 1 ""
+    place = csi "#{crow + 1};#{ccol + 1}H"
+    hide = csi "?25l"
+    show = csi "?25h"
+    tty-write (cond (eq? body "") place "${hide}${wipe}${body}${place}${show}")
+    {cols rows lines}
+  end
+end
+
+defn key-pump target -> match read-key do
+  :eof -> send target {:tea-quit}
+  {:signal :interrupt} -> send target {:tea-quit}
+  {:signal :resize} -> do
+    send target {:resize}
+    key-pump target
+  end
+  {:signal _} -> key-pump target
+  :unknown -> key-pump target
+  {:meta :unknown} -> do
+    send target {:tea-key :esc}
+    key-pump target
+  end
+  {:meta k} -> do
+    send target {:tea-key :esc}
+    send target {:tea-key k}
+    key-pump target
+  end
+  k -> do
+    send target {:tea-key k}
+    key-pump target
+  end
+end
+
+defn rect-min do
+  :nil wh -> wh
+  {w h} {w2 h2} -> {(cond (lt? w w2) w w2) (cond (lt? h h2) h h2)}
+end
+
+defn dedupe-rects do
+  '() acc -> acc
+  '({name w h} . rest) acc -> dedupe-rects rest (dict-put acc name (rect-min (dict-get acc name :nil) {w h}))
+end
+
+defn sync-names do
+  frame '() -> frame
+  frame '({name {w h}} . rest) -> do
+    seen = dict-get (state-get frame :win-sizes %{}) name :nil
+    cond (eq? seen {w h}) (sync-names frame rest) (sync-names (drive frame {:window-size name w h}) rest)
+  end
+end
+
+export defn window-sync frame cols rows -> do
+  key = {cols rows frame.windows}
+  cond (eq? (state-get frame :win-shape :nil) key) frame
+    (sync-names (state-put frame :win-shape key) (dict-to-list (dedupe-rects (window-rects frame cols (rows - 1)) %{})))
+end
+
+defn handle-msg frame msg -> match msg do
+  {:down _ref pid reason} -> drive frame {:buffer-down pid reason}
+  {:exit _pid :interrupt} -> drive frame {:tea-quit}
+  m -> drive frame m
+end
+
+defn note-dirty dirty pid -> cond (List.any? dirty (fn p -> eq? p pid)) dirty (cons pid dirty)
+
+defn flush-dirty do
+  frame '() -> frame
+  frame '(pid . rest) -> flush-dirty (drive frame {:buffer-changed pid}) rest
+end
+
+defn sort-msg do
+  frame dirty {:changed pid} -> {frame (note-dirty dirty pid)}
+  frame dirty m -> {(handle-msg (flush-dirty frame dirty) m) '()}
+end
+
+defn drain-pending do
+  frame dirty 0 -> flush-dirty frame dirty
+  frame dirty budget -> receive do
+    m -> match (sort-msg frame dirty m) do
+      {f2 d2} -> drain-pending f2 d2 (budget - 1)
+    end
+    after 0 -> flush-dirty frame dirty
+  end
+end
+
+defn main-loop frame prev -> match frame.running do
+  :false -> :ok
+  _ -> do
+    prev2 = paint frame prev
+    synced = match prev2 do
+      {cols rows _lines} -> window-sync frame cols rows
+    end
+    msg = receive do
+      m -> m
+    end
+    {f2 dirty} = sort-msg synced '() msg
+    main-loop (drain-pending f2 dirty 32) prev2
+  end
+end
+
+defn file-text path -> match (read path) do
+  {:ok data} -> data
+  _ -> ""
+end
+
+defn open-msg do
+  '() -> {:open "*scratch*" "" :nil}
+  '(path . _rest) -> {:open path (file-text path) path}
+end
+
+export defn iem-run frame0 args -> do
+    frame = drive frame0 (open-msg args)
+    match tty? do
+      :true -> do
+        trap-exit :true
+        tty-raw!
+        tty-write (csi "?1049h")
+        me = self
+        spawn (fn -> key-pump me)
+        try do
+          main-loop frame :nil
+        ensure do
+          tty-write (csi "?1049l")
+          tty-restore!
+        end
+      end
+      _ -> :ok
+    end
+end

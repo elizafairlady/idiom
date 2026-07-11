@@ -1,0 +1,45 @@
+use std/test
+use std/compile
+use std/cmd
+
+activate Test
+
+spec proc-kind :: proc -> atom
+defn proc-kind do
+  (_ :: pid) -> :pid
+  (_ :: port) -> :port
+end
+
+suite "proc names the pid|port union and type patterns narrow it" do
+  test "type patterns dispatch fn clauses over both kinds" do
+    proc-kind (self) |> assert-eq :pid
+    p = spawn (command (list "sleep" "2"))
+    proc-kind p |> assert-eq :port
+    exit p :kill
+  end
+
+  test "match narrows a proc with binders typed by the member" do
+    r = match (self) do
+      (p :: pid) -> {:pid p}
+      (_ :: port) -> :port
+    end
+    r |> assert-eq {:pid (self)}
+  end
+
+  test "a one-armed match over proc is non-exhaustive by member name" do
+    assert-expand-error "spec f :: proc -> atom\ndefn f p -> match p do\n  (_ :: pid) -> :pid\nend\nf (self)\n" "port is not covered"
+  end
+
+  test "is-a? knows the union at runtime" do
+    is-a? (self) :proc |> assert-eq :true
+    is-a? 5 :proc |> assert-eq :false
+  end
+
+  test "a member flows into a proc contract" do
+    assert-compiles "info = process-info (self)\ninfo\n"
+  end
+
+  test "an unknown type in a pattern is an expand error" do
+    assert-expand-error "match 5 do\n  (x :: nonsense-type) -> x\nend\n" "unknown type 'nonsense-type' in pattern"
+  end
+end

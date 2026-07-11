@@ -1,0 +1,129 @@
+use std/test
+
+activate Test
+
+defn rev do
+  '() acc -> acc
+  '(h . t) acc -> rev t (cons h acc)
+end
+
+defn greet do
+  "hello" -> :greeting
+  _ -> :other
+end
+
+defn sign do
+  n when n < 0 -> :neg
+  0 -> :zero
+  _ -> :pos
+end
+
+defn head-of xs -> match xs do
+  '() -> :empty
+  '(h . _) -> {:head h}
+end
+
+suite "tutorial/ch03 the shape of things" do
+  test "equals is a pattern" do
+    {a b} = {1 2}
+    a + b |> assert-eq 3
+    {:ok val} = {:ok 42}
+    val |> assert-eq 42
+  end
+
+  test "a failed match is a crash with a reason" do
+    reason = assert-raises (fn -> do
+      {:ok v} = {:error :nope}
+      v
+    end)
+    reason |> assert-eq {:error {:no-clause :fn {{:error :nope}}}}
+  end
+
+  test "one dot splits every shape" do
+    '(h . t) = '(1 2 3)
+    {h t} |> assert-eq {1 '(2 3)}
+    [x y . r] = [1 2 3 4 5]
+    {x y r} |> assert-eq {1 2 [3 4 5]}
+    {p q . rest} = {1 2 3 4}
+    {p q rest} |> assert-eq {1 2 {3 4}}
+    %{:a a . more} = %{:a 1 :b 2 :c 3}
+    {a more} |> assert-eq {1 %{:b 2 :c 3}}
+  end
+
+  test "nested dotted list pattern" do
+    '(a . '(b . '())) = '(1 2)
+    {a b} |> assert-eq {1 2}
+  end
+
+  test "wildcards in rest position" do
+    [_ second . _] = [10 20 30]
+    second |> assert-eq 20
+  end
+
+  test "dict patterns are open" do
+    %{:a a} = %{:a 1 :b 2}
+    a |> assert-eq 1
+  end
+
+  test "a repeated name demands equal values" do
+    {a a} = {5 5}
+    a |> assert-eq 5
+    assert-raises (fn -> do
+      {b b} = {5 6}
+      b
+    end)
+  end
+
+  test "a pin sees only its own pattern" do
+    pin-pair = fn do
+      {x ^x} -> :pin
+      {_ _} -> :miss
+    end
+    pin-pair {9 9} |> assert-eq :pin
+    pin-pair {9 8} |> assert-eq :miss
+  end
+
+  test "a match pin sees the enclosing scope" do
+    x = 2
+    r = match {2 :payload} do
+      {^x p} -> {:pinned p}
+      _ -> :other
+    end
+    r |> assert-eq {:pinned :payload}
+  end
+
+  test "a guard sees the enclosing scope" do
+    x = 2
+    r = match {2 :payload} do
+      {y p} when (eq? y x) -> {:pinned p}
+      _ -> :other
+    end
+    r |> assert-eq {:pinned :payload}
+  end
+
+  test "guards order clauses by condition" do
+    r = match {1 2} do
+      {x y} when x > y -> :desc
+      {x y} -> {:asc x y}
+    end
+    r |> assert-eq {:asc 1 2}
+    sign -3 |> assert-eq :neg
+    sign 0 |> assert-eq :zero
+    sign 9 |> assert-eq :pos
+  end
+
+  test "match is an expression like everything else" do
+    head-of '(1 2 3) |> assert-eq {:head 1}
+    head-of '() |> assert-eq :empty
+    match 1 do
+      1 -> 41
+      _ -> 0
+    end |> add 1 |> assert-eq 42
+  end
+
+  test "clause heads are patterns" do
+    rev '(1 2 3) '() |> assert-eq '(3 2 1)
+    greet "hello" |> assert-eq :greeting
+    greet "goodbye" |> assert-eq :other
+  end
+end

@@ -1,0 +1,2 @@
+s = "println \"s = \#{inspect s}\\n\#{s}\""
+println "s = #{inspect s}\n#{s}"

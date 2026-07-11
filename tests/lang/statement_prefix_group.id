@@ -1,0 +1,56 @@
+use std/test
+activate Test
+
+defn pick a b -> add a b
+
+defmacro prefix-shape do
+  %`(prefix-shape (%,a %,b) %,body) -> %`{:grouped %,a %,b}
+  %`(prefix-shape %,a %,body) -> %`{:single %,a}
+end
+
+suite "statement prefix grouping" do
+  test "unparenthesized call scrutinee in match" do
+    r = match pick 20 22 do
+      42 -> :ok
+      _ -> :bad
+    end
+    assert-eq r :ok
+  end
+
+  test "grouped prefix equals parenthesized prefix" do
+    a = match pick 1 2 do v -> v end
+    b = match (pick 1 2) do v -> v end
+    assert-eq a b
+  end
+
+  test "operator scrutinee in match" do
+    r = match 40 + 2 do
+      42 -> :ok
+      _ -> :bad
+    end
+    assert-eq r :ok
+  end
+
+  test "statement position groups too" do
+    r = do
+      match pick 2 2 do
+        4 -> :four
+        _ -> :bad
+      end
+    end
+    assert-eq r :four
+  end
+
+  test "a macro receives the prefix as one nested expr" do
+    assert-eq (prefix-shape 1 2 do :x end) {:grouped 1 2}
+    assert-eq (prefix-shape 9 do :x end) {:single 9}
+  end
+
+  test "if conditions and else-if chains still enforest" do
+    x = 4
+    r = if x > 3 do :big else do :small end
+    assert-eq r :big
+    s = if x > 9 do :a else if x > 3 do :b else do :c end
+    assert-eq s :b
+  end
+end

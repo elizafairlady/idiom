@@ -1,0 +1,10 @@
+use std/test
+use app/ish
+activate Test
+activate Shell
+suite "explain probe" do
+  test "capture" do
+    r = (grep idiom < README.md)
+    :ok
+  end
+end

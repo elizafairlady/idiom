@@ -1,0 +1,15 @@
+package kernel
+
+export protocol IdiomOperators do
+  operator "|>" precedence: 10 assoc: left capture: {:infix :expression} macro do
+    %`(_ (%,head %,@args) %,left) -> %`(%,head %,left %,@args)
+    %`(_ %,right %,left) -> %`(%,right %,left)
+  end
+
+  operator "|>>" precedence: 10 assoc: left capture: {:infix :expression} macro do
+    %`(_ (%,head %,@args) %,left) -> %`(%,head %,@args %,left)
+    %`(_ %,right %,left) -> %`(%,right %,left)
+  end
+end
+
+activate IdiomOperators

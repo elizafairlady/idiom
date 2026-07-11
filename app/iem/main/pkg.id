@@ -1,0 +1,42 @@
+package iem-main
+
+use std/string
+use std/system with [env-get]
+use std/file with [read]
+use std/compile with [compile]
+use app/iem
+
+defn init-path -> match (env-get "IEM_INIT") do
+  :nil -> match (env-get "HOME") do
+    :nil -> :nil
+    home -> "${home}/.iem/init.id"
+  end
+  path -> path
+end
+
+export defn load-init frame -> match (init-path) do
+  :nil -> frame
+  path -> match (read path) do
+    {:ok src} -> match (compile src) do
+      {:ok thunk _tok} -> match (apply '() thunk) do
+        f when (closure? f) -> f frame
+        _other -> do
+          eprintln "iem: ${path} must end with a fn frame -> frame"
+          frame
+        end
+      end
+      {:error diag} -> do
+        eprintln "iem: init error in ${path}"
+        eprintln diag
+        frame
+      end
+      :incomplete -> do
+        eprintln "iem: ${path} is incomplete"
+        frame
+      end
+    end
+    _ -> frame
+  end
+end
+
+export defn main args -> iem-run (load-init (frame-new)) args

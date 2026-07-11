@@ -1,0 +1,38 @@
+package dict
+
+export defn get m k -> m |> dict-get &k :nil
+export defn get-or m k default -> m |> dict-get &k &default
+
+export defn fetch do
+  m k when (m |> dict-has? &k) -> {:ok (m |> dict-get &k :nil)}
+  _m k -> {:error {:key-not-found &k}}
+end
+
+export defn get! do
+  m k when (m |> dict-has? &k) -> m |> dict-get &k :nil
+  _ k -> error {:key-not-found &k}
+end
+export defn put m k v -> m |> dict-put &k &v
+export defn del m k -> m |> dict-del &k
+export defn keys m -> m |> dict-keys
+export defn vals m -> m |> dict-vals
+export defn size m -> m |> dict-size
+export defn has? m k -> m |> dict-has? &k
+export defn empty? m -> m |> dict-size |> eq? 0
+
+export defn update m k default f -> m |> dict-put &k (f (m |> dict-get k &default))
+
+export defn put-new m k v -> cond (m |> dict-has? &k) &m (m |> dict-put &k &v)
+
+export defn replace m k v -> cond (m |> dict-has? &k) (m |> dict-put &k &v) &m
+
+export defn replace! m k v -> cond (m |> dict-has? &k) (m |> dict-put &k &v) (error {:key-not-found &k})
+
+export defn pop m k -> {(m |> dict-get &k :nil) (m |> dict-del &k)}
+
+export defn pop-or m k default -> {(m |> dict-get &k &default) (m |> dict-del &k)}
+
+export defn pop-result do
+  m k when (m |> dict-has? &k) -> {:ok {(m |> dict-get &k :nil) (m |> dict-del &k)}}
+  _m k -> {:error {:key-not-found &k}}
+end

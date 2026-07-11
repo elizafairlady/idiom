@@ -1,0 +1,5 @@
+println "ready"
+receive do
+  {:never} -> :ok
+  after 5000 -> :timeout
+end

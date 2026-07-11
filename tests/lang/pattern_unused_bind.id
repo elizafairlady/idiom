@@ -1,0 +1,66 @@
+use std/test
+use std/system with [total-allocs]
+activate Test
+
+pkt = bits-of-int 5 8 :big |> bits-append (bits-of-int 258 16 :big) |> bits-append (bits-of-int 7 32 :big)
+
+defn parse-unused do
+  %<a:8 v:16 . _rest> -> add a v
+end
+
+defn parse-used do
+  %<a:8 v:16 . rest> -> add (add a v) (bits-len rest)
+end
+
+defn parse-sized do
+  %<len:8 v:(len * 8)/bits . _tail> -> bits-len v
+end
+
+defn alloc-delta f -> do
+  a0 = total-allocs
+  r = f :nil
+  {r (total-allocs - a0)}
+end
+
+suite do
+  test "unused named bitstring tail allocates nothing" do
+    {r allocs} = alloc-delta (fn _x -> parse-unused pkt)
+    assert-eq r 263
+    assert-eq allocs 0
+  end
+
+  test "used bitstring tail still slices exactly once" do
+    {r allocs} = alloc-delta (fn _x -> parse-used pkt)
+    assert-eq r 295
+    assert-eq allocs 1
+  end
+
+  test "size-referenced bind survives the prune" do
+    sized = bits-of-int 2 8 :big |> bits-append (bits-of-int 0 16 :big) |> bits-append (bits-of-int 1 8 :big)
+    assert-eq (parse-sized sized) 16
+  end
+
+  test "unused bind in a tuple clause head still matches" do
+    f = fn do
+      {_unused x} -> x
+    end
+    assert-eq (f {1 2}) 2
+  end
+
+  test "unused bind on the match rail" do
+    r = match {:a 41} do
+      {_tag v} -> v + 1
+    end
+    assert-eq r 42
+  end
+
+  test "pin of a head bind blocks the prune" do
+    g = fn do
+      {x ^x} -> :same
+      {_a _b} -> :diff
+    end
+    assert-eq (g {1 1}) :same
+    assert-eq (g {1 2}) :diff
+  end
+end
+:ok

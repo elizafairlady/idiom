@@ -1,0 +1,69 @@
+package cmd
+
+export defn lit s -> {:lit s}
+
+export defn glob s -> {:glob s}
+
+export defn var name -> {:env name}
+
+export defn word do
+  {:lit s} -> {:lit s}
+  {:glob s} -> {:glob s}
+  {:env s} -> {:env s}
+  {:cat xs} -> {:cat xs}
+  s when (string? s) -> {:lit s}
+  x -> error {:cmd-word x}
+end
+
+export defn words do
+  '() -> '()
+  '(h . t) -> cons (word &h) (words t)
+end
+
+export defn cat xs -> {:cat (words xs)}
+
+export defn assign name value -> {name (word value)}
+
+export defn redir fd op target -> {:redir op fd (word target)}
+
+export defn heredoc fd data -> {:redir :<< fd (word data)}
+
+export defn sub do
+  g -> {:sub g :read}
+  g dir -> {:sub g dir}
+end
+
+export defn dup fd to -> {:dup fd to}
+
+export defn stdio in out err -> {:stdio in out err}
+
+export defn stage do
+  argv -> {:stage (words argv) '() '()}
+  argv redirs -> {:stage (words argv) redirs '()}
+  argv redirs env -> {:stage (words argv) redirs env}
+end
+
+export defn job stage io -> {:exec stage io}
+
+export defn command do
+  argv -> job (stage argv) (stdio :inherit :inherit :inherit)
+  argv io -> job (stage argv) io
+end
+
+export defn pipeline do
+  stages -> {:pipeline stages (stdio :inherit :inherit :inherit) :false}
+  stages io -> {:pipeline stages io :false}
+  stages io pipefail -> {:pipeline stages io pipefail}
+end
+
+export defn pipefail stages io -> pipeline stages io :true
+
+export defn bg do
+  {:exec stage io} -> {:exec stage io :bg}
+  {:pipeline stages io pf} -> {:pipeline stages io pf :bg}
+end
+
+export defn fg do
+  {:exec stage io} -> {:exec stage io :fg}
+  {:pipeline stages io pf} -> {:pipeline stages io pf :fg}
+end

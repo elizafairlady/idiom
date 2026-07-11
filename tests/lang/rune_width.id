@@ -1,0 +1,48 @@
+use std/test
+use std/string with [from-runes byte-str repeat rune-str]
+use std/string/runes with [width char-width]
+activate Test
+
+suite do
+  test "narrow ascii is one column" do
+    width "a" |> assert-eq 1
+    width "abc" |> assert-eq 3
+    char-width 97 |> assert-eq 1
+    char-width 0 |> assert-eq 0
+    width "a#{byte-str 0}b" |> assert-eq 2
+    width "#{byte-str 127}" |> assert-eq 1
+    width (repeat "abcdefgh" 400) |> assert-eq 3200
+    width "aaa#{rune-str 233}" |> assert-eq 4
+  end
+
+  test "wide cjk and fullwidth are two columns" do
+    width "日" |> assert-eq 2
+    width "日本" |> assert-eq 4
+    char-width 4352 |> assert-eq 2
+    char-width 4447 |> assert-eq 2
+    char-width 44032 |> assert-eq 2
+    char-width 65281 |> assert-eq 2
+    char-width 12351 |> assert-eq 1
+    char-width 12352 |> assert-eq 2
+  end
+
+  test "emoji pictographs are two columns" do
+    width "🎉" |> assert-eq 2
+    char-width 127744 |> assert-eq 2
+    char-width 128591 |> assert-eq 2
+    char-width 129648 |> assert-eq 2
+  end
+
+  test "combining marks are zero columns" do
+    char-width 769 |> assert-eq 0
+    char-width 768 |> assert-eq 0
+    char-width 917999 |> assert-eq 0
+    width (from-runes (list 101 769)) |> assert-eq 1
+    width (from-runes (list 97 769 98 776)) |> assert-eq 2
+  end
+
+  test "mixed strings sum per rune" do
+    width "abc日本🎉" |> assert-eq 9
+    width (from-runes (list 26085 769 97)) |> assert-eq 3
+  end
+end

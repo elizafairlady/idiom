@@ -1,0 +1,103 @@
+package regex
+
+export defn compile do
+  source -> compile source '()
+  source opts -> raw-compile source opts
+end
+
+export defn compile! do
+  source -> compile! source '()
+  source opts -> match (compile source opts) do
+    {:ok rx} -> rx
+    {:error reason} -> error reason
+  end
+end
+
+export defn regex? value -> raw-regex? value
+export defn result? value -> raw-result? value
+
+export trait Pattern do
+  spec source-of :: Pattern a => a -> string
+  spec options-of :: Pattern a => a -> list
+  spec group-count :: Pattern a => a -> int
+  spec group-names :: Pattern a => a -> list
+  spec scan :: Pattern a => a string -> regex-result | nil
+  spec scan-at :: Pattern a => a string int -> regex-result | nil
+  spec scan-from :: Pattern a => a string int -> regex-result | nil
+  spec scan-full :: Pattern a => a string -> regex-result | nil
+  spec test? :: Pattern a => a string -> atom
+  spec scan-all :: Pattern a => a string -> list
+  spec sub :: Pattern a => a string string -> string
+  spec sub-all :: Pattern a => a string string -> string
+  spec split-on :: Pattern a => a string -> list
+
+  method source-of rx
+  method options-of rx
+  method group-count rx
+  method group-names rx
+
+  method scan rx s
+  method scan-at rx s offset
+  method scan-from rx s offset
+  method scan-full rx s
+  method test? rx s
+  method scan-all rx s
+
+  method sub rx s replacement
+  method sub-all rx s replacement
+  method split-on rx s
+end
+
+implement Pattern on regex do
+  method source-of rx -> rx |> raw-source
+  method options-of rx -> rx |> raw-options
+  method group-count rx -> rx |> raw-group-count
+  method group-names rx -> rx |> raw-group-names
+
+  method scan rx s -> rx |> raw-scan-from s 0
+  method scan-at rx s offset -> rx |> raw-scan-at s offset
+  method scan-from rx s offset -> rx |> raw-scan-from s offset
+  method scan-full rx s -> rx |> raw-scan-full s
+  method test? rx s -> rx |> raw-test? s
+  method scan-all rx s -> rx |> raw-scan-all s
+
+  method sub rx s replacement -> rx |> raw-replace s replacement
+  method sub-all rx s replacement -> rx |> raw-replace-all s replacement
+  method split-on rx s -> rx |> raw-split-on s
+end
+
+spec scan-full! :: Pattern a => a string -> regex-result
+export defn scan-full! rx s -> match (rx |> scan-full s) do
+  :nil -> error {:regex-no-full-match s}
+  result -> result
+end
+
+export trait MatchResult do
+  spec start-of :: MatchResult a => a -> int | nil
+  spec end-of :: MatchResult a => a -> int | nil
+  spec text-of :: MatchResult a => a -> string
+  spec capture :: MatchResult a => a int -> string | nil
+  spec capture-range :: MatchResult a => a int -> tuple | nil
+  spec capture-named :: MatchResult a => a atom -> string | nil
+  spec captures :: MatchResult a => a -> list
+
+  method start-of result
+  method end-of result
+  method text-of result
+  method capture result index
+  method capture-range result index
+  method capture-named result name
+  method captures result
+end
+
+implement MatchResult on regex-result do
+  method start-of result -> raw-result-start result
+  method end-of result -> raw-result-end result
+  method text-of result -> raw-result-text result
+  method capture result index -> raw-capture result index
+  method capture-range result index -> raw-capture-range result index
+  method capture-named result name -> raw-capture-named result name
+  method captures result -> raw-captures result
+end
+
+export defn escape s -> raw-escape s

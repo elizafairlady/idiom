@@ -1,0 +1,10 @@
+w % 
+s sleep 5\r
+p 300
+s \x1a
+w Stopped
+s jobs\r
+w Stopped  sleep 5
+s bg\r
+w sleep 5 &
+s :q\r

@@ -1,0 +1,246 @@
+use std/test
+use std/string
+use std/enum
+use std/regex
+import std/list as L
+
+activate Test
+
+suite "tutorial/ch05 bytes are honest runes are lossy" do
+  test "byte-len counts bytes not characters" do
+    byte-len "hello" |> assert-eq 5
+    byte-len "é" |> assert-eq 2
+    byte-len "日本語" |> assert-eq 9
+    byte-len "🐣" |> assert-eq 4
+  end
+
+  test "byte-slice cuts bytes and will cut a character in half" do
+    byte-slice "hello" 1 3 |> assert-eq "el"
+    half = byte-slice "café" 0 4
+    byte-len half |> assert-eq 4
+    runes-lossy half |> assert-eq (list 99 97 102 65533)
+    byte-slice "café" 0 5 |> assert-eq "café"
+  end
+
+  test "byte-slice out of range is an error not a clamp" do
+    over = assert-raises (fn -> byte-slice "abc" 0 10)
+    over |> assert-eq {:error {:slice-out-of-range 0 10 3}}
+    back = assert-raises (fn -> byte-slice "abc" 2 1)
+    back |> assert-eq {:error {:slice-out-of-range 2 1 3}}
+  end
+
+  test "byte-find returns a byte offset or nil" do
+    byte-find "banana" "na" 0 |> assert-eq 2
+    byte-find "banana" "na" 3 |> assert-eq 4
+    byte-find "banana" "xyz" 0 |> assert-eq :nil
+    byte-find "abc" "" 0 |> assert-eq 0
+  end
+
+  test "byte reads one byte and byte-str writes one" do
+    byte "A" 0 |> assert-eq 65
+    byte "é" 0 |> assert-eq 195
+    byte "é" 1 |> assert-eq 169
+    byte "abc" 5 |> assert-eq :nil
+    byte-len (byte-str 233) |> assert-eq 1
+    byte-len (rune-str 233) |> assert-eq 2
+    rune-str 233 |> assert-eq "é"
+  end
+
+  test "strings enumerate as bytes" do
+    "héllo".to-list |> assert-eq (list 104 195 169 108 108 111)
+    "abc".map (fn b -> b + 1) |> assert-eq (list 98 99 100)
+  end
+
+  test "runes-lossy decodes and replaces damage with 65533" do
+    runes-lossy "hé" |> assert-eq (list 104 233)
+    runes-lossy "日本" |> assert-eq (list 26085 26412)
+    runes-lossy (byte-str 255) |> assert-eq (list 65533)
+    runes-lossy "" |> assert-eq '()
+  end
+
+  test "the round trip through runes is lossy" do
+    cut = byte-slice "café" 0 4
+    back = from-runes (runes-lossy cut)
+    byte-len cut |> assert-eq 4
+    byte-len back |> assert-eq 6
+    from-runes (list 104 233 33) |> assert-eq "hé!"
+  end
+
+  test "rune-str refuses invalid codepoints" do
+    neg = assert-raises (fn -> rune-str -1)
+    neg |> assert-eq {:error {:type-error :rune-str -1}}
+    huge = assert-raises (fn -> rune-str 1114112)
+    huge |> assert-eq {:error {:type-error :rune-str 1114112}}
+    surrogate = assert-raises (fn -> rune-str 55296)
+    surrogate |> assert-eq {:error {:type-error :rune-str 55296}}
+  end
+
+  test "everyday string ops" do
+    split "a,b,,c" "," |> assert-eq (list "a" "b" "" "c")
+    split "no-commas" "," |> assert-eq (list "no-commas")
+    nosep = assert-raises (fn -> split "a,b" "")
+    nosep |> assert-eq {:error {:split :empty-separator}}
+    join (list "a" "b" "c") "-" |> assert-eq "a-b-c"
+    trim "  padded\t\n " |> assert-eq "padded"
+    replace "banana" "na" "NA" |> assert-eq "baNANA"
+    lines "a\nb\nc" |> assert-eq (list "a" "b" "c")
+    "na" |> repeat 4 |> assert-eq "nananana"
+    pad-left "7" 3 "0" |> assert-eq "007"
+  end
+
+  test "case ops are byte-ascii only" do
+    upcase "hello, world" |> assert-eq "HELLO, WORLD"
+    upcase "café" |> assert-eq "CAFé"
+    downcase "CAFÉ" |> assert-eq "cafÉ"
+    capitalize "hello" |> assert-eq "Hello"
+    capitalize "élan" |> assert-eq "élan"
+  end
+
+  test "rune-indexed helpers" do
+    reverse-runes "héllo" |> assert-eq "olléh"
+    slice-runes "日本語です" 0 2 |> assert-eq "日本"
+    take-runes "héllo" 2 |> assert-eq "hé"
+    first-rune "élan" |> assert-eq 233
+    starts-with? "café" "caf" |> assert-eq :true
+    ends-with? "café" "é" |> assert-eq :true
+  end
+
+  test "bitstrings pack fields at bit offsets" do
+    inspect %<4:4 5:4> |> assert-eq "%<69>"
+    inspect %<5:3> |> assert-eq "%<5:3>"
+    header = match (bits-append %<4:4 5:4> (string-bits "xy")) do
+      %<version:4 ihl:4 . rest> -> {version ihl (bits-string rest)}
+    end
+    header |> assert-eq {4 5 "xy"}
+    path = match (string-bits "GET /") do
+      %<"GET " . tail> -> bits-string tail
+      _ -> :nope
+    end
+    path |> assert-eq "/"
+    %<200:8> |> bits-int 0 8 :signed |> assert-eq -56
+    short = match %<1:4> do
+      %<b:8> -> b
+      _ -> :too-short
+    end
+    short |> assert-eq :too-short
+  end
+
+  test "regex literals scan with named and numbered groups" do
+    m = r"(?<word>[a-z]+)-([0-9]+)" |> scan "abc-42"
+    m |> capture 0 |> assert-eq "abc-42"
+    m |> capture 1 |> assert-eq "abc"
+    m |> capture 2 |> assert-eq "42"
+    m |> capture-named :word |> assert-eq "abc"
+    m |> start-of |> assert-eq 0
+    m |> end-of |> assert-eq 6
+    m |> capture-range 1 |> assert-eq {0 3}
+    r"(?<word>\w+)@(?<host>\w+)" |> group-names |> assert-eq (list "word" "host")
+    r"(?<word>\w+)@(?<host>\w+)" |> group-count |> assert-eq 2
+  end
+
+  test "no match is nil and unset groups are nil" do
+    r"[a-z]+" |> scan "42" |> assert-eq :nil
+    r"(a)?b" |> scan "b" |> captures |> assert-eq (list :nil)
+    r"cat" |> test? "concatenate" |> assert-eq :true
+  end
+
+  test "asking for a group the pattern lacks crashes" do
+    noname = assert-raises (fn -> r"(?<word>[a-z]+)" |> scan "abc" |> capture-named :nope)
+    noname |> assert-eq {:error {:runtime "unknown capture name 'nope'"}}
+    noindex = assert-raises (fn -> r"(a)" |> scan "a" |> capture 5)
+    noindex |> assert-eq {:error {:runtime "capture index out of range"}}
+  end
+
+  test "scan variants anchor search and demand" do
+    r"bc" |> scan-at "abc" 1 |> text-of |> assert-eq "bc"
+    r"bc" |> scan-at "abc" 0 |> assert-eq :nil
+    r"bc" |> scan-from "abc" 0 |> text-of |> assert-eq "bc"
+    r"b" |> scan-full "abc" |> assert-eq :nil
+    r"abc" |> scan-full "abc" |> text-of |> assert-eq "abc"
+  end
+
+  test "scan-all walks every match" do
+    hits = r"[a-z]+([0-9]+)" |> scan-all "a1 b22 c333"
+    hits |> L.map (fn m -> text-of m) |> assert-eq (list "a1" "b22" "c333")
+    hits |> L.map (fn m -> capture m 1) |> assert-eq (list "1" "22" "333")
+    r"[0-9]+" |> scan-all "no digits" |> assert-eq '()
+  end
+
+  test "empty matches advance one byte and are all reported" do
+    spans = r"x?" |> scan-all "ab" |> L.map (fn m -> {(start-of m) (end-of m) (text-of m)})
+    spans |> assert-eq (list {0 0 ""} {1 1 ""} {2 2 ""})
+    starts = r"a*" |> scan-all "baab" |> L.map (fn m -> {(start-of m) (text-of m)})
+    starts |> assert-eq (list {0 ""} {1 "aa"} {3 ""} {4 ""})
+    r"x?" |> sub-all "ab" "-" |> assert-eq "-a-b-"
+  end
+
+  test "leftmost longest not first alternative" do
+    r"a|ab" |> scan "ab" |> text-of |> assert-eq "ab"
+    r"ab|a" |> scan "ab" |> text-of |> assert-eq "ab"
+    r"one|onetwo" |> scan "onetwo" |> text-of |> assert-eq "onetwo"
+    r"(a)|(ab)" |> scan "ab" |> captures |> assert-eq (list :nil "ab")
+    r"a+|b+" |> scan "abbb" |> text-of |> assert-eq "a"
+    r"x*" |> scan "xxxy" |> text-of |> assert-eq "xxx"
+    r"a{2,4}" |> scan "aaaaa" |> text-of |> assert-eq "aaaa"
+    r"(ab)+" |> scan "ababab" |> captures |> assert-eq (list "ab")
+  end
+
+  test "greedy only and no lazy quantifiers" do
+    r"<.+>" |> scan "<a><b>" |> text-of |> assert-eq "<a><b>"
+    tags = r"<[^>]+>" |> scan-all "<a><b>" |> L.map (fn m -> text-of m)
+    tags |> assert-eq (list "<a>" "<b>")
+    lazy = compile "a*?b"
+    lazy |> assert-eq {:error {:regex :compile "regex parse error at byte 2: quantifier has no atom" "a*?b"}}
+  end
+
+  test "backreferences are rejected at compile" do
+    compile "(a)\\1" |> assert-eq {:error {:regex :compile "regex parse error at byte 5: backreferences are not supported" "(a)\\1"}}
+    compile "(?<x>a)\\k<x>" |> assert-eq {:error {:regex :compile "regex parse error at byte 9: backreferences are not supported" "(?<x>a)\\k<x>"}}
+  end
+
+  test "flags live on compile not on the literal" do
+    (compile! "hello" :i) |> test? "HELLO" |> assert-eq :true
+    (compile! "hello" :i) |> scan "say HeLLo" |> text-of |> assert-eq "HeLLo"
+    (compile! "x" (list :i :m)) |> options-of |> assert-eq (list :caseless :multiline)
+    (compile! "^b" :m) |> scan-all "a\nb\nb" |> L.length |> assert-eq 2
+    (compile! "a.b" :s) |> test? "a\nb" |> assert-eq :true
+    r"a.b" |> test? "a\nb" |> assert-eq :false
+    (compile! "é" :i) |> test? "É" |> assert-eq :false
+    inline = compile "(?i)abc"
+    inline |> assert-eq {:error {:regex :compile "regex parse error at byte 3: unknown group extension" "(?i)abc"}}
+  end
+
+  test "lookaround all four directions" do
+    r"\d+(?= dollars)" |> scan "50 cents, 99 dollars" |> text-of |> assert-eq "99"
+    (compile! "(?<=\\$)\\d+") |> scan "cost $25 today" |> text-of |> assert-eq "25"
+    (compile! "\\b\\w+(?!\\w)") |> scan "hi there" |> text-of |> assert-eq "hi"
+  end
+
+  test "compile reports pattern errors as values" do
+    unterminated = compile "a(b"
+    unterminated |> assert-eq {:error {:regex :compile "regex parse error at byte 3: unterminated group" "a(b"}}
+    unclosed = compile "a[b"
+    unclosed |> assert-eq {:error {:regex :compile "regex parse error at byte 3: unterminated character class" "a[b"}}
+    bounds = compile "a{3,2}"
+    bounds |> assert-eq {:error {:regex :compile "regex parse error at byte 6: quantifier upper bound is smaller than lower bound" "a{3,2}"}}
+  end
+
+  test "sub and sub-all with templates" do
+    r"(?<name>[a-z]+)=([0-9]+)" |> sub "foo=7 bar=9" "\${name}!" |> assert-eq "foo! bar=9"
+    r"(?<name>[a-z]+)=([0-9]+)" |> sub-all "foo=7 bar=9" "$2<-\${name}" |> assert-eq "7<-foo 9<-bar"
+    r"(?<name>[a-z]+)=([0-9]+)" |> sub-all "foo=7" "\\k<name>:$1" |> assert-eq "foo:foo"
+    r"[0-9]+" |> sub-all "a1b22" "$$" |> assert-eq "a$b$"
+  end
+
+  test "split-on splits by pattern and swallows nothing" do
+    r"\s*,\s*" |> split-on "a , b,c ,  d" |> assert-eq (list "a" "b" "c" "d")
+    r"," |> split-on ",a,,b," |> assert-eq (list "" "a" "" "b" "")
+    r"[0-9]" |> split-on "abc" |> assert-eq (list "abc")
+  end
+
+  test "escape makes a literal pattern and replace stays literal" do
+    escape "1+1 (really?)" |> assert-eq "1\\+1 \\(really\\?\\)"
+    replace "a.b.c" "." "/" |> assert-eq "a/b/c"
+    r"\." |> sub-all "a.b.c" "/" |> assert-eq "a/b/c"
+  end
+end

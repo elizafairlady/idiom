@@ -1,0 +1,42 @@
+use std/test
+activate Test
+
+defn defn-home %<a:8> -> a
+defn defn-match-home x -> match x do %<a:8> -> a end
+
+env-home = fn %<a:8> -> a
+env-match-home = fn x -> match x do %<a:8> -> a end
+env-guard-home = fn x when bits? x -> bits-len x
+
+suite do
+  test "bitstring pin agrees across construction homes" do
+    b = %<65:8>
+    defn-home b |> assert-eq 65
+    defn-match-home b |> assert-eq 65
+    env-home b |> assert-eq 65
+    env-match-home b |> assert-eq 65
+    env-guard-home b |> assert-eq 8
+    local-home = fn %<a:8> -> a
+    local-home b |> assert-eq 65
+    local-match-home = fn x -> match x do %<a:8> -> a end
+    local-match-home b |> assert-eq 65
+    direct = match b do %<a:8> -> a end
+    direct |> assert-eq 65
+  end
+
+  test "non-bitstring argument refutes at runtime in every home" do
+    send (self) :nope
+    escaped = receive do
+      v -> v
+    end
+    assert-raises (fn -> defn-home escaped)
+    assert-raises (fn -> defn-match-home escaped)
+    assert-raises (fn -> env-home escaped)
+    assert-raises (fn -> env-match-home escaped)
+  end
+
+  test "rigid annotation still rejects a bitstring-pinned clause" do
+    assert-expand-error "package p\nspec bad :: a -> int\nbad = fn %<x:8> -> x\n" "expected bitstring, got a"
+    assert-expand-error "package p\nspec bad :: a -> int\nbad = fn x -> match x do %<v:8> -> v end\n" "expected bitstring, got a"
+  end
+end

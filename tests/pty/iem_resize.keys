@@ -1,0 +1,6 @@
+w L1:C1
+s hi
+w L1:C3
+r 60 20
+g tests/pty/iem_resize_1.grid
+s \x18\x03

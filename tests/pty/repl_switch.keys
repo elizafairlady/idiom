@@ -1,0 +1,6 @@
+w idiom repl
+s protocol Greetish do grammar Greet exclusive do; token nl {:regex "\n+"} -> {:emit-atom nl}; skip space {:regex "[ \t\r]+"}; token name {:regex "(?<name_text>[a-z]+)"} -> {:capture-string name_text}; form greeting {:capture who {:token name}} -> {:emit-form "%-expr" [{:emit-word "println"} {:capture who}]}; form program {:repeat {:alt {:token nl} {:capture line {:ref greeting}}}} -> {:emit-form "%-package-begin" [{:splice line}]}; end end\r
+s activate Greetish\r
+s zork\r
+w zork
+s :q\r

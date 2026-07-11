@@ -1,0 +1,64 @@
+use std/string
+use std/test
+import std/list as L
+activate Test
+
+defn list-shape do
+  '(a b c . rest) -> a + b + c + (L.length rest)
+  _ -> 0
+end
+
+defn vector-shape do
+  [a b c . rest] -> a + b + c + (seq-count rest)
+  _ -> 0
+end
+
+defn tuple-shape do
+  {a b c . rest} -> a + b + c + (seq-count rest)
+  _ -> 0
+end
+
+defn dict-shape do
+  %{:kind :ok :value v :other o . rest} -> v + o + (dict-size rest)
+  _ -> 0
+end
+
+defn guard-shape do
+  {a b c} when (and (eq? a b) (eq? b c)) -> a
+  {a b c} -> a + b + c
+  _ -> 0
+end
+
+defn syntax-shape do
+  %`%{:value %,v . %,rest} -> (syntax-int-value v) + (syntax-length rest)
+  %`[%,a %,b %,@tail] -> (syntax-int-value a) + (syntax-int-value b) + (L.length tail)
+  %`(pair %,a %,b) -> (syntax-int-value a) + (syntax-int-value b)
+  _ -> 0
+end
+
+suite "pattern" do
+  bench "value-selector/list-rest" expect: 8 do
+    list-shape '(1 2 3 4 5)
+  end
+
+  bench "value-selector/vector-rest" expect: 8 do
+    vector-shape [1 2 3 4 5]
+  end
+
+  bench "value-selector/tuple-rest" expect: 8 do
+    tuple-shape {1 2 3 4 5}
+  end
+
+  bench "value-selector/dict-rest" expect: 19 do
+    dict-shape %{:kind :ok :value 7 :other 11 :extra 3}
+  end
+
+  bench "guard/same-and-fallback" expect: 17 do
+    (guard-shape {7 7 7}) + (guard-shape {7 1 2})
+  end
+
+  bench "syntax-selector/dict-vector-list" expect: 22 do
+    (syntax-shape %'%{:value 7 :rest 1}) + (syntax-shape %'[1 2 3]) + (syntax-shape %'(pair 4 5))
+  end
+end
+:ok

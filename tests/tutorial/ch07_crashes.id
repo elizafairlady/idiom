@@ -1,0 +1,211 @@
+use std/test
+use std/file with [read! write!]
+import std/result as R
+
+activate Test
+
+defn double x -> x * 2
+
+suite "tutorial/ch07 crashes are values" do
+  test "ok and error tuples are just values to match" do
+    res = {:error :enoent}
+    got = match res do
+      {:ok data} -> {:read data}
+      {:error reason} -> {:could-not-read reason}
+    end
+    got |> assert-eq {:could-not-read :enoent}
+  end
+
+  test "result combinators thread the happy path" do
+    R.map {:ok 3} (fn x -> x * 10) |> assert-eq {:ok 30}
+    R.map {:error :nope} (fn x -> x * 10) |> assert-eq {:error :nope}
+    R.and-then {:ok 3} (fn x -> {:ok (x + 1)}) |> assert-eq {:ok 4}
+    R.unwrap-or {:error :gone} 99 |> assert-eq 99
+    R.ok 7 |> assert-eq {:ok 7}
+    R.err :why |> assert-eq {:error :why}
+  end
+
+  test "error raises and rescue catches the whole value" do
+    got = try do
+      error {:boom 1}
+    rescue do e -> {:rescued e}
+    end
+    got |> assert-eq {:rescued {:error {:boom 1}}}
+  end
+
+  test "error with many arguments tuples them" do
+    got = try do
+      error :tag "detail" 9
+    rescue do e -> e
+    end
+    got |> assert-eq {:error {:tag "detail" 9}}
+  end
+
+  test "runtime crashes rescue as structured values" do
+    {pid ref} = spawn-monitor (fn -> receive do x -> 1 + x end)
+    send pid :atom
+    t = receive do
+      {:down r p reason} when (and (eq? r ref) (eq? p pid)) -> reason
+      after 500 -> :timeout
+    end
+    {:error detail _trace} = t
+    detail |> assert-eq {:type-error :add 1 :atom}
+    a = try do
+      apply (list 1 2 3) &double
+    rescue do e -> e
+    end
+    a |> assert-eq {:error {:arity :double 3 1 1}}
+  end
+
+  test "ensure runs on the way out" do
+    plain = try do
+      41 + 1
+    ensure do :ok
+    end
+    plain |> assert-eq 42
+    path = "/tmp/idiom_ch07_ensure.txt"
+    got = try do
+      error :die
+    rescue do e -> e
+    ensure do (write! path "ensure-ran")
+    end
+    got |> assert-eq {:error :die}
+    read! path |> assert-eq "ensure-ran"
+  end
+
+  test "the bang bridge turns error tuples into raises" do
+    use std/file with [read]
+    read "/tmp/no-such-file-xyz" |> assert-eq {:error :enoent}
+    raised = assert-raises (fn -> read! "/tmp/no-such-file-xyz")
+    raised |> assert-eq {:error {:file-read "/tmp/no-such-file-xyz" :enoent}}
+  end
+
+  test "unwrap bang re-raises the reason" do
+    raised = assert-raises (fn -> R.unwrap! {:error :bad-input})
+    raised |> assert-eq {:error :bad-input}
+  end
+
+  test "assert-raises returns the error value" do
+    got = assert-raises (fn -> error {:boom 3})
+    got |> assert-eq {:error {:boom 3}}
+  end
+
+  test "a monitor reports a normal death" do
+    {pid ref} = spawn-monitor (fn -> :ok)
+    got = receive do
+      {:down r p reason} when (and (eq? r ref) (eq? p pid)) -> {:down-reason reason}
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:down-reason :normal}
+  end
+
+  test "a raised value crosses the boundary intact" do
+    {pid ref} = spawn-monitor (fn -> error {:boom 42})
+    got = receive do
+      {:down r p reason} when (eq? r ref) -> reason
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:error {:boom 42}}
+  end
+
+  test "a runtime crash reason crosses the boundary with its trace" do
+    {pid ref} = spawn-monitor (fn -> match 1 do
+      2 -> :ok
+    end)
+    got = receive do
+      {:down r p reason} when (and (eq? r ref) (eq? p pid)) -> reason
+      after 500 -> :timeout
+    end
+    {:error detail trace} = got
+    detail |> assert-eq {:no-clause :match {1}}
+    '({:frame _ {:span file line _ _ _}} . _) = trace
+    file |> assert-eq "tests/tutorial/ch07_crashes.id"
+    (gt? line 0) |> assert-eq :true
+  end
+
+  test "a bare raise crosses without the error wrapper" do
+    {pid ref} = spawn-monitor (fn -> raise {:bare :raise})
+    got = receive do
+      {:down r p reason} when (eq? r ref) -> reason
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:bare :raise}
+  end
+
+  test "exit terminates self with a reason that travels" do
+    {pid ref} = spawn-monitor (fn -> exit {:shutdown :because})
+    got = receive do
+      {:down r p reason} when (eq? r ref) -> reason
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:shutdown :because}
+  end
+
+  test "trap-exit turns link deaths into mail" do
+    trap-exit :true
+    spawn-link (fn -> exit :boom)
+    got = receive do
+      {:exit from reason} -> {:trapped reason (pid? from)}
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:trapped :boom :true}
+  end
+
+  test "normal child exits do not disturb an untrapping parent" do
+    spawn-link (fn -> :done)
+    got = receive do
+      {:never} -> :bad
+      after 100 -> :parent-survived
+    end
+    got |> assert-eq :parent-survived
+  end
+
+  test "a trapping parent hears even normal exits" do
+    trap-exit :true
+    spawn-link (fn -> :done)
+    got = receive do
+      {:exit _ reason} -> {:trapped-normal reason}
+      after 500 -> :timeout
+    end
+    got |> assert-eq {:trapped-normal :normal}
+  end
+
+  test "kill arrives as killed" do
+    {pid ref} = spawn-monitor (fn -> receive do
+      {:never} -> :bad
+      after 5000 -> :late
+    end)
+    exit pid :kill
+    got = receive do
+      {:down r p reason} when (eq? r ref) -> reason
+      after 500 -> :timeout
+    end
+    got |> assert-eq :killed
+  end
+
+  test "kill cannot be trapped" do
+    trap-exit :true
+    victim = spawn-link (fn do
+      trap-exit :true
+      receive do
+        {:exit from reason} -> exit {:trapped reason}
+        after 5000 -> :late
+      end
+    end)
+    exit victim :kill
+    got = receive do
+      {:exit p reason} when (eq? p victim) -> reason
+      after 500 -> :timeout
+    end
+    got |> assert-eq :killed
+  end
+
+  test "sending to the dead is quietly fine" do
+    {pid ref} = spawn-monitor (fn -> :ok)
+    receive do
+      {:down r _ _} when (eq? r ref) -> :ok
+      after 500 -> :timeout
+    end
+    send pid {:hello :ghost} |> assert-eq {:hello :ghost}
+  end
+end

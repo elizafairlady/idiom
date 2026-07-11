@@ -1,0 +1,8 @@
+w (fundamental)
+s hello iem
+w hello iem
+s \r
+s second line
+w second line
+s \x13
+s \x11
