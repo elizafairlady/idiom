@@ -162,7 +162,7 @@ static const char *rope_flatten(IdmObject *obj);
 static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32]);
 static IdmSymbol *intern_find_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32], uint32_t h);
 static uint32_t intern_hash(IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32]);
-static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, const char *package_key);
+static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, IdmSymbol *package_key);
 
 static void heap_lock(IdmHeap *heap) {
     if (heap->locking) pthread_mutex_lock(&heap->lock);
@@ -570,7 +570,6 @@ void idm_runtime_destroy(IdmRuntime *rt) {
     rt->retired_module_count = 0;
     rt->retired_module_cap = 0;
     for (size_t i = 0; i < rt->env_count; i++) {
-        free(rt->envs[i]->package_key);
         IdmEnvSlots *slots = atomic_load_explicit(&rt->envs[i]->slots, memory_order_relaxed);
         while (slots) {
             IdmEnvSlots *retired = slots->retired;
@@ -595,7 +594,7 @@ void idm_runtime_destroy(IdmRuntime *rt) {
     idm_intern_destroy(&rt->intern);
 }
 
-IdmEnv *idm_package_env_get_or_create(IdmRuntime *rt, const char *key) {
+IdmEnv *idm_package_env_get_or_create(IdmRuntime *rt, IdmSymbol *key) {
     if (!key) return NULL;
     pthread_mutex_lock(&g_env_mu);
     IdmEnv *found = env_get_or_create_unlocked(rt, key);
@@ -610,21 +609,18 @@ IdmEnv *idm_env_fresh(IdmRuntime *rt) {
     return env;
 }
 
-static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, const char *package_key) {
+static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, IdmSymbol *package_key) {
     if (package_key) {
         for (size_t i = 0; i < rt->env_count; i++) {
-            if (rt->envs[i]->package_key && strcmp(rt->envs[i]->package_key, package_key) == 0) return rt->envs[i];
+            if (rt->envs[i]->package_key == package_key) return rt->envs[i];
         }
     }
     IdmEnv *env = calloc(1u, sizeof(*env));
     if (!env) return NULL;
     atomic_init(&env->slots, NULL);
-    if (package_key) {
-        env->package_key = idm_strdup(package_key);
-        if (!env->package_key) { free(env); return NULL; }
-    }
+    env->package_key = package_key;
     if (rt->env_count == rt->env_cap) {
-        if (!idm_grow((void **)&rt->envs, &rt->env_cap, sizeof(*rt->envs), 8u, rt->env_count + 1u)) { free(env->package_key); free(env); return NULL; }
+        if (!idm_grow((void **)&rt->envs, &rt->env_cap, sizeof(*rt->envs), 8u, rt->env_count + 1u)) { free(env); return NULL; }
     }
     rt->envs[rt->env_count++] = env;
     return env;

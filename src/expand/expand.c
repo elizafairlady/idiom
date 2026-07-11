@@ -1010,16 +1010,15 @@ static bool resolve_unbound_member_surface(ExpandContext *ctx, const IdmSyntax *
 }
 
 static const IdmCallableContract *method_surface_contract(ExpandContext *ctx, const MethodSurfaceDef *surface) {
-    const char *trait = method_surface_trait_text(surface);
     const char *name = method_surface_name_text(surface);
-    if (!ctx || !trait || !name) return NULL;
-    if (ctx->trait_name && strcmp(ctx->trait_name, trait) == 0) {
+    if (!ctx || !surface->trait || !name) return NULL;
+    if (ctx->trait_identity == surface->trait) {
         for (size_t i = 0; i < ctx->decl_method_count; i++) {
             const TraitMethodDef *method = &ctx->decl_methods[i];
             if (method->has_contract && method->contract.sig_count != 0 && trait_method_matches_name(ctx, method, name)) return &method->contract;
         }
     }
-    const TraitDef *def = typed_trait_by_identity(ctx, trait);
+    const TraitDef *def = typed_trait_by_symbol(ctx, surface->trait);
     if (!def) return NULL;
     for (size_t i = 0; i < def->method_count; i++) {
         const TraitMethodDef *method = &def->methods[i];
@@ -2707,7 +2706,7 @@ static IdmCore *expand_protocol_info_parts(ExpandContext *ctx, IdmSyntax *const 
     if (status == IDM_RESOLVE_AMBIGUOUS) return expand_error(err, name_syntax->span, "ambiguous protocol '%s'", name_syntax->as.text);
     if (!p) return expand_error(err, name_syntax->span, "protocol-info expects a protocol; '%s' is unbound", name_syntax->as.text);
     const IdmArtifact *art = p->art;
-    char provider_key[17];
+    char provider_key[65];
     artifact_provider_key(art->src_hash, provider_key);
     IdmValue env_key = idm_atom(ctx->rt, provider_key);
     IdmSpan span = items[start]->span;

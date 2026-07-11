@@ -1480,18 +1480,6 @@ static bool op_recv(Vm *vm, Frame *frame, size_t instr_ip, const uint32_t *opera
     return true;
 }
 
-static const char *module_const_text(const IdmBytecodeModule *module, uint32_t index, const char *what, IdmError *err) {
-    if (index >= module->const_count) {
-        idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", what, index);
-        return NULL;
-    }
-    IdmValue value = module->constants[index];
-    if (idm_value_tag(value) == IDM_VAL_ATOM || idm_value_tag(value) == IDM_VAL_WORD) return idm_symbol_text(idm_value_symbol(value));
-    if (idm_value_tag(value) == IDM_VAL_STRING) return idm_string_bytes(value);
-    idm_error_set(err, idm_span_unknown(NULL), "%s constant must be a name", what);
-    return NULL;
-}
-
 static IdmSymbol *module_const_symbol(IdmRuntime *rt, const IdmBytecodeModule *module, uint32_t index, const char *what, IdmError *err) {
     if (index >= module->const_count) {
         idm_error_set(err, idm_span_unknown(NULL), "%s constant %u out of bounds", what, index);
@@ -1591,7 +1579,7 @@ static bool package_env_push(Vm *vm, Frame *frame, uint32_t key_const, IdmError 
     IdmValue key_value = module->constants[key_const];
     if (idm_value_tag(key_value) != IDM_VAL_ATOM && idm_value_tag(key_value) != IDM_VAL_WORD) return idm_error_set(err, idm_span_unknown(NULL), "PUSH_PACKAGE_ENV expects a key constant");
     IdmEnv *parent = frame->env ? frame->env : vm->rt->main_env;
-    IdmEnv *child = idm_package_env_get_or_create(vm->rt, idm_symbol_text(idm_value_symbol(key_value)));
+    IdmEnv *child = idm_package_env_get_or_create(vm->rt, idm_value_symbol(key_value));
     if (!child) return idm_error_oom(err, idm_span_unknown(NULL));
     if (vm->env_save_count == vm->env_save_cap) {
         if (!idm_grow((void **)&vm->env_save, &vm->env_save_cap, sizeof(*vm->env_save), 8u, vm->env_save_count + 1u)) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -2012,7 +2000,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 IdmBcCodeSite *site = &module->code_sites[instr_ip];
                 IdmEnv *env = atomic_load_explicit(&site->env, memory_order_acquire);
                 if (!env) {
-                    const char *key = module_const_text(module, key_const, "LOAD_PACKAGE_SLOT key", err);
+                    IdmSymbol *key = module_const_symbol(vm->rt, module, key_const, "LOAD_PACKAGE_SLOT key", err);
                     if (!key) return false;
                     env = idm_package_env_get_or_create(vm->rt, key);
                     if (!env) return idm_error_oom(err, idm_span_unknown(NULL));
@@ -2031,7 +2019,7 @@ static bool vm_run_loop_inner(Vm *vm, int64_t *budget, IdmExecStatus *status, Id
                 IdmBcCodeSite *site = &module->code_sites[instr_ip];
                 IdmEnv *env = atomic_load_explicit(&site->env, memory_order_acquire);
                 if (!env) {
-                    const char *key = module_const_text(module, key_const, "STORE_PACKAGE_SLOT key", err);
+                    IdmSymbol *key = module_const_symbol(vm->rt, module, key_const, "STORE_PACKAGE_SLOT key", err);
                     if (!key) return false;
                     env = idm_package_env_get_or_create(vm->rt, key);
                     if (!env) return idm_error_oom(err, idm_span_unknown(NULL));

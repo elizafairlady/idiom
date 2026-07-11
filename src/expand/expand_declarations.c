@@ -947,7 +947,7 @@ IdmCore *build_method_dispatch_refresh_core(ExpandContext *ctx, IdmSpan span, Id
     for (size_t i = 0; ok && i < ctx->typed.method_surface_count; i++) {
         const MethodSurfaceDef *surface = &ctx->typed.method_surfaces[i];
         if (!surface->has_dispatch || !surface->dispatch_env || !surface->dispatch_env_key || !surface->dispatch_env_key[0]) continue;
-        const TraitDef *trait = typed_trait_by_identity(ctx, method_surface_trait_text(surface));
+        const TraitDef *trait = typed_trait_by_symbol(ctx, surface->trait);
         const TraitMethodDef *method = trait ? find_trait_method_def(ctx, trait->methods, trait->method_count, method_surface_name_text(surface)) : NULL;
         if (!method) continue;
         if (!method_dispatch_has_impl_clause(ctx, method_surface_trait_text(surface), method_surface_name_text(surface))) continue;
@@ -1904,7 +1904,7 @@ bool ctx_activate_protocol_closure(ExpandContext *ctx, ProtocolDef *p, IdmError 
     bool ok = true;
     for (size_t i = 0; ok && i < act_count; i++) {
         ProtocolActivation *act = &acts[i];
-        char runtime_key[17];
+        char runtime_key[65];
         artifact_provider_key(act->art->src_hash, runtime_key);
         ok = artifact_base(ctx, act->art, &act->base, err) &&
              activate_artifact(ctx, act->identity, act->art, act->base, &ctx->empty_scopes, idm_span_unknown(NULL), err) &&
@@ -1939,7 +1939,7 @@ IdmCore *expand_activate(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmSp
     bool activated = true;
     for (size_t i = 0; activated && i < act_count; i++) {
         ProtocolActivation *act = &acts[i];
-        char runtime_key[17];
+        char runtime_key[65];
         artifact_provider_key(act->art->src_hash, runtime_key);
         activated = artifact_base(ctx, act->art, &act->base, err) &&
                     activate_artifact(ctx, act->identity, act->art, act->base, &act_scopes, span, err) &&

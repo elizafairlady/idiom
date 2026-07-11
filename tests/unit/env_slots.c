@@ -22,6 +22,17 @@ static IdmRuntime g_rt;
 static IdmEnv *g_env;
 static atomic_bool g_stop;
 
+static void test_package_identity(void) {
+    IdmSymbol *a = idm_intern(&g_rt.intern, IDM_SYMBOL_ATOM, "a");
+    IdmSymbol *same = idm_intern(&g_rt.intern, IDM_SYMBOL_ATOM, "a");
+    IdmSymbol *b = idm_intern(&g_rt.intern, IDM_SYMBOL_ATOM, "b");
+    check(a && same && b, "intern package identities");
+    IdmEnv *first = idm_package_env_get_or_create(&g_rt, a);
+    check(first != NULL, "create package env");
+    check(first == idm_package_env_get_or_create(&g_rt, same), "same package identity reuses env");
+    check(first != idm_package_env_get_or_create(&g_rt, b), "different package identity gets different env");
+}
+
 static void *racing_reader(void *arg) {
     uintptr_t seed = (uintptr_t)arg;
     while (!atomic_load_explicit(&g_stop, memory_order_relaxed)) {
@@ -117,6 +128,7 @@ static void test_reads_scale(void) {
 
 int idm_unit_env_slots(void) {
     idm_runtime_init(&g_rt);
+    test_package_identity();
     test_grow_race();
     test_reads_scale();
     idm_runtime_destroy(&g_rt);

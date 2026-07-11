@@ -192,7 +192,7 @@ typedef struct IdmEnvSlots {
 } IdmEnvSlots;
 
 typedef struct IdmEnv {
-    char *package_key;
+    IdmSymbol *package_key;
     _Atomic(IdmEnvSlots *) slots;
 } IdmEnv;
 
@@ -237,7 +237,7 @@ struct IdmRuntime {
 
 void idm_runtime_retire_module(IdmRuntime *rt, IdmBytecodeModule *module);
 
-IdmEnv *idm_package_env_get_or_create(IdmRuntime *rt, const char *key);
+IdmEnv *idm_package_env_get_or_create(IdmRuntime *rt, IdmSymbol *key);
 IdmEnv *idm_env_fresh(IdmRuntime *rt);
 bool idm_env_slot_ensure(IdmEnv *env, uint32_t id, IdmError *err);
 bool idm_env_slot_set(IdmRuntime *rt, IdmEnv *env, uint32_t id, IdmValue value, IdmError *err);

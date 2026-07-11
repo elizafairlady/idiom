@@ -122,7 +122,7 @@ void idm_sha256(const void *data, size_t len, unsigned char out[32]);
 void idm_sha256_hex(const void *data, size_t len, char out[65]);
 
 #define IDM_WIRE_MAGIC "IDMW"
-#define IDM_WIRE_FORMAT 5u
+#define IDM_WIRE_FORMAT 6u
 #define IDM_WIRE_SECTION_BYTECODE 1u
 #define IDM_WIRE_SECTION_PACKAGE 2u
 #define IDM_WIRE_SECTION_MAIN 3u

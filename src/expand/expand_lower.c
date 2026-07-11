@@ -693,7 +693,7 @@ static IdmCore *lower_fold_pure_call(LowerCtx *lc, IdmCore *call) {
         slot = callee->as.package_ref.slot;
         IdmValue kv = callee->as.package_ref.env_key;
         IdmValueTag kt = idm_value_tag(kv);
-        const char *key = kt == IDM_VAL_ATOM || kt == IDM_VAL_WORD ? idm_symbol_text(idm_value_symbol(kv)) : NULL;
+        IdmSymbol *key = kt == IDM_VAL_ATOM || kt == IDM_VAL_WORD ? idm_value_symbol(kv) : NULL;
         if (!key) return call;
         if (callee->as.package_ref.has_contract) contract = &callee->as.package_ref.contract;
         env = idm_package_env_get_or_create(ctx->rt, key);

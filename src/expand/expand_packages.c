@@ -87,7 +87,7 @@ static bool artifact_match_hash(const IdmArtifact *art, const void *needle) {
 }
 
 static bool artifact_match_key(const IdmArtifact *art, const void *needle) {
-    char key[17];
+    char key[65];
     artifact_provider_key(art->src_hash, key);
     return strcmp(key, (const char *)needle) == 0;
 }
@@ -183,7 +183,7 @@ static bool install_artifact_const_slots(ExpandContext *ctx, const IdmArtifact *
         const IdmPkgSlot *slot = &art->slots[i];
         if (slot->const_entry_count == 0) continue;
         if (!env) {
-            env = idm_package_env_get_or_create(ctx->rt, provider_key);
+            env = idm_package_env_get_or_create(ctx->rt, idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, provider_key));
             if (!env) return idm_error_oom(err, idm_span_unknown(NULL));
         }
         if (!idm_bc_is_finalized(art->module) && !idm_bc_intern_literals(ctx->rt, art->module, err)) return false;
@@ -255,7 +255,7 @@ static bool bind_package_slot_ref(ExpandContext *ctx, const char *bind_name, int
 bool install_artifact_runtime_slots_mode(ExpandContext *ctx, const IdmArtifact *art, IdmScopeId min_id, int64_t delta, bool once, bool with_imports, IdmSpan span, IdmError *err) {
     if (!art || (art->slot_count == 0 && art->import_count == 0)) return true;
     if (once && runtime_init_recorded(ctx, art)) return true;
-    char provider_key[17];
+    char provider_key[65];
     artifact_provider_key(art->src_hash, provider_key);
     for (size_t i = 0; i < art->slot_count; i++) {
         const IdmPkgSlot *slot = &art->slots[i];
@@ -290,7 +290,7 @@ bool install_artifact_runtime_slots(ExpandContext *ctx, const IdmArtifact *art, 
 
 bool bind_artifact_exported_slots(ExpandContext *ctx, const IdmArtifact *art, const IdmScopeSet *act_scopes, IdmSpan span, IdmError *err) {
     if (!art || art->slot_count == 0) return true;
-    char provider_key[17];
+    char provider_key[65];
     artifact_provider_key(art->src_hash, provider_key);
     for (size_t i = 0; i < art->slot_count; i++) {
         const IdmPkgSlot *slot = &art->slots[i];
@@ -349,7 +349,7 @@ IdmCore *wrap_artifact_runtime_init(ExpandContext *ctx, const IdmArtifact *art, 
     } else if (!allow_empty_module) {
         return body;
     }
-    char package_key[17];
+    char package_key[65];
     artifact_provider_key(art->src_hash, package_key);
     IdmCore *wrapped = idm_core_use_package(idm_atom(ctx->rt, package_key), module, module_owned, art->init_fn + fn_off, body, span);
     if (!wrapped) {
@@ -389,7 +389,7 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     const char *provider = art->name ? art->name : path;
-    char provider_key[17];
+    char provider_key[65];
     artifact_provider_key(art->src_hash, provider_key);
 
     bool ok = true;
@@ -941,7 +941,7 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
     if (!artifact_record_consumer_deps(ctx, cache->kernel_path, k, err)) return false;
     idm_scope_store_bump_to(&ctx->scope_store, cache->kernel_scope_end);
     const char *kernel_name = k->name ? k->name : "std/kernel";
-    char kernel_key[17];
+    char kernel_key[65];
     artifact_provider_key(k->src_hash, kernel_key);
     if (!record_activation(ctx, "std/kernel", kernel_name, kernel_key, idm_span_unknown(NULL), err)) return false;
     for (size_t i = 0; i < k->operator_count; i++) {
@@ -1057,13 +1057,13 @@ IdmCore *wrap_phase_runtime_inits(ExpandContext *ctx, IdmCore *body, IdmError *e
     return wrap_phase_runtime_inits_since(ctx, body, 0, err);
 }
 
-void artifact_provider_key(const unsigned char hash[32], char out[17]) {
+void artifact_provider_key(const unsigned char hash[32], char out[65]) {
     static const char hex[] = "0123456789abcdef";
-    for (size_t i = 0; i < 8u; i++) {
+    for (size_t i = 0; i < 32u; i++) {
         out[i * 2u] = hex[hash[i] >> 4];
         out[i * 2u + 1u] = hex[hash[i] & 0xfu];
     }
-    out[16] = '\0';
+    out[64] = '\0';
 }
 
 static bool artifact_clone(IdmRuntime *rt, const IdmArtifact *src, IdmArtifact *dst, IdmError *err) {
@@ -1560,7 +1560,7 @@ bool artifact_base(ExpandContext *ctx, const IdmArtifact *art, IdmScopeId *out_b
     state->base = base;
     ctx->artifact_base_count++;
     *out_base = base;
-    char provider_key[17];
+    char provider_key[65];
     artifact_provider_key(art->src_hash, provider_key);
     return install_artifact_const_slots(ctx, art, provider_key, err);
 }
@@ -1772,7 +1772,7 @@ bool activate_artifact(ExpandContext *ctx, const char *activation_name, const Id
     surface_checkpoint(ctx, &checkpoint);
     IdmScopeId min_id = art->scope_base;
     int64_t delta = (int64_t)base - (int64_t)art->scope_base;
-    char provider_key[17];
+    char provider_key[65];
     artifact_provider_key(art->src_hash, provider_key);
     bool ok = true;
     for (size_t i = 0; i < art->operator_count; i++) {
@@ -1911,7 +1911,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
     }
     for (size_t i = 0; ok && i < preact_count; i++) {
         IdmScopeId base = 0;
-        char runtime_key[17];
+        char runtime_key[65];
         artifact_provider_key(preacts[i].art->src_hash, runtime_key);
         ok = artifact_base(&ctx, preacts[i].art, &base, err) &&
              activate_artifact(&ctx, idm_symbol_text(preacts[i].identity), preacts[i].art, base, &ctx.empty_scopes, idm_span_unknown(NULL), err) &&

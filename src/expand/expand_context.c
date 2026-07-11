@@ -64,7 +64,8 @@ bool ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     idm_scope_store_init_shared(&ctx->scope_store, &rt->scope_next);
     ctx->surface_phase = -1;
     ctx->unit = "<unit>";
-    memcpy(ctx->unit_key, "0000000000000000", sizeof ctx->unit_key);
+    memset(ctx->unit_key, '0', sizeof ctx->unit_key - 1u);
+    ctx->unit_key[sizeof ctx->unit_key - 1u] = '\0';
     if (!ctx_seed_builtin_types(ctx)) return false;
     IdmError floor_err;
     idm_error_init(&floor_err);
@@ -739,23 +740,6 @@ bool protocol_def_set_identity(ProtocolDef *protocol, IdmSymbol *identity, IdmEr
     if (!protocol || !identity) return idm_error_set(err, span, "protocol requires an identity");
     protocol->identity = identity;
     return true;
-}
-
-bool typed_trait_matches_identity(const ExpandContext *ctx, const TraitDef *trait, const char *identity) {
-    (void)ctx;
-    return trait && trait->name && identity && strcmp(idm_symbol_text(trait->name), identity) == 0;
-}
-
-const TraitDef *typed_trait_by_identity(ExpandContext *ctx, const char *identity) {
-    if (!ctx || !identity) return NULL;
-    const TraitDef *found = NULL;
-    for (size_t i = 0; i < ctx->typed.entity_count; i++) {
-        TypedEntity *entity = &ctx->typed.entities[i];
-        if (entity->kind != IDM_TYPED_ENTITY_TRAIT || !typed_trait_matches_identity(ctx, &entity->as.trait, identity)) continue;
-        if (found && found->name != entity->as.trait.name) return NULL;
-        found = &entity->as.trait;
-    }
-    return found;
 }
 
 const TraitDef *typed_trait_by_symbol(const ExpandContext *ctx, IdmSymbol *identity) {
@@ -1763,7 +1747,7 @@ FieldSelectorDef *field_selector_ensure(ExpandContext *ctx, const char *name, Id
 }
 
 IdmEnv *expand_unit_runtime_env(ExpandContext *ctx) {
-    if (ctx->in_package && ctx->unit_key[0]) return idm_package_env_get_or_create(ctx->rt, ctx->unit_key);
+    if (ctx->in_package && ctx->unit_key[0]) return idm_package_env_get_or_create(ctx->rt, idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, ctx->unit_key));
     if (ctx->phase != 0 && ctx->phase_env) return ctx->phase_env->env;
     return ctx->rt->main_env;
 }
