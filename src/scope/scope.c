@@ -1,11 +1,51 @@
 #include "idiom/scope.h"
 #include "idiom/value.h"
 
+#include <stdatomic.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define IDM_TYPE_TERM_MAX_DEPTH 128u
 #define IDM_TYPE_TERM_MIN_WIRE 11u
+
+typedef struct {
+    atomic_size_t refs;
+    IdmScopeId items[];
+} ScopeSetData;
+
+static ScopeSetData *scope_set_data(const IdmScopeSet *set) {
+    return set && set->items ? (ScopeSetData *)((char *)set->items - offsetof(ScopeSetData, items)) : NULL;
+}
+
+static void scope_set_release(IdmScopeSet *set) {
+    ScopeSetData *data = scope_set_data(set);
+    if (data && atomic_fetch_sub_explicit(&data->refs, 1u, memory_order_acq_rel) == 1u) free(data);
+    set->items = NULL;
+    set->count = 0;
+    set->cap = 0;
+}
+
+static bool scope_set_unique(IdmScopeSet *set, size_t needed) {
+    ScopeSetData *data = scope_set_data(set);
+    if (data && atomic_load_explicit(&data->refs, memory_order_acquire) == 1u && set->cap >= needed) return true;
+    size_t count = set->count;
+    size_t cap = set->cap ? set->cap : 4u;
+    while (cap < needed) {
+        if (cap > SIZE_MAX / 2u) { cap = needed; break; }
+        cap *= 2u;
+    }
+    if (cap > (SIZE_MAX - offsetof(ScopeSetData, items)) / sizeof(IdmScopeId)) return false;
+    ScopeSetData *next = malloc(offsetof(ScopeSetData, items) + cap * sizeof(IdmScopeId));
+    if (!next) return false;
+    atomic_init(&next->refs, 1u);
+    if (count != 0) memcpy(next->items, set->items, count * sizeof(*set->items));
+    scope_set_release(set);
+    set->items = next->items;
+    set->count = count;
+    set->cap = cap;
+    return true;
+}
 
 void idm_scope_store_init(IdmScopeStore *store) {
     store->next_scope = 1u;
@@ -53,20 +93,18 @@ void idm_scope_set_init(IdmScopeSet *set) {
 
 void idm_scope_set_destroy(IdmScopeSet *set) {
     if (!set) return;
-    free(set->items);
-    set->items = NULL;
-    set->count = 0;
-    set->cap = 0;
+    scope_set_release(set);
 }
 
 bool idm_scope_set_copy(IdmScopeSet *dst, const IdmScopeSet *src) {
     idm_scope_set_init(dst);
     if (src->count == 0) return true;
-    dst->items = malloc(src->count * sizeof(*dst->items));
-    if (!dst->items) return false;
-    memcpy(dst->items, src->items, src->count * sizeof(*dst->items));
+    ScopeSetData *data = scope_set_data(src);
+    if (!data) return false;
+    atomic_fetch_add_explicit(&data->refs, 1u, memory_order_relaxed);
+    dst->items = src->items;
     dst->count = src->count;
-    dst->cap = src->count;
+    dst->cap = src->cap;
     return true;
 }
 
@@ -86,9 +124,8 @@ bool idm_scope_set_add(IdmScopeSet *set, IdmScopeId scope) {
     bool found = false;
     size_t index = lower_bound(set, scope, &found);
     if (found) return true;
-    if (set->count == set->cap) {
-        if (!idm_grow((void **)&set->items, &set->cap, sizeof(*set->items), 4u, set->count + 1u)) return false;
-    }
+    size_t count = set->count;
+    if (!scope_set_unique(set, count + 1u)) return false;
     memmove(set->items + index + 1u, set->items + index, (set->count - index) * sizeof(*set->items));
     set->items[index] = scope;
     set->count++;
@@ -99,6 +136,8 @@ bool idm_scope_set_remove(IdmScopeSet *set, IdmScopeId scope) {
     bool found = false;
     size_t index = lower_bound(set, scope, &found);
     if (!found) return false;
+    size_t count = set->count;
+    if (!scope_set_unique(set, count)) return false;
     memmove(set->items + index, set->items + index + 1u, (set->count - index - 1u) * sizeof(*set->items));
     set->count--;
     return true;
@@ -116,6 +155,7 @@ bool idm_scope_set_contains(const IdmScopeSet *set, IdmScopeId scope) {
 }
 
 bool idm_scope_set_subset(const IdmScopeSet *a, const IdmScopeSet *b) {
+    if (a == b || (a->count == b->count && a->items == b->items)) return true;
     size_t i = 0;
     size_t j = 0;
     while (i < a->count && j < b->count) {
@@ -132,7 +172,7 @@ bool idm_scope_set_subset(const IdmScopeSet *a, const IdmScopeSet *b) {
 }
 
 bool idm_scope_set_equal(const IdmScopeSet *a, const IdmScopeSet *b) {
-    return a->count == b->count && (a->count == 0 || memcmp(a->items, b->items, a->count * sizeof(*a->items)) == 0);
+    return a == b || (a->count == b->count && (a->items == b->items || a->count == 0 || memcmp(a->items, b->items, a->count * sizeof(*a->items)) == 0));
 }
 
 bool idm_scope_set_write(IdmBuffer *buf, const IdmScopeSet *set) {
@@ -173,7 +213,13 @@ bool idm_scope_set_deserialize(IdmByteReader *r, IdmScopeSet *set, IdmError *err
     return true;
 }
 
-void idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta) {
+bool idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta) {
+    if (!set || set->count == 0 || delta == 0) return true;
+    bool changes = false;
+    for (size_t i = 0; i < set->count; i++) if (set->items[i] >= min_id) { changes = true; break; }
+    if (!changes) return true;
+    size_t count = set->count;
+    if (!scope_set_unique(set, count)) return false;
     for (size_t i = 0; i < set->count; i++) {
         if (set->items[i] >= min_id) set->items[i] = (IdmScopeId)((int64_t)set->items[i] + delta);
     }
@@ -186,6 +232,7 @@ void idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta) 
         }
         set->items[j] = key;
     }
+    return true;
 }
 
 void idm_binding_table_init(IdmBindingTable *table) {

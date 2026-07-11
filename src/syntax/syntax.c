@@ -926,16 +926,17 @@ IdmSyntax *idm_syn_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmError *err) 
     return syn_deserialize_depth(rt, r, 0u, err);
 }
 
-void idm_syn_scope_relocate_tree(IdmSyntax *syn, IdmScopeId min_id, int64_t delta) {
-    if (!syn || delta == 0) return;
+bool idm_syn_scope_relocate_tree(IdmSyntax *syn, IdmScopeId min_id, int64_t delta) {
+    if (!syn || delta == 0) return true;
     for (size_t i = 0; i < syn->scopes.count; i++) {
-        idm_scope_set_relocate(&syn->scopes.items[i].scopes, min_id, delta);
+        if (!idm_scope_set_relocate(&syn->scopes.items[i].scopes, min_id, delta)) return false;
     }
     if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT) {
         for (size_t i = 0; i < syn->as.seq.count; i++) {
-            idm_syn_scope_relocate_tree(syn->as.seq.items[i], min_id, delta);
+            if (!idm_syn_scope_relocate_tree(syn->as.seq.items[i], min_id, delta)) return false;
         }
     }
+    return true;
 }
 
 bool idm_syn_scope_visit_tree(const IdmSyntax *syn, bool (*visit)(void *user, IdmScopeId id), void *user) {

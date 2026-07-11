@@ -230,7 +230,7 @@ bool idm_scope_set_equal(const IdmScopeSet *a, const IdmScopeSet *b);
 bool idm_scope_set_write(IdmBuffer *buf, const IdmScopeSet *set);
 bool idm_scope_set_serialize(IdmBuffer *out, const IdmScopeSet *set, IdmError *err);
 bool idm_scope_set_deserialize(IdmByteReader *r, IdmScopeSet *set, IdmError *err);
-void idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta);
+bool idm_scope_set_relocate(IdmScopeSet *set, IdmScopeId min_id, int64_t delta);
 
 void idm_binding_table_init(IdmBindingTable *table);
 void idm_binding_table_destroy(IdmBindingTable *table);

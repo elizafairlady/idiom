@@ -80,6 +80,19 @@ static void check_dump(IdmSyntax *syn, const char *expected, const char *name) {
 }
 
 int idm_unit_syntax_equal(void) {
+    IdmScopeSet scopes;
+    IdmScopeSet shared;
+    idm_scope_set_init(&scopes);
+    check(idm_scope_set_add(&scopes, 3u) && idm_scope_set_add(&scopes, 1u), "scope add");
+    check(idm_scope_set_copy(&shared, &scopes), "scope share");
+    check(shared.items == scopes.items, "scope copy shares backing");
+    check(idm_scope_set_add(&shared, 2u), "scope copy-on-write add");
+    check(shared.items != scopes.items, "scope mutation detaches backing");
+    check(scopes.count == 2u && !idm_scope_set_contains(&scopes, 2u), "scope source unchanged");
+    check(shared.count == 3u && idm_scope_set_contains(&shared, 2u), "scope copy changed");
+    idm_scope_set_destroy(&shared);
+    idm_scope_set_destroy(&scopes);
+
     IdmSyntax *n = nil();
     check(!idm_syn_equal(NULL, n), "null unequal");
     idm_syn_free(n);

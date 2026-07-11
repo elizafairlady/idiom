@@ -807,7 +807,7 @@ bool install_imported_grammar(ExpandContext *ctx, const IdmPkgGrammar *grammar, 
     bool ok = dst->artifact.name && dst->provider && dst->provider_key &&
               idm_scope_set_copy(&dst->artifact.scopes, &grammar->scopes) &&
               idm_scope_set_copy(&dst->binding_scopes, binding_scopes);
-    if (ok) idm_scope_set_relocate(&dst->artifact.scopes, min_id, delta);
+    if (ok) ok = idm_scope_set_relocate(&dst->artifact.scopes, min_id, delta);
     if (ok) ok = grammar_rules_copy_relocated(&dst->artifact.rules, grammar->rules, grammar->rule_count, min_id, delta, err, idm_span_unknown(NULL));
     if (ok) dst->artifact.rule_count = grammar->rule_count;
     if (ok) {

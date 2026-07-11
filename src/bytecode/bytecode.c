@@ -2455,7 +2455,10 @@ static bool value_relocate_syntax(IdmRuntime *rt, IdmValue v, IdmScopeId min_id,
             if (!syn) return false;
             IdmSyntax *copy = idm_syn_clone(syn);
             if (!copy) return idm_error_oom(err, idm_span_unknown(NULL));
-            idm_syn_scope_relocate_tree(copy, min_id, delta);
+            if (!idm_syn_scope_relocate_tree(copy, min_id, delta)) {
+                idm_syn_free(copy);
+                return idm_error_oom(err, idm_span_unknown(NULL));
+            }
             *out = idm_syntax_value(rt, copy, err);
             idm_syn_free(copy);
             if (err && err->present) return false;
@@ -2564,8 +2567,7 @@ static bool pattern_relocate_syntax(IdmRuntime *rt, IdmPattern *pat, IdmScopeId 
             if (!sp) return true;
             switch (sp->kind) {
                 case IDM_SYN_PAT_LITERAL:
-                    idm_syn_scope_relocate_tree(sp->as.literal, min_id, delta);
-                    return true;
+                    return idm_syn_scope_relocate_tree(sp->as.literal, min_id, delta) || idm_error_oom(err, idm_span_unknown(NULL));
                 case IDM_SYN_PAT_SEQUENCE:
                     for (size_t i = 0; i < sp->as.seq.count; i++) {
                         IdmPattern wrapper;

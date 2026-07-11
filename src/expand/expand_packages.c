@@ -263,8 +263,8 @@ bool install_artifact_runtime_slots_mode(ExpandContext *ctx, const IdmArtifact *
         idm_scope_set_init(&scopes);
         bool ok = idm_scope_set_copy(&scopes, &slot->scopes);
         if (ok) {
-            idm_scope_set_relocate(&scopes, min_id, delta);
-            ok = bind_package_slot_ref(ctx, slot->name, slot_bind_phase(ctx, slot->has_contract, &slot->contract), &scopes, slot->arity, slot->has_contract ? &slot->contract : NULL, provider_key, slot->slot, span, err);
+            ok = idm_scope_set_relocate(&scopes, min_id, delta) &&
+                 bind_package_slot_ref(ctx, slot->name, slot_bind_phase(ctx, slot->has_contract, &slot->contract), &scopes, slot->arity, slot->has_contract ? &slot->contract : NULL, provider_key, slot->slot, span, err);
         }
         idm_scope_set_destroy(&scopes);
         if (!ok) return false;
@@ -275,8 +275,8 @@ bool install_artifact_runtime_slots_mode(ExpandContext *ctx, const IdmArtifact *
         idm_scope_set_init(&scopes);
         bool ok = idm_scope_set_copy(&scopes, &imp->scopes);
         if (ok) {
-            idm_scope_set_relocate(&scopes, min_id, delta);
-            ok = bind_package_slot_ref(ctx, imp->name, slot_bind_phase(ctx, imp->has_contract, &imp->contract), &scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, idm_symbol_text(imp->env_key), imp->slot, span, err);
+            ok = idm_scope_set_relocate(&scopes, min_id, delta) &&
+                 bind_package_slot_ref(ctx, imp->name, slot_bind_phase(ctx, imp->has_contract, &imp->contract), &scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, idm_symbol_text(imp->env_key), imp->slot, span, err);
         }
         idm_scope_set_destroy(&scopes);
         if (!ok) return false;
@@ -1601,22 +1601,22 @@ static bool idm_artifact_relocate(IdmRuntime *rt, IdmArtifact *art, IdmScopeId m
     art->scope_base = (IdmScopeId)((int64_t)art->scope_base + delta);
     art->scope_end = (IdmScopeId)((int64_t)art->scope_end + delta);
     if (art->module && !idm_bc_relocate_syntax_scopes(rt, art->module, min_id, delta, err)) return false;
-    for (size_t i = 0; i < art->slot_count; i++) idm_scope_set_relocate(&art->slots[i].scopes, min_id, delta);
-    for (size_t i = 0; i < art->import_count; i++) idm_scope_set_relocate(&art->imports[i].scopes, min_id, delta);
+    for (size_t i = 0; i < art->slot_count; i++) if (!idm_scope_set_relocate(&art->slots[i].scopes, min_id, delta)) return idm_error_oom(err, idm_span_unknown(NULL));
+    for (size_t i = 0; i < art->import_count; i++) if (!idm_scope_set_relocate(&art->imports[i].scopes, min_id, delta)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < art->macro_count; i++)
         if (art->macros[i].module && !idm_bc_relocate_syntax_scopes(rt, &art->macros[i].module->module, min_id, delta, err)) return false;
     for (size_t i = 0; i < art->operator_count; i++) {
-        idm_scope_set_relocate(&art->operators[i].scopes, min_id, delta);
+        if (!idm_scope_set_relocate(&art->operators[i].scopes, min_id, delta)) return idm_error_oom(err, idm_span_unknown(NULL));
         if (art->operators[i].target_module && !idm_bc_relocate_syntax_scopes(rt, &art->operators[i].target_module->module, min_id, delta, err)) return false;
     }
     for (size_t i = 0; i < art->core_form_count; i++)
         if (art->core_form[i].module && !idm_bc_relocate_syntax_scopes(rt, &art->core_form[i].module->module, min_id, delta, err)) return false;
     for (size_t i = 0; i < art->reader_forms_count; i++)
         if (art->reader_forms[i].module && !idm_bc_relocate_syntax_scopes(rt, &art->reader_forms[i].module->module, min_id, delta, err)) return false;
-    for (size_t i = 0; i < art->grammar_count; i++) idm_scope_set_relocate(&art->grammars[i].scopes, min_id, delta);
+    for (size_t i = 0; i < art->grammar_count; i++) if (!idm_scope_set_relocate(&art->grammars[i].scopes, min_id, delta)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < art->typed.entity_count; i++) {
         IdmPkgTypedEntity *e = &art->typed.entities[i];
-        if (e->kind == IDM_TYPED_ENTITY_TYPE) idm_scope_set_relocate(&e->as.type.scopes, min_id, delta);
+        if (e->kind == IDM_TYPED_ENTITY_TYPE && !idm_scope_set_relocate(&e->as.type.scopes, min_id, delta)) return idm_error_oom(err, idm_span_unknown(NULL));
         else if (e->kind == IDM_TYPED_ENTITY_PROTOCOL && e->as.protocol.art && !idm_artifact_relocate(rt, e->as.protocol.art, min_id, delta, err)) return false;
     }
     if (art->phase_env) {
@@ -1673,7 +1673,10 @@ static bool install_relocated_operator(ExpandContext *ctx, const IdmOperatorDef 
     idm_scope_set_init(&local.scopes);
     IdmModuleRef *target_module = NULL;
     if (!idm_scope_set_copy(&local.scopes, &op->scopes)) return idm_error_oom(err, idm_span_unknown(NULL));
-    idm_scope_set_relocate(&local.scopes, min_id, delta);
+    if (!idm_scope_set_relocate(&local.scopes, min_id, delta)) {
+        idm_scope_set_destroy(&local.scopes);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
     if (op->target_module) {
         target_module = relocated_module_ref(ctx, op->target_module, min_id, delta, err);
         if (!target_module) {

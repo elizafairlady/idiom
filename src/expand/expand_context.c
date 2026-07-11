@@ -2046,9 +2046,13 @@ const IdmBinding *resolve_default(const ExpandContext *ctx, const IdmSyntax *wor
 
 bool binder_scopes_pruned(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmScopeSet *out) {
     if (!syntax_scopes_copy(out, name_syntax)) return false;
-    if (ctx->rt->macro_intro_active) idm_scope_set_remove(out, ctx->rt->macro_intro_scope);
+    if (ctx->rt->macro_intro_active && idm_scope_set_contains(out, ctx->rt->macro_intro_scope) &&
+        !idm_scope_set_remove(out, ctx->rt->macro_intro_scope)) return false;
     for (const BodyDefCtx *def = ctx->def_ctx; def; def = def->prev) {
-        for (size_t i = 0; i < def->use_scopes.count; i++) idm_scope_set_remove(out, def->use_scopes.items[i]);
+        for (size_t i = 0; i < def->use_scopes.count; i++) {
+            IdmScopeId scope = def->use_scopes.items[i];
+            if (idm_scope_set_contains(out, scope) && !idm_scope_set_remove(out, scope)) return false;
+        }
     }
     return true;
 }

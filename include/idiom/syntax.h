@@ -139,7 +139,7 @@ bool idm_syn_dump_pretty(IdmBuffer *buf, const IdmSyntax *syn);
 typedef struct IdmRuntime IdmRuntime;
 bool idm_syn_serialize(IdmBuffer *out, const IdmSyntax *syn, IdmError *err);
 IdmSyntax *idm_syn_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmError *err);
-void idm_syn_scope_relocate_tree(IdmSyntax *syn, IdmScopeId min_id, int64_t delta);
+bool idm_syn_scope_relocate_tree(IdmSyntax *syn, IdmScopeId min_id, int64_t delta);
 bool idm_syn_scope_visit_tree(const IdmSyntax *syn, bool (*visit)(void *user, IdmScopeId id), void *user);
 
 #endif
