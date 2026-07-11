@@ -119,7 +119,7 @@ struct IdmPattern {
         struct { IdmDictPatternEntry *entries; size_t count; IdmPattern *rest; } dict;
         IdmSyntaxPattern *syntax;
         struct { IdmBitSeg *segs; size_t count; } bits;
-        struct { char *name; IdmPattern *sub; } type_test;
+        struct { char *name; IdmSymbol *symbol; IdmPattern *sub; } type_test;
     } as;
 };
 
@@ -141,6 +141,7 @@ IdmPattern *idm_pat_dict(IdmDictPatternEntry *entries, size_t count, IdmPattern 
 IdmPattern *idm_pat_syntax_take(IdmSyntaxPattern *syntax, IdmSpan span);
 IdmPattern *idm_pat_bits_take(IdmBitSeg *segs, size_t count, IdmSpan span);
 IdmPattern *idm_pat_type(const char *type, IdmSpan span);
+IdmPattern *idm_pat_type_symbol(IdmSymbol *type, IdmSpan span);
 IdmPattern *idm_pat_type_sub_take(const char *type, IdmPattern *sub, IdmSpan span);
 IdmPattern *idm_pat_clone(const IdmPattern *pat);
 void idm_pat_free(IdmPattern *pat);

@@ -546,10 +546,11 @@ IdmCore *idm_core_record_is(IdmCore *value, IdmSymbol *type, IdmSpan span) {
     return core;
 }
 
-IdmCore *idm_core_dispatch(IdmDispatchKind kind, const char *name, IdmSpan span) {
+IdmCore *idm_core_dispatch(IdmDispatchKind kind, const char *name, IdmSymbol *identity, IdmSpan span) {
     IdmCore *core = core_alloc(IDM_CORE_DISPATCH, span);
     if (!core) return NULL;
     core->as.dispatch.kind = kind;
+    core->as.dispatch.identity = identity;
     core->as.dispatch.name = name ? idm_strdup(name) : NULL;
     if (name && !core->as.dispatch.name) {
         free(core);
@@ -566,27 +567,25 @@ bool idm_core_dispatch_add_arg(IdmCore *core, IdmCore *arg) {
     return true;
 }
 
-bool idm_core_dispatch_add_method(IdmCore *core, const char *trait, IdmCore *evidence, uint8_t evidence_state) {
+bool idm_core_dispatch_add_method(IdmCore *core, IdmSymbol *trait, IdmCore *evidence, uint8_t evidence_state) {
     if (!core || core->kind != IDM_CORE_DISPATCH) return false;
     size_t cap = core->as.dispatch.method_count;
     if (!idm_grow((void **)&core->as.dispatch.methods, &cap, sizeof(*core->as.dispatch.methods), 4u, core->as.dispatch.method_count + 1u)) return false;
     IdmDispatchMethodDef *m = &core->as.dispatch.methods[core->as.dispatch.method_count];
-    m->trait = trait ? idm_strdup(trait) : NULL;
-    if (trait && !m->trait) return false;
+    m->trait = trait;
     m->evidence = evidence;
     m->evidence_state = evidence_state;
     core->as.dispatch.method_count++;
     return true;
 }
 
-bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, const char *type_identity, IdmArity arity, bool passthrough, uint32_t primitive, IdmCore *ref, uint8_t ref_state) {
-    if (!core || core->kind != IDM_CORE_DISPATCH || !type_identity) return false;
+bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, IdmSymbol *type, IdmArity arity, bool passthrough, uint32_t primitive, IdmCore *ref, uint8_t ref_state) {
+    if (!core || core->kind != IDM_CORE_DISPATCH || !type) return false;
     size_t cap = core->as.dispatch.impl_count;
     if (!idm_grow((void **)&core->as.dispatch.impls, &cap, sizeof(*core->as.dispatch.impls), 4u, core->as.dispatch.impl_count + 1u)) return false;
     IdmDispatchImplDef *im = &core->as.dispatch.impls[core->as.dispatch.impl_count];
     im->method = method;
-    im->type_identity = idm_strdup(type_identity);
-    if (!im->type_identity) return false;
+    im->type = type;
     im->arity = arity;
     im->passthrough = passthrough;
     im->primitive = primitive;
@@ -596,15 +595,13 @@ bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, const char *type
     return true;
 }
 
-bool idm_core_dispatch_add_field(IdmCore *core, IdmSymbol *type, IdmSymbol *field, const char *type_identity, uint32_t field_index, const IdmTypeTerm *contract) {
-    if (!core || core->kind != IDM_CORE_DISPATCH || !type || !field || !type_identity) return false;
+bool idm_core_dispatch_add_field(IdmCore *core, IdmSymbol *type, IdmSymbol *field, uint32_t field_index, const IdmTypeTerm *contract) {
+    if (!core || core->kind != IDM_CORE_DISPATCH || !type || !field) return false;
     size_t cap = core->as.dispatch.field_count;
     if (!idm_grow((void **)&core->as.dispatch.fields, &cap, sizeof(*core->as.dispatch.fields), 4u, core->as.dispatch.field_count + 1u)) return false;
     IdmDispatchFieldDef *f = &core->as.dispatch.fields[core->as.dispatch.field_count];
     f->type = type;
     f->field = field;
-    f->type_identity = idm_strdup(type_identity);
-    if (!f->type_identity) return false;
     f->field_index = field_index;
     memset(&f->contract, 0, sizeof(f->contract));
     f->has_contract = false;
@@ -761,17 +758,14 @@ void idm_core_free(IdmCore *core) {
             for (size_t i = 0; i < core->as.dispatch.arg_count; i++) idm_core_free(core->as.dispatch.args[i]);
             free(core->as.dispatch.args);
             for (size_t i = 0; i < core->as.dispatch.method_count; i++) {
-                free(core->as.dispatch.methods[i].trait);
                 idm_core_free(core->as.dispatch.methods[i].evidence);
             }
             free(core->as.dispatch.methods);
             for (size_t i = 0; i < core->as.dispatch.impl_count; i++) {
-                free(core->as.dispatch.impls[i].type_identity);
                 idm_core_free(core->as.dispatch.impls[i].ref);
             }
             free(core->as.dispatch.impls);
             for (size_t i = 0; i < core->as.dispatch.field_count; i++) {
-                free(core->as.dispatch.fields[i].type_identity);
                 if (core->as.dispatch.fields[i].has_contract) idm_type_term_destroy(&core->as.dispatch.fields[i].contract);
             }
             free(core->as.dispatch.fields);

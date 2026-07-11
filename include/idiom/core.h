@@ -376,14 +376,14 @@ typedef struct {
 } IdmLetRecBinding;
 
 typedef struct {
-    char *trait;
+    IdmSymbol *trait;
     IdmCore *evidence;
     uint8_t evidence_state;
 } IdmDispatchMethodDef;
 
 typedef struct {
     uint32_t method;
-    char *type_identity;
+    IdmSymbol *type;
     IdmArity arity;
     bool passthrough;
     uint32_t primitive;
@@ -394,7 +394,6 @@ typedef struct {
 typedef struct {
     IdmSymbol *type;
     IdmSymbol *field;
-    char *type_identity;
     uint32_t field_index;
     bool has_contract;
     IdmTypeTerm contract;
@@ -542,6 +541,7 @@ struct IdmCore {
         struct {
             IdmDispatchKind kind;
             char *name;
+            IdmSymbol *identity;
             IdmCore **args;
             size_t arg_count;
             size_t arg_cap;
@@ -609,11 +609,11 @@ IdmCore *idm_core_record_construct(IdmSymbol *type, IdmSpan span);
 bool idm_core_record_construct_add(IdmCore *core, IdmSymbol *field, const IdmTypeTerm *contract, IdmCore *value);
 IdmCore *idm_core_record_field(IdmCore *receiver, IdmSymbol *type, IdmSymbol *field, uint32_t field_index, IdmSpan span);
 IdmCore *idm_core_record_is(IdmCore *value, IdmSymbol *type, IdmSpan span);
-IdmCore *idm_core_dispatch(IdmDispatchKind kind, const char *name, IdmSpan span);
+IdmCore *idm_core_dispatch(IdmDispatchKind kind, const char *name, IdmSymbol *identity, IdmSpan span);
 bool idm_core_dispatch_add_arg(IdmCore *core, IdmCore *arg);
-bool idm_core_dispatch_add_method(IdmCore *core, const char *trait, IdmCore *evidence, uint8_t evidence_state);
-bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, const char *type_identity, IdmArity arity, bool passthrough, uint32_t primitive, IdmCore *ref, uint8_t ref_state);
-bool idm_core_dispatch_add_field(IdmCore *core, IdmSymbol *type, IdmSymbol *field, const char *type_identity, uint32_t field_index, const IdmTypeTerm *contract);
+bool idm_core_dispatch_add_method(IdmCore *core, IdmSymbol *trait, IdmCore *evidence, uint8_t evidence_state);
+bool idm_core_dispatch_add_impl(IdmCore *core, uint32_t method, IdmSymbol *type, IdmArity arity, bool passthrough, uint32_t primitive, IdmCore *ref, uint8_t ref_state);
+bool idm_core_dispatch_add_field(IdmCore *core, IdmSymbol *type, IdmSymbol *field, uint32_t field_index, const IdmTypeTerm *contract);
 void idm_core_dispatch_set_fallback(IdmCore *core, IdmCore *fallback, uint8_t fallback_state);
 void idm_core_free(IdmCore *core);
 bool idm_core_statement_discardable(const IdmCore *core);

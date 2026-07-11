@@ -1171,7 +1171,13 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
         }
         case IDM_VAL_FLOAT: { uint64_t bits; double d = idm_float_value(v); memcpy(&bits, &d, 8u); return idm_buf_put_u8(out, 2u) && idm_buf_put_u64(out, bits); }
         case IDM_VAL_STRING: return idm_buf_put_u8(out, 3u) && idm_buf_put_str(out, idm_string_bytes(v), idm_string_length(v));
-        case IDM_VAL_ATOM: { const char *s = idm_symbol_text(idm_value_symbol(v)); return idm_buf_put_u8(out, 4u) && idm_buf_put_str(out, s, strlen(s)); }
+        case IDM_VAL_ATOM: {
+            IdmSymbol *symbol = idm_value_symbol(v);
+            const char *s = idm_symbol_text(symbol);
+            IdmSymbolKind kind = idm_symbol_kind(symbol);
+            return idm_buf_put_u8(out, 4u) && idm_buf_put_str(out, s, strlen(s)) && idm_buf_put_u8(out, (uint8_t)kind) &&
+                   (kind != IDM_SYMBOL_IDENTITY || idm_buf_append_n(out, (const char *)idm_symbol_identity_hash(symbol), 32u));
+        }
         case IDM_VAL_WORD: { const char *s = idm_symbol_text(idm_value_symbol(v)); return idm_buf_put_u8(out, 5u) && idm_buf_put_str(out, s, strlen(s)); }
         case IDM_VAL_PAIR: {
             IdmError ignore; idm_error_init(&ignore);
@@ -1210,8 +1216,11 @@ static bool serialize_value(IdmBuffer *out, IdmValue v, unsigned depth, IdmError
             const char *type = type_symbol ? idm_symbol_text(type_symbol) : NULL;
             size_t n = idm_record_field_count(v, &ignore);
             idm_error_clear(&ignore);
+            if (!type_symbol) return idm_error_set(err, idm_span_unknown(NULL), "record constant has no type identity");
             if (!idm_buf_put_u8(out, 11u) ||
                 !idm_buf_put_str(out, type ? type : "", type ? strlen(type) : 0u) ||
+                !idm_buf_put_u8(out, (uint8_t)idm_symbol_kind(type_symbol)) ||
+                (idm_symbol_kind(type_symbol) == IDM_SYMBOL_IDENTITY && !idm_buf_append_n(out, (const char *)idm_symbol_identity_hash(type_symbol), 32u)) ||
                 !idm_buf_put_u32(out, (uint32_t)n)) return idm_error_oom(err, idm_span_unknown(NULL));
             for (size_t i = 0; i < n; i++) {
                 IdmError field_err;
@@ -1300,6 +1309,9 @@ static bool serialize_pattern(IdmBuffer *out, const IdmPattern *pat, unsigned de
         case IDM_PAT_PIN: return idm_buf_put_str(out, pat->as.name, strlen(pat->as.name)) ? true : idm_error_oom(err, idm_span_unknown(NULL));
         case IDM_PAT_TYPE:
             if (!idm_buf_put_str(out, pat->as.type_test.name, strlen(pat->as.type_test.name))) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (!idm_buf_put_u8(out, (uint8_t)(pat->as.type_test.symbol ? idm_symbol_kind(pat->as.type_test.symbol) : IDM_SYMBOL_ATOM))) return idm_error_oom(err, idm_span_unknown(NULL));
+            if (pat->as.type_test.symbol && idm_symbol_kind(pat->as.type_test.symbol) == IDM_SYMBOL_IDENTITY &&
+                !idm_buf_append_n(out, (const char *)idm_symbol_identity_hash(pat->as.type_test.symbol), 32u)) return idm_error_oom(err, idm_span_unknown(NULL));
             if (!idm_buf_put_u8(out, pat->as.type_test.sub ? 1u : 0u)) return idm_error_oom(err, idm_span_unknown(NULL));
             return !pat->as.type_test.sub || serialize_pattern(out, pat->as.type_test.sub, depth + 1u, err);
         case IDM_PAT_LITERAL: return serialize_value(out, pat->as.literal, depth + 1u, err);
@@ -1453,7 +1465,23 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
         }
         case 2u: { uint64_t bits = idm_rd_u64(r); if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated float"); double d; memcpy(&d, &bits, 8u); *out = idm_float(rt, d, err); return !(err && err->present); }
         case 3u: { size_t n = 0; char *s = idm_rd_string(r, &n); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated string"); *out = idm_string_n(rt, s, n, err); free(s); return !(err && err->present); }
-        case 4u: { char *s = idm_rd_string(r, NULL); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated atom"); *out = idm_atom(rt, s); free(s); return true; }
+        case 4u: {
+            char *s = idm_rd_string(r, NULL);
+            uint8_t kind = s ? idm_rd_u8(r) : 0u;
+            unsigned char identity_hash[32];
+            if (!s || (kind != (uint8_t)IDM_SYMBOL_ATOM && kind != (uint8_t)IDM_SYMBOL_IDENTITY)) { free(s); return idm_error_set(err, idm_span_unknown(NULL), "invalid atom symbol kind"); }
+            if (kind == (uint8_t)IDM_SYMBOL_IDENTITY) {
+                if (r->len - r->pos < sizeof(identity_hash)) { free(s); return idm_error_set(err, idm_span_unknown(NULL), "truncated atom identity"); }
+                memcpy(identity_hash, r->data + r->pos, sizeof(identity_hash));
+                r->pos += sizeof(identity_hash);
+            }
+            IdmSymbol *symbol = kind == (uint8_t)IDM_SYMBOL_IDENTITY ? idm_intern_identity(&rt->intern, s, identity_hash)
+                                                                    : idm_intern(&rt->intern, (IdmSymbolKind)kind, s);
+            free(s);
+            if (!symbol) return idm_error_oom(err, idm_span_unknown(NULL));
+            *out = idm_atom_symbol(symbol);
+            return true;
+        }
         case 5u: { char *s = idm_rd_string(r, NULL); if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated word"); *out = idm_word(rt, s); free(s); return true; }
         case 6u: {
             IdmValue car, cdr;
@@ -1488,7 +1516,19 @@ static bool deserialize_value(IdmRuntime *rt, IdmByteReader *r, IdmValue *out, u
                 free(type);
                 return idm_error_set(err, idm_span_unknown(NULL), "record type must be a non-empty name");
             }
-            IdmSymbol *type_symbol = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, type);
+            uint8_t type_kind = idm_rd_u8(r);
+            unsigned char identity_hash[32];
+            if (type_kind != (uint8_t)IDM_SYMBOL_ATOM && type_kind != (uint8_t)IDM_SYMBOL_IDENTITY) r->ok = false;
+            if (r->ok && type_kind == (uint8_t)IDM_SYMBOL_IDENTITY) {
+                if (r->len - r->pos < sizeof(identity_hash)) r->ok = false;
+                else {
+                    memcpy(identity_hash, r->data + r->pos, sizeof(identity_hash));
+                    r->pos += sizeof(identity_hash);
+                }
+            }
+            IdmSymbol *type_symbol = !r->ok ? NULL
+                : type_kind == (uint8_t)IDM_SYMBOL_IDENTITY ? idm_intern_identity(&rt->intern, type, identity_hash)
+                                                           : idm_intern(&rt->intern, (IdmSymbolKind)type_kind, type);
             uint32_t n = idm_rd_u32(r);
             if (!type_symbol || !r->ok) {
                 free(type);
@@ -1664,6 +1704,16 @@ static IdmPattern *deserialize_pattern(IdmRuntime *rt, IdmByteReader *r, unsigne
         case IDM_PAT_TYPE: {
             char *s = idm_rd_string(r, NULL);
             if (!s) { idm_error_set(err, span, "truncated pattern type"); return NULL; }
+            uint8_t symbol_kind = idm_rd_u8(r);
+            unsigned char identity_hash[32];
+            if (symbol_kind != (uint8_t)IDM_SYMBOL_ATOM && symbol_kind != (uint8_t)IDM_SYMBOL_IDENTITY) r->ok = false;
+            if (r->ok && symbol_kind == (uint8_t)IDM_SYMBOL_IDENTITY) {
+                if (r->len - r->pos < sizeof(identity_hash)) r->ok = false;
+                else {
+                    memcpy(identity_hash, r->data + r->pos, sizeof(identity_hash));
+                    r->pos += sizeof(identity_hash);
+                }
+            }
             uint8_t has_sub = idm_rd_u8(r);
             if (!r->ok) { free(s); idm_error_set(err, span, "truncated pattern type"); return NULL; }
             IdmPattern *sub = NULL;
@@ -1671,8 +1721,14 @@ static IdmPattern *deserialize_pattern(IdmRuntime *rt, IdmByteReader *r, unsigne
                 sub = deserialize_pattern(rt, r, depth + 1u, err);
                 if (!sub) { free(s); return NULL; }
             }
-            IdmPattern *p = sub ? idm_pat_type_sub_take(s, sub, span) : idm_pat_type(s, span);
+            IdmSymbol *symbol = symbol_kind == (uint8_t)IDM_SYMBOL_IDENTITY
+                ? idm_intern_identity(&rt->intern, s, identity_hash)
+                : idm_intern(&rt->intern, (IdmSymbolKind)symbol_kind, s);
+            IdmPattern *p = symbol ? idm_pat_type_symbol(symbol, span) : NULL;
+            if (p) p->as.type_test.sub = sub;
+            else idm_pat_free(sub);
             free(s);
+            if (!p) idm_error_oom(err, span);
             return p;
         }
         case IDM_PAT_LITERAL: { IdmValue v; if (!deserialize_value(rt, r, &v, depth + 1u, err)) return NULL; return idm_pat_literal(v, span); }

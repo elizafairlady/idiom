@@ -143,6 +143,7 @@ struct IdmObject {
 
 struct IdmSymbol {
     char *text;
+    unsigned char identity_hash[32];
     uint32_t id;
     IdmSymbolKind kind;
     IdmBuiltinType builtin_type;
@@ -158,9 +159,9 @@ static pthread_mutex_t g_record_shape_mu = PTHREAD_MUTEX_INITIALIZER;
 atomic_uint idm_gc_marking_heap_count = 0;
 
 static const char *rope_flatten(IdmObject *obj);
-static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text);
-static IdmSymbol *intern_find_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, uint32_t h);
-static uint32_t intern_hash(IdmSymbolKind kind, const char *text);
+static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32]);
+static IdmSymbol *intern_find_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32], uint32_t h);
+static uint32_t intern_hash(IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32]);
 static IdmEnv *env_get_or_create_unlocked(IdmRuntime *rt, const char *package_key);
 
 static void heap_lock(IdmHeap *heap) {
@@ -702,28 +703,43 @@ void idm_intern_destroy(IdmIntern *intern) {
 }
 
 IdmSymbol *idm_intern(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
+    if (!intern || !text || kind == IDM_SYMBOL_IDENTITY) return NULL;
     pthread_mutex_lock(&g_intern_mu);
-    IdmSymbol *sym = idm_intern_unlocked(intern, kind, text);
+    IdmSymbol *sym = idm_intern_unlocked(intern, kind, text, NULL);
     pthread_mutex_unlock(&g_intern_mu);
     return sym;
 }
 
 IdmSymbol *idm_intern_lookup(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
-    if (!intern || !text) return NULL;
-    uint32_t h = intern_hash(kind, text);
+    if (!intern || !text || kind == IDM_SYMBOL_IDENTITY) return NULL;
+    uint32_t h = intern_hash(kind, text, NULL);
     pthread_mutex_lock(&g_intern_mu);
-    IdmSymbol *sym = intern_find_unlocked(intern, kind, text, h);
+    IdmSymbol *sym = intern_find_unlocked(intern, kind, text, NULL, h);
     pthread_mutex_unlock(&g_intern_mu);
     return sym;
 }
 
-static uint32_t intern_hash(IdmSymbolKind kind, const char *text) {
+IdmSymbol *idm_intern_identity(IdmIntern *intern, const char *text, const unsigned char identity_hash[32]) {
+    if (!intern || !text || !identity_hash) return NULL;
+    pthread_mutex_lock(&g_intern_mu);
+    IdmSymbol *sym = idm_intern_unlocked(intern, IDM_SYMBOL_IDENTITY, text, identity_hash);
+    pthread_mutex_unlock(&g_intern_mu);
+    return sym;
+}
+
+static uint32_t intern_hash(IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32]) {
     uint32_t h = 2166136261u;
     h ^= (uint32_t)kind;
     h *= 16777619u;
     for (const unsigned char *p = (const unsigned char *)text; *p; p++) {
         h ^= *p;
         h *= 16777619u;
+    }
+    if (kind == IDM_SYMBOL_IDENTITY) {
+        for (size_t i = 0; i < 32u; i++) {
+            h ^= identity_hash[i];
+            h *= 16777619u;
+        }
     }
     return h;
 }
@@ -772,9 +788,9 @@ static bool intern_rehash(IdmIntern *intern, size_t new_count) {
     return true;
 }
 
-static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text) {
-    uint32_t h = intern_hash(kind, text);
-    IdmSymbol *found = intern_find_unlocked(intern, kind, text, h);
+static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32]) {
+    uint32_t h = intern_hash(kind, text, identity_hash);
+    IdmSymbol *found = intern_find_unlocked(intern, kind, text, identity_hash, h);
     if (found) return found;
     if (intern->count == intern->cap) {
         if (!idm_grow((void **)&intern->symbols, &intern->cap, sizeof(*intern->symbols), 32u, intern->count + 1u)) return NULL;
@@ -794,6 +810,8 @@ static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, con
     }
     sym->id = intern->next_id++;
     sym->kind = kind;
+    if (kind == IDM_SYMBOL_IDENTITY) memcpy(sym->identity_hash, identity_hash, sizeof(sym->identity_hash));
+    else memset(sym->identity_hash, 0, sizeof(sym->identity_hash));
     sym->builtin_type = builtin_type_from_text(text);
     sym->hash = h;
     sym->falsy = strcmp(text, "false") == 0 || strcmp(text, "nil") == 0;
@@ -805,16 +823,21 @@ static IdmSymbol *idm_intern_unlocked(IdmIntern *intern, IdmSymbolKind kind, con
     return sym;
 }
 
-static IdmSymbol *intern_find_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, uint32_t h) {
+static IdmSymbol *intern_find_unlocked(IdmIntern *intern, IdmSymbolKind kind, const char *text, const unsigned char identity_hash[32], uint32_t h) {
     if (!intern->bucket_count) return NULL;
     for (IdmSymbol *s = intern->buckets[h & (intern->bucket_count - 1u)]; s; s = s->hnext) {
-        if (s->hash == h && s->kind == kind && strcmp(s->text, text) == 0) return s;
+        if (s->hash == h && s->kind == kind && strcmp(s->text, text) == 0 &&
+            (kind != IDM_SYMBOL_IDENTITY || memcmp(s->identity_hash, identity_hash, sizeof(s->identity_hash)) == 0)) return s;
     }
     return NULL;
 }
 
 const char *idm_symbol_text(const IdmSymbol *sym) {
     return sym ? sym->text : "";
+}
+
+const unsigned char *idm_symbol_identity_hash(const IdmSymbol *sym) {
+    return sym && sym->kind == IDM_SYMBOL_IDENTITY ? sym->identity_hash : NULL;
 }
 
 uint32_t idm_symbol_id(const IdmSymbol *sym) {
@@ -1550,6 +1573,12 @@ IdmValue idm_word(IdmRuntime *rt, const char *text) {
 
 IdmValue idm_atom(IdmRuntime *rt, const char *text) {
     return idm_immediate(IDM_IMM_ATOM, (uint64_t)((uintptr_t)idm_intern(&rt->intern, IDM_SYMBOL_ATOM, text) >> 3));
+}
+
+IdmValue idm_atom_symbol(IdmSymbol *symbol) {
+    return symbol && (symbol->kind == IDM_SYMBOL_ATOM || symbol->kind == IDM_SYMBOL_IDENTITY)
+        ? idm_immediate(IDM_IMM_ATOM, (uint64_t)((uintptr_t)symbol >> 3))
+        : idm_nil();
 }
 
 IdmValue idm_bool(IdmRuntime *rt, bool value) {

@@ -25,7 +25,8 @@ typedef bool (*IdmIdentifierBoundFn)(void *user, IdmRuntime *rt, const IdmSyntax
 
 typedef enum {
     IDM_SYMBOL_WORD,
-    IDM_SYMBOL_ATOM
+    IDM_SYMBOL_ATOM,
+    IDM_SYMBOL_IDENTITY
 } IdmSymbolKind;
 
 typedef enum {
@@ -261,7 +262,9 @@ void idm_intern_init(IdmIntern *intern);
 void idm_intern_destroy(IdmIntern *intern);
 IdmSymbol *idm_intern(IdmIntern *intern, IdmSymbolKind kind, const char *text);
 IdmSymbol *idm_intern_lookup(IdmIntern *intern, IdmSymbolKind kind, const char *text);
+IdmSymbol *idm_intern_identity(IdmIntern *intern, const char *text, const unsigned char hash[32]);
 const char *idm_symbol_text(const IdmSymbol *sym);
+const unsigned char *idm_symbol_identity_hash(const IdmSymbol *sym);
 uint32_t idm_symbol_id(const IdmSymbol *sym);
 IdmSymbolKind idm_symbol_kind(const IdmSymbol *sym);
 
@@ -319,6 +322,7 @@ IdmSymbol *idm_value_symbol(IdmValue value);
 uint64_t idm_value_id(IdmValue value);
 IdmValue idm_word(IdmRuntime *rt, const char *text);
 IdmValue idm_atom(IdmRuntime *rt, const char *text);
+IdmValue idm_atom_symbol(IdmSymbol *symbol);
 IdmValue idm_bool(IdmRuntime *rt, bool value);
 IdmValue idm_string(IdmRuntime *rt, const char *text, IdmError *err);
 IdmValue idm_string_n(IdmRuntime *rt, const char *text, size_t len, IdmError *err);

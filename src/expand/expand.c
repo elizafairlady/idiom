@@ -784,7 +784,7 @@ static IdmCore *expand_implements_parts(ExpandContext *ctx, IdmSyntax *const *it
     }
     IdmSpan call_span = items[start]->span;
     idm_syn_free(trait_name);
-    IdmCore *node = idm_core_dispatch(IDM_DISPATCH_IMPLEMENTS, trait_def_identity_text(trait), call_span);
+    IdmCore *node = idm_core_dispatch(IDM_DISPATCH_IMPLEMENTS, trait_def_identity_text(trait), trait->name, call_span);
     if (!node || !idm_core_dispatch_add_arg(node, value)) {
         idm_core_free(node);
         idm_core_free(value);
@@ -1099,13 +1099,13 @@ IdmCore *build_field_selector_core(ExpandContext *ctx, const char *name, IdmSpan
     for (size_t i = 0; i < ctx->typed.entity_count; i++) {
         const TypedEntity *e = &ctx->typed.entities[i];
         if (e->kind != IDM_TYPED_ENTITY_TYPE || e->as.type.field_count == 0) continue;
-        const char *id = type_def_identity_text(&e->as.type);
-        if (!id) continue;
+        IdmSymbol *identity = e->as.type.identity;
+        if (!identity) continue;
         for (size_t f = 0; f < e->as.type.field_count; f++) {
             const char *fname = type_field_name_text(&e->as.type.fields[f]);
             if (!fname || strcmp(fname, name) != 0) continue;
             FieldSurfaceRef ref = { &e->as.type, (uint32_t)f };
-            if (!expand_multi_add_dispatch_clause(ctx, multi, 1u, id, field_dispatch_clause_body, &ref, span, err)) {
+            if (!expand_multi_add_dispatch_clause(ctx, multi, 1u, identity, field_dispatch_clause_body, &ref, span, err)) {
                 idm_core_free(multi);
                 return NULL;
             }
@@ -1155,7 +1155,7 @@ static IdmCore *expand_field_surface_call_cores(ExpandContext *ctx, const FieldS
         args[0] = NULL;
     }
     core_args_free(args, arg_count);
-    IdmCore *node = idm_core_dispatch(IDM_DISPATCH_FIELD, field_name, span);
+    IdmCore *node = idm_core_dispatch(IDM_DISPATCH_FIELD, field_name, NULL, span);
     if (!node || !idm_core_dispatch_add_arg(node, receiver)) {
         idm_core_free(node);
         idm_core_free(receiver);
@@ -1163,11 +1163,10 @@ static IdmCore *expand_field_surface_call_cores(ExpandContext *ctx, const FieldS
     }
     for (size_t i = 0; i < group->count; i++) {
         const TypeDef *type = group->items[i].type;
-        const char *identity = type_def_identity_text(type);
         uint32_t index = group->items[i].field_index;
-        if (!identity || !type_def_identity_symbol(type) || index >= type->field_count || !type->fields[index].name) continue;
+        if (!type_def_identity_symbol(type) || index >= type->field_count || !type->fields[index].name) continue;
         const IdmTypeTerm *contract = type->fields[index].has_contract ? &type->fields[index].contract : NULL;
-        if (!idm_core_dispatch_add_field(node, type_def_identity_symbol(type), type->fields[index].name, identity, index, contract)) {
+        if (!idm_core_dispatch_add_field(node, type_def_identity_symbol(type), type->fields[index].name, index, contract)) {
             idm_core_free(node);
             return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
         }
@@ -1228,7 +1227,7 @@ static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const Metho
         core_args_free(args, arg_count);
         return expand_error(err, span, "ambiguous method '%s'", method_surface_name_text(group->items[0]));
     }
-    IdmCore *node = idm_core_dispatch(IDM_DISPATCH_METHOD, method_surface_name_text(group->items[0]), span);
+    IdmCore *node = idm_core_dispatch(IDM_DISPATCH_METHOD, method_surface_name_text(group->items[0]), NULL, span);
     if (!node) {
         idm_core_free(receiver);
         core_args_free(args, arg_count);
@@ -1260,7 +1259,7 @@ static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const Metho
                 return NULL;
             }
         }
-        if (!idm_core_dispatch_add_method(node, method_surface_trait_text(method), evidence, evidence_state)) {
+        if (!idm_core_dispatch_add_method(node, method->trait, evidence, evidence_state)) {
             idm_core_free(evidence);
             idm_core_free(node);
             return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
@@ -1281,7 +1280,7 @@ static IdmCore *expand_method_surface_call_cores(ExpandContext *ctx, const Metho
                     return NULL;
                 }
             }
-            if (!idm_core_dispatch_add_impl(node, method_pos, impl_type, impl->arity, passthrough, passthrough ? impl->contract.primitive : 0u, ref, ref_state)) {
+            if (!idm_core_dispatch_add_impl(node, method_pos, impl->type, impl->arity, passthrough, passthrough ? impl->contract.primitive : 0u, ref, ref_state)) {
                 idm_core_free(ref);
                 idm_core_free(node);
                 return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
@@ -1609,26 +1608,31 @@ static IdmCore *application_surface_call_from(ExpandContext *ctx, FieldSurfaceGr
     return parse_dot_tail(ctx, items, pos, end, stop_at_operator, call, err);
 }
 
-static bool is_a_target_push(const char *resolved, TypeNameList *out, IdmError *err) {
+static bool is_a_target_push(IdmSymbol *resolved, TypeNameList *out, IdmError *err) {
     for (size_t i = 0; i < out->count; i++) {
-        if (strcmp(out->items[i], resolved) == 0) return true;
+        if (out->items[i] == resolved) return true;
     }
     if (out->count == out->cap && !idm_grow((void **)&out->items, &out->cap, sizeof(*out->items), 8u, out->count + 1u)) return idm_error_oom(err, idm_span_unknown(NULL));
     out->items[out->count++] = resolved;
     return true;
 }
 
-bool is_a_target_names(ExpandContext *ctx, const char *name, TypeNameList *out, IdmError *err) {
-    const TypeDef *td = typed_type_by_identity(ctx, name);
-    const char *resolved = td ? type_def_identity_text(td) : NULL;
-    if (!resolved) resolved = name;
-    if (!is_a_target_push(resolved, out, err)) return false;
+bool is_a_target_symbols(ExpandContext *ctx, IdmSymbol *symbol, TypeNameList *out, IdmError *err) {
+    if (!symbol) return false;
+    const TypeDef *td = NULL;
+    for (size_t i = 0; i < ctx->typed.entity_count; i++) {
+        const TypedEntity *entity = &ctx->typed.entities[i];
+        if (entity->kind == IDM_TYPED_ENTITY_TYPE && entity->as.type.identity == symbol) {
+            td = &entity->as.type;
+            break;
+        }
+    }
+    if (!is_a_target_push(symbol, out, err)) return false;
     if (td && td->member_count != 0) {
         for (size_t i = 0; i < td->member_count; i++) {
             const IdmTypeTerm *m = &td->members[i].term;
-            const char *member = idm_type_term_text(m);
-            if (m->kind != IDM_TYPE_CON || !member) return false;
-            if (!is_a_target_names(ctx, member, out, err)) return false;
+            if (m->kind != IDM_TYPE_CON || !m->symbol) return false;
+            if (!is_a_target_symbols(ctx, m->symbol, out, err)) return false;
         }
     }
     return true;
@@ -1649,9 +1653,9 @@ static IdmCore *rewrite_is_a_call(ExpandContext *ctx, IdmCore *call, const IdmSc
     const IdmBinding *binding = NULL;
     if (resolve_scoped(ctx, name, IDM_BIND_SPACE_TYPE, scopes, NULL, &binding) == IDM_RESOLVE_OK && binding && binding->kind == IDM_BIND_TYPE) {
         const TypeDef *td = typed_type_by_index(ctx, binding->payload);
-        const char *identity = td ? type_def_identity_text(td) : NULL;
-        if (identity && strcmp(identity, name) != 0) {
-            IdmCore *lit = idm_core_literal(idm_atom(ctx->rt, identity), targ->span);
+        IdmSymbol *identity = td ? td->identity : NULL;
+        if (identity) {
+            IdmCore *lit = idm_core_literal(idm_atom_symbol(identity), targ->span);
             if (!lit) {
                 idm_core_free(call);
                 return (IdmCore *)(uintptr_t)idm_error_oom(err, call->span);

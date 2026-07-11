@@ -336,6 +336,7 @@ typedef struct ExpandContext {
     bool value_context;
     bool command_sub_context;
     bool suppress_method_impl_surface_refresh;
+    IdmSymbol *trait_identity;
     struct BodyDefCtx *def_ctx;
     const IdmScopeSet *op_fallback;
     bool repl_env_binds;
@@ -535,7 +536,7 @@ IdmPattern *pattern_from_bitstring(ExpandContext *ctx, const IdmSyntax *syn, Idm
 void begin_function_context(ExpandContext *ctx, SavedFunctionContext *saved);
 const CaptureBinding *capture_lookup_existing(const CaptureBinding *captures, size_t count, const IdmSyntax *word);
 typedef struct {
-    const char *identity;
+    IdmSymbol *identity;
     const IdmArtifact *art;
 } ProtocolPreActivation;
 bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const char *unit_name_hint, const unsigned char src_hash[32], const IdmPkgSlot *inherited_slots, size_t inherited_count, const ProtocolPreActivation *preacts, size_t preact_count, IdmArtifact *out, IdmError *err);
@@ -549,7 +550,7 @@ IdmCore *expand_package_body_items(ExpandContext *ctx, IdmSyntax *const *items, 
 IdmCore *expand_package_units(ExpandContext *ctx, const IdmPackageUnit *units, size_t unit_count, IdmError *err);
 IdmCore *expand_error(IdmError *err, IdmSpan span, const char *fmt, ...);
 IdmCore *expand_raise_message_body(ExpandContext *ctx, const char *message, IdmSpan span, IdmError *err);
-bool expand_multi_add_dispatch_clause(ExpandContext *ctx, IdmCore *multi, uint32_t argc, const char *arg0_type, ExpandMultiClauseBodyFn body_fn, const void *body_user, IdmSpan span, IdmError *err);
+bool expand_multi_add_dispatch_clause(ExpandContext *ctx, IdmCore *multi, uint32_t argc, IdmSymbol *arg0_type, ExpandMultiClauseBodyFn body_fn, const void *body_user, IdmSpan span, IdmError *err);
 IdmCore *expand_activate(ExpandContext *ctx, const IdmSyntax *name_syntax, IdmSpan span, IdmError *err);
 IdmCore *expand_fn_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 IdmCore *expand_explain_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
@@ -595,16 +596,15 @@ const MethodSurfaceDef *method_surface_by_index(const ExpandContext *ctx, uint32
 const char *method_surface_trait_text(const MethodSurfaceDef *surface);
 const char *method_surface_trait_key_text(const MethodSurfaceDef *surface);
 const char *method_surface_name_text(const MethodSurfaceDef *surface);
-bool method_surface_matches_trait(const ExpandContext *ctx, const MethodSurfaceDef *surface, const char *trait);
+bool method_surface_matches_trait(const MethodSurfaceDef *surface, IdmSymbol *trait);
 bool method_surface_matches_name(const ExpandContext *ctx, const MethodSurfaceDef *surface, const char *name);
-bool method_surface_matches_identity(const ExpandContext *ctx, const MethodSurfaceDef *surface, const char *trait, const char *name);
-bool method_surface_index_by_identity(const ExpandContext *ctx, const char *trait, const char *name, uint32_t *out);
+bool method_surface_matches_identity(const ExpandContext *ctx, const MethodSurfaceDef *surface, IdmSymbol *trait, const char *name);
+bool method_surface_index_by_identity(const ExpandContext *ctx, IdmSymbol *trait, const char *name, uint32_t *out);
 bool method_surfaces_share_trait_identity(const MethodSurfaceDef *a, const MethodSurfaceDef *b);
 const char *method_impl_trait_text(const MethodImplDef *impl);
 const char *method_impl_name_text(const MethodImplDef *impl);
 const char *method_impl_type_text(const MethodImplDef *impl);
-bool method_impl_set_identity(ExpandContext *ctx, MethodImplDef *impl, const char *trait, const char *name, const char *type, IdmError *err, IdmSpan span);
-bool method_impl_set_type(ExpandContext *ctx, MethodImplDef *impl, const char *type, IdmError *err, IdmSpan span);
+bool method_impl_set_identity(ExpandContext *ctx, MethodImplDef *impl, IdmSymbol *trait, IdmSymbol *name, const char *type, IdmError *err, IdmSpan span);
 bool method_impl_matches_type(const ExpandContext *ctx, const MethodImplDef *impl, const char *type);
 char *structural_head_join(const char *head, IdmSyntax *const *items, size_t count, size_t *inout_pos);
 bool structural_head_parse(const char *head, const char **out_field, size_t *out_field_len, const char **out_type);
@@ -615,7 +615,7 @@ IdmCore *build_field_selector_core(ExpandContext *ctx, const char *name, IdmSpan
 bool method_impl_matches_trait(const ExpandContext *ctx, const MethodImplDef *impl, const char *trait);
 bool method_impl_same_type(const MethodImplDef *a, const MethodImplDef *b);
 bool method_impl_matches_identity(const ExpandContext *ctx, const MethodImplDef *impl, const char *trait, const char *name, const char *type);
-bool install_method_surface(ExpandContext *ctx, const char *trait, const char *trait_key, const char *name, IdmArity arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, bool has_dispatch, bool dispatch_env, const char *dispatch_env_key, uint32_t dispatch_slot, IdmError *err);
+bool install_method_surface(ExpandContext *ctx, IdmSymbol *trait, const char *trait_key, const char *name, IdmArity arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, bool has_dispatch, bool dispatch_env, const char *dispatch_env_key, uint32_t dispatch_slot, IdmError *err);
 bool install_field_surfaces(ExpandContext *ctx, const TypeDef *type, uint32_t type_index, const IdmScopeSet *scopes, IdmError *err);
 ProtocolDef *typed_registry_add_protocol(ExpandContext *ctx, uint32_t *out_index, IdmError *err, IdmSpan span);
 TraitDef *typed_registry_add_trait(ExpandContext *ctx, uint32_t *out_index, IdmError *err, IdmSpan span);
@@ -624,12 +624,13 @@ ProtocolDef *typed_protocol_by_index(ExpandContext *ctx, uint32_t index);
 TraitDef *typed_trait_by_index(ExpandContext *ctx, uint32_t index);
 TypeDef *typed_type_by_index(ExpandContext *ctx, uint32_t index);
 const char *protocol_def_identity_text(const ProtocolDef *protocol);
-bool protocol_def_set_identity(ExpandContext *ctx, ProtocolDef *protocol, const char *identity, IdmError *err, IdmSpan span);
+bool protocol_def_set_identity(ProtocolDef *protocol, IdmSymbol *identity, IdmError *err, IdmSpan span);
 bool typed_trait_matches_identity(const ExpandContext *ctx, const TraitDef *trait, const char *identity);
 const TraitDef *typed_trait_by_identity(ExpandContext *ctx, const char *identity);
+const TraitDef *typed_trait_by_symbol(const ExpandContext *ctx, IdmSymbol *identity);
 bool typed_type_same_identity(const TypeDef *a, const TypeDef *b);
 const char *trait_def_identity_text(const TraitDef *trait);
-bool trait_def_set_identity(ExpandContext *ctx, TraitDef *trait, const char *identity, IdmError *err, IdmSpan span);
+bool trait_def_set_identity(TraitDef *trait, IdmSymbol *identity, IdmError *err, IdmSpan span);
 const char *trait_method_name_text(const TraitMethodDef *method);
 bool type_var_is_wildcard(const IdmTypeTerm *term);
 bool type_var_same(const IdmTypeTerm *a, const IdmTypeTerm *b);
@@ -651,9 +652,8 @@ bool trait_method_impl_set_name(ExpandContext *ctx, TraitMethodImpl *impl, const
 bool trait_method_impl_matches_name(const ExpandContext *ctx, const TraitMethodImpl *impl, const char *name);
 const char *type_def_identity_text(const TypeDef *type);
 const TypeDef *type_def_lookup_name(const ExpandContext *ctx, const char *name);
-const TypeDef *typed_type_by_identity(const ExpandContext *ctx, const char *identity);
 IdmSymbol *type_def_identity_symbol(const TypeDef *type);
-bool type_def_set_identity(ExpandContext *ctx, TypeDef *type, const char *identity, IdmError *err, IdmSpan span);
+bool type_def_set_identity(TypeDef *type, IdmSymbol *identity, IdmError *err, IdmSpan span);
 const char *type_field_name_text(const TypeFieldDef *field);
 const IdmTypeTerm *type_field_contract_term(const TypeFieldDef *field);
 bool type_field_set(ExpandContext *ctx, TypeFieldDef *field, const char *name, const IdmTypeTerm *contract, IdmError *err, IdmSpan span);
@@ -666,17 +666,17 @@ bool expand_solved_type_set(ExpandContext *ctx, const IdmCore *core, IdmTypeTerm
 const IdmTypeTerm *expand_solved_type_lookup(const ExpandContext *ctx, const IdmCore *core);
 void expand_solved_types_clear(ExpandContext *ctx);
 typedef struct {
-    const char **items;
+    IdmSymbol **items;
     size_t count;
     size_t cap;
 } TypeNameList;
-bool is_a_target_names(ExpandContext *ctx, const char *name, TypeNameList *out, IdmError *err);
+bool is_a_target_symbols(ExpandContext *ctx, IdmSymbol *symbol, TypeNameList *out, IdmError *err);
 bool expand_lower_root(ExpandContext *ctx, IdmCore **root, IdmError *err);
 bool expand_core_is_primitive_call(const IdmCore *core, IdmPrimitive primitive);
 IdmCore *decl_done(IdmError *err);
-int expand_dispatch_select_impl(ExpandContext *ctx, const IdmCore *node, const char *receiver_type, uint32_t argc, size_t *out);
-bool expand_dispatch_route_method(ExpandContext *ctx, IdmCore *node, const char *receiver_type, IdmError *err);
-bool expand_dispatch_route_field(ExpandContext *ctx, IdmCore *node, const char *receiver_type, IdmError *err);
+int expand_dispatch_select_impl(ExpandContext *ctx, const IdmCore *node, IdmSymbol *receiver_type, uint32_t argc, size_t *out);
+bool expand_dispatch_route_method(ExpandContext *ctx, IdmCore *node, IdmSymbol *receiver_type, IdmError *err);
+bool expand_dispatch_route_field(ExpandContext *ctx, IdmCore *node, IdmSymbol *receiver_type, IdmError *err);
 bool expand_typecheck_infer_scheme(ExpandContext *ctx, const IdmCore *value, const char *name, IdmCallableContract *out, bool *out_has, IdmError *err);
 bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, IdmError *err);
 typedef struct {
@@ -713,7 +713,7 @@ bool artifact_bind_name(const char *qualifier, const char *name, const char **ou
 const char *package_path_text(const IdmSyntax *syn);
 const char *surface_token_text(const IdmSyntax *syn);
 char *surface_token_text_dup(const IdmSyntax *syn);
-char *scoped_identity(ExpandContext *ctx, const char *name, const IdmSyntax *form, unsigned char out_hash[32], IdmError *err);
+IdmSymbol *scoped_identity(ExpandContext *ctx, const char *name, const IdmSyntax *form, unsigned char out_hash[32], IdmError *err);
 bool predeclare_trait_methods(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmError *err);
 void protocol_def_destroy(ProtocolDef *protocol);
 void trait_def_destroy(TraitDef *trait);

@@ -203,6 +203,10 @@ static bool type_con_term(GenCtx *g, const char *name, IdmTypeTerm *out, IdmErro
     return idm_type_con(g->ctx->rt, out, name) || idm_error_oom(err, span);
 }
 
+static bool type_con_symbol_term(IdmSymbol *symbol, IdmTypeTerm *out, IdmError *err, IdmSpan span) {
+    return idm_type_con_symbol(out, symbol) || idm_error_oom(err, span);
+}
+
 static bool type_from_literal(GenCtx *g, IdmValue value, IdmTypeTerm *out, IdmError *err, IdmSpan span) {
     (void)g;
     if (idm_is_nil(value)) return type_con_term(g, "empty-list", out, err, span);
@@ -887,7 +891,7 @@ static bool gen_dispatch(GenCtx *g, const TypeEnv *env, const IdmCore *core, Idm
         bool has_applied = false;
         if (core->as.dispatch.arg_count != 0 && !dispatch_receiver_term(g->ctx, core->as.dispatch.args[0], &applied, &has_applied)) return idm_error_oom(err, core->span);
         uint8_t route = IDM_DISPATCH_ROUTE_DYNAMIC;
-        const TraitDef *trait = typed_trait_by_identity(g->ctx, core->as.dispatch.name);
+        const TraitDef *trait = typed_trait_by_symbol(g->ctx, core->as.dispatch.identity);
         if (trait && has_applied && applied.kind != IDM_TYPE_VAR) {
             route = trait_impl_satisfies_term(g->ctx, trait, &applied) ? IDM_DISPATCH_ROUTE_FOLD_TRUE : IDM_DISPATCH_ROUTE_FOLD_FALSE;
         } else if (trait && has_applied) {
@@ -909,8 +913,8 @@ static bool gen_dispatch(GenCtx *g, const TypeEnv *env, const IdmCore *core, Idm
         IdmTypeTerm applied;
         bool got = false;
         if (!dispatch_receiver_term(g->ctx, core->as.dispatch.args[0], &applied, &got)) return idm_error_oom(err, core->span);
-        const char *rt_name = got ? idm_type_term_text(&applied) : NULL;
-        bool routed = expand_dispatch_route_field(g->ctx, node, rt_name, err);
+        IdmSymbol *rt_symbol = got && applied.kind == IDM_TYPE_CON ? applied.symbol : NULL;
+        bool routed = expand_dispatch_route_field(g->ctx, node, rt_symbol, err);
         if (got) idm_type_term_destroy(&applied);
         if (!routed) return false;
         if (node->as.dispatch.route == IDM_DISPATCH_ROUTE_FIELD_STATIC) {
@@ -932,8 +936,8 @@ static bool gen_dispatch(GenCtx *g, const TypeEnv *env, const IdmCore *core, Idm
         idm_type_term_destroy(&receiver_type);
         return idm_error_oom(err, core->span);
     }
-    const char *rt_name = has_routed_type ? idm_type_term_text(&routed_type) : NULL;
-    bool routed = expand_dispatch_route_method(g->ctx, node, rt_name, err);
+    IdmSymbol *rt_symbol = has_routed_type && routed_type.kind == IDM_TYPE_CON ? routed_type.symbol : NULL;
+    bool routed = expand_dispatch_route_method(g->ctx, node, rt_symbol, err);
     if (has_routed_type) idm_type_term_destroy(&routed_type);
     if (!routed) {
         idm_type_term_destroy(&receiver_type);
@@ -1184,11 +1188,6 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
             return type_con_term(g, "atom", out, err, core->span);
         case IDM_CORE_RECORD_CONSTRUCT: {
             const char *tname = idm_symbol_text(core->as.record_construct.type);
-            char disp[96];
-            size_t dn = tname ? strcspn(tname, "#") : 0u;
-            if (dn >= sizeof(disp)) dn = sizeof(disp) - 1u;
-            if (tname) memcpy(disp, tname, dn);
-            disp[dn] = '\0';
             for (size_t i = 0; i < core->as.record_construct.count; i++) {
                 IdmTypeTerm vt;
                 if (!gen_core(g, env, core->as.record_construct.field_values[i], &vt, err)) return false;
@@ -1196,7 +1195,7 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
                 if (core->as.record_construct.field_has_contracts[i]) {
                     const char *saved = g->owner;
                     bool saved_may = g->may;
-                    g->owner = disp;
+                    g->owner = tname;
                     g->may = true;
                     ok = subsume(g, &core->as.record_construct.field_contracts[i], &vt, err, core->as.record_construct.field_values[i]->span, 0u);
                     g->may = saved_may;
@@ -1205,7 +1204,7 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
                 idm_type_term_destroy(&vt);
                 if (!ok) return false;
             }
-            return type_con_term(g, tname, out, err, core->span);
+            return type_con_symbol_term(core->as.record_construct.type, out, err, core->span);
         }
         case IDM_CORE_RECORD_FIELD: {
             if (!gen_discard(g, env, core->as.record_field.receiver, err)) return false;
@@ -1318,7 +1317,7 @@ static bool gen_core_node(GenCtx *g, const TypeEnv *env, const IdmCore *core, Id
                                 IdmBuffer sb;
                                 idm_buf_init(&sb);
                                 bool w = idm_type_term_write(&sb, &si);
-                                idm_error_set(err, p->span, "match clause on '%.*s' is unreachable for scrutinee type %s", (int)strcspn(probe.head_name, "#"), probe.head_name, w && sb.data ? sb.data : "?");
+                                idm_error_set(err, p->span, "match clause on '%s' is unreachable for scrutinee type %s", probe.head_name, w && sb.data ? sb.data : "?");
                                 idm_buf_destroy(&sb);
                                 ok = false;
                             }
@@ -1612,13 +1611,14 @@ static bool seed_pattern_local_fresh(GenCtx *g, TypeEnv *env, const IdmFnClause 
     return true;
 }
 
-static bool seed_pattern_local_typed(GenCtx *g, TypeEnv *env, const IdmFnClause *cl, const char *name, const char *type_name, IdmError *err) {
-    (void)g;
+static bool seed_pattern_local_typed(GenCtx *g, TypeEnv *env, const IdmFnClause *cl, const char *name, const char *type_name, IdmSymbol *type_symbol, IdmError *err) {
     if (!name) return true;
     for (uint32_t k = 0; k < cl->pattern_local_count; k++) {
         if (!cl->pattern_locals[k].name || strcmp(cl->pattern_locals[k].name, name) != 0) continue;
         IdmTypeTerm t;
-        if (!type_con_term(g, type_name, &t, err, idm_span_unknown(NULL))) return false;
+        bool made = type_symbol ? type_con_symbol_term(type_symbol, &t, err, idm_span_unknown(NULL))
+                                : type_con_term(g, type_name, &t, err, idm_span_unknown(NULL));
+        if (!made) return false;
         bool ok = type_env_set_local(env, cl->pattern_locals[k].slot, &t);
         idm_type_term_destroy(&t);
         return ok || idm_error_oom(err, idm_span_unknown(NULL));
@@ -1659,12 +1659,12 @@ static bool seed_pattern_interior(GenCtx *g, TypeEnv *env, const IdmFnClause *cl
                 const char *tn = seg->kind == IDM_BITSEG_INT ? "int"
                                : seg->kind == IDM_BITSEG_FLOAT ? "float"
                                : "bitstring";
-                if (!seed_pattern_local_typed(g, env, cl, seg->sub->as.name, tn, err)) return false;
+                if (!seed_pattern_local_typed(g, env, cl, seg->sub->as.name, tn, NULL, err)) return false;
             }
             return true;
         case IDM_PAT_TYPE:
             if (p->as.type_test.sub && p->as.type_test.sub->kind == IDM_PAT_BIND) {
-                return seed_pattern_local_typed(g, env, cl, p->as.type_test.sub->as.name, p->as.type_test.name, err);
+                return seed_pattern_local_typed(g, env, cl, p->as.type_test.sub->as.name, p->as.type_test.name, p->as.type_test.symbol, err);
             }
             return seed_pattern_interior(g, env, cl, p->as.type_test.sub, false, err);
         default:
@@ -1746,8 +1746,7 @@ static bool reject_residual(GenCtx *g, const IdmConstraintSet *residual, IdmErro
         idm_buf_init(&tb);
         bool w = idm_type_term_write(&tb, &ty);
         const char *tr = c->trait ? idm_symbol_text(c->trait) : "?";
-        int trn = (int)strcspn(tr, "#");
-        idm_error_set(err, span, "unsolved typeclass '%.*s' for %s", trn, tr, w && tb.data ? tb.data : "?");
+        idm_error_set(err, span, "unsolved typeclass '%s' for %s", tr, w && tb.data ? tb.data : "?");
         idm_buf_destroy(&tb);
         idm_type_term_destroy(&ty);
         return false;

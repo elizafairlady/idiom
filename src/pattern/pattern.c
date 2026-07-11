@@ -480,6 +480,13 @@ IdmPattern *idm_pat_type(const char *type, IdmSpan span) {
     return pat;
 }
 
+IdmPattern *idm_pat_type_symbol(IdmSymbol *type, IdmSpan span) {
+    if (!type) return NULL;
+    IdmPattern *pat = idm_pat_type(idm_symbol_text(type), span);
+    if (pat) pat->as.type_test.symbol = type;
+    return pat;
+}
+
 IdmPattern *idm_pat_type_sub_take(const char *type, IdmPattern *sub, IdmSpan span) {
     IdmPattern *pat = idm_pat_type(type, span);
     if (!pat) {
@@ -556,9 +563,12 @@ IdmPattern *idm_pat_clone(const IdmPattern *pat) {
         case IDM_PAT_PIN:
             return idm_pat_pin(pat->as.name, pat->span);
         case IDM_PAT_TYPE: {
-            if (!pat->as.type_test.sub) return idm_pat_type(pat->as.type_test.name, pat->span);
+            if (!pat->as.type_test.sub) return pat->as.type_test.symbol ? idm_pat_type_symbol(pat->as.type_test.symbol, pat->span) : idm_pat_type(pat->as.type_test.name, pat->span);
             IdmPattern *sub = idm_pat_clone(pat->as.type_test.sub);
-            return sub ? idm_pat_type_sub_take(pat->as.type_test.name, sub, pat->span) : NULL;
+            if (!sub) return NULL;
+            IdmPattern *copy = idm_pat_type_sub_take(pat->as.type_test.name, sub, pat->span);
+            if (copy) copy->as.type_test.symbol = pat->as.type_test.symbol;
+            return copy;
         }
         case IDM_PAT_LITERAL:
             return idm_pat_literal(pat->as.literal, pat->span);
@@ -1188,7 +1198,7 @@ static SelPat *sel_pat_from_idm(IdmRuntime *rt, const IdmPattern *pat, const Idm
             if (!out) { idm_error_oom(err, pat->span); return NULL; }
             out->as.name.name = idm_strdup(pat->as.type_test.name);
             out->as.name.slot = UINT32_MAX;
-            out->as.name.symbol = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, pat->as.type_test.name);
+            out->as.name.symbol = pat->as.type_test.symbol ? pat->as.type_test.symbol : idm_intern(&rt->intern, IDM_SYMBOL_ATOM, pat->as.type_test.name);
             out->as.name.sub = NULL;
             if (!out->as.name.name) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }
             if (!out->as.name.symbol) { sel_pat_free(out); idm_error_oom(err, pat->span); return NULL; }

@@ -106,7 +106,6 @@ void idm_trait_method_def_destroy(IdmTraitMethodDef *method) {
 
 void idm_trait_requirement_def_destroy(IdmTraitRequirementDef *requirement) {
     if (!requirement) return;
-    free(requirement->name);
     memset(requirement, 0, sizeof(*requirement));
 }
 
@@ -339,7 +338,6 @@ void idm_pkg_import_destroy(IdmPkgImport *imp) {
 void idm_pkg_trait_destroy(IdmPkgTrait *trait) {
     if (!trait) return;
     free(trait->name);
-    free(trait->identity);
     for (size_t i = 0; i < trait->requirement_count; i++) idm_trait_requirement_def_destroy(&trait->requirements[i]);
     free(trait->requirements);
     for (size_t i = 0; i < trait->method_count; i++) idm_trait_method_def_destroy(&trait->methods[i]);
@@ -349,8 +347,6 @@ void idm_pkg_trait_destroy(IdmPkgTrait *trait) {
 
 void idm_pkg_method_impl_destroy(IdmPkgMethodImpl *impl) {
     if (!impl) return;
-    free(impl->trait);
-    free(impl->type);
     free(impl->method);
     free(impl->impl_env_key);
     if (impl->has_contract) idm_callable_contract_destroy(&impl->contract);
@@ -360,7 +356,6 @@ void idm_pkg_method_impl_destroy(IdmPkgMethodImpl *impl) {
 void idm_pkg_type_destroy(IdmPkgType *type) {
     if (!type) return;
     free(type->name);
-    free(type->identity);
     idm_scope_set_destroy(&type->scopes);
     for (size_t i = 0; i < type->member_count; i++) idm_type_term_destroy(&type->members[i].term);
     free(type->members);
@@ -375,7 +370,6 @@ void idm_pkg_type_destroy(IdmPkgType *type) {
 void idm_pkg_protocol_destroy(IdmPkgProtocol *protocol) {
     if (!protocol) return;
     free(protocol->name);
-    free(protocol->identity);
     if (protocol->art && !protocol->art->rt_owned) {
         idm_artifact_destroy(protocol->art);
         free(protocol->art);
@@ -406,8 +400,8 @@ bool idm_trait_requirement_defs_copy(const IdmTraitRequirementDef *src, size_t c
     IdmTraitRequirementDef *requirements = calloc(count, sizeof(*requirements));
     if (!requirements) return false;
     for (size_t i = 0; i < count; i++) {
-        requirements[i].name = idm_strdup(src[i].name);
-        if (!requirements[i].name) {
+        requirements[i].identity = src[i].identity;
+        if (!requirements[i].identity) {
             for (size_t j = 0; j <= i; j++) idm_trait_requirement_def_destroy(&requirements[j]);
             free(requirements);
             return false;
@@ -454,7 +448,6 @@ void idm_artifact_destroy(IdmArtifact *art) {
         free(art->core_form);
     }
     if (art->protocol_requires) {
-        for (size_t i = 0; i < art->protocol_require_count; i++) free(art->protocol_requires[i]);
         free(art->protocol_requires);
         art->protocol_requires = NULL;
         art->protocol_require_count = 0;
@@ -1349,6 +1342,20 @@ static bool source_reader_artifact_validate(const char *source_reader, const Idm
 
 static bool artifact_read_str(IdmByteReader *r, char **out, IdmError *err);
 
+static bool artifact_put_identity(IdmBuffer *out, IdmSymbol *identity) {
+    const unsigned char *hash = idm_symbol_identity_hash(identity);
+    const char *text = idm_symbol_text(identity);
+    return hash && idm_buf_put_str(out, text, strlen(text)) && idm_buf_append_n(out, (const char *)hash, 32u);
+}
+
+static bool artifact_put_symbol(IdmBuffer *out, IdmSymbol *symbol) {
+    if (!symbol) return false;
+    IdmSymbolKind kind = idm_symbol_kind(symbol);
+    const char *text = idm_symbol_text(symbol);
+    return idm_buf_put_u8(out, (uint8_t)kind) && idm_buf_put_str(out, text, strlen(text)) &&
+           (kind != IDM_SYMBOL_IDENTITY || idm_buf_append_n(out, (const char *)idm_symbol_identity_hash(symbol), 32u));
+}
+
 static bool put_method_defs(IdmBuffer *out, const IdmTraitMethodDef *methods, size_t count) {
     if (!idm_buf_put_u32(out, (uint32_t)count)) return false;
     for (size_t i = 0; i < count; i++) {
@@ -1402,12 +1409,14 @@ static bool read_method_defs(IdmRuntime *rt, IdmByteReader *r, IdmTraitMethodDef
 static bool put_requirement_defs(IdmBuffer *out, const IdmTraitRequirementDef *requirements, size_t count) {
     if (!idm_buf_put_u32(out, (uint32_t)count)) return false;
     for (size_t i = 0; i < count; i++) {
-        if (!idm_buf_put_str(out, requirements[i].name, strlen(requirements[i].name))) return false;
+        if (!artifact_put_identity(out, requirements[i].identity)) return false;
     }
     return true;
 }
 
-static bool read_requirement_defs(IdmByteReader *r, IdmTraitRequirementDef **out_requirements, size_t *out_count, IdmError *err) {
+static bool artifact_read_identity(IdmRuntime *rt, IdmByteReader *r, IdmSymbol **out, IdmError *err);
+
+static bool read_requirement_defs(IdmRuntime *rt, IdmByteReader *r, IdmTraitRequirementDef **out_requirements, size_t *out_count, IdmError *err) {
     uint32_t count = idm_rd_u32(r);
     if (!r->ok || count > (r->len - r->pos) / 4u) return false;
     if (count == 0) return true;
@@ -1416,7 +1425,7 @@ static bool read_requirement_defs(IdmByteReader *r, IdmTraitRequirementDef **out
     *out_requirements = requirements;
     for (uint32_t i = 0; i < count; i++) {
         *out_count = i + 1u;
-        if (!artifact_read_str(r, &requirements[i].name, err)) return false;
+        if (!artifact_read_identity(rt, r, &requirements[i].identity, err)) return false;
     }
     return true;
 }
@@ -1611,7 +1620,7 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     for (size_t i = 0; ok && i < art->typed.entity_count; i++) {
         if (art->typed.entities[i].kind != IDM_TYPED_ENTITY_TYPE) continue;
         const IdmPkgType *t = &art->typed.entities[i].as.type;
-        ok = idm_buf_put_str(out, t->name, strlen(t->name)) && idm_buf_put_str(out, t->identity, strlen(t->identity)) && idm_scope_set_serialize(out, &t->scopes, NULL);
+        ok = idm_buf_put_str(out, t->name, strlen(t->name)) && artifact_put_identity(out, t->identity) && idm_scope_set_serialize(out, &t->scopes, NULL);
         ok = ok && idm_buf_put_u32(out, (uint32_t)t->member_count);
         for (size_t m = 0; ok && m < t->member_count; m++) ok = idm_type_term_serialize(out, &t->members[m].term, err);
         ok = ok && idm_buf_put_u32(out, (uint32_t)t->field_count);
@@ -1625,15 +1634,15 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     for (size_t i = 0; ok && i < art->typed.entity_count; i++) {
         if (art->typed.entities[i].kind != IDM_TYPED_ENTITY_TRAIT) continue;
         const IdmPkgTrait *t = &art->typed.entities[i].as.trait;
-        ok = idm_buf_put_str(out, t->name, strlen(t->name)) && idm_buf_put_str(out, t->identity, strlen(t->identity));
+        ok = idm_buf_put_str(out, t->name, strlen(t->name)) && artifact_put_identity(out, t->identity);
         ok = ok && put_requirement_defs(out, t->requirements, t->requirement_count);
         ok = ok && put_method_defs(out, t->methods, t->method_count);
     }
     ok = ok && idm_buf_put_u32(out, (uint32_t)art->typed.method_impl_count);
     for (size_t i = 0; ok && i < art->typed.method_impl_count; i++) {
         const IdmPkgMethodImpl *impl = &art->typed.method_impls[i];
-        ok = idm_buf_put_str(out, impl->trait, strlen(impl->trait)) &&
-             idm_buf_put_str(out, impl->type, strlen(impl->type)) &&
+        ok = artifact_put_identity(out, impl->trait) &&
+             artifact_put_symbol(out, impl->type) &&
              idm_buf_put_str(out, impl->method, strlen(impl->method)) &&
              idm_arity_serialize(out, impl->arity, err) &&
              idm_buf_put_u8(out, impl->impl_env ? 1u : 0u) &&
@@ -1646,7 +1655,7 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     for (size_t i = 0; ok && i < art->typed.entity_count; i++) {
         if (art->typed.entities[i].kind != IDM_TYPED_ENTITY_PROTOCOL) continue;
         const IdmPkgProtocol *p = &art->typed.entities[i].as.protocol;
-        ok = idm_buf_put_str(out, p->name, strlen(p->name)) && idm_buf_put_str(out, p->identity, strlen(p->identity));
+        ok = idm_buf_put_str(out, p->name, strlen(p->name)) && artifact_put_identity(out, p->identity);
         if (ok) {
             IdmBuffer blob;
             idm_buf_init(&blob);
@@ -1670,7 +1679,7 @@ bool idm_artifact_serialize(const IdmArtifact *art, IdmBuffer *out, IdmError *er
     if (!idm_buf_put_u32(out, (uint32_t)art->protocol_require_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < art->protocol_require_count; i++) {
         if (!art->protocol_requires[i]) return idm_error_set(err, idm_span_unknown(NULL), "protocol requirement entry is incomplete");
-        if (!idm_buf_put_str(out, art->protocol_requires[i], strlen(art->protocol_requires[i]))) return idm_error_oom(err, idm_span_unknown(NULL));
+        if (!artifact_put_identity(out, art->protocol_requires[i])) return idm_error_oom(err, idm_span_unknown(NULL));
     }
     if (!idm_buf_put_u32(out, (uint32_t)art->reader_forms_count)) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < art->reader_forms_count; i++) {
@@ -1730,6 +1739,40 @@ static bool artifact_read_str(IdmByteReader *r, char **out, IdmError *err) {
     if (!s) return idm_error_set(err, idm_span_unknown(NULL), "truncated artifact string");
     *out = s;
     return true;
+}
+
+static bool artifact_read_identity(IdmRuntime *rt, IdmByteReader *r, IdmSymbol **out, IdmError *err) {
+    char *text = NULL;
+    if (!artifact_read_str(r, &text, err)) return false;
+    if (r->len - r->pos < 32u) {
+        free(text);
+        r->ok = false;
+        return idm_error_set(err, idm_span_unknown(NULL), "truncated artifact identity");
+    }
+    *out = idm_intern_identity(&rt->intern, text, r->data + r->pos);
+    r->pos += 32u;
+    free(text);
+    return *out != NULL || idm_error_oom(err, idm_span_unknown(NULL));
+}
+
+static bool artifact_read_symbol(IdmRuntime *rt, IdmByteReader *r, IdmSymbol **out, IdmError *err) {
+    uint8_t kind = idm_rd_u8(r);
+    if (!r->ok || kind > (uint8_t)IDM_SYMBOL_IDENTITY) return idm_error_set(err, idm_span_unknown(NULL), "invalid artifact symbol kind");
+    char *text = NULL;
+    if (!artifact_read_str(r, &text, err)) return false;
+    if (kind == (uint8_t)IDM_SYMBOL_IDENTITY) {
+        if (r->len - r->pos < 32u) {
+            free(text);
+            r->ok = false;
+            return idm_error_set(err, idm_span_unknown(NULL), "truncated artifact identity");
+        }
+        *out = idm_intern_identity(&rt->intern, text, r->data + r->pos);
+        r->pos += 32u;
+    } else {
+        *out = idm_intern(&rt->intern, (IdmSymbolKind)kind, text);
+    }
+    free(text);
+    return *out != NULL || idm_error_oom(err, idm_span_unknown(NULL));
 }
 
 static bool read_module_ref(IdmRuntime *rt, IdmByteReader *r, IdmModuleRef **out, IdmError *err) {
@@ -1909,7 +1952,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         IdmPkgType *t = &entity->as.type;
         idm_scope_set_init(&t->scopes);
         RD_STR(t->name);
-        RD_STR(t->identity);
+        if (ok) ok = artifact_read_identity(rt, &r, &t->identity, err);
         if (ok) ok = idm_scope_set_deserialize(&r, &t->scopes, NULL);
         uint32_t member_count;
         RD_U32(member_count);
@@ -1935,8 +1978,8 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         if (!entity) { ok = false; break; }
         IdmPkgTrait *t = &entity->as.trait;
         RD_STR(t->name);
-        RD_STR(t->identity);
-        if (ok) ok = read_requirement_defs(&r, &t->requirements, &t->requirement_count, err);
+        if (ok) ok = artifact_read_identity(rt, &r, &t->identity, err);
+        if (ok) ok = read_requirement_defs(rt, &r, &t->requirements, &t->requirement_count, err);
         if (ok) ok = read_method_defs(rt, &r, &t->methods, &t->method_count, err);
     }
     uint32_t method_impl_count;
@@ -1945,8 +1988,8 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
     for (uint32_t i = 0; ok && i < method_impl_count; i++) {
         IdmPkgMethodImpl *impl = &out->typed.method_impls[i];
         out->typed.method_impl_count = i + 1u;
-        RD_STR(impl->trait);
-        RD_STR(impl->type);
+        if (ok) ok = artifact_read_identity(rt, &r, &impl->trait, err);
+        if (ok) ok = artifact_read_symbol(rt, &r, &impl->type, err);
         RD_STR(impl->method);
         impl->arity = idm_arity_unknown();
         if (ok) ok = idm_arity_deserialize(&r, &impl->arity, err);
@@ -1964,7 +2007,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
         if (!entity) { ok = false; break; }
         IdmPkgProtocol *p = &entity->as.protocol;
         RD_STR(p->name);
-        RD_STR(p->identity);
+        if (ok) ok = artifact_read_identity(rt, &r, &p->identity, err);
         uint64_t blob_len = ok ? idm_rd_u64(&r) : 0u;
         if (ok && (!r.ok || blob_len > r.len - r.pos)) ok = idm_error_set(err, idm_span_unknown(NULL), "truncated protocol artifact");
         if (ok) {
@@ -1989,7 +2032,7 @@ bool idm_artifact_deserialize(IdmRuntime *rt, const unsigned char *data, size_t 
     RD_CALLOC(out->protocol_requires, protocol_require_count);
     for (uint32_t i = 0; ok && i < protocol_require_count; i++) {
         out->protocol_require_count = i + 1u;
-        RD_STR(out->protocol_requires[i]);
+        if (ok) ok = artifact_read_identity(rt, &r, &out->protocol_requires[i], err);
     }
     uint32_t reader_forms_count;
     RD_U32(reader_forms_count);

@@ -239,8 +239,8 @@ static void test_explain_ish(void) {
     check(contains_text(out, "\"name\":\"test\""), "explain ish test edge");
     check(contains_text(out, "\"name\":\"<\""), "explain ish redirect operator edge");
     check(contains_text(out, "\"name\":\"_\""), "explain ish fallback core-form edge");
-    check(contains_text(out, "\"provider\":\"Test#"), "explain ish Test provider");
-    check(contains_text(out, "\"provider\":\"Shell#"), "explain ish Shell provider");
+    check(contains_text(out, "\"provider\":\"Test\""), "explain ish Test provider");
+    check(contains_text(out, "\"provider\":\"Shell\""), "explain ish Shell provider");
     check(contains_text(out, "\"kind\":\"operator\""), "explain ish operator kind");
     check(contains_text(out, "\"kind\":\"core-form\""), "explain ish core-form kind");
     check(contains_text(out, "\"value-context\":true"), "explain ish value context");

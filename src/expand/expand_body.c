@@ -4787,11 +4787,11 @@ static bool parse_function_clause_shape(ExpandContext *ctx, const IdmSyntax *hea
     return true;
 }
 
-static const char *guard_predicate_type(ExpandContext *ctx, const IdmCore *guard, uint32_t *out_slot) {
+static IdmSymbol *guard_predicate_type(ExpandContext *ctx, const IdmCore *guard, uint32_t *out_slot) {
     if (!guard) return NULL;
     if (guard->kind == IDM_CORE_RECORD_IS && guard->as.record_is.value && guard->as.record_is.value->kind == IDM_CORE_ARG_REF) {
         *out_slot = guard->as.record_is.value->as.slot_ref.slot;
-        return idm_symbol_text(guard->as.record_is.type);
+        return guard->as.record_is.type;
     }
     if (guard->kind != IDM_CORE_CALL || guard->as.call.arg_count != 1) return NULL;
     const IdmCore *arg = guard->as.call.args[0];
@@ -4814,7 +4814,7 @@ static const char *guard_predicate_type(ExpandContext *ctx, const IdmCore *guard
         }
     }
     if (!pname) return NULL;
-    size_t n = strcspn(pname, "#");
+    size_t n = strlen(pname);
     if (n < 2 || pname[n - 1u] != '?') return NULL;
     static _Thread_local char base[96];
     if (n - 1u >= sizeof(base)) return NULL;
@@ -4823,26 +4823,25 @@ static const char *guard_predicate_type(ExpandContext *ctx, const IdmCore *guard
     const TypeDef *td = type_def_lookup_name(ctx, base);
     if (td) {
         *out_slot = arg->as.slot_ref.slot;
-        const char *id = type_def_identity_text(td);
-        return id ? id : base;
+        return td->identity;
     }
     if (idm_type_name_is_builtin(base)) {
         *out_slot = arg->as.slot_ref.slot;
-        return base;
+        return idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, base);
     }
     return NULL;
 }
 
 static bool clause_guard_refine(ExpandContext *ctx, const IdmCore *guard) {
     uint32_t slot = 0;
-    const char *tname = guard_predicate_type(ctx, guard, &slot);
-    if (!tname) return true;
+    IdmSymbol *type = guard_predicate_type(ctx, guard, &slot);
+    if (!type) return true;
     for (size_t i = ctx->bindings.count; i > 0; i--) {
         IdmBinding *b = &ctx->bindings.items[i - 1u];
         if (b->kind != IDM_BIND_ARG || b->frame_id != ctx->frame || b->payload != slot) continue;
         if (b->has_contract) return true;
         IdmTypeTerm con;
-        if (!idm_type_con(ctx->rt, &con, tname)) return false;
+        if (!idm_type_con_symbol(&con, type)) return false;
         IdmCallableContract contract;
         bool ok = callable_contract_from_value_type(&con, &contract);
         if (ok) ok = idm_binding_table_set_contract(&ctx->bindings, b->id, &contract);

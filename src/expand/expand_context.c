@@ -26,7 +26,8 @@ static bool ctx_seed_builtin_types(ExpandContext *ctx) {
         if (!type) return false;
         type->name = idm_strdup(parents[p]);
         if (!type->name) return false;
-        if (!type_def_set_identity(ctx, type, parents[p], &err, idm_span_unknown(NULL))) return false;
+        IdmSymbol *identity = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, parents[p]);
+        if (!type_def_set_identity(type, identity, &err, idm_span_unknown(NULL))) return false;
         type->exported = false;
         type->members = calloc(member_count, sizeof(*type->members));
         if (!type->members) return false;
@@ -619,13 +620,14 @@ IdmCore *expand_raise_message_body(ExpandContext *ctx, const char *message, IdmS
     return raise;
 }
 
-bool expand_multi_add_dispatch_clause(ExpandContext *ctx, IdmCore *multi, uint32_t argc, const char *arg0_type, ExpandMultiClauseBodyFn body_fn, const void *body_user, IdmSpan span, IdmError *err) {
+bool expand_multi_add_dispatch_clause(ExpandContext *ctx, IdmCore *multi, uint32_t argc, IdmSymbol *arg0_type, ExpandMultiClauseBodyFn body_fn, const void *body_user, IdmSpan span, IdmError *err) {
     IdmPattern **patterns = argc == 0 ? NULL : calloc(argc, sizeof(*patterns));
     if (argc != 0 && !patterns) return idm_error_oom(err, span);
     bool ok = true;
     for (uint32_t i = 0; i < argc && ok; i++) {
-        bool structural_head = arg0_type && arg0_type[0] == '_' && arg0_type[1] == '.';
-        patterns[i] = i == 0 && arg0_type && !structural_head ? idm_pat_type(arg0_type, span) : idm_pat_wildcard(span);
+        const char *type_text = idm_symbol_text(arg0_type);
+        bool structural_head = arg0_type && type_text[0] == '_' && type_text[1] == '.';
+        patterns[i] = i == 0 && arg0_type && !structural_head ? idm_pat_type_symbol(arg0_type, span) : idm_pat_wildcard(span);
         if (!patterns[i]) ok = false;
     }
     IdmCore *body = ok ? body_fn(ctx, multi, body_user, argc, span, err) : NULL;
@@ -721,8 +723,8 @@ TypeDef *typed_type_by_index(ExpandContext *ctx, uint32_t index) {
     return entity ? &entity->as.type : NULL;
 }
 
-static IdmSymbol *typed_identity_lookup(const ExpandContext *ctx, const char *identity) {
-    return ctx && ctx->rt && identity ? idm_intern_lookup(&ctx->rt->intern, IDM_SYMBOL_ATOM, identity) : NULL;
+static IdmSymbol *typed_atom_lookup(const ExpandContext *ctx, const char *text) {
+    return ctx && ctx->rt && text ? idm_intern_lookup(&ctx->rt->intern, IDM_SYMBOL_ATOM, text) : NULL;
 }
 
 static IdmSymbol *typed_atom_intern(ExpandContext *ctx, const char *text) {
@@ -733,24 +735,33 @@ const char *protocol_def_identity_text(const ProtocolDef *protocol) {
     return protocol && protocol->identity ? idm_symbol_text(protocol->identity) : NULL;
 }
 
-bool protocol_def_set_identity(ExpandContext *ctx, ProtocolDef *protocol, const char *identity, IdmError *err, IdmSpan span) {
-    if (!ctx || !protocol || !identity) return idm_error_set(err, span, "protocol requires an identity");
-    IdmSymbol *sym = typed_atom_intern(ctx, identity);
-    if (!sym) return idm_error_oom(err, span);
-    protocol->identity = sym;
+bool protocol_def_set_identity(ProtocolDef *protocol, IdmSymbol *identity, IdmError *err, IdmSpan span) {
+    if (!protocol || !identity) return idm_error_set(err, span, "protocol requires an identity");
+    protocol->identity = identity;
     return true;
 }
 
 bool typed_trait_matches_identity(const ExpandContext *ctx, const TraitDef *trait, const char *identity) {
-    IdmSymbol *sym = typed_identity_lookup(ctx, identity);
-    return trait && trait->name && sym && trait->name == sym;
+    (void)ctx;
+    return trait && trait->name && identity && strcmp(idm_symbol_text(trait->name), identity) == 0;
 }
 
 const TraitDef *typed_trait_by_identity(ExpandContext *ctx, const char *identity) {
     if (!ctx || !identity) return NULL;
+    const TraitDef *found = NULL;
     for (size_t i = 0; i < ctx->typed.entity_count; i++) {
         TypedEntity *entity = &ctx->typed.entities[i];
-        if (entity->kind == IDM_TYPED_ENTITY_TRAIT && typed_trait_matches_identity(ctx, &entity->as.trait, identity)) return &entity->as.trait;
+        if (entity->kind != IDM_TYPED_ENTITY_TRAIT || !typed_trait_matches_identity(ctx, &entity->as.trait, identity)) continue;
+        if (found && found->name != entity->as.trait.name) return NULL;
+        found = &entity->as.trait;
+    }
+    return found;
+}
+
+const TraitDef *typed_trait_by_symbol(const ExpandContext *ctx, IdmSymbol *identity) {
+    for (size_t i = 0; ctx && identity && i < ctx->typed.entity_count; i++) {
+        const TypedEntity *entity = &ctx->typed.entities[i];
+        if (entity->kind == IDM_TYPED_ENTITY_TRAIT && entity->as.trait.name == identity) return &entity->as.trait;
     }
     return NULL;
 }
@@ -763,11 +774,9 @@ const char *trait_def_identity_text(const TraitDef *trait) {
     return trait && trait->name ? idm_symbol_text(trait->name) : NULL;
 }
 
-bool trait_def_set_identity(ExpandContext *ctx, TraitDef *trait, const char *identity, IdmError *err, IdmSpan span) {
-    if (!ctx || !trait || !identity) return idm_error_set(err, span, "trait requires an identity");
-    IdmSymbol *sym = typed_atom_intern(ctx, identity);
-    if (!sym) return idm_error_oom(err, span);
-    trait->name = sym;
+bool trait_def_set_identity(TraitDef *trait, IdmSymbol *identity, IdmError *err, IdmSpan span) {
+    if (!trait || !identity) return idm_error_set(err, span, "trait requires an identity");
+    trait->name = identity;
     return true;
 }
 
@@ -797,30 +806,32 @@ static bool nil_empty_list_same(const char *a, const char *b) {
 
 bool type_name_same(const ExpandContext *ctx, const char *a, const char *b) {
     if (!a || !b) return false;
-    if (strcmp(a, b) == 0) return true;
-    if (nil_empty_list_same(a, b)) return true;
-    IdmSymbol *as = typed_identity_lookup(ctx, a);
-    IdmSymbol *bs = typed_identity_lookup(ctx, b);
-    if (as && bs && as == bs) return true;
     const TypeDef *ta = typed_type_by_identity_or_name(ctx, a);
     const TypeDef *tb = typed_type_by_identity_or_name(ctx, b);
-    return ta && tb && ta == tb;
+    if (ta || tb) return ta && tb && ta->identity == tb->identity;
+    if (strcmp(a, b) == 0) {
+        for (size_t i = 0; ctx && i < ctx->typed.entity_count; i++) {
+            const TypedEntity *entity = &ctx->typed.entities[i];
+            if (entity->kind != IDM_TYPED_ENTITY_TYPE) continue;
+            const char *identity = type_def_identity_text(&entity->as.type);
+            if ((identity && strcmp(identity, a) == 0) || (entity->as.type.name && strcmp(entity->as.type.name, a) == 0)) return false;
+        }
+        return true;
+    }
+    return nil_empty_list_same(a, b);
 }
 
 const TraitDef *trait_by_constraint_name(ExpandContext *ctx, const char *trait) {
-    const TraitDef *direct = typed_trait_by_identity(ctx, trait);
-    if (direct) return direct;
     const IdmBinding *binding = NULL;
     IdmResolveStatus status = resolve_scoped(ctx, trait, IDM_BIND_SPACE_TRAIT, &ctx->empty_scopes, NULL, &binding);
     if (status == IDM_RESOLVE_OK && binding && binding->kind == IDM_BIND_TRAIT) return typed_trait_by_index(ctx, binding->payload);
     const TraitDef *found = NULL;
-    size_t len = trait ? strlen(trait) : 0u;
     for (size_t i = 0; trait && i < ctx->typed.entity_count; i++) {
         const TypedEntity *entity = &ctx->typed.entities[i];
         if (entity->kind != IDM_TYPED_ENTITY_TRAIT) continue;
         const char *identity = trait_def_identity_text(&entity->as.trait);
-        if (!identity || strncmp(identity, trait, len) != 0 || identity[len] != '#') continue;
-        if (found) return NULL;
+        if (!identity || strcmp(identity, trait) != 0) continue;
+        if (found && found->name != entity->as.trait.name) return NULL;
         found = &entity->as.trait;
     }
     return found;
@@ -850,7 +861,14 @@ bool typeclass_same_trait(ExpandContext *ctx, const char *a, const char *b) {
 static bool trait_requires_trait(ExpandContext *ctx, const TraitDef *source, const TraitDef *target, unsigned depth) {
     if (!source || !target || depth > 64u) return false;
     for (size_t i = 0; i < source->requirement_count; i++) {
-        const TraitDef *required = trait_by_constraint_name(ctx, source->requirements[i].name);
+        const TraitDef *required = NULL;
+        for (size_t j = 0; j < ctx->typed.entity_count; j++) {
+            const TypedEntity *entity = &ctx->typed.entities[j];
+            if (entity->kind == IDM_TYPED_ENTITY_TRAIT && entity->as.trait.name == source->requirements[i].identity) {
+                required = &entity->as.trait;
+                break;
+            }
+        }
         if (!required) continue;
         if (required == target) return true;
         if (trait_requires_trait(ctx, required, target, depth + 1u)) return true;
@@ -899,27 +917,19 @@ bool trait_impl_satisfies_type(const ExpandContext *ctx, const TraitDef *trait, 
     return trait->method_count != 0;
 }
 
-const TypeDef *typed_type_by_identity(const ExpandContext *ctx, const char *identity) {
-    if (!ctx || !identity) return NULL;
-    IdmSymbol *sym = typed_identity_lookup(ctx, identity);
-    if (!sym) return NULL;
-    for (size_t i = 0; i < ctx->typed.entity_count; i++) {
-        const TypedEntity *entity = &ctx->typed.entities[i];
-        if (entity->kind == IDM_TYPED_ENTITY_TYPE && entity->as.type.identity == sym) return &entity->as.type;
-    }
-    return NULL;
-}
-
 static const TypeDef *typed_type_by_identity_or_name(const ExpandContext *ctx, const char *name) {
     if (!ctx || !name) return NULL;
+    const TypeDef *found = NULL;
     for (size_t i = 0; i < ctx->typed.entity_count; i++) {
         const TypedEntity *entity = &ctx->typed.entities[i];
         if (entity->kind != IDM_TYPED_ENTITY_TYPE) continue;
         const TypeDef *type = &entity->as.type;
         const char *identity = type_def_identity_text(type);
-        if ((identity && strcmp(identity, name) == 0) || (type->name && strcmp(type->name, name) == 0)) return type;
+        if ((!identity || strcmp(identity, name) != 0) && (!type->name || strcmp(type->name, name) != 0)) continue;
+        if (found && found->identity != type->identity) return NULL;
+        found = type;
     }
-    return NULL;
+    return found;
 }
 
 const TypeDef *type_def_lookup_name(const ExpandContext *ctx, const char *name) {
@@ -959,7 +969,7 @@ bool trait_method_set_name(ExpandContext *ctx, TraitMethodDef *method, const cha
 }
 
 bool trait_method_matches_name(const ExpandContext *ctx, const TraitMethodDef *method, const char *name) {
-    IdmSymbol *sym = typed_identity_lookup(ctx, name);
+    IdmSymbol *sym = typed_atom_lookup(ctx, name);
     return method && method->name && sym && method->name == sym;
 }
 
@@ -984,7 +994,7 @@ bool trait_method_impl_set_name(ExpandContext *ctx, TraitMethodImpl *impl, const
 }
 
 bool trait_method_impl_matches_name(const ExpandContext *ctx, const TraitMethodImpl *impl, const char *name) {
-    IdmSymbol *sym = typed_identity_lookup(ctx, name);
+    IdmSymbol *sym = typed_atom_lookup(ctx, name);
     return impl && impl->name && sym && impl->name == sym;
 }
 
@@ -1094,11 +1104,9 @@ IdmSymbol *type_def_identity_symbol(const TypeDef *type) {
     return type ? type->identity : NULL;
 }
 
-bool type_def_set_identity(ExpandContext *ctx, TypeDef *type, const char *identity, IdmError *err, IdmSpan span) {
-    if (!ctx || !type || !identity) return idm_error_set(err, span, "type requires an identity");
-    IdmSymbol *sym = typed_atom_intern(ctx, identity);
-    if (!sym) return idm_error_oom(err, span);
-    type->identity = sym;
+bool type_def_set_identity(TypeDef *type, IdmSymbol *identity, IdmError *err, IdmSpan span) {
+    if (!type || !identity) return idm_error_set(err, span, "type requires an identity");
+    type->identity = identity;
     return true;
 }
 
@@ -1125,7 +1133,7 @@ bool type_field_set(ExpandContext *ctx, TypeFieldDef *field, const char *name, c
 }
 
 bool type_field_matches_name(const ExpandContext *ctx, const TypeFieldDef *field, const char *name) {
-    IdmSymbol *sym = typed_identity_lookup(ctx, name);
+    IdmSymbol *sym = typed_atom_lookup(ctx, name);
     return field && field->name && sym && field->name == sym;
 }
 
@@ -1213,6 +1221,7 @@ static bool parse_type_atom(ExpandContext *ctx, IdmSyntax *const *items, size_t 
     bool ok = true;
     if (is_var && owner) ok = contract_var_id(owner, word->as.text, &var_id, err, word->span);
     const char *type_name = word->as.text;
+    IdmSymbol *type_symbol = NULL;
     if (ok && !is_var) {
         IdmResolveStatus status = IDM_RESOLVE_UNBOUND;
         TypeDef *type = resolve_type_def(ctx, word, &status);
@@ -1221,9 +1230,11 @@ static bool parse_type_atom(ExpandContext *ctx, IdmSyntax *const *items, size_t 
             idm_syn_free(word);
             return idm_error_set(err, span, "ambiguous type '%s'", type_name);
         }
-        if (type) type_name = type_def_identity_text(type);
+        if (type) type_symbol = type->identity;
     }
-    if (ok) ok = is_var ? idm_type_var(ctx->rt, out, word->as.text, var_id, false) : idm_type_con(ctx->rt, out, type_name);
+    if (ok) ok = is_var ? idm_type_var(ctx->rt, out, word->as.text, var_id, false)
+                        : type_symbol ? idm_type_con_symbol(out, type_symbol)
+                                      : idm_type_con(ctx->rt, out, type_name);
     IdmSpan span = word->span;
     idm_syn_free(word);
     if (!ok) return idm_error_oom(err, span);
@@ -1399,12 +1410,13 @@ static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, 
             idm_syn_free(trait);
             return idm_error_set(err, span, "ambiguous trait '%s'", trait_name);
         }
-        if (trait_def) trait_name = trait_def_identity_text(trait_def);
-        else if (ctx->trait_name && ctx->trait_key &&
+        const TraitDef *resolved_trait = trait_def ? trait_def : trait_by_constraint_name(ctx, trait_name);
+        IdmSymbol *trait_identity = resolved_trait ? resolved_trait->name : NULL;
+        if (!trait_identity && ctx->trait_name && ctx->trait_key &&
                  (strcmp(trait_name, ctx->trait_key) == 0 || strcmp(trait_name, ctx->trait_name) == 0)) {
-            trait_name = ctx->trait_name;
+            trait_identity = ctx->trait_identity;
         }
-        constraint.trait = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, trait_name);
+        constraint.trait = trait_identity ? trait_identity : idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, trait_name);
         IdmSpan span = trait->span;
         idm_syn_free(trait);
         if (!constraint.trait) return idm_error_oom(err, span);
@@ -1420,16 +1432,15 @@ static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, 
 static bool contract_terms_resolved(ExpandContext *ctx, const IdmTypeTerm *term, IdmSpan span, IdmError *err) {
     if (!term) return true;
     const char *name = idm_type_term_text(term);
-    if (term->kind == IDM_TYPE_CON && name && strcmp(name, "_") != 0 &&
+    if (term->kind == IDM_TYPE_CON && term->symbol && idm_symbol_kind(term->symbol) != IDM_SYMBOL_IDENTITY && name && strcmp(name, "_") != 0 &&
         strcmp(name, "Any") != 0 &&
-        !strchr(name, '#') && !idm_type_name_is_builtin(name)) {
-        size_t n = strlen(name);
+        !idm_type_name_is_builtin(name)) {
         for (size_t i = 0; i < ctx->typed.entity_count; i++) {
             const TypedEntity *e = &ctx->typed.entities[i];
-            const char *id = NULL;
-            if (e->kind == IDM_TYPED_ENTITY_TYPE) id = type_def_identity_text(&e->as.type);
-            else if (e->kind == IDM_TYPED_ENTITY_TRAIT) id = trait_def_identity_text(&e->as.trait);
-            if (!id || strncmp(id, name, n) != 0 || id[n] != '#') continue;
+            const char *surface = e->kind == IDM_TYPED_ENTITY_TYPE ? e->as.type.name : NULL;
+            const char *identity = e->kind == IDM_TYPED_ENTITY_TYPE ? type_def_identity_text(&e->as.type) : NULL;
+            if (e->kind == IDM_TYPED_ENTITY_TRAIT) identity = trait_def_identity_text(&e->as.trait);
+            if ((!surface || strcmp(surface, name) != 0) && (!identity || strcmp(identity, name) != 0)) continue;
             if (e->kind == IDM_TYPED_ENTITY_TRAIT) {
                 return expand_error(err, span, "unbound type '%s' in contract; '%s' is a trait — constrain with it before '=>' instead", name, name);
             }
@@ -1590,21 +1601,20 @@ const char *method_surface_name_text(const MethodSurfaceDef *surface) {
     return surface && surface->name ? idm_symbol_text(surface->name) : NULL;
 }
 
-bool method_surface_matches_identity(const ExpandContext *ctx, const MethodSurfaceDef *surface, const char *trait, const char *name) {
-    return method_surface_matches_trait(ctx, surface, trait) && method_surface_matches_name(ctx, surface, name);
+bool method_surface_matches_identity(const ExpandContext *ctx, const MethodSurfaceDef *surface, IdmSymbol *trait, const char *name) {
+    return method_surface_matches_trait(surface, trait) && method_surface_matches_name(ctx, surface, name);
 }
 
-bool method_surface_matches_trait(const ExpandContext *ctx, const MethodSurfaceDef *surface, const char *trait) {
-    IdmSymbol *sym = typed_identity_lookup(ctx, trait);
-    return surface && surface->trait && sym && surface->trait == sym;
+bool method_surface_matches_trait(const MethodSurfaceDef *surface, IdmSymbol *trait) {
+    return surface && surface->trait == trait;
 }
 
 bool method_surface_matches_name(const ExpandContext *ctx, const MethodSurfaceDef *surface, const char *name) {
-    IdmSymbol *sym = typed_identity_lookup(ctx, name);
+    IdmSymbol *sym = typed_atom_lookup(ctx, name);
     return surface && surface->name && sym && surface->name == sym;
 }
 
-bool method_surface_index_by_identity(const ExpandContext *ctx, const char *trait, const char *name, uint32_t *out) {
+bool method_surface_index_by_identity(const ExpandContext *ctx, IdmSymbol *trait, const char *name, uint32_t *out) {
     if (!ctx || !trait || !name) return false;
     for (size_t i = 0; i < ctx->typed.method_surface_count; i++) {
         const MethodSurfaceDef *surface = &ctx->typed.method_surfaces[i];
@@ -1634,23 +1644,14 @@ const char *method_impl_name_text(const MethodImplDef *impl) {
     return impl && impl->name ? idm_symbol_text(impl->name) : NULL;
 }
 
-bool method_impl_set_identity(ExpandContext *ctx, MethodImplDef *impl, const char *trait, const char *name, const char *type, IdmError *err, IdmSpan span) {
+bool method_impl_set_identity(ExpandContext *ctx, MethodImplDef *impl, IdmSymbol *trait, IdmSymbol *name, const char *type, IdmError *err, IdmSpan span) {
     if (!ctx || !impl || !trait || !name || !type) return idm_error_set(err, span, "method implementation requires trait, method, and receiver type");
-    IdmSymbol *trait_sym = typed_atom_intern(ctx, trait);
-    IdmSymbol *name_sym = typed_atom_intern(ctx, name);
-    IdmSymbol *type_sym = typed_atom_intern(ctx, type);
-    if (!trait_sym || !name_sym || !type_sym) return idm_error_oom(err, span);
-    impl->trait = trait_sym;
-    impl->name = name_sym;
+    const TypeDef *type_def = typed_type_by_identity_or_name(ctx, type);
+    IdmSymbol *type_sym = type_def ? type_def->identity : typed_atom_intern(ctx, type);
+    if (!type_sym) return idm_error_oom(err, span);
+    impl->trait = trait;
+    impl->name = name;
     impl->type = type_sym;
-    return true;
-}
-
-bool method_impl_set_type(ExpandContext *ctx, MethodImplDef *impl, const char *type, IdmError *err, IdmSpan span) {
-    if (!ctx || !impl || !type) return idm_error_set(err, span, "method implementation requires a receiver type");
-    IdmSymbol *sym = typed_atom_intern(ctx, type);
-    if (!sym) return idm_error_oom(err, span);
-    impl->type = sym;
     return true;
 }
 
@@ -1804,10 +1805,11 @@ bool method_impl_matches_type(const ExpandContext *ctx, const MethodImplDef *imp
 }
 
 bool method_impl_matches_trait(const ExpandContext *ctx, const MethodImplDef *impl, const char *trait) {
-    IdmSymbol *sym = typed_identity_lookup(ctx, trait);
+    const TraitDef *def = trait_by_constraint_name((ExpandContext *)ctx, trait);
+    IdmSymbol *sym = def ? def->name : typed_atom_lookup(ctx, trait);
     if (impl && impl->trait && sym) return impl->trait == sym;
     const MethodSurfaceDef *surface = method_surface_by_index(ctx, impl ? impl->method_surface : UINT32_MAX);
-    return method_surface_matches_trait(ctx, surface, trait);
+    return method_surface_matches_trait(surface, sym);
 }
 
 bool method_impl_same_type(const MethodImplDef *a, const MethodImplDef *b) {
@@ -1816,25 +1818,27 @@ bool method_impl_same_type(const MethodImplDef *a, const MethodImplDef *b) {
 
 bool method_impl_matches_identity(const ExpandContext *ctx, const MethodImplDef *impl, const char *trait, const char *name, const char *type) {
     if (!impl || (type && !method_impl_matches_type(ctx, impl, type))) return false;
-    IdmSymbol *trait_sym = typed_identity_lookup(ctx, trait);
-    IdmSymbol *name_sym = typed_identity_lookup(ctx, name);
+    const TraitDef *def = trait_by_constraint_name((ExpandContext *)ctx, trait);
+    IdmSymbol *trait_sym = def ? def->name : typed_atom_lookup(ctx, trait);
+    IdmSymbol *name_sym = typed_atom_lookup(ctx, name);
     if (impl->trait && impl->name && trait_sym && name_sym) return impl->trait == trait_sym && impl->name == name_sym;
     const MethodSurfaceDef *surface = method_surface_by_index(ctx, impl->method_surface);
-    return method_surface_matches_identity(ctx, surface, trait, name);
+    return method_surface_matches_identity(ctx, surface, trait_sym, name);
 }
 
-static void refresh_method_impl_surface_cache(ExpandContext *ctx, const char *trait, const char *name, uint32_t method_surface) {
+static void refresh_method_impl_surface_cache(ExpandContext *ctx, IdmSymbol *trait, const char *name, uint32_t method_surface) {
     if (!ctx || !trait || !name || method_surface == UINT32_MAX) return;
     if (ctx->suppress_method_impl_surface_refresh) return;
     for (size_t i = 0; i < ctx->typed.method_impl_count; i++) {
         MethodImplDef *impl = &ctx->typed.method_impls[i];
-        if (method_impl_matches_identity(ctx, impl, trait, name, NULL)) impl->method_surface = method_surface;
+        if (impl->trait == trait && impl->name && strcmp(idm_symbol_text(impl->name), name) == 0) impl->method_surface = method_surface;
     }
 }
 
-bool install_method_surface(ExpandContext *ctx, const char *trait, const char *trait_key, const char *name, IdmArity arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, bool has_dispatch, bool dispatch_env, const char *dispatch_env_key, uint32_t dispatch_slot, IdmError *err) {
+bool install_method_surface(ExpandContext *ctx, IdmSymbol *trait, const char *trait_key, const char *name, IdmArity arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, bool has_dispatch, bool dispatch_env, const char *dispatch_env_key, uint32_t dispatch_slot, IdmError *err) {
     const IdmScopeSet *check_scopes = scopes ? scopes : &ctx->empty_scopes;
-    const char *check_key = trait_key ? trait_key : trait;
+    const char *trait_text = idm_symbol_text(trait);
+    const char *check_key = trait_key ? trait_key : trait_text;
     for (size_t i = 0; i < ctx->bindings.count; i++) {
         const IdmBinding *binding = &ctx->bindings.items[i];
         if (binding->space == IDM_BIND_SPACE_FIELD &&
@@ -1849,7 +1853,7 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *t
         if (!method_surface_matches_identity(ctx, e, trait, name) || !idm_scope_set_equal(&e->scopes, check_scopes)) continue;
         {
             if (!idm_arity_equal(&e->arity, &arity)) {
-                return idm_error_set(err, idm_span_unknown(NULL), "method surface '%s.%s' arity changed while activating this scope", trait, name);
+                return idm_error_set(err, idm_span_unknown(NULL), "method surface '%s.%s' arity changed while activating this scope", trait_text, name);
             }
             const char *e_provider = e->provider ? e->provider : "";
             const char *e_provider_key = e->provider_key ? e->provider_key : "";
@@ -1876,7 +1880,7 @@ bool install_method_surface(ExpandContext *ctx, const char *trait, const char *t
     }
     MethodSurfaceDef *method = &ctx->typed.method_surfaces[ctx->typed.method_surface_count];
     memset(method, 0, sizeof(*method));
-    method->trait = typed_atom_intern(ctx, trait);
+    method->trait = trait;
     method->trait_key = typed_atom_intern(ctx, check_key);
     method->name = typed_atom_intern(ctx, name);
     method->provider = idm_strdup(provider ? provider : "");
@@ -1975,26 +1979,41 @@ static const IdmBinding *resolve_surface_binding(const ExpandContext *ctx, const
     return status == IDM_RESOLVE_OK && binding && binding->kind == kind ? binding : NULL;
 }
 
-char *scoped_identity(ExpandContext *ctx, const char *name, const IdmSyntax *form, unsigned char out_hash[32], IdmError *err) {
+IdmSymbol *scoped_identity(ExpandContext *ctx, const char *name, const IdmSyntax *form, unsigned char out_hash[32], IdmError *err) {
     IdmBuffer ser;
     idm_buf_init(&ser);
     if (!idm_syn_serialize(&ser, form, err)) {
         idm_buf_destroy(&ser);
         return NULL;
     }
-    idm_sha256(ser.data ? ser.data : "", ser.len, out_hash);
+    if (ctx->trait_identity) {
+        IdmBuffer nested;
+        idm_buf_init(&nested);
+        const unsigned char *parent_hash = idm_symbol_identity_hash(ctx->trait_identity);
+        bool ok = parent_hash && idm_buf_append_n(&nested, (const char *)parent_hash, 32u) &&
+                  idm_buf_append_n(&nested, ser.data ? ser.data : "", ser.len);
+        if (!ok) {
+            idm_buf_destroy(&nested);
+            idm_buf_destroy(&ser);
+            idm_error_oom(err, form->span);
+            return NULL;
+        }
+        idm_sha256(nested.data, nested.len, out_hash);
+        idm_buf_destroy(&nested);
+    } else {
+        idm_sha256(ser.data ? ser.data : "", ser.len, out_hash);
+    }
     idm_buf_destroy(&ser);
-    char key[17];
-    artifact_provider_key(out_hash, key);
     IdmBuffer buf;
     idm_buf_init(&buf);
     bool ok = !ctx->trait_name || (idm_buf_append(&buf, ctx->trait_name) && idm_buf_append_char(&buf, '/'));
-    if (!ok || !idm_buf_append(&buf, name) || !idm_buf_append_char(&buf, '#') || !idm_buf_append(&buf, key)) {
+    if (!ok || !idm_buf_append(&buf, name)) {
         idm_buf_destroy(&buf);
         idm_error_oom(err, form->span);
         return NULL;
     }
-    char *identity = idm_buf_take(&buf);
+    IdmSymbol *identity = idm_intern_identity(&ctx->rt->intern, buf.data ? buf.data : "", out_hash);
+    idm_buf_destroy(&buf);
     if (!identity) idm_error_oom(err, form->span);
     return identity;
 }

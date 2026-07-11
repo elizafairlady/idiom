@@ -78,7 +78,7 @@ typedef struct {
 } IdmTraitMethodDef;
 
 typedef struct {
-    char *name;
+    IdmSymbol *identity;
 } IdmTraitRequirementDef;
 
 typedef struct {
@@ -319,7 +319,7 @@ struct IdmPhaseReads {
 
 typedef struct {
     char *name;
-    char *identity;
+    IdmSymbol *identity;
     IdmTraitRequirementDef *requirements;
     size_t requirement_count;
     IdmTraitMethodDef *methods;
@@ -327,8 +327,8 @@ typedef struct {
 } IdmPkgTrait;
 
 typedef struct {
-    char *trait;
-    char *type;
+    IdmSymbol *trait;
+    IdmSymbol *type;
     char *method;
     IdmArity arity;
     bool impl_env;
@@ -350,7 +350,7 @@ typedef struct {
 
 typedef struct {
     char *name;
-    char *identity;
+    IdmSymbol *identity;
     IdmScopeSet scopes;
     IdmPkgTypeMember *members;
     size_t member_count;
@@ -360,7 +360,7 @@ typedef struct {
 
 typedef struct {
     char *name;
-    char *identity;
+    IdmSymbol *identity;
     IdmArtifact *art;
 } IdmPkgProtocol;
 
@@ -411,7 +411,7 @@ struct IdmArtifact {
     IdmScopeId scope_base;
     IdmScopeId scope_end;
     IdmPhaseEnv *phase_env;
-    char **protocol_requires;
+    IdmSymbol **protocol_requires;
     size_t protocol_require_count;
     unsigned char src_hash[32];
     unsigned char action_hash[32];

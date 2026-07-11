@@ -23,6 +23,11 @@ static const char *lower_type_name(const LowerCtx *lc, const IdmCore *core) {
     return NULL;
 }
 
+static IdmSymbol *lower_type_symbol(const LowerCtx *lc, const IdmCore *core) {
+    const IdmTypeTerm *term = core ? expand_solved_type_lookup(lc->ctx, core) : NULL;
+    return term && term->kind == IDM_TYPE_CON ? term->symbol : NULL;
+}
+
 static IdmCore *lower_error(IdmError *err, IdmSpan span, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -59,13 +64,14 @@ static IdmCore *dispatch_take_args_call(IdmCore *node, IdmCore *callee, IdmError
     return call;
 }
 
-static bool dispatch_impl_matches_type(const ExpandContext *ctx, const IdmDispatchImplDef *cand, const char *type) {
-    if (!cand->type_identity || !type) return false;
-    if (cand->type_identity[0] == '_' && cand->type_identity[1] == '.') return type_satisfies_structural_head(ctx, cand->type_identity, type);
-    return type_name_same(ctx, cand->type_identity, type);
+static bool dispatch_impl_matches_type(const ExpandContext *ctx, const IdmDispatchImplDef *cand, IdmSymbol *type) {
+    if (!cand->type || !type) return false;
+    const char *candidate = idm_symbol_text(cand->type);
+    if (candidate[0] == '_' && candidate[1] == '.') return type_satisfies_structural_head(ctx, candidate, idm_symbol_text(type));
+    return cand->type == type;
 }
 
-int expand_dispatch_select_impl(ExpandContext *ctx, const IdmCore *node, const char *receiver_type, uint32_t argc, size_t *out) {
+int expand_dispatch_select_impl(ExpandContext *ctx, const IdmCore *node, IdmSymbol *receiver_type, uint32_t argc, size_t *out) {
     size_t chosen = SIZE_MAX;
     for (size_t c = 0; c < node->as.dispatch.impl_count; c++) {
         const IdmDispatchImplDef *cand = &node->as.dispatch.impls[c];
@@ -87,48 +93,49 @@ static bool dispatch_route_evidence(ExpandContext *ctx, IdmCore *node, IdmError 
         return idm_error_set(err, node->span, "method '%s' has no dispatch selector", method_name);
     }
     if (m->evidence_state == IDM_DISPATCH_REF_INVISIBLE) {
-        return idm_error_set(err, node->span, "method evidence '%s.%s' is not visible in this function", m->trait ? m->trait : "?", method_name);
+        return idm_error_set(err, node->span, "method evidence '%s.%s' is not visible in this function", idm_symbol_text(m->trait), method_name);
     }
     node->as.dispatch.route = IDM_DISPATCH_ROUTE_EVIDENCE;
     node->as.dispatch.route_index = 0;
     return true;
 }
 
-bool expand_dispatch_route_method(ExpandContext *ctx, IdmCore *node, const char *receiver_type, IdmError *err) {
+bool expand_dispatch_route_method(ExpandContext *ctx, IdmCore *node, IdmSymbol *receiver_type, IdmError *err) {
     const char *method_name = node->as.dispatch.name ? node->as.dispatch.name : "?";
+    const char *receiver_name = idm_symbol_text(receiver_type);
     uint32_t argc = (uint32_t)node->as.dispatch.arg_count;
     IdmSpan span = node->span;
-    if (receiver_type && strcmp(receiver_type, "Any") == 0) receiver_type = NULL;
+    if (receiver_type && strcmp(receiver_name, "Any") == 0) receiver_type = NULL;
     if (receiver_type) {
         size_t chosen = SIZE_MAX;
         int sel = expand_dispatch_select_impl(ctx, node, receiver_type, argc, &chosen);
-        if (sel < 0) return idm_error_set(err, span, "ambiguous method '%s' on type '%s'", method_name, receiver_type);
+        if (sel < 0) return idm_error_set(err, span, "ambiguous method '%s' on type '%s'", method_name, receiver_name);
         if (sel > 0) {
             const IdmDispatchImplDef *cand = &node->as.dispatch.impls[chosen];
             if (!cand->passthrough && cand->ref_state == IDM_DISPATCH_REF_INVISIBLE) {
-                const char *trait = node->as.dispatch.methods[cand->method].trait;
-                return idm_error_set(err, span, "method implementation '%s.%s' is not visible in this function", trait ? trait : "?", method_name);
+                IdmSymbol *trait = node->as.dispatch.methods[cand->method].trait;
+                return idm_error_set(err, span, "method implementation '%s.%s' is not visible in this function", idm_symbol_text(trait), method_name);
             }
             node->as.dispatch.route = IDM_DISPATCH_ROUTE_DEVIRT;
             node->as.dispatch.route_index = (uint32_t)chosen;
             return true;
         }
-        const TypeDef *td = type_def_lookup_name(ctx, receiver_type);
+        const TypeDef *td = type_def_lookup_name(ctx, receiver_name);
         if (td && td->member_count != 0) {
-            const char *missing = NULL;
+            IdmSymbol *missing = NULL;
             bool covered = true;
             for (size_t m = 0; m < td->member_count && covered; m++) {
-                const char *member = td->members[m].term.kind == IDM_TYPE_CON ? idm_type_term_text(&td->members[m].term) : NULL;
+                IdmSymbol *member = td->members[m].term.kind == IDM_TYPE_CON ? td->members[m].term.symbol : NULL;
                 if (!member) { covered = false; break; }
                 size_t member_chosen = SIZE_MAX;
                 if (expand_dispatch_select_impl(ctx, node, member, argc, &member_chosen) == 0) { covered = false; missing = member; }
             }
             if (covered && node->as.dispatch.method_count == 1u) return dispatch_route_evidence(ctx, node, err);
             if (missing) {
-                return idm_error_set(err, span, "method '%s' is not implemented on member '%s' of receiver type '%s'", method_name, missing, receiver_type);
+                return idm_error_set(err, span, "method '%s' is not implemented on member '%s' of receiver type '%s'", method_name, idm_symbol_text(missing), receiver_name);
             }
         }
-        return idm_error_set(err, span, "method '%s' is not implemented on receiver type '%s'", method_name, receiver_type);
+        return idm_error_set(err, span, "method '%s' is not implemented on receiver type '%s'", method_name, receiver_name);
     }
     if (node->as.dispatch.method_count != 1u) {
         return idm_error_set(err, span, "ambiguous method '%s' for a dynamic receiver", method_name);
@@ -136,18 +143,20 @@ bool expand_dispatch_route_method(ExpandContext *ctx, IdmCore *node, const char 
     return dispatch_route_evidence(ctx, node, err);
 }
 
-bool expand_dispatch_route_field(ExpandContext *ctx, IdmCore *node, const char *receiver_type, IdmError *err) {
+bool expand_dispatch_route_field(ExpandContext *ctx, IdmCore *node, IdmSymbol *receiver_type, IdmError *err) {
+    (void)ctx;
     const char *field_name = node->as.dispatch.name ? node->as.dispatch.name : "<field>";
     IdmSpan span = node->span;
     if (receiver_type) {
+        const char *receiver_name = idm_symbol_text(receiver_type);
         size_t chosen = SIZE_MAX;
         for (size_t i = 0; i < node->as.dispatch.field_count; i++) {
-            if (!type_name_same(ctx, node->as.dispatch.fields[i].type_identity, receiver_type)) continue;
-            if (chosen != SIZE_MAX) return idm_error_set(err, span, "ambiguous field '%s' on type '%s'", field_name, receiver_type);
+            if (node->as.dispatch.fields[i].type != receiver_type) continue;
+            if (chosen != SIZE_MAX) return idm_error_set(err, span, "ambiguous field '%s' on type '%s'", field_name, receiver_name);
             chosen = i;
         }
         if (chosen == SIZE_MAX) {
-            return idm_error_set(err, span, "field '%s' is not available on receiver type '%s'", field_name, receiver_type);
+            return idm_error_set(err, span, "field '%s' is not available on receiver type '%s'", field_name, receiver_name);
         }
         node->as.dispatch.route = IDM_DISPATCH_ROUTE_FIELD_STATIC;
         node->as.dispatch.route_index = (uint32_t)chosen;
@@ -259,7 +268,7 @@ static IdmCore *type_membership_chain(LowerCtx *lc, LowerFrame *fr, const char *
     for (size_t i = targets->count; i > 0; i--) {
         IdmCore *test = expand_primitive_clause_call(IDM_PRIM_IS_A_P, span, err);
         IdmCore *ref = test ? idm_core_local_ref(bind_name, slot, span) : NULL;
-        IdmCore *atom = ref ? idm_core_literal(idm_atom(ctx->rt, targets->items[i - 1u]), span) : NULL;
+        IdmCore *atom = ref ? idm_core_literal(idm_atom_symbol(targets->items[i - 1u]), span) : NULL;
         if (atom && idm_core_call_add_arg(test, ref)) ref = NULL;
         if (!ref && atom && idm_core_call_add_arg(test, atom)) atom = NULL;
         if (ref || atom || !test) {
@@ -295,17 +304,19 @@ static IdmCore *type_membership_chain(LowerCtx *lc, LowerFrame *fr, const char *
     return bound;
 }
 
-static bool implements_target_add(LowerCtx *lc, const TraitDef *trait, const char *type, TypeNameList *out, IdmSpan span, IdmError *err) {
-    if (!trait_impl_satisfies_type(lc->ctx, trait, type)) return true;
-    if (is_a_target_names(lc->ctx, type, out, err)) return true;
+static bool implements_target_add(LowerCtx *lc, const TraitDef *trait, IdmSymbol *type, TypeNameList *out, IdmSpan span, IdmError *err) {
+    const char *type_name = idm_symbol_text(type);
+    if (!trait_impl_satisfies_type(lc->ctx, trait, type_name)) return true;
+    if (is_a_target_symbols(lc->ctx, type, out, err)) return true;
     if (err && err->present) return false;
-    return idm_error_set(err, span, "implements? cannot compile a runtime type test for type '%.*s'", (int)strcspn(type, "#"), type);
+    return idm_error_set(err, span, "implements? cannot compile a runtime type test for type '%s'", type_name);
 }
 
 static IdmCore *lower_implements_dispatch(LowerCtx *lc, LowerFrame *fr, IdmCore *node, IdmError *err) {
     ExpandContext *ctx = lc->ctx;
     IdmSpan span = node->span;
-    const char *trait_identity = node->as.dispatch.name;
+    IdmSymbol *trait_identity = node->as.dispatch.identity;
+    const char *trait_name = idm_symbol_text(trait_identity);
     if (node->as.dispatch.route == IDM_DISPATCH_ROUTE_FOLD_TRUE || node->as.dispatch.route == IDM_DISPATCH_ROUTE_FOLD_FALSE) {
         IdmCore *literal = idm_core_literal(idm_bool(ctx->rt, node->as.dispatch.route == IDM_DISPATCH_ROUTE_FOLD_TRUE), span);
         if (!literal) idm_error_oom(err, span);
@@ -314,16 +325,16 @@ static IdmCore *lower_implements_dispatch(LowerCtx *lc, LowerFrame *fr, IdmCore 
     if (node->as.dispatch.route != IDM_DISPATCH_ROUTE_DYNAMIC) {
         return lower_error(err, span, "internal: unrouted implements dispatch reached lower");
     }
-    const TraitDef *trait = typed_trait_by_identity(ctx, trait_identity);
+    const TraitDef *trait = typed_trait_by_symbol(ctx, trait_identity);
     if (!trait || node->as.dispatch.arg_count == 0) {
-        return lower_error(err, span, "unbound trait '%s'", trait_identity ? trait_identity : "?");
+        return lower_error(err, span, "unbound trait '%s'", trait_name);
     }
     IdmCore *value = node->as.dispatch.args[0];
     TypeNameList targets = {0};
     bool ok = true;
     for (size_t i = 0; ok && trait_identity && i < ctx->typed.method_impl_count; i++) {
         const MethodImplDef *impl = &ctx->typed.method_impls[i];
-        if (!method_impl_matches_trait(ctx, impl, trait_identity)) continue;
+        if (impl->trait != trait_identity) continue;
         const char *type = method_impl_type_text(impl);
         if (!type) continue;
         if (type[0] == '_' && type[1] == '.') {
@@ -332,10 +343,10 @@ static IdmCore *lower_implements_dispatch(LowerCtx *lc, LowerFrame *fr, IdmCore 
                 if (ent->kind != IDM_TYPED_ENTITY_TYPE || ent->as.type.field_count == 0) continue;
                 const char *id = type_def_identity_text(&ent->as.type);
                 if (!id || !type_satisfies_structural_head(ctx, type, id)) continue;
-                ok = implements_target_add(lc, trait, id, &targets, span, err);
+                ok = implements_target_add(lc, trait, ent->as.type.identity, &targets, span, err);
             }
         } else {
-            ok = implements_target_add(lc, trait, type, &targets, span, err);
+            ok = implements_target_add(lc, trait, impl->type, &targets, span, err);
         }
     }
     if (!ok) {
@@ -348,15 +359,20 @@ static IdmCore *lower_implements_dispatch(LowerCtx *lc, LowerFrame *fr, IdmCore 
     return chain;
 }
 
-static bool is_a_static_member(ExpandContext *ctx, const char *type_name, const char *target) {
-    if (strcmp(target, "Any") == 0) return true;
-    const TypeDef *vt = typed_type_by_identity(ctx, type_name);
-    const TypeDef *tt = typed_type_by_identity(ctx, target);
-    if (vt || tt) {
-        if (typed_type_same_identity(vt, tt)) return true;
-        return strcmp(target, "record") == 0 && vt && vt->field_count != 0;
+static bool is_a_static_member(ExpandContext *ctx, IdmSymbol *type, IdmSymbol *target) {
+    if (type == target || strcmp(idm_symbol_text(target), "Any") == 0) return true;
+    const TypeDef *value_type = NULL;
+    for (size_t i = 0; i < ctx->typed.entity_count; i++) {
+        const TypedEntity *entity = &ctx->typed.entities[i];
+        if (entity->kind == IDM_TYPED_ENTITY_TYPE && entity->as.type.identity == type) {
+            value_type = &entity->as.type;
+            break;
+        }
     }
-    return type_name_same(ctx, target, type_name);
+    if (strcmp(idm_symbol_text(target), "record") == 0 && value_type && value_type->field_count != 0) return true;
+    IdmBuiltinType outer = idm_value_builtin_type_kind(target);
+    IdmBuiltinType member = idm_value_builtin_type_kind(type);
+    return idm_builtin_type_includes(outer, member);
 }
 
 bool expand_core_is_primitive_call(const IdmCore *core, IdmPrimitive primitive) {
@@ -371,23 +387,24 @@ static IdmCore *lower_is_a_call(LowerCtx *lc, LowerFrame *fr, IdmCore *call, Idm
     if (!expand_core_is_primitive_call(call, IDM_PRIM_IS_A_P) || call->as.call.arg_count != 2u) return call;
     const IdmCore *targ = call->as.call.args[1];
     if (!targ || targ->kind != IDM_CORE_LITERAL) return call;
-    const char *name = NULL;
+    IdmSymbol *target = NULL;
     IdmValue tv = targ->as.literal;
-    if (idm_value_tag(tv) == IDM_VAL_ATOM || idm_value_tag(tv) == IDM_VAL_WORD) name = idm_symbol_text(idm_value_symbol(tv));
-    else if (idm_value_tag(tv) == IDM_VAL_STRING) name = idm_string_bytes(tv);
-    if (!name || !name[0]) return call;
+    if (idm_value_tag(tv) == IDM_VAL_ATOM) target = idm_value_symbol(tv);
+    else if (idm_value_tag(tv) == IDM_VAL_WORD) target = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, idm_symbol_text(idm_value_symbol(tv)));
+    else if (idm_value_tag(tv) == IDM_VAL_STRING) target = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, idm_string_bytes(tv));
+    if (!target || !idm_symbol_text(target)[0]) return call;
     TypeNameList targets = {0};
-    if (!is_a_target_names(ctx, name, &targets, err)) {
+    if (!is_a_target_symbols(ctx, target, &targets, err)) {
         free(targets.items);
-        if (err && !err->present) idm_error_set(err, call->span, "is-a? cannot compile a runtime type test for type '%.*s'", (int)strcspn(name, "#"), name);
+        if (err && !err->present) idm_error_set(err, call->span, "is-a? cannot compile a runtime type test for type '%s'", idm_symbol_text(target));
         idm_core_free(call);
         return NULL;
     }
     IdmSpan span = call->span;
-    const char *static_name = lower_type_name(lc, call->as.call.args[0]);
-    if (static_name) {
+    IdmSymbol *static_type = lower_type_symbol(lc, call->as.call.args[0]);
+    if (static_type) {
         bool member = false;
-        for (size_t i = 0; !member && i < targets.count; i++) member = is_a_static_member(ctx, static_name, targets.items[i]);
+        for (size_t i = 0; !member && i < targets.count; i++) member = is_a_static_member(ctx, static_type, targets.items[i]);
         free(targets.items);
         IdmCore *lit = idm_core_literal(idm_bool(ctx->rt, member), span);
         if (!lit) {

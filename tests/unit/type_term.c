@@ -67,6 +67,21 @@ int idm_unit_type_term(void) {
     idm_buf_destroy(&wire);
     idm_error_clear(&err);
 
+    unsigned char identity_hash[32];
+    memset(identity_hash, 0x5a, sizeof(identity_hash));
+    IdmSymbol *identity = idm_intern_identity(&rt.intern, "Box", identity_hash);
+    IdmTypeTerm nominal;
+    check(idm_type_con_symbol(&nominal, identity), "make nominal identity term");
+    idm_buf_init(&wire);
+    check(idm_type_term_serialize(&wire, &nominal, &err), "serialize nominal identity term");
+    idm_byte_reader_init(&reader, (const unsigned char *)(wire.data ? wire.data : ""), wire.len);
+    IdmTypeTerm nominal2;
+    check(idm_type_term_deserialize(&rt, &reader, &nominal2, &err), "deserialize nominal identity term");
+    check(nominal2.symbol == identity, "nominal identity survives wire");
+    idm_type_term_destroy(&nominal2);
+    idm_buf_destroy(&wire);
+    idm_error_clear(&err);
+
     IdmCallableContract ct;
     memset(&ct, 0, sizeof(ct));
     IdmContractSig *ctsig = idm_contract_add_sig(&ct);
@@ -76,9 +91,24 @@ int idm_unit_type_term(void) {
     ctsig->arg_count = 1u;
     idm_type_var(&rt, &ctsig->result, "a", 1u, false);
     ctsig->has_result = true;
+    ct.context = calloc(1u, sizeof(*ct.context));
+    ct.context_count = 1u;
+    ct.context_cap = 1u;
+    ct.context[0].kind = IDM_CONSTR_CLASS;
+    ct.context[0].trait = identity;
+    idm_type_var(&rt, &ct.context[0].lhs, "a", 1u, false);
     IdmCallableContract ct2;
     check(idm_callable_contract_copy(&ct2, &ct), "contract copy");
     check(ct2.sig_count == 1u && ct2.sigs[0].arg_count == 1u && ct2.sigs[0].has_result, "contract copy fields");
+    idm_buf_init(&wire);
+    check(idm_callable_contract_serialize(&wire, &ct, &err), "serialize identity constraint");
+    idm_byte_reader_init(&reader, (const unsigned char *)(wire.data ? wire.data : ""), wire.len);
+    IdmCallableContract ct3;
+    check(idm_callable_contract_deserialize(&rt, &reader, &ct3, &err), "deserialize identity constraint");
+    check(ct3.context_count == 1u && ct3.context[0].trait == identity, "constraint identity survives wire");
+    idm_callable_contract_destroy(&ct3);
+    idm_buf_destroy(&wire);
+    idm_error_clear(&err);
     idm_callable_contract_destroy(&ct);
     idm_callable_contract_destroy(&ct2);
 
@@ -112,5 +142,6 @@ int idm_unit_type_term(void) {
     idm_type_term_destroy(&box2);
     idm_type_term_destroy(&un);
     idm_type_term_destroy(&v2);
+    idm_type_term_destroy(&nominal);
     return failures;
 }

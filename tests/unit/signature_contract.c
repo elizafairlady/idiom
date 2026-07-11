@@ -149,13 +149,17 @@ static const IdmPkgTrait *find_trait(const IdmArtifact *art, const char *name) {
 static const IdmPkgMethodImpl *find_method_impl(const IdmArtifact *art, const char *method, const char *type) {
     for (size_t i = 0; i < art->typed.method_impl_count; i++) {
         const IdmPkgMethodImpl *impl = &art->typed.method_impls[i];
-        if (strcmp(impl->method, method) == 0 && strcmp(impl->type, type) == 0) return impl;
+        if (strcmp(impl->method, method) == 0 && strcmp(idm_symbol_text(impl->type), type) == 0) return impl;
     }
     return NULL;
 }
 
 static bool type_con_named(const IdmTypeTerm *term, const char *name) {
     return term && term->kind == IDM_TYPE_CON && term->symbol && strcmp(idm_type_term_text(term), name) == 0;
+}
+
+static bool type_con_identity(const IdmTypeTerm *term, IdmSymbol *identity) {
+    return term && term->kind == IDM_TYPE_CON && term->symbol == identity;
 }
 
 static bool type_var_named(const IdmTypeTerm *term, const char *name) {
@@ -298,7 +302,8 @@ int idm_unit_signature_contract(void) {
     const IdmPkgSlot *sumish = find_slot(&art, "sumish");
     check(sumish && sumish->has_contract, "sumish slot contract");
     check(sumish->contract.context_count == 1u, "sumish context");
-    check(sumish->contract.context[0].trait && strcmp(idm_symbol_text(sumish->contract.context[0].trait), "Number") != 0, "sumish trait identity");
+    check(idm_symbol_kind(sumish->contract.context[0].trait) == IDM_SYMBOL_IDENTITY &&
+          idm_symbol_identity_hash(sumish->contract.context[0].trait), "sumish trait identity");
     check(sumish->contract.sigs[0].arg_count == 2u && sumish->contract.sigs[0].has_result, "sumish contract shape");
     check(type_var_named(&sumish->contract.sigs[0].args[0], "a"), "sumish arg a0");
     check(type_var_named(&sumish->contract.sigs[0].args[1], "a"), "sumish arg a1");
@@ -352,27 +357,27 @@ int idm_unit_signature_contract(void) {
 
     const IdmPkgSlot *overt_int = find_slot(&art, "overt-int");
     check(overt_int && overt_int->has_contract, "overt-int slot contract");
-    check(type_con_named(&overt_int->contract.sigs[0].result, num->identity), "overt-int result Num");
+    check(type_con_identity(&overt_int->contract.sigs[0].result, num->identity), "overt-int result Num");
 
     const IdmPkgSlot *overt_float = find_slot(&art, "overt-float");
     check(overt_float && overt_float->has_contract, "overt-float slot contract");
-    check(type_con_named(&overt_float->contract.sigs[0].result, num->identity), "overt-float result Num");
+    check(type_con_identity(&overt_float->contract.sigs[0].result, num->identity), "overt-float result Num");
 
     const IdmPkgType *maybe_int = find_type(&art, "MaybeInt");
     const IdmPkgType *some_int = find_type(&art, "SomeInt");
     const IdmPkgType *no_int = find_type(&art, "NoInt");
     check(maybe_int && some_int && no_int, "MaybeInt record member types");
     check(maybe_int->member_count == 2u, "MaybeInt overtype members");
-    check(type_con_named(&maybe_int->members[0].term, some_int->identity), "MaybeInt member SomeInt");
-    check(type_con_named(&maybe_int->members[1].term, no_int->identity), "MaybeInt member NoInt");
+    check(type_con_identity(&maybe_int->members[0].term, some_int->identity), "MaybeInt member SomeInt");
+    check(type_con_identity(&maybe_int->members[1].term, no_int->identity), "MaybeInt member NoInt");
 
     const IdmPkgSlot *some = find_slot(&art, "some");
     check(some && some->has_contract, "some slot contract");
-    check(type_con_named(&some->contract.sigs[0].result, maybe_int->identity), "some result MaybeInt");
+    check(type_con_identity(&some->contract.sigs[0].result, maybe_int->identity), "some result MaybeInt");
 
     const IdmPkgSlot *none = find_slot(&art, "none");
     check(none && none->has_contract, "none slot contract");
-    check(type_con_named(&none->contract.sigs[0].result, maybe_int->identity), "none result MaybeInt");
+    check(type_con_identity(&none->contract.sigs[0].result, maybe_int->identity), "none result MaybeInt");
 
     const IdmPkgSlot *marker_int = find_slot(&art, "marker-int");
     check(marker_int && marker_int->has_contract, "marker-int slot contract");
@@ -383,7 +388,7 @@ int idm_unit_signature_contract(void) {
     check(marker_trait->methods[0].has_contract, "Marker method contract");
     check(marker_trait->methods[0].contract.context_count == 1u, "Marker method context");
     check(marker_trait->methods[0].contract.context[0].trait &&
-          strcmp(idm_symbol_text(marker_trait->methods[0].contract.context[0].trait), marker_trait->identity) == 0,
+          marker_trait->methods[0].contract.context[0].trait == marker_trait->identity,
           "Marker method context identity");
     check(!marker_trait->methods[0].contract.passthrough, "Marker method is not a passthrough");
 

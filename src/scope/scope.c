@@ -691,8 +691,12 @@ static bool type_term_serialize_depth(IdmBuffer *out, const IdmTypeTerm *term, u
     if (depth > IDM_TYPE_TERM_MAX_DEPTH) return idm_error_set(err, idm_span_unknown(NULL), "type term nested too deeply to serialize");
     if (!type_term_kind_valid((uint8_t)term->kind)) return idm_error_set(err, idm_span_unknown(NULL), "invalid type term kind");
     if (term->arg_count > UINT32_MAX) return idm_error_set(err, idm_span_unknown(NULL), "type term has too many arguments");
+    const char *text = idm_type_term_text(term);
     if (!idm_buf_put_u8(out, (uint8_t)term->kind) ||
-        !idm_buf_put_opt_str(out, idm_type_term_text(term)) ||
+        !idm_buf_put_opt_str(out, text) ||
+        (text && !idm_buf_put_u8(out, (uint8_t)idm_symbol_kind(term->symbol))) ||
+        (text && idm_symbol_kind(term->symbol) == IDM_SYMBOL_IDENTITY &&
+         !idm_buf_append_n(out, (const char *)idm_symbol_identity_hash(term->symbol), 32u)) ||
         !idm_buf_put_u32(out, term->var_id) ||
         !idm_buf_put_u8(out, term->rigid ? 1u : 0u) ||
         !idm_buf_put_u32(out, (uint32_t)term->arg_count)) {
@@ -719,12 +723,34 @@ static bool type_term_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, IdmTyp
     }
     char *name = NULL;
     if (!idm_rd_opt_str(r, &name, err)) return false;
+    uint8_t symbol_kind = name ? idm_rd_u8(r) : 0u;
+    unsigned char identity_hash[32];
+    if (name && symbol_kind == (uint8_t)IDM_SYMBOL_IDENTITY) {
+        if (r->ok && sizeof(identity_hash) <= r->len - r->pos) {
+            memcpy(identity_hash, r->data + r->pos, sizeof(identity_hash));
+            r->pos += sizeof(identity_hash);
+        } else {
+            r->ok = false;
+        }
+    }
     uint32_t var_id = idm_rd_u32(r);
     uint8_t rigid = idm_rd_u8(r);
     uint32_t arg_count = idm_rd_u32(r);
     if (!r->ok) {
         free(name);
         return idm_error_set(err, idm_span_unknown(NULL), "truncated type term");
+    }
+    if (name && symbol_kind > (uint8_t)IDM_SYMBOL_IDENTITY) {
+        free(name);
+        r->ok = false;
+        return idm_error_set(err, idm_span_unknown(NULL), "invalid type term symbol kind");
+    }
+    if (name && ((kind != (uint8_t)IDM_TYPE_VAR && kind != (uint8_t)IDM_TYPE_CON) ||
+                 (kind == (uint8_t)IDM_TYPE_VAR && symbol_kind != (uint8_t)IDM_SYMBOL_WORD) ||
+                 (kind == (uint8_t)IDM_TYPE_CON && symbol_kind != (uint8_t)IDM_SYMBOL_ATOM && symbol_kind != (uint8_t)IDM_SYMBOL_IDENTITY))) {
+        free(name);
+        r->ok = false;
+        return idm_error_set(err, idm_span_unknown(NULL), "type term symbol kind does not match term kind");
     }
     if (rigid > 1u) {
         free(name);
@@ -738,9 +764,10 @@ static bool type_term_deserialize_depth(IdmRuntime *rt, IdmByteReader *r, IdmTyp
     }
     out->kind = (IdmTypeKind)kind;
     if (name) {
-        IdmSymbolKind symbol_kind = out->kind == IDM_TYPE_VAR ? IDM_SYMBOL_WORD : IDM_SYMBOL_ATOM;
         const char *canonical = out->kind == IDM_TYPE_CON && strcmp(name, "nil") == 0 ? "empty-list" : name;
-        out->symbol = idm_intern(&rt->intern, symbol_kind, canonical);
+        out->symbol = symbol_kind == (uint8_t)IDM_SYMBOL_IDENTITY
+            ? idm_intern_identity(&rt->intern, canonical, identity_hash)
+            : idm_intern(&rt->intern, (IdmSymbolKind)symbol_kind, canonical);
         free(name);
         if (!out->symbol) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
     }
@@ -858,8 +885,12 @@ bool idm_constraint_copy(IdmConstraint *dst, const IdmConstraint *src) {
 bool idm_constraint_serialize(IdmBuffer *out, const IdmConstraint *constraint, IdmError *err) {
     if (!constraint) return idm_error_set(err, idm_span_unknown(NULL), "cannot serialize null constraint");
     if (constraint->kind > IDM_CONSTR_CLASS) return idm_error_set(err, idm_span_unknown(NULL), "invalid constraint kind");
+    const char *trait = constraint->trait ? idm_symbol_text(constraint->trait) : NULL;
     if (!idm_buf_put_u8(out, (uint8_t)constraint->kind) ||
-        !idm_buf_put_opt_str(out, constraint->trait ? idm_symbol_text(constraint->trait) : NULL)) {
+        !idm_buf_put_opt_str(out, trait) ||
+        (trait && !idm_buf_put_u8(out, (uint8_t)idm_symbol_kind(constraint->trait))) ||
+        (trait && idm_symbol_kind(constraint->trait) == IDM_SYMBOL_IDENTITY &&
+         !idm_buf_append_n(out, (const char *)idm_symbol_identity_hash(constraint->trait), 32u))) {
         return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
     }
     return idm_type_term_serialize(out, &constraint->lhs, err) &&
@@ -878,8 +909,22 @@ bool idm_constraint_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmConstraint 
     char *trait = NULL;
     if (!idm_rd_opt_str(r, &trait, err)) return false;
     if (trait) {
-        constraint->trait = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, trait);
+        uint8_t symbol_kind = idm_rd_u8(r);
+        unsigned char identity_hash[32];
+        if (symbol_kind != (uint8_t)IDM_SYMBOL_ATOM && symbol_kind != (uint8_t)IDM_SYMBOL_IDENTITY) r->ok = false;
+        if (r->ok && symbol_kind == (uint8_t)IDM_SYMBOL_IDENTITY) {
+            if (r->len - r->pos < sizeof(identity_hash)) r->ok = false;
+            else {
+                memcpy(identity_hash, r->data + r->pos, sizeof(identity_hash));
+                r->pos += sizeof(identity_hash);
+            }
+        }
+        constraint->trait = !r->ok ? NULL
+            : symbol_kind == (uint8_t)IDM_SYMBOL_IDENTITY
+                ? idm_intern_identity(&rt->intern, trait, identity_hash)
+                : idm_intern(&rt->intern, (IdmSymbolKind)symbol_kind, trait);
         free(trait);
+        if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "invalid constraint trait symbol");
         if (!constraint->trait) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
     }
     if (!idm_type_term_deserialize(rt, r, &constraint->lhs, err) ||

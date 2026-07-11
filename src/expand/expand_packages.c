@@ -661,11 +661,11 @@ static const IdmArtifact *kernel_protocol_art(const IdmArtifact *kernel, const c
     return NULL;
 }
 
-static const IdmArtifact *kernel_protocol_art_by_identity(const IdmArtifact *kernel, const char *identity) {
+static const IdmArtifact *kernel_protocol_art_by_identity(const IdmArtifact *kernel, IdmSymbol *identity) {
     for (size_t i = 0; i < kernel->typed.entity_count; i++) {
         const IdmPkgTypedEntity *entity = &kernel->typed.entities[i];
         if (entity->kind != IDM_TYPED_ENTITY_PROTOCOL) continue;
-        if (entity->as.protocol.identity && strcmp(entity->as.protocol.identity, identity) == 0 && entity->as.protocol.art) return entity->as.protocol.art;
+        if (entity->as.protocol.identity == identity && entity->as.protocol.art) return entity->as.protocol.art;
     }
     return NULL;
 }
@@ -1134,7 +1134,7 @@ static bool install_artifact_protocol(ExpandContext *ctx, const IdmPkgProtocol *
             free(clone);
         }
     }
-    if (!p->name || !protocol_def_set_identity(ctx, p, entry->identity, err, idm_span_unknown(NULL)) || !entry->art || !p->art) {
+    if (!p->name || !protocol_def_set_identity(p, entry->identity, err, idm_span_unknown(NULL)) || !entry->art || !p->art) {
         protocol_def_destroy(p);
         surface_rollback(ctx, &checkpoint);
         free(qualified);
@@ -1174,7 +1174,7 @@ static bool install_artifact_trait(ExpandContext *ctx, const IdmPkgTrait *entry,
         free(qualified);
         return false;
     }
-    if (!trait_def_set_identity(ctx, t, entry->identity, err, idm_span_unknown(NULL)) ||
+    if (!trait_def_set_identity(t, entry->identity, err, idm_span_unknown(NULL)) ||
         !idm_trait_requirement_defs_copy(entry->requirements, entry->requirement_count, &t->requirements) ||
         !trait_method_defs_import(ctx, entry->methods, entry->method_count, &t->methods, err, idm_span_unknown(NULL))) {
         trait_def_destroy(t);
@@ -1218,7 +1218,7 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
         bool updated = false;
         for (size_t j = 0; j < ctx->typed.method_impl_count; j++) {
             MethodImplDef *dst = &ctx->typed.method_impls[j];
-            if (!method_impl_matches_identity(ctx, dst, src->trait, src->method, src->type)) continue;
+            if (dst->trait != src->trait || dst->type != src->type || !dst->name || strcmp(idm_symbol_text(dst->name), src->method) != 0) continue;
             char *next_key = idm_strdup(key ? key : "");
             if (!next_key) return idm_error_oom(err, idm_span_unknown(NULL));
             IdmCallableContract next_contract;
@@ -1258,11 +1258,14 @@ static bool install_artifact_method_impls(ExpandContext *ctx, const IdmPkgMethod
             memset(dst, 0, sizeof(*dst));
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
-        if (!dst->impl_env_key || !method_impl_set_identity(ctx, dst, src->trait, src->method, src->type, err, idm_span_unknown(NULL))) {
+        dst->trait = src->trait;
+        dst->type = src->type;
+        dst->name = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, src->method);
+        if (!dst->impl_env_key || !dst->trait || !dst->type || !dst->name) {
             free(dst->impl_env_key);
             if (dst->has_contract) idm_callable_contract_destroy(&dst->contract);
             memset(dst, 0, sizeof(*dst));
-            return false;
+            return idm_error_oom(err, idm_span_unknown(NULL));
         }
         ctx->typed.method_impl_count++;
     }
@@ -1293,7 +1296,7 @@ static bool install_artifact_type(ExpandContext *ctx, const IdmPkgType *entry, c
         return false;
     }
     t->name = idm_strdup(bind_name);
-    if (!t->name || !type_def_set_identity(ctx, t, entry->identity, err, idm_span_unknown(NULL)) || !idm_scope_set_copy(&t->scopes, scopes)) {
+    if (!t->name || !type_def_set_identity(t, entry->identity, err, idm_span_unknown(NULL)) || !idm_scope_set_copy(&t->scopes, scopes)) {
         type_def_destroy(t);
         surface_rollback(ctx, &checkpoint);
         free(qualified);
@@ -1840,8 +1843,7 @@ static const char *canonical_primitive_home_for_unit(const char *unit) {
 static char *trait_spelling_dup(const char *identity) {
     const char *start = strrchr(identity, '/');
     start = start ? start + 1u : identity;
-    const char *suffix = strrchr(start, '#');
-    return suffix ? idm_strndup(start, (size_t)(suffix - start)) : idm_strdup(start);
+    return idm_strdup(start);
 }
 
 static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const IdmPackageUnit *units, size_t unit_count, const char *unit_name_hint, bool kernel_mode, const unsigned char src_hash[32], const char *inherited_env_key, const IdmPkgSlot *inherited_slots, size_t inherited_count, const IdmPkgImport *inherited_imports, size_t inherited_import_count, const ProtocolPreActivation *preacts, size_t preact_count, IdmArtifact *out, IdmError *err) {
@@ -1912,8 +1914,8 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
         char runtime_key[17];
         artifact_provider_key(preacts[i].art->src_hash, runtime_key);
         ok = artifact_base(&ctx, preacts[i].art, &base, err) &&
-             activate_artifact(&ctx, preacts[i].identity, preacts[i].art, base, &ctx.empty_scopes, idm_span_unknown(NULL), err) &&
-             record_activation(&ctx, preacts[i].identity, preacts[i].identity, runtime_key, idm_span_unknown(NULL), err) &&
+             activate_artifact(&ctx, idm_symbol_text(preacts[i].identity), preacts[i].art, base, &ctx.empty_scopes, idm_span_unknown(NULL), err) &&
+             record_activation(&ctx, idm_symbol_text(preacts[i].identity), idm_symbol_text(preacts[i].identity), runtime_key, idm_span_unknown(NULL), err) &&
              install_artifact_runtime_slots_mode(&ctx, preacts[i].art, preacts[i].art->scope_base, (int64_t)base - (int64_t)preacts[i].art->scope_base, true, true, idm_span_unknown(NULL), err) &&
              bind_artifact_exported_slots(&ctx, preacts[i].art, &ctx.empty_scopes, idm_span_unknown(NULL), err);
     }
@@ -2030,7 +2032,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                     IdmPkgType *type = &dst->as.type;
                     dst->kind = IDM_TYPED_ENTITY_TYPE;
                     type->name = idm_strdup(t->name);
-                    type->identity = idm_strdup(type_def_identity_text(t));
+                    type->identity = t->identity;
                     if (!type->name || !type->identity || !idm_scope_set_copy(&type->scopes, &t->scopes)) copy_ok = false;
                     if (copy_ok && t->member_count != 0) {
                         type->members = calloc(t->member_count, sizeof(*type->members));
@@ -2068,7 +2070,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                     dst->kind = IDM_TYPED_ENTITY_TRAIT;
                     const char *identity = trait_def_identity_text(t);
                     trait->name = trait_spelling_dup(identity);
-                    trait->identity = idm_strdup(identity);
+                    trait->identity = t->name;
                     if (!trait->name || !trait->identity ||
                         !idm_trait_requirement_defs_copy(t->requirements, t->requirement_count, &trait->requirements) ||
                         !trait_method_defs_export(t->methods, t->method_count, &trait->methods)) {
@@ -2085,7 +2087,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                     IdmPkgProtocol *protocol = &dst->as.protocol;
                     dst->kind = IDM_TYPED_ENTITY_PROTOCOL;
                     protocol->name = idm_strdup(p->name);
-                    protocol->identity = idm_strdup(protocol_def_identity_text(p));
+                    protocol->identity = p->identity;
                     protocol->art = p->art;
                     if (!protocol->name || !protocol->identity || !protocol->art) {
                         copy_ok = false;
@@ -2125,8 +2127,8 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                 copy_ok = false;
                 break;
             }
-            dst->trait = idm_strdup(trait);
-            dst->type = idm_strdup(type);
+            dst->trait = surface ? surface->trait : src->trait;
+            dst->type = src->type;
             dst->method = idm_strdup(method);
             dst->arity = src->arity;
             dst->impl_env = src->impl_env;

@@ -263,10 +263,9 @@ static bool solve_class(IdmSubst *s, const IdmConstraintSet *given,
         idm_buf_init(&tb);
         bool w = idm_type_term_write(&tb, ty);
         const char *tr = trait ? idm_symbol_text(trait) : "?";
-        int trn = (int)strcspn(tr, "#");
         bool set = tr[0] == '_' && tr[1] == '.'
             ? idm_error_set(err, span, "structural constraint '%s' is not satisfied by %s", tr, w && tb.data ? tb.data : "?")
-            : idm_error_set(err, span, "typeclass '%.*s' is not implemented for %s", trn, tr, w && tb.data ? tb.data : "?");
+            : idm_error_set(err, span, "typeclass '%s' is not implemented for %s", tr, w && tb.data ? tb.data : "?");
         idm_buf_destroy(&tb);
         return set;
     }
