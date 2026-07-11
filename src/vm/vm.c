@@ -1508,6 +1508,17 @@ static IdmSymbol *module_const_symbol(IdmRuntime *rt, const IdmBytecodeModule *m
     return NULL;
 }
 
+static IdmSymbol *module_type_symbol(const IdmBytecodeModule *module, uint32_t index, const char *what, IdmError *err) {
+    if (index >= module->type_count) {
+        idm_error_set(err, idm_span_unknown(NULL), "%s type %u out of bounds", what, index);
+        return NULL;
+    }
+    const IdmTypeTerm *term = &module->types[index];
+    if (term->kind == IDM_TYPE_CON && term->arg_count == 0 && term->symbol) return term->symbol;
+    idm_error_set(err, idm_span_unknown(NULL), "%s must be a concrete type", what);
+    return NULL;
+}
+
 static bool op_make_record(Vm *vm, Frame *frame, size_t instr_ip, const uint32_t *operands, IdmError *err) {
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     uint32_t dst = operands[0];
@@ -1548,10 +1559,10 @@ static bool op_record_field(Vm *vm, Frame *frame, const uint32_t *operands, IdmE
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     uint32_t dst = operands[0];
     uint32_t receiver_reg = operands[1];
-    uint32_t type_const = operands[2];
+    uint32_t type_index = operands[2];
     uint32_t field_const = operands[3];
     uint32_t field_index = operands[4];
-    IdmSymbol *type = module_const_symbol(vm->rt, module, type_const, "RECORD_FIELD type", err);
+    IdmSymbol *type = module_type_symbol(module, type_index, "RECORD_FIELD type", err);
     if (!type) return false;
     IdmSymbol *field = module_const_symbol(vm->rt, module, field_const, "RECORD_FIELD field", err);
     if (!field) return false;
@@ -1566,8 +1577,8 @@ static bool op_record_is(Vm *vm, Frame *frame, const uint32_t *operands, IdmErro
     const IdmBytecodeModule *module = frame->module ? frame->module : vm->module;
     uint32_t dst = operands[0];
     uint32_t value_reg = operands[1];
-    uint32_t type_const = operands[2];
-    IdmSymbol *type = module_const_symbol(vm->rt, module, type_const, "RECORD_IS type", err);
+    uint32_t type_index = operands[2];
+    IdmSymbol *type = module_type_symbol(module, type_index, "RECORD_IS type", err);
     if (!type) return false;
     IdmValue value = idm_nil();
     if (!frame_reg_value(frame, value_reg, &value, err)) return false;

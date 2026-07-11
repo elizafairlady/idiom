@@ -713,11 +713,19 @@ static bool bc_type_term(const IdmBytecodeModule *module, uint32_t index, const 
     return true;
 }
 
+static bool bc_type_symbol(const IdmBytecodeModule *module, uint32_t index, const char *what, IdmSymbol **out, IdmError *err) {
+    const IdmTypeTerm *term = NULL;
+    if (!bc_type_term(module, index, what, &term, err)) return false;
+    if (!term || term->kind != IDM_TYPE_CON || term->arg_count != 0 || !term->symbol) return idm_error_set(err, idm_span_unknown(NULL), "%s must be a concrete type", what);
+    *out = term->symbol;
+    return true;
+}
+
 static bool record_site_for_instr(IdmRuntime *rt, IdmBytecodeModule *module, const IdmBcInstr *instr, IdmError *err) {
     if (instr->op != IDM_OP_MAKE_RECORD) return true;
     uint32_t field_count = instr->operands[3];
     IdmSymbol *type = NULL;
-    if (!bc_const_symbol(rt, module, instr->operands[1], "MAKE_RECORD type", &type, err)) return false;
+    if (!bc_type_symbol(module, instr->operands[1], "MAKE_RECORD type", &type, err)) return false;
     IdmSymbol **fields = field_count == 0 ? NULL : calloc(field_count, sizeof(*fields));
     if (field_count != 0 && !fields) return idm_error_oom(err, idm_span_unknown(NULL));
     const IdmTypeTerm **contracts = field_count == 0 ? NULL : calloc(field_count, sizeof(*contracts));

@@ -63,8 +63,9 @@ static void test_record_contract_type_terms(void) {
     check(idm_core_compile_main(&rt, record, &module, &main_fn, &err), "compile typed record");
     idm_core_free(record);
     check_error(&err, "compile typed record error");
-    check(module.type_count == 1u, "typed record type pool count");
-    check(idm_type_term_equal(&module.types[0], &int_contract), "typed record type pool term");
+    check(module.type_count == 2u, "typed record type pool count");
+    check(strcmp(idm_type_term_text(&module.types[0]), "test.TypedRecord") == 0, "typed record identity term");
+    check(idm_type_term_equal(&module.types[1], &int_contract), "typed record contract term");
 
     IdmBuffer bytes;
     idm_buf_init(&bytes);
@@ -76,9 +77,10 @@ static void test_record_contract_type_terms(void) {
     IdmBytecodeModule roundtrip;
     check(idm_ic_deserialize(&rt2, (const unsigned char *)bytes.data, bytes.len, &roundtrip, &err), "typed record deserialize");
     check_error(&err, "typed record deserialize error");
-    check(roundtrip.type_count == 1u, "typed record roundtrip type pool count");
-    check(strcmp(idm_type_term_text(&roundtrip.types[0]), idm_type_term_text(&int_contract)) == 0, "typed record roundtrip type text");
-    check(!idm_type_term_equal(&roundtrip.types[0], &int_contract), "type symbol handles differ across runtimes");
+    check(roundtrip.type_count == 2u, "typed record roundtrip type pool count");
+    check(strcmp(idm_type_term_text(&roundtrip.types[0]), "test.TypedRecord") == 0, "typed record roundtrip identity text");
+    check(strcmp(idm_type_term_text(&roundtrip.types[1]), idm_type_term_text(&int_contract)) == 0, "typed record roundtrip contract text");
+    check(!idm_type_term_equal(&roundtrip.types[1], &int_contract), "type symbol handles differ across runtimes");
 
     IdmValue out = idm_nil();
     check(idm_bc_intern_literals(&rt2, &roundtrip, &err), "roundtrip finalize");
@@ -87,8 +89,9 @@ static void test_record_contract_type_terms(void) {
     check(make_record != SIZE_MAX, "typed record make op");
     check(roundtrip.code_sites[make_record].record.shape != NULL, "typed record shape cached");
     check(roundtrip.code_sites[make_record].record.field_count == 1u, "typed record field count cached");
-    check(roundtrip.code_sites[make_record].record.contracts && roundtrip.code_sites[make_record].record.contracts[0] == &roundtrip.types[0], "typed record contract cached");
-    check(roundtrip.types[0].symbol == idm_intern_lookup(&rt2.intern, IDM_SYMBOL_ATOM, "int"), "typed record type term interned");
+    check(roundtrip.code_sites[make_record].record.contracts && roundtrip.code_sites[make_record].record.contracts[0] == &roundtrip.types[1], "typed record contract cached");
+    check(roundtrip.types[0].symbol == idm_intern_lookup(&rt2.intern, IDM_SYMBOL_ATOM, "test.TypedRecord"), "typed record identity linked");
+    check(roundtrip.types[1].symbol == idm_intern_lookup(&rt2.intern, IDM_SYMBOL_ATOM, "int"), "typed record contract linked");
     check(idm_vm_run(&rt2, &roundtrip, main_fn, &out, &err), "run typed record");
     check_error(&err, "run typed record error");
     check(idm_value_tag(out) == IDM_VAL_RECORD, "typed record output");

@@ -2243,6 +2243,14 @@ static bool add_const_symbol(CompileCtx *ctx, const IdmSymbol *symbol, uint32_t 
     return add_const_name(ctx, core_symbol_text(symbol), out_index, err, span);
 }
 
+static bool add_type_symbol(CompileCtx *ctx, IdmSymbol *symbol, uint32_t *out_index, IdmError *err, IdmSpan span) {
+    IdmTypeTerm term;
+    if (!idm_type_con_symbol(&term, symbol)) return idm_error_oom(err, span);
+    bool ok = idm_bc_add_type_term(ctx->module, &term, out_index);
+    idm_type_term_destroy(&term);
+    return ok || idm_error_oom(err, span);
+}
+
 static bool patch_here(IdmBytecodeModule *module, size_t operand_index, IdmError *err, IdmSpan span, const char *what) {
     if (module->code_count > UINT32_MAX) return idm_error_set(err, span, "bytecode too large");
     if (!idm_bc_patch_u32(module, operand_index, (uint32_t)module->code_count)) return idm_error_set(err, span, "failed to patch %s", what);
@@ -2943,9 +2951,9 @@ static bool compile_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail
             for (uint32_t i = 0; i < count; i++) {
                 if (!compile_expr(core->as.record_construct.field_values[i], ctx, first + i, false, err)) return false;
             }
-            uint32_t type_const = 0;
-            if (!add_const_symbol(ctx, core->as.record_construct.type, &type_const, err, core->span)) return false;
-            if (!emit_op4(ctx->module, IDM_OP_MAKE_RECORD, dst, type_const, first, count, NULL)) return idm_error_oom(err, core->span);
+            uint32_t type_index = 0;
+            if (!add_type_symbol(ctx, core->as.record_construct.type, &type_index, err, core->span)) return false;
+            if (!emit_op4(ctx->module, IDM_OP_MAKE_RECORD, dst, type_index, first, count, NULL)) return idm_error_oom(err, core->span);
             for (uint32_t i = 0; i < count; i++) {
                 uint32_t field_const = 0;
                 uint32_t contract_type = UINT32_MAX;
@@ -2962,19 +2970,19 @@ static bool compile_expr(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool tail
         case IDM_CORE_RECORD_FIELD: {
             uint32_t receiver = ctx_alloc(ctx);
             if (!compile_expr(core->as.record_field.receiver, ctx, receiver, false, err)) return false;
-            uint32_t type_const = 0;
+            uint32_t type_index = 0;
             uint32_t field_const = 0;
-            if (!add_const_symbol(ctx, core->as.record_field.type, &type_const, err, core->span)) return false;
+            if (!add_type_symbol(ctx, core->as.record_field.type, &type_index, err, core->span)) return false;
             if (!add_const_symbol(ctx, core->as.record_field.field, &field_const, err, core->span)) return false;
-            if (!emit_op5(ctx->module, IDM_OP_RECORD_FIELD, dst, receiver, type_const, field_const, core->as.record_field.field_index, NULL)) return idm_error_oom(err, core->span);
+            if (!emit_op5(ctx->module, IDM_OP_RECORD_FIELD, dst, receiver, type_index, field_const, core->as.record_field.field_index, NULL)) return idm_error_oom(err, core->span);
             return true;
         }
         case IDM_CORE_RECORD_IS: {
             uint32_t value = ctx_alloc(ctx);
             if (!compile_expr(core->as.record_is.value, ctx, value, false, err)) return false;
-            uint32_t type_const = 0;
-            if (!add_const_symbol(ctx, core->as.record_is.type, &type_const, err, core->span)) return false;
-            if (!emit_op3(ctx->module, IDM_OP_RECORD_IS, dst, value, type_const, NULL)) return idm_error_oom(err, core->span);
+            uint32_t type_index = 0;
+            if (!add_type_symbol(ctx, core->as.record_is.type, &type_index, err, core->span)) return false;
+            if (!emit_op3(ctx->module, IDM_OP_RECORD_IS, dst, value, type_index, NULL)) return idm_error_oom(err, core->span);
             return true;
         }
     }
