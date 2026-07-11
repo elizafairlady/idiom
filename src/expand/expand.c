@@ -402,9 +402,6 @@ static void note_unbound_context(ExpandContext *ctx, const IdmSyntax *word, IdmE
         free(ctx->phase_demand_diag);
         ctx->phase_demand_diag = NULL;
     }
-    for (size_t i = 0; i < word->origins.count; i++) {
-        idm_error_note(err, "in expansion of '%s'", word->origins.items[i]);
-    }
     if (word_has_subtraction_shape(word->as.text) || word_is_subtraction_of_bindings(ctx, word)) {
         idm_error_note(err, "identifier '%s' was read as one word; use spaces around '-' for subtraction", word->as.text);
     }
@@ -544,7 +541,6 @@ static IdmCore *expand_word_ref_mode(ExpandContext *ctx, const IdmSyntax *word, 
             }
         }
         if (candidates != 0) idm_error_note(err, "%zu candidate bindings named '%s' are visible here with incomparable scopes", candidates, word->as.text);
-        for (size_t i = 0; i < word->origins.count; i++) idm_error_note(err, "in expansion of '%s'", word->origins.items[i]);
         return NULL;
     }
     IdmResolveStatus field_status = IDM_RESOLVE_UNBOUND;
@@ -3145,7 +3141,7 @@ static const ReaderFormBinding *resolve_reader_form(ExpandContext *ctx, const Id
     return (const ReaderFormBinding *)binding->data;
 }
 
-IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+static IdmCore *expand_syntax_raw(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
     IdmCore *lit = literal_from_syntax(ctx, syn, err);
     if (lit || (err && err->present)) return lit;
 
@@ -3164,6 +3160,18 @@ IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) 
     if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT)
         return expand_container(ctx, syn, err);
     return expand_error(err, syn->span, "unsupported syntax for the current expansion phase");
+}
+
+IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err) {
+    const IdmOriginChain *saved = ctx->expansion_origins;
+    bool scoped = syn && syn->origins.count != 0 && &syn->origins != saved;
+    if (scoped) ctx->expansion_origins = &syn->origins;
+    IdmCore *core = expand_syntax_raw(ctx, syn, err);
+    if (!core && scoped && err && err->present) {
+        for (size_t i = 0; i < syn->origins.count; i++) idm_error_note(err, "in expansion of '%s'", syn->origins.items[i]);
+    }
+    if (scoped) ctx->expansion_origins = saved;
+    return core;
 }
 
 bool idm_expand_syntax(IdmRuntime *rt, const IdmSyntax *syntax, IdmCore **out, IdmError *err) {

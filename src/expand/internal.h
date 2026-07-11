@@ -426,6 +426,7 @@ typedef struct ExpandContext {
     size_t solved_node_count;
     size_t solved_node_cap;
     uint64_t solved_generation;
+    const IdmOriginChain *expansion_origins;
 } ExpandContext;
 typedef struct BodyDefCtx {
     struct BodyDefCtx *prev;

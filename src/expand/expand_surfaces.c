@@ -214,11 +214,12 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
         !idm_syn_scope_add_tree(expanded_syntax, 0, ctx->def_ctx->inside_edge)) {
         idm_syn_free(expanded_syntax); return idm_error_oom(err, use_syntax->span);
     }
-    if (!idm_syn_origin_push_tree(expanded_syntax, head->as.text)) {
+    if (!idm_syn_origin_push(expanded_syntax, head->as.text)) {
         idm_syn_free(expanded_syntax); return idm_error_oom(err, use_syntax->span);
     }
-    for (size_t i = 0; i < use_syntax->origins.count; i++) {
-        if (!idm_syn_origin_push_tree(expanded_syntax, use_syntax->origins.items[i])) {
+    const IdmOriginChain *inherited = use_syntax->origins.count != 0 ? &use_syntax->origins : ctx->expansion_origins;
+    for (size_t i = 0; inherited && i < inherited->count; i++) {
+        if (!idm_syn_origin_push(expanded_syntax, inherited->items[i])) {
             idm_syn_free(expanded_syntax); return idm_error_oom(err, use_syntax->span);
         }
     }

@@ -2594,7 +2594,13 @@ static bool body_work_splice(IdmSyntax ***work, size_t *work_count, size_t *work
         if (!idm_grow((void **)work, work_cap, sizeof(**work), 8u, needed)) return idm_error_oom(err, body->span);
     }
     memmove(*work + at + add, *work + at + 1u, (*work_count - at - 1u) * sizeof(**work));
-    for (size_t k = 0; k < add; k++) (*work)[at + k] = body->as.seq.items[1u + k];
+    for (size_t k = 0; k < add; k++) {
+        IdmSyntax *item = body->as.seq.items[1u + k];
+        for (size_t i = 0; i < body->origins.count; i++) {
+            if (!idm_syn_origin_push(item, body->origins.items[i])) return idm_error_oom(err, body->span);
+        }
+        (*work)[at + k] = item;
+    }
     *work_count = needed;
     return true;
 }

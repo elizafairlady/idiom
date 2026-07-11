@@ -350,16 +350,6 @@ bool idm_syn_origin_push(IdmSyntax *syn, const char *origin) {
     return true;
 }
 
-bool idm_syn_origin_push_tree(IdmSyntax *syn, const char *origin) {
-    if (!idm_syn_origin_push(syn, origin)) return false;
-    if (syn->kind == IDM_SYN_LIST || syn->kind == IDM_SYN_VECTOR || syn->kind == IDM_SYN_TUPLE || syn->kind == IDM_SYN_DICT) {
-        for (size_t i = 0; i < syn->as.seq.count; i++) {
-            if (!idm_syn_origin_push_tree(syn->as.seq.items[i], origin)) return false;
-        }
-    }
-    return true;
-}
-
 static IdmSyntax *syn_clone_at(const IdmSyntax *syn, unsigned depth) {
     if (!syn) return NULL;
     if (depth > IDM_IC_MAX_DEPTH) return NULL;
