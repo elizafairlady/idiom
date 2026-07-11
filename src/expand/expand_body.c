@@ -2177,7 +2177,7 @@ bool record_package_slot(ExpandContext *ctx, const char *name, uint32_t slot_id,
 static bool body_existing_env_binding(ExpandContext *ctx, const char *name, const IdmScopeSet *scopes, const IdmBinding **out_binding) {
     for (size_t i = ctx->bindings.count; i > 0; i--) {
         const IdmBinding *binding = &ctx->bindings.items[i - 1u];
-        if ((binding->phase != ctx->phase && binding->phase != IDM_PHASE_ANY) || binding->space != IDM_BIND_SPACE_DEFAULT ||
+        if (binding->phase != ctx->phase || binding->space != IDM_BIND_SPACE_DEFAULT ||
             binding->kind != IDM_BIND_ENV || strcmp(binding->name, name) != 0) {
             continue;
         }
@@ -2970,6 +2970,7 @@ static bool seed_virtual_package_primitives(ExpandContext *ctx, IdmSyntax *const
         idm_scope_set_init(&scopes);
         uint32_t slot = 0;
         IdmBindingId binding_id = 0;
+        IdmBindingId binding_ids[2] = {0, 0};
         IdmCallableContract contract;
         memset(&contract, 0, sizeof(contract));
         if (ok) ok = binder_scopes_pruned(ctx, name_syntax, &scopes);
@@ -2981,11 +2982,13 @@ static bool seed_virtual_package_primitives(ExpandContext *ctx, IdmSyntax *const
                 binding_id = existing->id;
             } else {
                 slot = ctx->env_slot_seq++;
-                ok = idm_binding_table_add_with_arity(&ctx->bindings, info->name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ENV, &scopes, slot, IDM_FRAME_ENV, arity, &binding_id);
+                ok = idm_binding_table_add_biphase_with_arity(&ctx->bindings, info->name, IDM_BIND_SPACE_DEFAULT, IDM_BIND_ENV, &scopes, slot, IDM_FRAME_ENV, arity, binding_ids);
+                binding_id = binding_ids[0];
                 if (!ok) idm_error_oom(err, name_syntax->span);
             }
         }
         if (ok) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, &contract);
+        if (ok && binding_ids[1] != 0) ok = idm_binding_table_set_contract(&ctx->bindings, binding_ids[1], &contract);
         if (ok) ok = record_package_slot(ctx, info->name, slot, &scopes, arity, &contract, primitive_seed_exports(home));
         if (ok) ok = primitive_seeds_push(&seeds, &seed_count, &seed_cap, info->name, primitive, arity, slot, err, name_syntax->span);
         idm_callable_contract_destroy(&contract);
@@ -3346,7 +3349,7 @@ static bool body_def_binding_between(ExpandContext *ctx, size_t start, size_t en
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return idm_error_oom(err, name_syntax->span);
     for (size_t i = end; i > start; i--) {
         const IdmBinding *binding = &ctx->bindings.items[i - 1u];
-        if ((binding->phase == ctx->phase || binding->phase == IDM_PHASE_ANY) &&
+        if (binding->phase == ctx->phase &&
             binding->space == IDM_BIND_SPACE_DEFAULT &&
             (binding->kind == IDM_BIND_ENV || binding->kind == IDM_BIND_LOCAL) &&
             strcmp(binding->name, name) == 0 && idm_scope_set_equal(&binding->scopes, &scopes)) {

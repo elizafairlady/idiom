@@ -8,8 +8,6 @@ typedef uint32_t IdmBindingId;
 typedef struct IdmSymbol IdmSymbol;
 typedef struct IdmRuntime IdmRuntime;
 
-#define IDM_PHASE_ANY (-1)
-
 typedef struct {
     IdmScopeId next_scope;
     IdmScopeId *shared;
@@ -189,6 +187,7 @@ typedef struct {
     uint32_t frame_id;
     IdmArity arity;
     bool has_contract;
+    bool owns_data;
     IdmCallableContract contract;
     const char *provider;
     bool referenced;
@@ -238,6 +237,8 @@ void idm_binding_table_set_data_free(IdmBindingTable *table, void (*data_free)(I
 bool idm_binding_table_add_data(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, void *data, uint32_t frame_id, IdmBindingId *out_id);
 bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id);
 bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id);
+bool idm_binding_table_add_biphase_with_arity(IdmBindingTable *table, const char *name, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId out_ids[2]);
+bool idm_binding_table_clone_phase_range(IdmBindingTable *table, size_t start, size_t end, int source_phase, int target_phase);
 bool idm_binding_table_set_contract(IdmBindingTable *table, IdmBindingId id, const IdmCallableContract *contract);
 bool idm_binding_table_set_arity(IdmBindingTable *table, IdmBindingId id, IdmArity arity);
 void idm_binding_table_truncate(IdmBindingTable *table, size_t count);

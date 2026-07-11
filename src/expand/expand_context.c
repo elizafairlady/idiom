@@ -71,6 +71,10 @@ bool ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     idm_error_init(&floor_err);
     bool floors = bind_native_core_form(ctx, "fn", expand_fn_parts, &floor_err) &&
                   bind_native_core_form(ctx, "explain", expand_explain_parts, &floor_err);
+    ctx->phase = 1;
+    floors = floors && bind_native_core_form(ctx, "fn", expand_fn_parts, &floor_err) &&
+             bind_native_core_form(ctx, "explain", expand_explain_parts, &floor_err);
+    ctx->phase = 0;
     idm_error_clear(&floor_err);
     return floors;
 }
@@ -417,31 +421,43 @@ bool expand_edge_value(ExpandContext *ctx, IdmRuntime *rt, const ExpandEdge *edg
     return !(err && err->present);
 }
 
-static void surface_binding_set_provider(ExpandContext *ctx, const char *provider) {
+static void surface_binding_set_provider(ExpandContext *ctx, size_t start, const char *provider) {
     if (!provider || !provider[0]) return;
     IdmSymbol *sym = idm_intern(&ctx->rt->intern, IDM_SYMBOL_WORD, provider);
-    if (sym) ctx->bindings.items[ctx->bindings.count - 1u].provider = idm_symbol_text(sym);
+    if (!sym) return;
+    for (size_t i = start; i < ctx->bindings.count; i++) ctx->bindings.items[i].provider = idm_symbol_text(sym);
 }
 
 int surface_bind_payload(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, IdmSpan span, IdmError *err) {
     int guard = surface_install_guard(ctx, provider, provider_key, key, display, space, scopes, err);
     if (guard <= 0) return guard;
-    if (!idm_binding_table_add(&ctx->bindings, key, IDM_PHASE_ANY, space, kind, scopes, payload, ctx->frame, NULL)) {
+    size_t start = ctx->bindings.count;
+    bool added = ctx->kernel_mode ?
+                 idm_binding_table_add_biphase_with_arity(&ctx->bindings, key, space, kind, scopes, payload, ctx->frame, idm_arity_unknown(), NULL) :
+                 idm_binding_table_add(&ctx->bindings, key, ctx->phase, space, kind, scopes, payload, ctx->frame, NULL);
+    if (!added) {
         idm_error_oom(err, span);
         return -1;
     }
-    surface_binding_set_provider(ctx, provider);
+    surface_binding_set_provider(ctx, start, provider);
     return 1;
 }
 
 int surface_bind_data(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, void *data, IdmSpan span, IdmError *err) {
     int guard = surface_install_guard(ctx, provider, provider_key, key, display, space, scopes, err);
     if (guard <= 0) return guard;
-    if (!idm_binding_table_add_data(&ctx->bindings, key, IDM_PHASE_ANY, space, kind, scopes, data, ctx->frame, NULL)) {
+    size_t start = ctx->bindings.count;
+    if (!idm_binding_table_add_data(&ctx->bindings, key, ctx->phase, space, kind, scopes, data, ctx->frame, NULL)) {
         idm_error_oom(err, span);
         return -1;
     }
-    surface_binding_set_provider(ctx, provider);
+    if (ctx->kernel_mode && !idm_binding_table_clone_phase_range(&ctx->bindings, start, start + 1u, ctx->phase, ctx->phase == 0 ? 1 : 0)) {
+        ctx->bindings.items[start].owns_data = false;
+        idm_binding_table_truncate(&ctx->bindings, start);
+        idm_error_oom(err, span);
+        return -1;
+    }
+    surface_binding_set_provider(ctx, start, provider);
     return 1;
 }
 
@@ -825,7 +841,7 @@ const char *typeclass_display_name(ExpandContext *ctx, const char *trait) {
     if (!def) return trait;
     for (size_t i = 0; i < ctx->bindings.count; i++) {
         const IdmBinding *binding = &ctx->bindings.items[i];
-        if (binding->space == IDM_BIND_SPACE_TRAIT && binding->kind == IDM_BIND_TRAIT) {
+        if (binding->phase == ctx->phase && binding->space == IDM_BIND_SPACE_TRAIT && binding->kind == IDM_BIND_TRAIT) {
             const TraitDef *candidate = typed_trait_by_index(ctx, binding->payload);
             if (candidate == def) return binding->name;
         }
@@ -1837,13 +1853,23 @@ static void refresh_method_impl_surface_cache(ExpandContext *ctx, IdmSymbol *tra
     }
 }
 
+static bool method_surface_bound_in_phase(const ExpandContext *ctx, uint32_t payload, const char *name, const IdmScopeSet *scopes) {
+    for (size_t i = 0; i < ctx->bindings.count; i++) {
+        const IdmBinding *binding = &ctx->bindings.items[i];
+        if (binding->phase == ctx->phase && binding->space == IDM_BIND_SPACE_METHOD && binding->kind == IDM_BIND_METHOD &&
+            binding->payload == payload && strcmp(binding->name, name) == 0 && idm_scope_set_equal(&binding->scopes, scopes)) return true;
+    }
+    return false;
+}
+
 bool install_method_surface(ExpandContext *ctx, IdmSymbol *trait, const char *trait_key, const char *name, IdmArity arity, const IdmScopeSet *scopes, const char *provider, const char *provider_key, bool has_dispatch, bool dispatch_env, const char *dispatch_env_key, uint32_t dispatch_slot, IdmError *err) {
     const IdmScopeSet *check_scopes = scopes ? scopes : &ctx->empty_scopes;
     const char *trait_text = idm_symbol_text(trait);
     const char *check_key = trait_key ? trait_key : trait_text;
     for (size_t i = 0; i < ctx->bindings.count; i++) {
         const IdmBinding *binding = &ctx->bindings.items[i];
-        if (binding->space == IDM_BIND_SPACE_FIELD &&
+        if (binding->phase == ctx->phase &&
+            binding->space == IDM_BIND_SPACE_FIELD &&
             binding->kind == IDM_BIND_FIELD &&
             strcmp(binding->name, name) == 0 &&
             idm_scope_set_equal(&binding->scopes, check_scopes)) {
@@ -1872,6 +1898,10 @@ bool install_method_surface(ExpandContext *ctx, IdmSymbol *trait, const char *tr
                     e->dispatch_frame = ctx->frame;
                     e->dispatch_slot = dispatch_slot;
                 }
+                if (!method_surface_bound_in_phase(ctx, (uint32_t)i, name, check_scopes) &&
+                    !idm_binding_table_add(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_METHOD, IDM_BIND_METHOD, check_scopes, (uint32_t)i, ctx->frame, NULL)) {
+                    return idm_error_oom(err, idm_span_unknown(NULL));
+                }
                 refresh_method_impl_surface_cache(ctx, trait, name, (uint32_t)i);
                 return true;
             }
@@ -1897,7 +1927,7 @@ bool install_method_surface(ExpandContext *ctx, IdmSymbol *trait, const char *tr
         method_surface_def_destroy(method);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
-    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_METHOD, IDM_BIND_METHOD, &method->scopes, (uint32_t)ctx->typed.method_surface_count, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_METHOD, IDM_BIND_METHOD, &method->scopes, (uint32_t)ctx->typed.method_surface_count, ctx->frame, NULL)) {
         method_surface_def_destroy(method);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
@@ -1912,14 +1942,16 @@ bool install_field_surfaces(ExpandContext *ctx, const TypeDef *type, uint32_t ty
         const char *name = type_field_name_text(&type->fields[i]);
         for (size_t j = 0; j < ctx->typed.method_surface_count; j++) {
             const MethodSurfaceDef *method = &ctx->typed.method_surfaces[j];
-            if (method_surface_matches_name(ctx, method, name) && idm_scope_set_equal(&method->scopes, check_scopes)) {
+            if (method_surface_bound_in_phase(ctx, (uint32_t)j, name, check_scopes) &&
+                method_surface_matches_name(ctx, method, name) && idm_scope_set_equal(&method->scopes, check_scopes)) {
                 return idm_error_set(err, idm_span_unknown(NULL), "'%s' is declared as both a record field and a trait method in the same scope; dot access would be ambiguous — rename one", name);
             }
         }
         bool duplicate = false;
         for (size_t j = 0; j < ctx->bindings.count; j++) {
             const IdmBinding *binding = &ctx->bindings.items[j];
-            if (binding->space == IDM_BIND_SPACE_FIELD &&
+            if (binding->phase == ctx->phase &&
+                binding->space == IDM_BIND_SPACE_FIELD &&
                 binding->kind == IDM_BIND_FIELD &&
                 binding->payload == type_index &&
                 strcmp(binding->name, name) == 0 &&
@@ -1929,7 +1961,7 @@ bool install_field_surfaces(ExpandContext *ctx, const TypeDef *type, uint32_t ty
             }
         }
         if (duplicate) continue;
-        if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_FIELD, IDM_BIND_FIELD, check_scopes, type_index, ctx->frame, NULL)) {
+        if (!idm_binding_table_add(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_FIELD, IDM_BIND_FIELD, check_scopes, type_index, ctx->frame, NULL)) {
             return idm_error_oom(err, idm_span_unknown(NULL));
         }
         if (!field_selector_ensure(ctx, name, err)) return false;
@@ -2634,7 +2666,7 @@ static bool surface_binding_repeated(const ExpandContext *ctx, size_t index) {
     const IdmBinding *b = &ctx->bindings.items[index];
     for (size_t j = index + 1u; j < ctx->bindings.count; j++) {
         const IdmBinding *later = &ctx->bindings.items[j];
-        if (later->space != b->space || later->kind != b->kind) continue;
+        if (later->phase != b->phase || later->space != b->space || later->kind != b->kind) continue;
         if (strcmp(later->name ? later->name : "", b->name ? b->name : "") != 0) continue;
         const char *bp = b->provider ? b->provider : "";
         const char *lp = later->provider ? later->provider : "";
@@ -2648,7 +2680,7 @@ bool expand_surface_value(ExpandContext *ctx, IdmRuntime *rt, const char *kind, 
     if (strcmp(kind, "operators") == 0) {
         for (size_t i = ctx->bindings.count; i > 0; i--) {
             const IdmBinding *b = &ctx->bindings.items[i - 1u];
-            if (b->space != IDM_BIND_SPACE_OPERATOR || b->kind != IDM_BIND_OPERATOR || b->payload >= ctx->operator_count) continue;
+            if (b->phase != ctx->phase || b->space != IDM_BIND_SPACE_OPERATOR || b->kind != IDM_BIND_OPERATOR || b->payload >= ctx->operator_count) continue;
             if (surface_binding_repeated(ctx, i - 1u)) continue;
             const IdmOperatorDef *op = &ctx->operators[b->payload];
             IdmValue items[5];
@@ -2666,7 +2698,7 @@ bool expand_surface_value(ExpandContext *ctx, IdmRuntime *rt, const char *kind, 
     } else if (strcmp(kind, "macros") == 0) {
         for (size_t i = ctx->bindings.count; i > 0; i--) {
             const IdmBinding *b = &ctx->bindings.items[i - 1u];
-            if (b->space != IDM_BIND_SPACE_DEFAULT || b->kind != IDM_BIND_TRANSFORMER) continue;
+            if (b->phase != ctx->phase || b->space != IDM_BIND_SPACE_DEFAULT || b->kind != IDM_BIND_TRANSFORMER) continue;
             if (surface_binding_repeated(ctx, i - 1u)) continue;
             if (b->payload < ctx->macro_count && ctx->macros[b->payload].hidden) continue;
             IdmValue items[2];
@@ -2680,7 +2712,7 @@ bool expand_surface_value(ExpandContext *ctx, IdmRuntime *rt, const char *kind, 
     } else if (strcmp(kind, "core-form") == 0) {
         for (size_t i = ctx->bindings.count; i > 0; i--) {
             const IdmBinding *b = &ctx->bindings.items[i - 1u];
-            if (b->space != IDM_BIND_SPACE_CORE_FORM) continue;
+            if (b->phase != ctx->phase || b->space != IDM_BIND_SPACE_CORE_FORM) continue;
             if (surface_binding_repeated(ctx, i - 1u)) continue;
             IdmValue items[2];
             items[0] = idm_atom(rt, b->name ? b->name : "_");

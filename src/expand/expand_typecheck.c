@@ -388,7 +388,7 @@ static const IdmCallableContract *core_ref_contract(const IdmCore *core) {
 static const IdmBinding *binding_by_env_slot(const ExpandContext *ctx, const char *name, uint32_t slot) {
     for (size_t i = ctx->bindings.count; i > 0; i--) {
         const IdmBinding *b = &ctx->bindings.items[i - 1u];
-        if (b->kind == IDM_BIND_ENV && b->space == IDM_BIND_SPACE_DEFAULT && b->payload == slot && strcmp(b->name, name) == 0) return b;
+        if (b->phase == ctx->phase && b->kind == IDM_BIND_ENV && b->space == IDM_BIND_SPACE_DEFAULT && b->payload == slot && strcmp(b->name, name) == 0) return b;
     }
     return NULL;
 }

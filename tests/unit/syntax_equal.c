@@ -17,6 +17,14 @@ static void check(bool ok, const char *name) {
     if (!ok) fail(name);
 }
 
+static size_t binding_data_frees;
+
+static void binding_data_free(IdmBindingKind kind, void *data) {
+    (void)kind;
+    binding_data_frees++;
+    free(data);
+}
+
 static IdmSyntax *must(IdmSyntax *syn, const char *name) {
     if (!syn) fail(name);
     return syn;
@@ -91,6 +99,22 @@ int idm_unit_syntax_equal(void) {
     check(scopes.count == 2u && !idm_scope_set_contains(&scopes, 2u), "scope source unchanged");
     check(shared.count == 3u && idm_scope_set_contains(&shared, 2u), "scope copy changed");
     idm_scope_set_destroy(&shared);
+    idm_scope_set_destroy(&scopes);
+
+    IdmBindingTable bindings;
+    idm_binding_table_init(&bindings);
+    idm_binding_table_set_data_free(&bindings, binding_data_free);
+    idm_scope_set_init(&scopes);
+    int *binding_data = malloc(sizeof(*binding_data));
+    check(binding_data != NULL, "binding data alloc");
+    *binding_data = 42;
+    check(idm_binding_table_add_data(&bindings, "phase-name", 0, IDM_BIND_SPACE_CORE_FORM, IDM_BIND_CORE_FORM, &scopes, binding_data, 1u, NULL), "phase binding add");
+    check(idm_binding_resolve(&bindings, "phase-name", 0, IDM_BIND_SPACE_CORE_FORM, &scopes, NULL) == IDM_RESOLVE_OK, "phase binding visible");
+    check(idm_binding_resolve(&bindings, "phase-name", 1, IDM_BIND_SPACE_CORE_FORM, &scopes, NULL) == IDM_RESOLVE_UNBOUND, "phase binding isolated");
+    check(idm_binding_table_clone_phase_range(&bindings, 0u, 1u, 0, 1), "phase binding clone");
+    check(idm_binding_resolve(&bindings, "phase-name", 1, IDM_BIND_SPACE_CORE_FORM, &scopes, NULL) == IDM_RESOLVE_OK, "phase clone visible");
+    idm_binding_table_destroy(&bindings);
+    check(binding_data_frees == 1u, "phase clone shares data ownership");
     idm_scope_set_destroy(&scopes);
 
     IdmSyntax *n = nil();

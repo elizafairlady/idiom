@@ -22,10 +22,10 @@ static const char *canonical_primitive_home_for_unit(const char *unit);
 
 static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const IdmSyntax *pkg, const IdmPackageUnit *units, size_t unit_count, const char *unit_name_hint, bool kernel_mode, const unsigned char src_hash[32], const char *inherited_env_key, const IdmPkgSlot *inherited_slots, size_t inherited_count, const IdmPkgImport *inherited_imports, size_t inherited_import_count, const ProtocolPreActivation *preacts, size_t preact_count, IdmArtifact *out, IdmError *err);
 
-static bool bind_package_slot_ref(ExpandContext *ctx, const char *bind_name, int phase, const IdmScopeSet *scopes, IdmArity arity, const IdmCallableContract *contract, const char *env_key, uint32_t source_slot, IdmSpan span, IdmError *err);
+static bool bind_package_slot_ref(ExpandContext *ctx, const char *bind_name, bool biphase, const IdmScopeSet *scopes, IdmArity arity, const IdmCallableContract *contract, const char *env_key, uint32_t source_slot, IdmSpan span, IdmError *err);
 
-static int slot_bind_phase(const ExpandContext *ctx, bool has_contract, const IdmCallableContract *contract) {
-    return has_contract && contract->passthrough ? IDM_PHASE_ANY : ctx->phase;
+static bool slot_bind_biphase(bool has_contract, const IdmCallableContract *contract) {
+    return has_contract && contract->passthrough;
 }
 
 static bool collect_ctx_package_imports(const ExpandContext *ctx, IdmPkgImport **out_imports, size_t *out_count) {
@@ -34,7 +34,7 @@ static bool collect_ctx_package_imports(const ExpandContext *ctx, IdmPkgImport *
     size_t candidate_count = 0;
     for (size_t i = 0; i < ctx->bindings.count; i++) {
         const IdmBinding *b = &ctx->bindings.items[i];
-        if (b->kind == IDM_BIND_PACKAGE_SLOT && b->space == IDM_BIND_SPACE_DEFAULT && (b->phase == 0 || b->phase == IDM_PHASE_ANY) && b->payload < ctx->package_slot_ref_count) candidate_count++;
+        if (b->kind == IDM_BIND_PACKAGE_SLOT && b->space == IDM_BIND_SPACE_DEFAULT && b->phase == 0 && b->payload < ctx->package_slot_ref_count) candidate_count++;
     }
     if (candidate_count == 0) return true;
     IdmPkgImport *imports = calloc(candidate_count, sizeof(*imports));
@@ -42,7 +42,7 @@ static bool collect_ctx_package_imports(const ExpandContext *ctx, IdmPkgImport *
     size_t count = 0;
     for (size_t i = 0; i < ctx->bindings.count; i++) {
         const IdmBinding *b = &ctx->bindings.items[i];
-        if (!(b->kind == IDM_BIND_PACKAGE_SLOT && b->space == IDM_BIND_SPACE_DEFAULT && (b->phase == 0 || b->phase == IDM_PHASE_ANY) && b->payload < ctx->package_slot_ref_count)) continue;
+        if (!(b->kind == IDM_BIND_PACKAGE_SLOT && b->space == IDM_BIND_SPACE_DEFAULT && b->phase == 0 && b->payload < ctx->package_slot_ref_count)) continue;
         const PackageSlotRef *ref = &ctx->package_slot_refs[b->payload];
         IdmPkgImport *imp = &imports[count];
         imp->name = idm_strdup(b->name);
@@ -100,7 +100,7 @@ const IdmArtifact *expand_cache_artifact_by_key(IdmRuntime *rt, IdmSymbol *env_k
 static bool install_inherited_import_refs(ExpandContext *ctx, const IdmPkgImport *imports, size_t count, IdmError *err) {
     for (size_t i = 0; i < count; i++) {
         const IdmPkgImport *imp = &imports[i];
-        if (!bind_package_slot_ref(ctx, imp->name, slot_bind_phase(ctx, imp->has_contract, &imp->contract), &imp->scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, idm_symbol_text(imp->env_key), imp->slot, idm_span_unknown(NULL), err)) return false;
+        if (!bind_package_slot_ref(ctx, imp->name, slot_bind_biphase(imp->has_contract, &imp->contract), &imp->scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, idm_symbol_text(imp->env_key), imp->slot, idm_span_unknown(NULL), err)) return false;
     }
     return true;
 }
@@ -109,7 +109,7 @@ static bool install_inherited_package_slot_refs(ExpandContext *ctx, const char *
     if (count == 0) return true;
     if (!env_key) return idm_error_set(err, idm_span_unknown(NULL), "inherited package slots require a provider key");
     for (size_t i = 0; i < count; i++) {
-        if (!bind_package_slot_ref(ctx, slots[i].name, slot_bind_phase(ctx, slots[i].has_contract, &slots[i].contract), &slots[i].scopes, slots[i].arity, slots[i].has_contract ? &slots[i].contract : NULL, env_key, slots[i].slot, idm_span_unknown(NULL), err)) return false;
+        if (!bind_package_slot_ref(ctx, slots[i].name, slot_bind_biphase(slots[i].has_contract, &slots[i].contract), &slots[i].scopes, slots[i].arity, slots[i].has_contract ? &slots[i].contract : NULL, env_key, slots[i].slot, idm_span_unknown(NULL), err)) return false;
     }
     return true;
 }
@@ -243,13 +243,21 @@ bool record_runtime_init(ExpandContext *ctx, const IdmArtifact *art, IdmSpan spa
     return true;
 }
 
-static bool bind_package_slot_ref(ExpandContext *ctx, const char *bind_name, int phase, const IdmScopeSet *scopes, IdmArity arity, const IdmCallableContract *contract, const char *env_key, uint32_t source_slot, IdmSpan span, IdmError *err) {
+static bool bind_package_slot_ref(ExpandContext *ctx, const char *bind_name, bool biphase, const IdmScopeSet *scopes, IdmArity arity, const IdmCallableContract *contract, const char *env_key, uint32_t source_slot, IdmSpan span, IdmError *err) {
+    size_t binding_start = ctx->bindings.count;
+    size_t ref_start = ctx->package_slot_ref_count;
     uint32_t ref_id = 0;
     if (!package_slot_ref_add(ctx, env_key, source_slot, &ref_id)) return idm_error_oom(err, span);
-    IdmBindingId binding_id = 0;
-    bool ok = idm_binding_table_add_with_arity(&ctx->bindings, bind_name, phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, scopes, ref_id, IDM_FRAME_ENV, arity, &binding_id);
-    if (ok && contract) ok = idm_binding_table_set_contract(&ctx->bindings, binding_id, contract);
-    return ok || idm_error_oom(err, span);
+    IdmBindingId binding_ids[2] = {0, 0};
+    bool ok = biphase ?
+              idm_binding_table_add_biphase_with_arity(&ctx->bindings, bind_name, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, scopes, ref_id, IDM_FRAME_ENV, arity, binding_ids) :
+              idm_binding_table_add_with_arity(&ctx->bindings, bind_name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_PACKAGE_SLOT, scopes, ref_id, IDM_FRAME_ENV, arity, &binding_ids[0]);
+    size_t binding_count = biphase ? 2u : 1u;
+    for (size_t i = 0; ok && contract && i < binding_count; i++) ok = idm_binding_table_set_contract(&ctx->bindings, binding_ids[i], contract);
+    if (ok) return true;
+    idm_binding_table_truncate(&ctx->bindings, binding_start);
+    ctx->package_slot_ref_count = ref_start;
+    return idm_error_oom(err, span);
 }
 
 bool install_artifact_runtime_slots_mode(ExpandContext *ctx, const IdmArtifact *art, IdmScopeId min_id, int64_t delta, bool once, bool with_imports, IdmSpan span, IdmError *err) {
@@ -264,7 +272,7 @@ bool install_artifact_runtime_slots_mode(ExpandContext *ctx, const IdmArtifact *
         bool ok = idm_scope_set_copy(&scopes, &slot->scopes);
         if (ok) {
             ok = idm_scope_set_relocate(&scopes, min_id, delta) &&
-                 bind_package_slot_ref(ctx, slot->name, slot_bind_phase(ctx, slot->has_contract, &slot->contract), &scopes, slot->arity, slot->has_contract ? &slot->contract : NULL, provider_key, slot->slot, span, err);
+                 bind_package_slot_ref(ctx, slot->name, slot_bind_biphase(slot->has_contract, &slot->contract), &scopes, slot->arity, slot->has_contract ? &slot->contract : NULL, provider_key, slot->slot, span, err);
         }
         idm_scope_set_destroy(&scopes);
         if (!ok) return false;
@@ -276,7 +284,7 @@ bool install_artifact_runtime_slots_mode(ExpandContext *ctx, const IdmArtifact *
         bool ok = idm_scope_set_copy(&scopes, &imp->scopes);
         if (ok) {
             ok = idm_scope_set_relocate(&scopes, min_id, delta) &&
-                 bind_package_slot_ref(ctx, imp->name, slot_bind_phase(ctx, imp->has_contract, &imp->contract), &scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, idm_symbol_text(imp->env_key), imp->slot, span, err);
+                 bind_package_slot_ref(ctx, imp->name, slot_bind_biphase(imp->has_contract, &imp->contract), &scopes, imp->arity, imp->has_contract ? &imp->contract : NULL, idm_symbol_text(imp->env_key), imp->slot, span, err);
         }
         idm_scope_set_destroy(&scopes);
         if (!ok) return false;
@@ -295,7 +303,7 @@ bool bind_artifact_exported_slots(ExpandContext *ctx, const IdmArtifact *art, co
     for (size_t i = 0; i < art->slot_count; i++) {
         const IdmPkgSlot *slot = &art->slots[i];
         if (!slot->exported) continue;
-        if (!bind_package_slot_ref(ctx, slot->name, slot_bind_phase(ctx, slot->has_contract, &slot->contract), act_scopes ? act_scopes : &ctx->empty_scopes, slot->arity, slot->has_contract ? &slot->contract : NULL, provider_key, slot->slot, span, err)) return false;
+        if (!bind_package_slot_ref(ctx, slot->name, slot_bind_biphase(slot->has_contract, &slot->contract), act_scopes ? act_scopes : &ctx->empty_scopes, slot->arity, slot->has_contract ? &slot->contract : NULL, provider_key, slot->slot, span, err)) return false;
     }
     return true;
 }
@@ -399,8 +407,8 @@ IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier,
         const char *bind_name = art->slots[i].name;
         char *qualified = NULL;
         if (!artifact_bind_name(qualifier, art->slots[i].name, &bind_name, &qualified, err, span)) { ok = false; break; }
-        int phase = slot_bind_phase(ctx, art->slots[i].has_contract, &art->slots[i].contract);
-        ok = bind_package_slot_ref(ctx, bind_name, phase, &act_scopes, art->slots[i].arity, art->slots[i].has_contract ? &art->slots[i].contract : NULL, provider_key, art->slots[i].slot, span, err);
+        bool biphase = slot_bind_biphase(art->slots[i].has_contract, &art->slots[i].contract);
+        ok = bind_package_slot_ref(ctx, bind_name, biphase, &act_scopes, art->slots[i].arity, art->slots[i].has_contract ? &art->slots[i].contract : NULL, provider_key, art->slots[i].slot, span, err);
         free(qualified);
     }
     for (size_t i = 0; i < art->macro_count && ok; i++) {
@@ -944,6 +952,7 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
     char kernel_key[65];
     artifact_provider_key(k->src_hash, kernel_key);
     if (!record_activation(ctx, "std/kernel", kernel_name, kernel_key, idm_span_unknown(NULL), err)) return false;
+    size_t binding_start = ctx->bindings.count;
     for (size_t i = 0; i < k->operator_count; i++) {
         if (!install_imported_operator(ctx, &k->operators[i], &ctx->empty_scopes, kernel_name, kernel_key, err)) return false;
     }
@@ -966,10 +975,15 @@ bool ctx_activate_kernel(ExpandContext *ctx, IdmError *err) {
         if (!ctx_activate_protocol_closure(ctx, &entity->as.protocol, err)) return false;
         break;
     }
+    size_t binding_end = ctx->bindings.count;
+    int other_phase = ctx->phase == 0 ? 1 : 0;
+    if (!idm_binding_table_clone_phase_range(&ctx->bindings, binding_start, binding_end, ctx->phase, other_phase)) {
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
     {
         for (size_t i = 0; i < k->slot_count; i++) {
             const IdmScopeSet *bind_scopes = k->slots[i].exported ? &ctx->empty_scopes : &k->slots[i].scopes;
-            if (!bind_package_slot_ref(ctx, k->slots[i].name, IDM_PHASE_ANY, bind_scopes, k->slots[i].arity, k->slots[i].has_contract ? &k->slots[i].contract : NULL, kernel_key, k->slots[i].slot, idm_span_unknown(NULL), err)) return false;
+            if (!bind_package_slot_ref(ctx, k->slots[i].name, true, bind_scopes, k->slots[i].arity, k->slots[i].has_contract ? &k->slots[i].contract : NULL, kernel_key, k->slots[i].slot, idm_span_unknown(NULL), err)) return false;
         }
     }
     ctx->kernel_wrap = k->slot_count != 0;
@@ -1141,7 +1155,7 @@ static bool install_artifact_protocol(ExpandContext *ctx, const IdmPkgProtocol *
         if (err && err->present) return false;
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
-    if (!idm_binding_table_add(&ctx->bindings, bind_name, IDM_PHASE_ANY, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, bind_name, ctx->phase, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, scopes, payload, ctx->frame, NULL)) {
         surface_rollback(ctx, &checkpoint);
         free(qualified);
         return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1192,7 +1206,7 @@ static bool install_artifact_trait(ExpandContext *ctx, const IdmPkgTrait *entry,
         free(qualified);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }
-    if (!idm_binding_table_add(&ctx->bindings, bind_name, IDM_PHASE_ANY, IDM_BIND_SPACE_TRAIT, IDM_BIND_TRAIT, scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, bind_name, ctx->phase, IDM_BIND_SPACE_TRAIT, IDM_BIND_TRAIT, scopes, payload, ctx->frame, NULL)) {
         surface_rollback(ctx, &checkpoint);
         free(qualified);
         return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1342,7 +1356,7 @@ static bool install_artifact_type(ExpandContext *ctx, const IdmPkgType *entry, c
             }
         }
     }
-    if (!idm_binding_table_add(&ctx->bindings, bind_name, IDM_PHASE_ANY, IDM_BIND_SPACE_TYPE, IDM_BIND_TYPE, scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, bind_name, ctx->phase, IDM_BIND_SPACE_TYPE, IDM_BIND_TYPE, scopes, payload, ctx->frame, NULL)) {
         surface_rollback(ctx, &checkpoint);
         free(qualified);
         return idm_error_oom(err, idm_span_unknown(NULL));
@@ -1658,7 +1672,7 @@ static bool install_macro_twin(ExpandContext *ctx, const char *name, IdmScopeId 
     if (ctx->macro_count == macros_before || base == 0) return true;
     IdmScopeSet scopes;
     idm_scope_set_init(&scopes);
-    bool ok = idm_scope_set_add(&scopes, base) && idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, (uint32_t)(ctx->macro_count - 1u), ctx->frame, NULL);
+    bool ok = idm_scope_set_add(&scopes, base) && idm_binding_table_add(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, (uint32_t)(ctx->macro_count - 1u), ctx->frame, NULL);
     if (ok && provider && provider[0]) {
         IdmSymbol *sym = idm_intern(&ctx->rt->intern, IDM_SYMBOL_WORD, provider);
         if (sym) ctx->bindings.items[ctx->bindings.count - 1u].provider = idm_symbol_text(sym);

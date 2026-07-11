@@ -1017,7 +1017,7 @@ static const MethodSurfaceDef *current_dispatch_surface_index(ExpandContext *ctx
     const IdmScopeSet *best = &found->scopes;
     for (size_t i = 0; i < ctx->bindings.count; i++) {
         const IdmBinding *binding = &ctx->bindings.items[i];
-        if (binding->phase != IDM_PHASE_ANY && binding->phase != ctx->phase) continue;
+        if (binding->phase != ctx->phase) continue;
         if (binding->space != IDM_BIND_SPACE_METHOD || binding->kind != IDM_BIND_METHOD) continue;
         if (strcmp(binding->name, method) != 0 || !idm_scope_set_equal(&binding->scopes, best) || binding->payload >= ctx->typed.method_surface_count) continue;
         const MethodSurfaceDef *surface = &ctx->typed.method_surfaces[binding->payload];
@@ -1504,7 +1504,7 @@ static IdmCore *protocol_decl_core(ExpandContext *ctx, const IdmSyntax *form, co
         surface_rollback(ctx, &install_checkpoint);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
-    if (!idm_binding_table_add(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, &protocol_scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_PROTOCOL, IDM_BIND_PROTOCOL, &protocol_scopes, payload, ctx->frame, NULL)) {
         idm_scope_set_destroy(&protocol_scopes);
         surface_rollback(ctx, &install_checkpoint);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
@@ -1792,7 +1792,7 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         idm_core_free(init);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
-    if (!idm_binding_table_add(&ctx->bindings, name_syntax->as.text, IDM_PHASE_ANY, IDM_BIND_SPACE_TRAIT, IDM_BIND_TRAIT, &trait_scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, name_syntax->as.text, ctx->phase, IDM_BIND_SPACE_TRAIT, IDM_BIND_TRAIT, &trait_scopes, payload, ctx->frame, NULL)) {
         free(op_decls);
         idm_scope_set_destroy(&trait_scopes);
         surface_rollback(ctx, &install_checkpoint);
@@ -2313,7 +2313,7 @@ static bool register_type_surface(ExpandContext *ctx, const IdmSyntax *name_synt
         surface_rollback(ctx, &checkpoint);
         return idm_error_oom(err, span);
     }
-    if (!idm_binding_table_add(&ctx->bindings, type_name, IDM_PHASE_ANY, IDM_BIND_SPACE_TYPE, IDM_BIND_TYPE, &type->scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, type_name, ctx->phase, IDM_BIND_SPACE_TYPE, IDM_BIND_TYPE, &type->scopes, payload, ctx->frame, NULL)) {
         surface_rollback(ctx, &checkpoint);
         return idm_error_oom(err, span);
     }
@@ -2503,7 +2503,7 @@ static bool register_record_type_surface(ExpandContext *ctx, const IdmSyntax *na
         surface_rollback(ctx, &checkpoint);
         return idm_error_oom(err, span);
     }
-    if (!idm_binding_table_add(&ctx->bindings, record_name, IDM_PHASE_ANY, IDM_BIND_SPACE_TYPE, IDM_BIND_TYPE, &type->scopes, payload, ctx->frame, NULL)) {
+    if (!idm_binding_table_add(&ctx->bindings, record_name, ctx->phase, IDM_BIND_SPACE_TYPE, IDM_BIND_TYPE, &type->scopes, payload, ctx->frame, NULL)) {
         surface_rollback(ctx, &checkpoint);
         return idm_error_oom(err, span);
     }

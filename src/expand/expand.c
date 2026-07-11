@@ -79,7 +79,7 @@ static bool adjacent_items_present(IdmSyntax *const *items, size_t start, size_t
 static bool flatten_adjacent_items(IdmSyntax *const *items, size_t start, size_t end, IdmSyntax ***out_items, size_t *out_count);
 
 static bool binding_phase_visible(const IdmBinding *binding, int phase) {
-    return binding->phase == phase || binding->phase == IDM_PHASE_ANY;
+    return binding->phase == phase;
 }
 
 bool expand_arity_auto_calls_zero(const IdmArity *arity) {
@@ -3109,7 +3109,14 @@ static bool reader_form_bind(ExpandContext *ctx, const char *name, const IdmScop
         binding->fn.phase_env = idm_phase_env_retain(fn->phase_env);
     }
     IdmBindingId binding_id = 0;
-    if (!idm_binding_table_add_data(&ctx->bindings, name, IDM_PHASE_ANY, IDM_BIND_SPACE_READER_FORM, IDM_BIND_READER_FORM, scopes ? scopes : &ctx->empty_scopes, binding, IDM_FRAME_ENV, &binding_id)) {
+    size_t binding_start = ctx->bindings.count;
+    if (!idm_binding_table_add_data(&ctx->bindings, name, ctx->phase, IDM_BIND_SPACE_READER_FORM, IDM_BIND_READER_FORM, scopes ? scopes : &ctx->empty_scopes, binding, IDM_FRAME_ENV, &binding_id)) {
+        reader_form_binding_free(binding);
+        return idm_error_oom(err, idm_span_unknown(NULL));
+    }
+    if (ctx->kernel_mode && !idm_binding_table_clone_phase_range(&ctx->bindings, binding_start, binding_start + 1u, ctx->phase, ctx->phase == 0 ? 1 : 0)) {
+        ctx->bindings.items[binding_start].owns_data = false;
+        idm_binding_table_truncate(&ctx->bindings, binding_start);
         reader_form_binding_free(binding);
         return idm_error_oom(err, idm_span_unknown(NULL));
     }

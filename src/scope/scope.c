@@ -286,7 +286,7 @@ void idm_binding_table_destroy(IdmBindingTable *table) {
         free(table->items[i].name);
         idm_scope_set_destroy(&table->items[i].scopes);
         if (table->items[i].has_contract) idm_callable_contract_destroy(&table->items[i].contract);
-        if (table->data_free && table->items[i].data) table->data_free(table->items[i].kind, table->items[i].data);
+        if (table->data_free && table->items[i].data && table->items[i].owns_data) table->data_free(table->items[i].kind, table->items[i].data);
     }
     free(table->items);
     free(table->index_heads);
@@ -400,17 +400,22 @@ bool idm_arity_deserialize(IdmByteReader *r, IdmArity *out, IdmError *err) {
     return true;
 }
 
-bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id) {
+static bool binding_table_reserve(IdmBindingTable *table, size_t needed) {
     size_t old_cap = table->cap;
-    if (table->count == table->cap) {
-        if (!idm_grow((void **)&table->items, &table->cap, sizeof(*table->items), 16u, table->count + 1u)) return false;
+    if (needed > table->cap) {
+        if (!idm_grow((void **)&table->items, &table->cap, sizeof(*table->items), 16u, needed)) return false;
     }
     if (table->cap != old_cap || table->index_bucket_count == 0 ||
-        table->count + 1u > table->index_bucket_count - (table->index_bucket_count >> 2)) {
+        needed > table->index_bucket_count - (table->index_bucket_count >> 2)) {
         size_t bucket_count = table->index_bucket_count ? table->index_bucket_count : 64u;
-        while (table->count + 1u > bucket_count - (bucket_count >> 2)) bucket_count <<= 1;
+        while (needed > bucket_count - (bucket_count >> 2)) bucket_count <<= 1;
         if (!binding_index_rebuild(table, bucket_count)) return false;
     }
+    return true;
+}
+
+bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId *out_id) {
+    if (!binding_table_reserve(table, table->count + 1u)) return false;
     IdmBinding *binding = &table->items[table->count];
     binding->name = idm_strdup(name);
     if (!binding->name) return false;
@@ -427,6 +432,7 @@ bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, 
     binding->frame_id = frame_id;
     binding->arity = arity;
     binding->has_contract = false;
+    binding->owns_data = false;
     memset(&binding->contract, 0, sizeof(binding->contract));
     binding->provider = NULL;
     binding->referenced = false;
@@ -440,6 +446,47 @@ bool idm_binding_table_add_with_arity(IdmBindingTable *table, const char *name, 
 
 bool idm_binding_table_add(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmBindingId *out_id) {
     return idm_binding_table_add_with_arity(table, name, phase, space, kind, scopes, payload, frame_id, idm_arity_unknown(), out_id);
+}
+
+bool idm_binding_table_add_biphase_with_arity(IdmBindingTable *table, const char *name, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, uint32_t payload, uint32_t frame_id, IdmArity arity, IdmBindingId out_ids[2]) {
+    size_t rollback = table->count;
+    IdmBindingId ids[2];
+    if (!idm_binding_table_add_with_arity(table, name, 0, space, kind, scopes, payload, frame_id, arity, &ids[0]) ||
+        !idm_binding_table_add_with_arity(table, name, 1, space, kind, scopes, payload, frame_id, arity, &ids[1])) {
+        idm_binding_table_truncate(table, rollback);
+        return false;
+    }
+    if (out_ids) {
+        out_ids[0] = ids[0];
+        out_ids[1] = ids[1];
+    }
+    return true;
+}
+
+bool idm_binding_table_clone_phase_range(IdmBindingTable *table, size_t start, size_t end, int source_phase, int target_phase) {
+    if (!table || start > end || end > table->count) return false;
+    size_t rollback = table->count;
+    size_t clone_count = 0;
+    for (size_t i = start; i < end; i++) if (table->items[i].phase == source_phase) clone_count++;
+    if (!binding_table_reserve(table, rollback + clone_count)) return false;
+    for (size_t i = start; i < end; i++) {
+        const IdmBinding *source = &table->items[i];
+        if (source->phase != source_phase) continue;
+        IdmBindingId id = 0;
+        if (!idm_binding_table_add_with_arity(table, source->name, target_phase, source->space, source->kind, &source->scopes,
+                                              source->payload, source->frame_id, source->arity, &id)) {
+            idm_binding_table_truncate(table, rollback);
+            return false;
+        }
+        IdmBinding *target = &table->items[table->count - 1u];
+        target->data = source->data;
+        target->provider = source->provider;
+        if (source->has_contract && !idm_binding_table_set_contract(table, id, &source->contract)) {
+            idm_binding_table_truncate(table, rollback);
+            return false;
+        }
+    }
+    return true;
 }
 
 void idm_binding_mark_referenced(const IdmBinding *binding) {
@@ -456,7 +503,7 @@ void idm_binding_table_truncate(IdmBindingTable *table, size_t count) {
         free(table->items[table->count].name);
         idm_scope_set_destroy(&table->items[table->count].scopes);
         if (table->items[table->count].has_contract) idm_callable_contract_destroy(&table->items[table->count].contract);
-        if (table->data_free && table->items[table->count].data) table->data_free(table->items[table->count].kind, table->items[table->count].data);
+        if (table->data_free && table->items[table->count].data && table->items[table->count].owns_data) table->data_free(table->items[table->count].kind, table->items[table->count].data);
     }
 }
 
@@ -497,11 +544,12 @@ bool idm_binding_table_set_arity(IdmBindingTable *table, IdmBindingId id, IdmAri
 bool idm_binding_table_add_data(IdmBindingTable *table, const char *name, int phase, IdmBindingSpace space, IdmBindingKind kind, const IdmScopeSet *scopes, void *data, uint32_t frame_id, IdmBindingId *out_id) {
     if (!idm_binding_table_add_with_arity(table, name, phase, space, kind, scopes, 0u, frame_id, idm_arity_unknown(), out_id)) return false;
     table->items[table->count - 1u].data = data;
+    table->items[table->count - 1u].owns_data = true;
     return true;
 }
 
 static bool binding_candidate(const IdmBinding *candidate, const char *name, int phase, IdmBindingSpace space, const IdmScopeSet *reference_scopes) {
-    if ((candidate->phase != phase && candidate->phase != IDM_PHASE_ANY) || candidate->space != space || strcmp(candidate->name, name) != 0) return false;
+    if (candidate->phase != phase || candidate->space != space || strcmp(candidate->name, name) != 0) return false;
     return idm_scope_set_subset(&candidate->scopes, reference_scopes);
 }
 
