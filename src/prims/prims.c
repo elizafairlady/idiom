@@ -622,11 +622,23 @@ static bool prim_num_compare(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *
 
 static bool prim_eq(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     (void)err;
-    *out = idm_bool(rt, idm_value_equal(args[0], args[1]));
+    *out = idm_bool(rt, args[0].bits == args[1].bits);
     return true;
 }
 
 static bool prim_neq(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)err;
+    *out = idm_bool(rt, args[0].bits != args[1].bits);
+    return true;
+}
+
+static bool prim_equal(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
+    (void)err;
+    *out = idm_bool(rt, idm_value_equal(args[0], args[1]));
+    return true;
+}
+
+static bool prim_not_equal(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     (void)err;
     *out = idm_bool(rt, !idm_value_equal(args[0], args[1]));
     return true;
@@ -2546,6 +2558,8 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
         case IDM_PRIM_NEG: return prim_neg(rt, args, out, err);
         case IDM_PRIM_EQ: return prim_eq(rt, args, out, err);
         case IDM_PRIM_NEQ: return prim_neq(rt, args, out, err);
+        case IDM_PRIM_EQUAL: return prim_equal(rt, args, out, err);
+        case IDM_PRIM_NOT_EQUAL: return prim_not_equal(rt, args, out, err);
         case IDM_PRIM_LT:
         case IDM_PRIM_GT:
         case IDM_PRIM_LTE:

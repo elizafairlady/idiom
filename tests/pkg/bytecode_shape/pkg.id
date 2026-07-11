@@ -134,7 +134,7 @@ export defn syntax-pattern-matrix -> [
   end)
 ]
 
-export defn syntax-wire-ok -> and (eq? (inspect (syntax-value-matrix)) "[:nil \"syntax_word\" \"syntax-atom\" 42 9223372036854775808 3.5 \"syntax-string\" 2 2 2 2]") (eq? (syntax-pattern-matrix) [:word :atom :int :bigint :float :string :list :vector :tuple :dict :nonlinear-same :nonlinear-diff "(#<syntax> #<syntax> #<syntax>)" 1])
+export defn syntax-wire-ok -> and (equal? (inspect (syntax-value-matrix)) "[:nil \"syntax_word\" \"syntax-atom\" 42 9223372036854775808 3.5 \"syntax-string\" 2 2 2 2]") (equal? (syntax-pattern-matrix) [:word :atom :int :bigint :float :string :list :vector :tuple :dict :nonlinear-same :nonlinear-diff "(#<syntax> #<syntax> #<syntax>)" 1])
 
 export defn interpolated label value -> "${label}:#{value}"
 

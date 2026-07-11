@@ -102,7 +102,7 @@ suite "windows are a value tree in the frame" do
     pid = buffer-pid f4 "doomed"
     send pid {:step {:replace 5 99 ""}}
     reason = receive do
-      {:down _ref p r} when (eq? p pid) -> r
+      {:down _ref p r} when (equal? p pid) -> r
       after 2000 -> :no-down
     end
     f5 = drive f4 {:buffer-down pid reason}

@@ -265,7 +265,7 @@ suite "iem frame drives buffer actors in tea shape" do
       '({_prompt _name pid _tag} . _) -> do
         send pid {:type "z"}
         msg = receive do
-          {:changed p} when (eq? p pid) -> {:buffer-changed p}
+          {:changed p} when (equal? p pid) -> {:buffer-changed p}
           after 2000 -> :nil
         end
         msg |> assert-eq {:buffer-changed pid}

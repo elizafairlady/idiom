@@ -19,7 +19,7 @@ defn read-all p -> drain p :stdout ""
 
 defn down-reason do
   p ref -> receive do
-    {:down r t reason} when (and (eq? r ref) (eq? t p)) -> reason
+    {:down r t reason} when (and (equal? r ref) (equal? t p)) -> reason
     after 3000 -> :timeout
   end
 end
@@ -33,7 +33,7 @@ end
 defn watch do
   ref n -> receive do
     {:attempt _pid} -> watch ref (n + 1)
-    {:down r _p reason} when (eq? r ref) -> {n reason}
+    {:down r _p reason} when (equal? r ref) -> {n reason}
     after 2000 -> {n :timeout}
   end
 end
@@ -188,7 +188,7 @@ suite "tutorial/ch08 the world is also an actor" do
       {:hello pid} -> pid
       after 1000 -> :timeout
     end
-    eq? first second |> assert-eq :false
+    equal? first second |> assert-eq :false
     pid? second |> assert-eq :true
     Supervisor.count sup |> assert-eq 1
     Supervisor.stop sup |> assert-eq :ok

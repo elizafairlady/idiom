@@ -208,7 +208,7 @@ int idm_unit_signature_contract(void) {
         "end\n"
         "\n"
         "export trait Adder do\n"
-        "  method same a b -> eq? a b\n"
+        "  method same a b -> equal? a b\n"
         "end\n"
         "\n"
         "implement Adder on int\n"
@@ -397,12 +397,12 @@ int idm_unit_signature_contract(void) {
     check(adder_trait->methods[0].has_default, "Adder default method");
     check(adder_trait->methods[0].has_contract, "Adder method contract");
     check(adder_trait->methods[0].contract.passthrough, "Adder default passthrough survives the artifact");
-    check(adder_trait->methods[0].contract.primitive == (uint32_t)IDM_PRIM_EQ, "Adder default passthrough primitive is eq?");
+    check(adder_trait->methods[0].contract.primitive == (uint32_t)IDM_PRIM_EQUAL, "Adder default passthrough primitive is equal?");
 
     const IdmPkgMethodImpl *adder_impl = find_method_impl(&art, "same", "int");
     check(adder_impl != NULL, "Adder int impl artifact");
     check(adder_impl->has_contract && adder_impl->contract.passthrough, "Adder int impl passthrough survives the artifact");
-    check(adder_impl->contract.primitive == (uint32_t)IDM_PRIM_EQ, "Adder int impl passthrough primitive is eq?");
+    check(adder_impl->contract.primitive == (uint32_t)IDM_PRIM_EQUAL, "Adder int impl passthrough primitive is equal?");
 
     const IdmPkgMethodImpl *adder_override = find_method_impl(&art, "same", "string");
     check(adder_override != NULL, "Adder string impl artifact");

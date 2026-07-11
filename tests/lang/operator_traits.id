@@ -44,6 +44,20 @@ suite "operators are trait methods" do
     "x" == "y" |> assert-eq :false
   end
 
+  test "identity and structural equality stay explicit" do
+    left = [1 2]
+    alias = left
+    right = [1 2]
+    equal? left right |> assert
+    eq? left right |> assert-eq :false
+    eq? left alias |> assert
+    left == right |> assert
+    left != right |> assert-eq :false
+    left === right |> assert-eq :false
+    left === alias |> assert
+    left !== right |> assert
+  end
+
   test "one symbol declared by two traits with agreeing metadata dispatches per receiver" do
     1 <> 2 |> assert-eq {:loud 1 2}
     "a" <> "b" |> assert-eq {:quiet "a" "b"}
@@ -83,7 +97,7 @@ suite "operators are trait methods" do
     big = 10 ** 30
     d1 = %{} |> dict-put (- big) 1 |> dict-put "x" 2 |> dict-put 1.0 3
     d2 = %{} |> dict-put 1.0 3 |> dict-put "x" 2 |> dict-put (- big) 1
-    eq? d1 d2 |> assert
+    equal? d1 d2 |> assert
     compare d1 d2 |> assert-eq :eq
   end
 

@@ -15,7 +15,7 @@ defn wait-for-status pid want tries -> match tries do
   0 -> :gave-up
   _ -> match (process-info pid) do
     :nil -> :dead
-    d -> cond (eq? (dict-get d :status :nil) want) :ok (do
+    d -> cond (equal? (dict-get d :status :nil) want) :ok (do
       nap
       wait-for-status pid want (tries - 1)
     end)
@@ -70,7 +70,7 @@ suite "process and port introspection" do
 
   test "processes lists self" do
     me = self
-    hits = List.filter processes (fn p -> eq? p me)
+    hits = List.filter processes (fn p -> equal? p me)
     assert-eq (List.length hits) 1
   end
 
@@ -83,7 +83,7 @@ suite "process and port introspection" do
         match (dict-get cmd :stages '()) do
           '(st . _) -> do
             assert-eq (dict-get st :argv '()) '("sleep" "5")
-            assert-eq (eq? (dict-get st :pid :nil) :nil) :false
+            assert-eq (equal? (dict-get st :pid :nil) :nil) :false
           end
         end
       end

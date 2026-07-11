@@ -21,7 +21,7 @@ defn ex-handler frame text -> match text do
       {f3 more} -> {f3 (append cmds more)}
     end
   end
-  _ -> cond (and (gt? (byte-len text) 2) (eq? (byte-slice text 0 2) "e "))
+  _ -> cond (and (gt? (byte-len text) 2) (equal? (byte-slice text 0 2) "e "))
     {frame (list {:do (fn -> ex-open (byte-slice text 2 (byte-len text)))})}
     {(frame.record-update (echo: "Unknown ex command: ${text}")) '()}
 end

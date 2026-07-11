@@ -15,7 +15,7 @@ defn job-line n mark status text -> "[${n}]${mark}  #{status-name status}  ${tex
 
 export defn session-request msg -> match session do
   :nil -> {:none}
-  spid when (eq? spid (self)) -> {:none}
+  spid when (equal? spid (self)) -> {:none}
   spid -> do
     send spid msg
     receive do
@@ -39,12 +39,12 @@ export protocol Shell do
   defn await-ref port ref cap do
     out = cond cap (drain-stdout port "") ""
     receive do
-      {:down r _p reason} when (eq? r ref) -> match reason do
+      {:down r _p reason} when (equal? r ref) -> match reason do
         :normal -> {:ok 0 out}
-        {:exit-code n} -> {(cond (eq? n 0) :ok :err) n out}
+        {:exit-code n} -> {(cond (equal? n 0) :ok :err) n out}
         other -> error {:command other}
       end
-      {:stopped r _p} when (eq? r ref) -> error {:suspended port}
+      {:stopped r _p} when (equal? r ref) -> error {:suspended port}
     end
   end
 
@@ -65,7 +65,7 @@ export protocol Shell do
     await-ref port ref cap
   end
 
-  defn status-ok? r -> eq? (tuple-get r 0) :ok
+  defn status-ok? r -> equal? (tuple-get r 0) :ok
 
   defn merge-out a b -> {(tuple-get b 0) (tuple-get b 1) "#{tuple-get a 2}#{tuple-get b 2}"}
 
@@ -198,7 +198,7 @@ export protocol Shell do
   end
 
   defn item-tail do
-    s i n when (eq? i n) -> '()
+    s i n when (equal? i n) -> '()
     s i n -> cons (syntax-nth s i) (item-tail s (add i 1) n)
   end
 
@@ -237,16 +237,16 @@ export protocol Shell do
   defn render-word do
     p when (head-is? p "%-word") -> syntax-string-text (syntax-nth p 1)
     p when (syntax-word? p) -> syntax-word-text p
-    p when (eq? (syntax-kind p) :string) -> syntax-string-text p
+    p when (equal? (syntax-kind p) :string) -> syntax-string-text p
     p when (syntax-int? p) -> "#{syntax-int-value p}"
-    p when (eq? (syntax-kind p) :float) -> "#{syntax-float-value p}"
+    p when (equal? (syntax-kind p) :float) -> "#{syntax-float-value p}"
     p when (head-is? p "%-adjacent") -> render-run p 1 (syntax-length p) ""
     p when (head-is? p "%-group") -> "(...)"
     _ -> "..."
   end
 
   defn render-run do
-    p i n acc when (eq? i n) -> acc
+    p i n acc when (equal? i n) -> acc
     p i n acc -> render-run p (add i 1) n "#{acc}#{render-word (syntax-nth p i)}"
   end
 
@@ -259,10 +259,10 @@ export protocol Shell do
   defn glob-text? t -> or (contains? t "*") (contains? t "?")
 
   defn var-part-byte? b ->
-    or (and (gte? b 65) (lte? b 90)) (or (and (gte? b 97) (lte? b 122)) (or (and (gte? b 48) (lte? b 57)) (eq? b 95)))
+    or (and (gte? b 65) (lte? b 90)) (or (and (gte? b 97) (lte? b 122)) (or (and (gte? b 48) (lte? b 57)) (equal? b 95)))
 
   defn var-end do
-    text i n when (eq? i n) -> i
+    text i n when (equal? i n) -> i
     text i n when (var-part-byte? (byte text i)) -> var-end text (add i 1) n
     _text i _n -> i
   end
@@ -273,7 +273,7 @@ export protocol Shell do
     tail = byte-slice text stop (byte-len text)
     binder = make-syntax-word p name
     head = cond (identifier-bound? binder) %`"#{%,binder}" %`{:env %,(make-syntax-string p name)}
-    cond (eq? tail "") head %`(cat (list %,head %,(make-syntax-string p tail)))
+    cond (equal? tail "") head %`(cat (list %,head %,(make-syntax-string p tail)))
   end
 
   defn group-arg p do
@@ -295,10 +295,10 @@ export protocol Shell do
   defn word-arg do
     p when (starts-with? (word-text-of p) "$") -> var-arg p (word-text-of p)
     p when (glob-text? (word-text-of p)) -> %`{:glob %,(make-syntax-string p (word-text-of p))}
-    p when (neq? (word-text-of p) "") -> make-syntax-string p (word-text-of p)
-    p when (eq? (syntax-kind p) :string) -> p
+    p when (not-equal? (word-text-of p) "") -> make-syntax-string p (word-text-of p)
+    p when (equal? (syntax-kind p) :string) -> p
     p when (syntax-int? p) -> make-syntax-string p "#{syntax-int-value p}"
-    p when (eq? (syntax-kind p) :float) -> make-syntax-string p "#{syntax-float-value p}"
+    p when (equal? (syntax-kind p) :float) -> make-syntax-string p "#{syntax-float-value p}"
     p when (head-is? p "%-adjacent") -> %`(cat (list %,@(run-args p 1 (syntax-length p))))
     p when (head-is? p "%-string") -> %`"#{%,p}"
     p when (head-is? p "%-group") -> group-arg p
@@ -306,7 +306,7 @@ export protocol Shell do
   end
 
   defn run-args do
-    p i n when (eq? i n) -> '()
+    p i n when (equal? i n) -> '()
     p i n -> cons (word-arg (syntax-nth p i)) (run-args p (add i 1) n)
   end
 
@@ -315,7 +315,7 @@ export protocol Shell do
     '(h . t) -> cons (word-arg h) (arg-list t)
   end
 
-  defn value-ctx? u -> eq? (syntax-property u "value-context") "true"
+  defn value-ctx? u -> equal? (syntax-property u "value-context") "true"
 
   defn finish u ge -> cond (value-ctx? u) ge %`(shell-run %,ge)
 
@@ -354,7 +354,7 @@ export protocol Shell do
     {rparts bg} = split-amp (items-of right)
     r = as-operand u (make-syntax-expr u rparts)
     l = as-operand u left
-    ge = cond (eq? node :and) %`{:and %,l %,r} %`{:or %,l %,r}
+    ge = cond (equal? node :and) %`{:and %,l %,r} %`{:or %,l %,r}
     emit u ge bg (op-render u)
   end
 
@@ -460,7 +460,7 @@ defn recordable? do
   "" _prev -> :false
   t _prev when (starts-with? t " ") -> :false
   t _prev when (contains? t "\n") -> :false
-  t prev when (eq? t prev) -> :false
+  t prev when (equal? t prev) -> :false
   _t _prev -> :true
 end
 
@@ -504,7 +504,7 @@ end
 defn home-abbrev cwd do
   h = env-get "HOME"
   if (present? h) do
-    if (eq? cwd h) do
+    if (equal? cwd h) do
       "~"
     else if (starts-with? cwd "${h}/") do
       "~#{byte-slice cwd (byte-len h) (byte-len cwd)}"
@@ -523,7 +523,7 @@ defn status-mark do
 end
 
 defn arm ed status do
-  if (eq? (tty?) :true) do
+  if (equal? (tty?) :true) do
     ed |> dict-put :prompt "#{home-abbrev (pwd)}#{status-mark status} % " |> dict-put :cont-prompt "...> "
   else do
     ed |> dict-put :prompt "" |> dict-put :cont-prompt ""
@@ -532,7 +532,7 @@ end
 
 defn find-job do
   '() _p -> {:none}
-  '({n port text} . _) p when (eq? port p) -> {:job n port text}
+  '({n port text} . _) p when (equal? port p) -> {:job n port text}
   '(_ . t) p -> find-job t p
 end
 
@@ -543,7 +543,7 @@ end
 
 defn job-by-n do
   '() _m -> {:none}
-  '({n port text} . _) m when (eq? n m) -> {:job n port text}
+  '({n port text} . _) m when (equal? n m) -> {:job n port text}
   '(_ . t) m -> job-by-n t m
 end
 
@@ -565,30 +565,30 @@ end
 
 defn keep-undone do
   '() -> '()
-  '({_n port _text} . t) when (eq? (port-status port) :done) -> keep-undone t
+  '({_n port _text} . t) when (equal? (port-status port) :done) -> keep-undone t
   '({n port text} . t) -> cons {n port text} (keep-undone t)
 end
 
 defn stopped-count do
   '() -> 0
-  '({_n port _t} . t) when (eq? (port-status port) :stopped) -> add 1 (stopped-count t)
+  '({_n port _t} . t) when (equal? (port-status port) :stopped) -> add 1 (stopped-count t)
   '(_ . t) -> stopped-count t
 end
 
 defn drop-port do
   '() _p -> '()
-  '({_n port _t} . t) p when (eq? port p) -> t
+  '({_n port _t} . t) p when (equal? port p) -> t
   '(h . t) p -> cons h (drop-port t p)
 end
 
 defn jobs-prune {entries next} do
   kept = keep-undone entries
-  {kept (cond (eq? kept '()) 1 next)}
+  {kept (cond (equal? kept '()) 1 next)}
 end
 
 defn state-loop pid jst cwd hist-file hist -> receive do
   {:ish-done n} -> n
-  {:exit p _reason} when (eq? p pid) -> 70
+  {:exit p _reason} when (equal? p pid) -> 70
   {:ish-job port text from} -> do
     {jst2 n} = jobs-register jst port text
     send from {:ish-reply {:id n}}
@@ -602,7 +602,7 @@ defn state-loop pid jst cwd hist-file hist -> receive do
   {:ish-job-get n from} -> do
     jst2 = jobs-prune jst
     {entries _next} = jst2
-    send from {:ish-reply (cond (eq? n :nil) (newest-job entries) (job-by-n entries n))}
+    send from {:ish-reply (cond (equal? n :nil) (newest-job entries) (job-by-n entries n))}
     state-loop pid jst2 cwd hist-file hist
   end
   {:ish-job-remove port from} -> do
@@ -690,7 +690,7 @@ defn serve ed status warned do
   ed2 = arm ed status
   match (Edit.run ed2) do
     {:eof st} -> do
-      if (and (gt? (stopped-jobs) 0) (eq? warned :false)) do
+      if (and (gt? (stopped-jobs) 0) (equal? warned :false)) do
         eprintln "ish: there are stopped jobs"
         serve st status :true
       else do
@@ -702,7 +702,7 @@ defn serve ed status warned do
       serve (Edit.reset st) status :false
     end
     {:line line st} -> do
-      if (eq? (trim line) ":q") do
+      if (equal? (trim line) ":q") do
         0
       else do
         st2 = if (recordable? line (first-hist st)) do

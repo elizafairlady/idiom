@@ -2281,7 +2281,7 @@ static bool compile_package_artifact(IdmRuntime *rt, IdmScopeStore *store, const
                 if (!ctx.field_selectors[i].env || !ctx.field_selectors[i].emitted || ctx.field_selectors[i].env_key) continue;
                 out->field_selectors[out->field_selector_count].name = idm_strdup(ctx.field_selectors[i].name);
                 if (!out->field_selectors[out->field_selector_count].name) continue;
-                out->field_selectors[out->field_selector_count].env_key = idm_strdup(ctx.unit_key);
+                out->field_selectors[out->field_selector_count].env_key = idm_strdup(idm_symbol_text(ctx.unit_key));
                 out->field_selectors[out->field_selector_count].slot = ctx.field_selectors[i].slot;
                 out->field_selector_count++;
             }
@@ -2364,7 +2364,7 @@ bool compile_package_module(ExpandContext *parent, const IdmSyntax *pkg, const c
     IdmPkgImport *parent_imports = NULL;
     size_t parent_import_count = 0;
     if (!collect_ctx_package_imports(parent, &parent_imports, &parent_import_count)) return idm_error_oom(err, idm_span_unknown(NULL));
-    bool ok = compile_package_artifact(parent->rt, &parent->scope_store, pkg, NULL, 0u, unit_name_hint, parent->kernel_mode, src_hash, parent->unit_key, inherited_slots, inherited_count, parent_imports, parent_import_count, preacts, preact_count, out, err);
+    bool ok = compile_package_artifact(parent->rt, &parent->scope_store, pkg, NULL, 0u, unit_name_hint, parent->kernel_mode, src_hash, idm_symbol_text(parent->unit_key), inherited_slots, inherited_count, parent_imports, parent_import_count, preacts, preact_count, out, err);
     for (size_t i = 0; i < parent_import_count; i++) idm_pkg_import_destroy(&parent_imports[i]);
     free(parent_imports);
     return ok;

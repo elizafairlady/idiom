@@ -1730,6 +1730,8 @@ bool idm_primitive_contract(IdmRuntime *rt, IdmPrimitive primitive, size_t argc,
             break;
         case IDM_PRIM_EQ:
         case IDM_PRIM_NEQ:
+        case IDM_PRIM_EQUAL:
+        case IDM_PRIM_NOT_EQUAL:
         case IDM_PRIM_OK:
         case IDM_PRIM_SYNTAX_LIST_PRED:
         case IDM_PRIM_SYNTAX_WORD_PRED:
@@ -2553,11 +2555,11 @@ static bool compile_letrec(IdmCore *core, CompileCtx *ctx, uint32_t dst, bool ta
             if (compiled[i]) ok = emit_callable_closure(ctx, &callables[i], value_reg, err, binding->value->span);
             else ok = compile_expr(binding->value, ctx, value_reg, false, err);
             if (ok && compiled[i] && callables[i].capture_count == 0) {
-                const char *key = NULL;
+                IdmSymbol *key = NULL;
                 bool key_ok = !binding->has_env_key;
                 if (binding->has_env_key) {
                     IdmValueTag kt = idm_value_tag(binding->env_key);
-                    key = kt == IDM_VAL_ATOM || kt == IDM_VAL_WORD ? idm_symbol_text(idm_value_symbol(binding->env_key)) : NULL;
+                    key = kt == IDM_VAL_ATOM || kt == IDM_VAL_WORD ? idm_value_symbol(binding->env_key) : NULL;
                     key_ok = key != NULL;
                 }
                 if (key_ok && !idm_bc_note_env_closure(ctx->module, key, binding->slot, callables[i].entries, (uint32_t)callables[i].count)) ok = idm_error_oom(err, core->span);

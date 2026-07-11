@@ -78,7 +78,7 @@ end
 
 export defn member? do
   '() _ -> :false
-  '(h . _) x when (eq? &h &x) -> :true
+  '(h . _) x when (equal? &h &x) -> :true
   '(_ . t) x -> member? t x
 end
 
@@ -242,12 +242,12 @@ end
 
 defn delete-acc do
   '() _ acc -> rev-into acc '()
-  '(h . t) x acc when (eq? &h &x) -> (rev-into acc '()) |> append t
+  '(h . t) x acc when (equal? &h &x) -> (rev-into acc '()) |> append t
   '(h . t) x acc -> delete-acc t x (cons &h acc)
 end
 
 export defn delete-all do
-  xs x -> xs |> filter (fn item -> neq? item x)
+  xs x -> xs |> filter (fn item -> not-equal? item x)
 end
 
 defn delete-at-acc do
@@ -288,7 +288,7 @@ export defn update-at xs i f -> update-at-acc xs i f '()
 export defn starts-with? do
   _ '() -> :true
   '() _ -> :false
-  '(h . t) '(ph . pt) when (eq? &h &ph) -> starts-with? t pt
+  '(h . t) '(ph . pt) when (equal? &h &ph) -> starts-with? t pt
   _ _ -> :false
 end
 

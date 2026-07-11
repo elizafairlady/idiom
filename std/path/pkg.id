@@ -6,7 +6,7 @@ use std/system with [pwd]
 # Lexical path helpers. These do not normalize dot segments or query the filesystem.
 
 export defn join do
-  a b when (eq? a "") -> b
+  a b when (equal? a "") -> b
   a b when (ends-with? a "/") -> "${a}${b}"
   a b -> "${a}/${b}"
 end
@@ -20,7 +20,7 @@ end
 
 defn scan-slash do
   _p 0 -> :nil
-  p i -> cond (eq? (byte p (sub i 1)) 47) (sub i 1) (scan-slash p (sub i 1))
+  p i -> cond (equal? (byte p (sub i 1)) 47) (sub i 1) (scan-slash p (sub i 1))
 end
 
 export defn dirname do
@@ -42,9 +42,9 @@ defn last-dot do
   _p 0 -> :nil
   p i -> do
     b = byte p (sub i 1)
-    if (eq? b 46) do
+    if (equal? b 46) do
       sub i 1
-    else if (eq? b 47) do
+    else if (equal? b 47) do
       :nil
     else do
       last-dot p (sub i 1)

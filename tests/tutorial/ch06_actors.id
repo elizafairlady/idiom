@@ -78,7 +78,7 @@ suite "tutorial/ch06 mail for a tiny ghost" do
     send c {:inc}
     send c {:get self}
     total = receive do
-      {:count p n} when (eq? p c) -> n
+      {:count p n} when (equal? p c) -> n
       after 500 -> :timeout
     end
     send c {:stop}
@@ -92,8 +92,8 @@ suite "tutorial/ch06 mail for a tiny ghost" do
       {:iam q} -> q
       after 500 -> :timeout
     end
-    eq? got p |> assert-eq :true
+    equal? got p |> assert-eq :true
     pid? p |> assert-eq :true
-    eq? p parent |> assert-eq :false
+    equal? p parent |> assert-eq :false
   end
 end

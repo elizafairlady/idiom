@@ -9,20 +9,20 @@ defn up-pid -> receive do
 end
 
 defn tagged-up tag -> receive do
-  {:up t p} when (eq? t tag) -> p
+  {:up t p} when (equal? t tag) -> p
   after 2000 -> :timeout
 end
 
 defn quiet-on tag -> receive do
-  {:up t p} when (eq? t tag) -> {:restarted p}
+  {:up t p} when (equal? t tag) -> {:restarted p}
   after 300 -> :quiet
 end
 
-defn both-down a b n -> if (eq? n 2) do
+defn both-down a b n -> if (equal? n 2) do
   :both
 else do
   receive do
-    {:down r _p _reason} when (or (eq? r a) (eq? r b)) -> both-down a b (add n 1)
+    {:down r _p _reason} when (or (equal? r a) (equal? r b)) -> both-down a b (add n 1)
     after 2000 -> {:only n}
   end
 end
@@ -109,8 +109,8 @@ test "one_for_all restarts every child when one dies" do
   send a1 :crash
   a2 = tagged-up :a
   b2 = tagged-up :b
-  eq? a1 a2 |> assert-eq :false
-  eq? b1 b2 |> assert-eq :false
+  equal? a1 a2 |> assert-eq :false
+  equal? b1 b2 |> assert-eq :false
   Supervisor.stop sup |> assert-eq :ok
 end
 
@@ -133,8 +133,8 @@ test "rest_for_one restarts the failed child and those started after it" do
   send b1 :crash
   b2 = tagged-up :b
   c2 = tagged-up :c
-  eq? b1 b2 |> assert-eq :false
-  eq? c1 c2 |> assert-eq :false
+  equal? b1 b2 |> assert-eq :false
+  equal? c1 c2 |> assert-eq :false
   quiet-on :a |> assert-eq :quiet
   Supervisor.stop sup |> assert-eq :ok
 end
@@ -156,7 +156,7 @@ test "simple_one_for_one starts and restarts dynamic children" do
   _u2 = up-pid
   send p1 :crash
   np = up-pid
-  eq? np p1 |> assert-eq :false
+  equal? np p1 |> assert-eq :false
   pid? np |> assert-eq :true
   Supervisor.stop sup |> assert-eq :ok
 end

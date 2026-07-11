@@ -113,7 +113,7 @@ suite "ish lives in a buffer" do
     f = drive (ish-frame) {:open "scratch" "" :nil}
     f2 = drive (feed (key-m-x f) (typed "ish")) {:tea-key :enter}
     port = state-get f2 :ish-port :nil
-    neq? port :nil |> assert-eq :true
+    not-equal? port :nil |> assert-eq :true
     bufpid = buffer-pid f2 "*ish*"
     f3 = drive f2 {:buffer-down bufpid :crashed}
     state-get f3 :ish-port :nil |> assert-eq :nil
@@ -147,14 +147,14 @@ suite "ish lives in a buffer" do
     f3a = feed f3 (typed "post")
     B.mark-of (snap f3a) |> assert-eq 4
     f3b = drive f3a {:tea-key :enter}
-    neq? (buffer-pid f3b "*ish*") :nil |> assert-eq :true
+    not-equal? (buffer-pid f3b "*ish*") :nil |> assert-eq :true
     f3c = await f3b "post\n" 60
     snap-text f3c |> assert-eq "post\n"
     f4 = drive f3c {:window-size "*ish*" 40 5}
     env-set "IEM_ISH" "/bin/sh"
     f5 = drive (feed (key-m-x f4) (typed "ish")) {:tea-key :enter}
-    neq? (state-get f5 :ish-port :nil) :nil |> assert-eq :true
-    neq? (state-get f5 :ish-port :nil) port |> assert-eq :true
+    not-equal? (state-get f5 :ish-port :nil) :nil |> assert-eq :true
+    not-equal? (state-get f5 :ish-port :nil) port |> assert-eq :true
     current f5 |> assert-eq "*ish*"
     f6 = drive (feed f5 (typed "stty size")) {:tea-key :enter}
     f7 = await f6 "4 40" 60

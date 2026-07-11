@@ -12,7 +12,7 @@ export defmode ish port %{} do
     m = B.mark-of buf
     p = B.point-of buf
     buf2 = B.step buf (B.insert p c)
-    match (eq? p m) do
+    match (equal? p m) do
       :true -> {:done (B.step buf2 {:mark m})}
       _ -> {:done buf2}
     end
@@ -45,7 +45,7 @@ cr-s = "\r"
 bel-s = byte-str 7
 bs-s = byte-str 8
 
-defn flush-span s j i acc -> cond (eq? j i) acc "${acc}#{byte-slice s j i}"
+defn flush-span s j i acc -> cond (equal? j i) acc "${acc}#{byte-slice s j i}"
 
 defn tail-open s start n -> byte-slice s start (cond (lt? (start + 2) n) (start + 2) n)
 
@@ -111,7 +111,7 @@ defn str-hit do
 end
 
 defn str-esc s n start epos -> cond (gte? (epos + 1) n) {:tail "#{tail-open s start n}#{esc-s}"}
-  (cond (eq? (byte s (epos + 1)) 92) {:pos (epos + 2)} (seq-end s epos n))
+  (cond (equal? (byte s (epos + 1)) 92) {:pos (epos + 2)} (seq-end s epos n))
 
 defn scan s j n acc caches -> match caches do
   {ec cc bc hc} -> do
@@ -127,7 +127,7 @@ defn scan s j n acc caches -> match caches do
 end
 
 defn scan-hit s n acc caches i -> match caches do
-  {ec _cc _bc _hc} -> cond (eq? i ec)
+  {ec _cc _bc _hc} -> cond (equal? i ec)
     (match (seq-end s i n) do
       {:pos p} -> scan s p n acc caches
       {:tail t} -> {acc t}
@@ -191,9 +191,9 @@ defn ish-teardown frame msg -> do
   port = state-get frame :ish-port :nil
   buf = state-get frame :ish-buf :nil
   cleared = state-put (state-put (state-put frame :ish-port :nil) :ish-buf :nil) :ish-pump :nil
-  noted = cond (eq? msg :nil) cleared (cleared.record-update (echo: msg))
-  unhook = cond (eq? buf :nil) '() (list {:send buf {:set-handler :nil}})
-  kill = cond (eq? port :nil) '() (list {:do (fn -> do
+  noted = cond (equal? msg :nil) cleared (cleared.record-update (echo: msg))
+  unhook = cond (equal? buf :nil) '() (list {:send buf {:set-handler :nil}})
+  kill = cond (equal? port :nil) '() (list {:do (fn -> do
     exit port :kill
     '()
   end)})
@@ -201,9 +201,9 @@ defn ish-teardown frame msg -> do
 end
 
 defn ish-down-hook frame -> match (state-get frame :hook-event :nil) do
-  {:buffer-down pid reason} -> cond (eq? pid (state-get frame :ish-buf :nil)) (ish-teardown frame :nil)
-    (cond (eq? pid (state-get frame :ish-pump :nil))
-      (cond (eq? reason :normal) (ish-teardown frame :nil) (ish-teardown frame "ish output pump died: #{reason}"))
+  {:buffer-down pid reason} -> cond (equal? pid (state-get frame :ish-buf :nil)) (ish-teardown frame :nil)
+    (cond (equal? pid (state-get frame :ish-pump :nil))
+      (cond (equal? reason :normal) (ish-teardown frame :nil) (ish-teardown frame "ish output pump died: #{reason}"))
       {frame '()})
   _ -> {frame '()}
 end

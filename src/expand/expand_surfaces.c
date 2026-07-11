@@ -454,7 +454,7 @@ static MacroDef *macro_slot(ExpandContext *ctx, const char *name, IdmSpan span, 
 static bool bind_macro_surface(ExpandContext *ctx, const IdmSyntax *name_syntax, const char *name, uint32_t payload, IdmSpan span, IdmError *err) {
     IdmScopeSet scopes;
     if (!binder_scopes_pruned(ctx, name_syntax, &scopes)) return idm_error_oom(err, span);
-    int bound = surface_bind_payload(ctx, ctx->unit, ctx->unit_key, name, name, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, span, err);
+    int bound = surface_bind_payload(ctx, ctx->unit, idm_symbol_text(ctx->unit_key), name, name, IDM_BIND_SPACE_DEFAULT, IDM_BIND_TRANSFORMER, &scopes, payload, span, err);
     idm_scope_set_destroy(&scopes);
     return bound >= 0;
 }

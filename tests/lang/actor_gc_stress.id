@@ -14,7 +14,7 @@ end
 
 defn busy-loop parent n -> do
   payload = repeat "k" 4096
-  cond (eq? (n %% 64) 0) (send parent {:tick self (byte-len payload)}) :nil
+  cond (equal? (n %% 64) 0) (send parent {:tick self (byte-len payload)}) :nil
   busy-loop parent (n + 1)
 end
 
@@ -55,11 +55,11 @@ suite "actor-gc-stress" do
     parent = self
     pid = spawn-link (fn -> busy-loop parent 0)
     receive do
-      {:tick p 4096} when (eq? p pid) -> exit pid :kill
+      {:tick p 4096} when (equal? p pid) -> exit pid :kill
       after 1000 -> :timeout
     end |> assert-eq :ok
     reason = receive do
-      {:exit p value} when (eq? p pid) -> value
+      {:exit p value} when (equal? p pid) -> value
       after 1000 -> :timeout
     end
     trap-exit :false

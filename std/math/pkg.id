@@ -12,7 +12,7 @@ export defn rem x y -> x |> mod y
 
 export defn quot-rem x y -> {(x |> quot y) (x |> rem y)}
 
-export defn zero? n -> n |> eq? 0
+export defn zero? n -> n |> equal? 0
 
 export defn positive? n -> n |> gt? 0
 
@@ -22,9 +22,9 @@ export defn nonnegative? n -> n |> gte? 0
 
 export defn nonpositive? n -> n |> lte? 0
 
-export defn even? n -> n |> floor-mod 2 |> eq? 0
+export defn even? n -> n |> floor-mod 2 |> equal? 0
 
-export defn odd? n -> n |> floor-mod 2 |> neq? 0
+export defn odd? n -> n |> floor-mod 2 |> not-equal? 0
 
 export defn min a b -> cond (a |> lt? b) a b
 
@@ -59,7 +59,7 @@ export defn cube n -> n |> mul n |> mul n
 
 defn pow-int-loop do
   _ 0 acc -> acc
-  base exponent acc when ((exponent |> floor-mod 2) |> eq? 0) -> pow-int-loop (base * base) (exponent // 2) acc
+  base exponent acc when ((exponent |> floor-mod 2) |> equal? 0) -> pow-int-loop (base * base) (exponent // 2) acc
   base exponent acc -> pow-int-loop (base * base) (exponent // 2) (acc * base)
 end
 

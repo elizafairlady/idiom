@@ -95,7 +95,7 @@ suite "tutorial/ch03 the shape of things" do
   test "a guard sees the enclosing scope" do
     x = 2
     r = match {2 :payload} do
-      {y p} when (eq? y x) -> {:pinned p}
+      {y p} when (equal? y x) -> {:pinned p}
       _ -> :other
     end
     r |> assert-eq {:pinned :payload}

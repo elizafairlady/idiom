@@ -1126,7 +1126,7 @@ static IdmCore *build_field_selector_callee(ExpandContext *ctx, const char *name
     }
     IdmCore *callee = NULL;
     if (sel->env) {
-        const char *key = sel->env_key && sel->env_key[0] ? sel->env_key : (ctx->unit_key[0] && ctx->in_package ? ctx->unit_key : NULL);
+        const char *key = sel->env_key && sel->env_key[0] ? sel->env_key : (ctx->unit_key && ctx->in_package ? idm_symbol_text(ctx->unit_key) : NULL);
         callee = key
             ? idm_core_package_ref(name, idm_atom(ctx->rt, key), sel->slot, span)
             : idm_core_env_ref(name, sel->slot, span);

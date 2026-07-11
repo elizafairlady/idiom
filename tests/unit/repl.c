@@ -154,7 +154,7 @@ int idm_unit_repl(void) {
     out = run_ok(repl, thunk, &err);
     check(idm_value_tag(out) == IDM_VAL_ATOM, "pidfd wakeup spawn");
     sleep_ms(120);
-    thunk = compile_ok(repl, "pidfd_wakeup_ref = monitor pidfd_wakeup_port\nreceive do\n  {:down r target reason} when (and (eq? r pidfd_wakeup_ref) (eq? target pidfd_wakeup_port)) -> reason\n  after 500 -> :timeout\nend", &err);
+    thunk = compile_ok(repl, "pidfd_wakeup_ref = monitor pidfd_wakeup_port\nreceive do\n  {:down r target reason} when (and (equal? r pidfd_wakeup_ref) (equal? target pidfd_wakeup_port)) -> reason\n  after 500 -> :timeout\nend", &err);
     out = run_ok(repl, thunk, &err);
     check_exit_code(out, 7, "pidfd-ready port posts down across scheduler runs");
 

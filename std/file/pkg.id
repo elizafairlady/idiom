@@ -59,7 +59,7 @@ export defn open! do
 end
 
 defn fold-open do
-  port _chunk-size acc _f when (eq? port :closed) -> {:ok acc}
+  port _chunk-size acc _f when (equal? port :closed) -> {:ok acc}
   port chunk-size acc f -> match (read-port port chunk-size) do
     {:data chunk} -> fold-open port chunk-size (f chunk acc) f
     :eof -> do

@@ -78,7 +78,7 @@ defn width-runes do
 end
 
 defn ascii-from do
-  _s i n when (eq? i n) -> :true
+  _s i n when (equal? i n) -> :true
   s i n -> do
     b = byte s i
     cond (and (gte? b 1) (lte? b 127)) (ascii-from s (add i 1) n) :false

@@ -25,8 +25,10 @@ end
 implement Integer on int
 
 export trait Eq do
-  operator "==" precedence: 30 assoc: left capture: :infix a b -> eq? a b
-  operator "!=" precedence: 30 assoc: left capture: :infix a b -> neq? a b
+  operator "==" precedence: 30 assoc: left capture: :infix a b -> equal? a b
+  operator "!=" precedence: 30 assoc: left capture: :infix a b -> not-equal? a b
+  operator "===" precedence: 30 assoc: left capture: :infix a b -> eq? a b
+  operator "!==" precedence: 30 assoc: left capture: :infix a b -> neq? a b
 end
 
 implement Eq on nil
@@ -48,10 +50,10 @@ implement Eq on record
 
 export trait Ord do
   require Eq
-  operator "<" precedence: 30 assoc: left capture: :infix a b -> eq? (compare a b) :lt
-  operator ">" precedence: 30 assoc: left capture: :infix a b -> eq? (compare a b) :gt
-  operator "<=" precedence: 30 assoc: left capture: :infix a b -> neq? (compare a b) :gt
-  operator ">=" precedence: 30 assoc: left capture: :infix a b -> neq? (compare a b) :lt
+  operator "<" precedence: 30 assoc: left capture: :infix a b -> equal? (compare a b) :lt
+  operator ">" precedence: 30 assoc: left capture: :infix a b -> equal? (compare a b) :gt
+  operator "<=" precedence: 30 assoc: left capture: :infix a b -> not-equal? (compare a b) :gt
+  operator ">=" precedence: 30 assoc: left capture: :infix a b -> not-equal? (compare a b) :lt
 end
 
 implement Ord on int do

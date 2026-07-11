@@ -18,7 +18,7 @@ export defn keys m -> m |> dict-keys
 export defn vals m -> m |> dict-vals
 export defn size m -> m |> dict-size
 export defn has? m k -> m |> dict-has? &k
-export defn empty? m -> m |> dict-size |> eq? 0
+export defn empty? m -> m |> dict-size |> equal? 0
 
 export defn update m k default f -> m |> dict-put &k (f (m |> dict-get k &default))
 

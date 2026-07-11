@@ -241,7 +241,7 @@ static bool install_required_trait_methods(ExpandContext *ctx, const TraitDef *r
     if (!binder_scopes_pruned(ctx, name_syntax, &method_scopes)) return idm_error_oom(err, name_syntax->span);
     bool ok = true;
     for (size_t i = 0; i < required->method_count && ok; i++) {
-        ok = install_method_surface(ctx, required->name, name_syntax->as.text, trait_method_name_text(&required->methods[i]), required->methods[i].arity, &method_scopes, ctx->unit, ctx->unit_key, required->methods[i].has_dispatch, required->dispatch_env, required->dispatch_env_key, required->methods[i].dispatch_slot, err);
+        ok = install_method_surface(ctx, required->name, name_syntax->as.text, trait_method_name_text(&required->methods[i]), required->methods[i].arity, &method_scopes, ctx->unit, idm_symbol_text(ctx->unit_key), required->methods[i].has_dispatch, required->dispatch_env, required->dispatch_env_key, required->methods[i].dispatch_slot, err);
     }
     idm_scope_set_destroy(&method_scopes);
     return ok;
@@ -567,7 +567,7 @@ static bool add_decl_method(ExpandContext *ctx, const IdmSyntax *name_syntax, Id
         return idm_error_oom(err, name_syntax->span);
     }
     ctx->decl_method_count++;
-    return install_method_surface(ctx, ctx->trait_identity, ctx->trait_key ? ctx->trait_key : (ctx->trait_name ? ctx->trait_name : "<anonymous>"), trait_method_name_text(method), arity, &method->scopes, ctx->unit, ctx->unit_key, true, dispatch_env, dispatch_env ? ctx->unit_key : NULL, method->dispatch_slot, err);
+    return install_method_surface(ctx, ctx->trait_identity, ctx->trait_key ? ctx->trait_key : (ctx->trait_name ? ctx->trait_name : "<anonymous>"), trait_method_name_text(method), arity, &method->scopes, ctx->unit, idm_symbol_text(ctx->unit_key), true, dispatch_env, dispatch_env ? idm_symbol_text(ctx->unit_key) : NULL, method->dispatch_slot, err);
 }
 
 bool predeclare_trait_methods(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t count, IdmError *err) {
@@ -930,7 +930,7 @@ static bool refresh_add_field_selectors(ExpandContext *ctx, IdmCore **core, IdmS
             if (!*core) { idm_core_free(sel_core); return idm_error_oom(err, span); }
             idm_core_letrec_set_env(*core);
         }
-        const char *sel_key = sel->env_key ? sel->env_key : (ctx->unit_key[0] && ctx->in_package ? ctx->unit_key : NULL);
+        const char *sel_key = sel->env_key ? sel->env_key : (ctx->unit_key && ctx->in_package ? idm_symbol_text(ctx->unit_key) : NULL);
         bool added = sel_key
             ? idm_core_letrec_add_env_fill(*core, sel->name, idm_atom(ctx->rt, sel_key), sel->slot, sel_core, sel->emitted)
             : idm_core_letrec_add_fill(*core, sel->name, sel->slot, sel_core, sel->emitted);
@@ -1085,7 +1085,7 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait_d
     bool surface_ok = true;
     bool saved_suppress_refresh = ctx->suppress_method_impl_surface_refresh;
     ctx->suppress_method_impl_surface_refresh = true;
-    for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, trait_def->name, trait_key, trait_method_name_text(&methods[i]), methods[i].arity, method_scopes, ctx->unit, ctx->unit_key, true, dispatch[i].env, dispatch[i].env_key, dispatch[i].slot, err);
+    for (size_t i = 0; i < method_count && surface_ok; i++) surface_ok = install_method_surface(ctx, trait_def->name, trait_key, trait_method_name_text(&methods[i]), methods[i].arity, method_scopes, ctx->unit, idm_symbol_text(ctx->unit_key), true, dispatch[i].env, dispatch[i].env_key, dispatch[i].slot, err);
     ctx->suppress_method_impl_surface_refresh = saved_suppress_refresh;
     if (!surface_ok) {
         surface_rollback(ctx, &checkpoint);
@@ -1234,12 +1234,12 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait_d
             return NULL;
         }
         if (provided) {
-            bool impl_pkg = letrec_env && ctx->unit_key[0];
+            bool impl_pkg = letrec_env && ctx->unit_key;
             uint32_t impl_slot = letrec_env ? ctx->env_slot_seq++ : ctx->next_slot++;
             IdmCore *fn = provided->fn;
             provided->fn = NULL;
             bool impl_added = impl_pkg
-                ? idm_core_letrec_add_env_fill(core, trait_method_impl_name_text(provided), idm_atom(ctx->rt, ctx->unit_key), impl_slot, fn, false)
+                ? idm_core_letrec_add_env_fill(core, trait_method_impl_name_text(provided), idm_atom_symbol(ctx->unit_key), impl_slot, fn, false)
                 : idm_core_letrec_add(core, trait_method_impl_name_text(provided), impl_slot, fn);
             if (!impl_added) {
                 idm_core_free(fn);
@@ -1248,7 +1248,7 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait_d
                 implement_dispatch_bindings_destroy(dispatch, method_count);
                 return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
             }
-            if (!method_impl_record(ctx, method_surface, type, structural, methods[i].arity, letrec_env, impl_pkg ? ctx->unit_key : NULL, impl_slot, provided->has_contract ? &provided->contract : NULL, err, span)) {
+            if (!method_impl_record(ctx, method_surface, type, structural, methods[i].arity, letrec_env, impl_pkg ? idm_symbol_text(ctx->unit_key) : NULL, impl_slot, provided->has_contract ? &provided->contract : NULL, err, span)) {
                 idm_core_free(core);
                 trait_impls_destroy(impls, impl_count);
                 implement_dispatch_bindings_destroy(dispatch, method_count);
@@ -1290,7 +1290,7 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait_d
         }
         methods[i].has_dispatch = true;
         methods[i].dispatch_slot = dispatch[i].slot;
-        if (ctx->in_package && dispatch[i].env && dispatch[i].env_key[0] && strcmp(dispatch[i].env_key, ctx->unit_key) == 0 &&
+        if (ctx->in_package && dispatch[i].env && dispatch[i].env_key[0] && strcmp(dispatch[i].env_key, idm_symbol_text(ctx->unit_key)) == 0 &&
             !record_package_slot(ctx, trait_method_name_text(&methods[i]), dispatch[i].slot, method_scopes, methods[i].arity, NULL, true)) {
             idm_core_free(core);
             trait_impls_destroy(impls, impl_count);
@@ -1307,7 +1307,7 @@ static IdmCore *build_trait_implement_core(ExpandContext *ctx, TraitDef *trait_d
         return (IdmCore *)(uintptr_t)idm_error_oom(err, span);
     }
     for (size_t i = 0; i < method_count; i++) {
-        if (!install_method_surface(ctx, trait_def->name, trait_key, trait_method_name_text(&methods[i]), methods[i].arity, method_scopes, ctx->unit, ctx->unit_key, true, dispatch[i].env, dispatch[i].env_key, dispatch[i].slot, err)) {
+        if (!install_method_surface(ctx, trait_def->name, trait_key, trait_method_name_text(&methods[i]), methods[i].arity, method_scopes, ctx->unit, idm_symbol_text(ctx->unit_key), true, dispatch[i].env, dispatch[i].env_key, dispatch[i].slot, err)) {
             idm_core_free(core);
             trait_impls_destroy(impls, impl_count);
             implement_dispatch_bindings_destroy(dispatch, method_count);
@@ -1724,9 +1724,9 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         IdmCore *default_fn = method->default_fn;
         method->default_fn = NULL;
         if (default_fn) {
-            bool def_pkg = trait_dispatch_env_storage(ctx) && ctx->unit_key[0];
+            bool def_pkg = trait_dispatch_env_storage(ctx) && ctx->unit_key;
             bool def_added = def_pkg
-                ? idm_core_letrec_add_env_fill(init, trait_method_name_text(method), idm_atom(ctx->rt, ctx->unit_key), method->default_slot, default_fn, false)
+                ? idm_core_letrec_add_env_fill(init, trait_method_name_text(method), idm_atom_symbol(ctx->unit_key), method->default_slot, default_fn, false)
                 : idm_core_letrec_add(init, trait_method_name_text(method), method->default_slot, default_fn);
             if (!def_added) {
                 idm_core_free(default_fn);
@@ -1810,7 +1810,7 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         idm_core_free(init);
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
-    trait->dispatch_env_key = idm_strdup(ctx->unit_key);
+    trait->dispatch_env_key = idm_strdup(idm_symbol_text(ctx->unit_key));
     if (!trait->dispatch_env_key) {
         free(op_decls);
         idm_scope_set_destroy(&trait_scopes);
@@ -1819,7 +1819,7 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
         return (IdmCore *)(uintptr_t)idm_error_oom(err, name_syntax->span);
     }
     for (size_t i = 0; i < method_count; i++) {
-        if (!install_method_surface(ctx, trait->name, name_syntax->as.text, trait_method_name_text(&methods[i]), methods[i].arity, &trait_scopes, ctx->unit, ctx->unit_key, methods[i].has_dispatch, trait->dispatch_env, trait->dispatch_env_key, methods[i].dispatch_slot, err)) {
+        if (!install_method_surface(ctx, trait->name, name_syntax->as.text, trait_method_name_text(&methods[i]), methods[i].arity, &trait_scopes, ctx->unit, idm_symbol_text(ctx->unit_key), methods[i].has_dispatch, trait->dispatch_env, trait->dispatch_env_key, methods[i].dispatch_slot, err)) {
             free(op_decls);
             idm_scope_set_destroy(&trait_scopes);
             surface_rollback(ctx, &install_checkpoint);
@@ -1830,7 +1830,7 @@ static IdmCore *trait_decl_core(ExpandContext *ctx, const IdmSyntax *form, const
     for (size_t i = 0; i < op_decl_count; i++) {
         const TraitOperatorForm *opd = &op_decls[i];
         const char *target_text = opd->target ? opd->target->as.text : opd->symbol->as.text;
-        if (!register_operator(ctx, opd->symbol->as.text, opd->capture, opd->precedence, opd->assoc, IDM_OPERATOR_ACTION_METHOD, target_text, &trait_scopes, &trait_scopes, ctx->unit, ctx->unit_key, trait->exported, opd->symbol->span, err)) {
+        if (!register_operator(ctx, opd->symbol->as.text, opd->capture, opd->precedence, opd->assoc, IDM_OPERATOR_ACTION_METHOD, target_text, &trait_scopes, &trait_scopes, ctx->unit, idm_symbol_text(ctx->unit_key), trait->exported, opd->symbol->span, err)) {
             free(op_decls);
             idm_scope_set_destroy(&trait_scopes);
             surface_rollback(ctx, &install_checkpoint);

@@ -43,7 +43,7 @@ static bool bind_native_core_form(ExpandContext *ctx, const char *name, NativeSu
     PhaseSyntaxFn *fn = calloc(1u, sizeof(*fn));
     if (!fn) return idm_error_oom(err, idm_span_unknown(NULL));
     fn->native = handler;
-    int bound = surface_bind_data(ctx, "kernel", ctx->unit_key, name, name, IDM_BIND_SPACE_CORE_FORM, IDM_BIND_CORE_FORM, &ctx->empty_scopes, fn, idm_span_unknown(NULL), err);
+    int bound = surface_bind_data(ctx, "kernel", idm_symbol_text(ctx->unit_key), name, name, IDM_BIND_SPACE_CORE_FORM, IDM_BIND_CORE_FORM, &ctx->empty_scopes, fn, idm_span_unknown(NULL), err);
     if (bound <= 0) {
         free(fn);
         return bound == 0;
@@ -64,8 +64,7 @@ bool ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
     idm_scope_store_init_shared(&ctx->scope_store, &rt->scope_next);
     ctx->surface_phase = -1;
     ctx->unit = "<unit>";
-    memset(ctx->unit_key, '0', sizeof ctx->unit_key - 1u);
-    ctx->unit_key[sizeof ctx->unit_key - 1u] = '\0';
+    ctx->unit_key = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, "0000000000000000000000000000000000000000000000000000000000000000");
     if (!ctx_seed_builtin_types(ctx)) return false;
     IdmError floor_err;
     idm_error_init(&floor_err);
@@ -77,7 +76,9 @@ bool ctx_init(ExpandContext *ctx, IdmRuntime *rt) {
 
 void ctx_set_unit(ExpandContext *ctx, const char *name, const unsigned char hash[32]) {
     ctx->unit = name;
-    artifact_provider_key(hash, ctx->unit_key);
+    char key[65];
+    artifact_provider_key(hash, key);
+    ctx->unit_key = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, key);
 }
 
 void hooks_install(IdmRuntime *rt, ExpandContext *ctx, SavedHooks *saved) {
@@ -275,7 +276,7 @@ static void surface_install_destroy(SurfaceInstall *install) {
 }
 
 int surface_install_guard(ExpandContext *ctx, const char *provider, const char *provider_key, const char *key, const char *display, IdmBindingSpace space, const IdmScopeSet *scopes, IdmError *err) {
-    bool local = strcmp(provider_key, ctx->unit_key) == 0;
+    bool local = strcmp(provider_key, idm_symbol_text(ctx->unit_key)) == 0;
     int phase = ctx->surface_phase >= 0 ? ctx->surface_phase : ctx->phase;
     for (size_t i = 0; i < ctx->surface_install_count; i++) {
         SurfaceInstall *e = &ctx->surface_installs[i];
@@ -1755,7 +1756,7 @@ FieldSelectorDef *field_selector_ensure(ExpandContext *ctx, const char *name, Id
 }
 
 IdmEnv *expand_unit_runtime_env(ExpandContext *ctx) {
-    if (ctx->in_package && ctx->unit_key[0]) return idm_package_env_get_or_create(ctx->rt, idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, ctx->unit_key));
+    if (ctx->in_package && ctx->unit_key) return idm_package_env_get_or_create(ctx->rt, ctx->unit_key);
     if (ctx->phase != 0 && ctx->phase_env) return ctx->phase_env->env;
     return ctx->rt->main_env;
 }

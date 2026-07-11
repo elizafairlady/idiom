@@ -18,7 +18,7 @@ defn reason-of graph -> do
   p = spawn graph
   ref = monitor p
   receive do
-    {:down r t reason} when (and (eq? r ref) (eq? t p)) -> reason
+    {:down r t reason} when (and (equal? r ref) (equal? t p)) -> reason
     after 5000 -> :timeout
   end
 end
@@ -87,7 +87,7 @@ suite "tutorial/ch14 shipping it" do
   test "the exit vocabulary is the monitor vocabulary" do
     {p ref} = spawn-monitor (fn -> exit self {:exit-code 12})
     got = receive do
-      {:down r t reason} when (and (eq? r ref) (eq? t p)) -> reason
+      {:down r t reason} when (and (equal? r ref) (equal? t p)) -> reason
       after 1000 -> :timeout
     end
     got |> assert-eq {:exit-code 12}
@@ -104,7 +104,7 @@ suite "tutorial/ch14 shipping it" do
     ref = monitor p
     out = drain p ""
     reason = receive do
-      {:down r t rsn} when (and (eq? r ref) (eq? t p)) -> rsn
+      {:down r t rsn} when (and (equal? r ref) (equal? t p)) -> rsn
       after 5000 -> :timeout
     end
     reason |> assert-eq {:exit-code 1}

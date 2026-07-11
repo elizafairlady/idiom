@@ -15,7 +15,7 @@ suite do
     hel = bits-append (bits-append b (bits-of-int 101 8 :big)) (bits-of-int 108 8 :big)
     bits-len hel |> assert-eq 24
     bits-string hel |> assert-eq "Hel"
-    eq? (string-bits "Hel") hel |> assert
+    equal? (string-bits "Hel") hel |> assert
     bits-len (bits-append (bits-of-int 5 3 :big) (bits-of-int 1 2 :big)) |> assert-eq 5
   end
 
@@ -30,9 +30,9 @@ suite do
     s = string-bits "Hel"
     v = bits-slice s 4 8
     bits-len v |> assert-eq 8
-    eq? v (bits-of-int 134 8 :big) |> assert
-    eq? (bits-slice s 0 24) s |> assert
-    neq? (bits-slice s 3 8) v |> assert
+    equal? v (bits-of-int 134 8 :big) |> assert
+    equal? (bits-slice s 0 24) s |> assert
+    not-equal? (bits-slice s 3 8) v |> assert
     d = dict (bits-slice s 4 8) :hit
     dict-get d (bits-of-int 134 8 :big) :miss |> assert-eq :hit
   end

@@ -10,8 +10,8 @@ suite "command graph job control" do
     {port ref} = spawn-monitor graph
     job-signal port :stop
     got-stop = receive do
-      {:stopped r p} when (eq? r ref) -> {:stopped p}
-      {:down r _p reason} when (eq? r ref) -> {:early-down reason}
+      {:stopped r p} when (equal? r ref) -> {:stopped p}
+      {:down r _p reason} when (equal? r ref) -> {:early-down reason}
       after 4000 -> :timeout
     end
     match got-stop do
@@ -21,7 +21,7 @@ suite "command graph job control" do
     job-resume port :bg
     job-signal port :term
     got-down = receive do
-      {:down r _p _reason} when (eq? r ref) -> :down
+      {:down r _p _reason} when (equal? r ref) -> :down
       after 4000 -> :timeout
     end
     got-down |> assert-eq :down
@@ -31,7 +31,7 @@ suite "command graph job control" do
     graph = Cmd.fg (Cmd.command (list "true") (Cmd.stdio :null :null :null))
     {_port ref} = spawn-monitor graph
     got = receive do
-      {:down r _p reason} when (eq? r ref) -> reason
+      {:down r _p reason} when (equal? r ref) -> reason
       after 4000 -> :timeout
     end
     got |> assert-eq :normal

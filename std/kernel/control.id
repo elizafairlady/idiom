@@ -54,12 +54,12 @@ export protocol IdiomControl do
 
   export defn head-is? do
     node name when (and (syntax? node) (syntax-list? node)) ->
-      and (gt? (syntax-length node) 0) (and (syntax-word? (syntax-nth node 0)) (eq? (syntax-word-text (syntax-nth node 0)) name))
+      and (gt? (syntax-length node) 0) (and (syntax-word? (syntax-nth node 0)) (equal? (syntax-word-text (syntax-nth node 0)) name))
     _ _ -> :false
   end
 
   export defn word-is? do
-    node name when (syntax-word? node) -> eq? (syntax-word-text node) name
+    node name when (syntax-word? node) -> equal? (syntax-word-text node) name
     _ _ -> :false
   end
 

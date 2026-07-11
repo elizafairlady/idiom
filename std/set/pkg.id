@@ -16,7 +16,7 @@ export defn to-list s -> s.dict |> dict-keys
 
 export defn size s -> s.dict |> dict-size
 
-export defn empty? s -> s |> size |> eq? 0
+export defn empty? s -> s |> size |> equal? 0
 
 export defn has? s x -> s.dict |> dict-has? &x
 

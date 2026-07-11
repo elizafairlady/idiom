@@ -9,7 +9,7 @@ activate Test
 defn crash-buffer pid -> do
   send pid {:step {:replace 5 99 ""}}
   receive do
-    {:down _ref p reason} when (eq? p pid) -> reason
+    {:down _ref p reason} when (equal? p pid) -> reason
     after 2000 -> :no-down
   end
 end
@@ -18,7 +18,7 @@ suite "buffer actors are monitored and their death is a frame event" do
   test "a crashing buffer posts down to its owner" do
     pid = spawn-buffer ""
     reason = crash-buffer pid
-    neq? reason :no-down |> assert
+    not-equal? reason :no-down |> assert
   end
 
   test "buffer death prunes the entry and echoes the reason" do

@@ -91,7 +91,7 @@ suite "collections" do
   end
 
   bench "list/map-filter-fold" expect: 26733 do
-    xs |> L.map (fn x -> x + 1) |> L.filter (fn x -> eq? (x %% 3) 0) |> L.foldl 0 &add
+    xs |> L.map (fn x -> x + 1) |> L.filter (fn x -> equal? (x %% 3) 0) |> L.foldl 0 &add
   end
 
   bench "vector/map-length" expect: 10 do

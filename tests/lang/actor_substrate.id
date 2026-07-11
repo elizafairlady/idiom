@@ -20,7 +20,7 @@ end
 defn spin-forever n -> spin-forever (n + 1)
 
 defn fill-seq do
-  i n when (eq? i n) -> :ok
+  i n when (equal? i n) -> :ok
   i n -> do
     send self {:seq i}
     fill-seq (add i 1) n
@@ -28,9 +28,9 @@ defn fill-seq do
 end
 
 defn check-seq do
-  i n when (eq? i n) -> :ok
+  i n when (equal? i n) -> :ok
   i n -> receive do
-    {:seq got} when (eq? got i) -> check-seq (add i 1) n
+    {:seq got} when (equal? got i) -> check-seq (add i 1) n
     {:seq got} -> {:out-of-order i got}
     after 500 -> :timeout
   end
@@ -40,7 +40,7 @@ defn idiom-fd-count -> do
   p = spawn Cmd.command (list "sh" "-c" "p=$PPID; exit $(ls /proc/$p/fd | wc -l)") (Cmd.stdio :null :null :null)
   ref = monitor p
   receive do
-    {:down r target v} when (and (eq? r ref) (eq? target p)) -> match v do
+    {:down r target v} when (and (equal? r ref) (equal? target p)) -> match v do
       {:exit-code n} -> n
       :normal -> 0
       _ -> -1
@@ -94,7 +94,7 @@ suite do
   test "spawn-monitor emits down signal" do
     {pid ref} = spawn-monitor (fn -> :ok)
     reason = receive do
-      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      {:down r p value} when (and (equal? r ref) (equal? p pid)) -> value
       after 500 -> :timeout
     end
     reason |> assert-eq :normal
@@ -105,7 +105,7 @@ suite do
       2 -> :ok
     end)
     reason = receive do
-      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      {:down r p value} when (and (equal? r ref) (equal? p pid)) -> value
       after 500 -> :timeout
     end
     {:error detail trace} = reason
@@ -119,7 +119,7 @@ suite do
     p = spawn Cmd.command (list "true") (Cmd.stdio :null :pipe :null)
     ref = monitor p
     receive do
-      {:down r target _v} when (and (eq? r ref) (eq? target p)) -> :ok
+      {:down r target _v} when (and (equal? r ref) (equal? target p)) -> :ok
       after 1000 -> :timeout
     end |> assert-eq :ok
     port-read p :stdout 64 |> assert-eq :eof
@@ -130,7 +130,7 @@ suite do
     ref = monitor p
     drain-stdout p 0 |> assert-eq 2
     receive do
-      {:down r target _v} when (and (eq? r ref) (eq? target p)) -> :ok
+      {:down r target _v} when (and (equal? r ref) (equal? target p)) -> :ok
       after 1000 -> :timeout
     end |> assert-eq :ok
     port-read p :stderr 64 |> assert-eq :eof
@@ -171,13 +171,13 @@ suite do
   test "re-monitor of a dead-and-gone actor is :noproc, never its exit reason" do
     {pid ref} = spawn-monitor (fn -> div 1 0)
     first = receive do
-      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      {:down r p value} when (and (equal? r ref) (equal? p pid)) -> value
       after 500 -> :timeout
     end
     (match first do {:error _ _} -> :true; _ -> :false end) |> assert-eq :true
     ref2 = monitor pid
     second = receive do
-      {:down r p value} when (and (eq? r ref2) (eq? p pid)) -> value
+      {:down r p value} when (and (equal? r ref2) (equal? p pid)) -> value
       after 500 -> :timeout
     end
     second |> assert-eq :noproc
@@ -187,12 +187,12 @@ suite do
     trap-exit :true
     {pid ref} = spawn-monitor (fn -> div 1 0)
     receive do
-      {:down r p _value} when (and (eq? r ref) (eq? p pid)) -> :ok
+      {:down r p _value} when (and (equal? r ref) (equal? p pid)) -> :ok
       after 500 -> :timeout
     end |> assert-eq :ok
     link pid
     got = receive do
-      {:exit p value} when (eq? p pid) -> value
+      {:exit p value} when (equal? p pid) -> value
       after 500 -> :timeout
     end
     trap-exit :false
@@ -202,7 +202,7 @@ suite do
   test "error-message renders every reason shape the repl prints" do
     {pid ref} = spawn-monitor (fn -> div 1 0)
     crash = receive do
-      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      {:down r p value} when (and (equal? r ref) (equal? p pid)) -> value
       after 500 -> :timeout
     end
     crash_text = error-message crash
@@ -241,11 +241,11 @@ suite do
     demonitor ref |> assert-eq :ok
     send pid {:stop}
     receive do
-      {:child-exiting p} when (eq? p pid) -> :ok
+      {:child-exiting p} when (equal? p pid) -> :ok
       after 500 -> :timeout
     end |> assert-eq :ok
     receive do
-      {:down r _p _reason} when (eq? r ref) -> :down
+      {:down r _p _reason} when (equal? r ref) -> :down
       after 100 -> :quiet
     end |> assert-eq :quiet
   end
@@ -278,7 +278,7 @@ suite do
       end
     end)
     reason = receive do
-      {:down r p value} when (and (eq? r ref) (eq? p c)) -> value
+      {:down r p value} when (and (equal? r ref) (equal? p c)) -> value
       after 1000 -> :timeout
     end
     {:error detail trace} = reason
@@ -297,7 +297,7 @@ suite do
     end)
     exit c {:boom 42} |> assert-eq :ok
     reason = receive do
-      {:down r p value} when (and (eq? r ref) (eq? p c)) -> value
+      {:down r p value} when (and (equal? r ref) (equal? p c)) -> value
       after 1000 -> :timeout
     end
     reason |> assert-eq {:boom 42}
@@ -310,7 +310,7 @@ suite do
         Cmd.stdio :null :pipe :null
     ref = monitor p
     reason = receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 500 -> :timeout
     end
     reason |> assert-eq :normal
@@ -321,7 +321,7 @@ suite do
     p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 7") (Cmd.stdio :null :null :null)
     ref = monitor p
     receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 500 -> :timeout
     end |> assert-eq {:exit-code 7}
   end
@@ -329,7 +329,7 @@ suite do
   test "spawn-monitor accepts command graph" do
     {p ref} = spawn-monitor Cmd.command (list "printf" "ok") (Cmd.stdio :null :pipe :null)
     receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 500 -> :timeout
     end |> assert-eq :normal
     port-read p :stdout 2 |> assert-eq {:data "ok"}
@@ -339,7 +339,7 @@ suite do
     trap-exit :true
     p = spawn-link Cmd.command (list "sh" "-c" "sleep 0.05; exit 6") (Cmd.stdio :null :null :null)
     receive do
-      {:exit target value} when (eq? target p) -> value
+      {:exit target value} when (equal? target p) -> value
       after 500 -> :timeout
     end |> assert-eq {:exit-code 6}
     trap-exit :false
@@ -350,14 +350,14 @@ suite do
     no_pipefail = spawn Cmd.pipeline stages (Cmd.stdio :null :null :null)
     ref1 = monitor no_pipefail
     receive do
-      {:down r target value} when (and (eq? r ref1) (eq? target no_pipefail)) -> value
+      {:down r target value} when (and (equal? r ref1) (equal? target no_pipefail)) -> value
       after 500 -> :timeout
     end |> assert-eq :normal
 
     with_pipefail = spawn Cmd.pipefail stages (Cmd.stdio :null :null :null)
     ref2 = monitor with_pipefail
     receive do
-      {:down r target value} when (and (eq? r ref2) (eq? target with_pipefail)) -> value
+      {:down r target value} when (and (equal? r ref2) (equal? target with_pipefail)) -> value
       after 500 -> :timeout
     end |> assert-eq {:exit-code 7}
   end
@@ -366,7 +366,7 @@ suite do
     p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 9") (Cmd.stdio :null :null :null)
     ref = monitor p
     reason = receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 500 -> :timeout
     end
     reason |> assert-eq {:exit-code 9}
@@ -377,7 +377,7 @@ suite do
     ref = monitor p
     demonitor ref |> assert-eq :ok
     receive do
-      {:down r _target _value} when (eq? r ref) -> :down
+      {:down r _target _value} when (equal? r ref) -> :down
       after 200 -> :quiet
     end |> assert-eq :quiet
   end
@@ -387,7 +387,7 @@ suite do
     ref = monitor p
     exit p :shutdown |> assert-eq :ok
     receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 500 -> :timeout
     end |> assert-eq {:exit-code 143}
   end
@@ -397,7 +397,7 @@ suite do
     ref = monitor p
     exit p :kill |> assert-eq :ok
     receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 500 -> :timeout
     end |> assert-eq {:exit-code 137}
   end
@@ -407,7 +407,7 @@ suite do
     p = spawn Cmd.command (list "sh" "-c" "sleep 0.05; exit 3") (Cmd.stdio :null :null :null)
     link p |> assert-eq :ok
     reason = receive do
-      {:exit target value} when (eq? target p) -> value
+      {:exit target value} when (equal? target p) -> value
       after 500 -> :timeout
     end
     trap-exit :false
@@ -420,13 +420,13 @@ suite do
     link p |> assert-eq :ok
     unlink p |> assert-eq :ok
     receive do
-      {:exit target _value} when (eq? target p) -> :exit
+      {:exit target _value} when (equal? target p) -> :exit
       after 200 -> :quiet
     end |> assert-eq :quiet
     trap-exit :false
     ref = monitor p
     receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 500 -> :timeout
     end |> assert-eq :noproc
   end
@@ -448,7 +448,7 @@ suite do
     ref = monitor p
     drain-stdout p 0 |> assert-eq 131072
     receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 1000 -> :timeout
     end |> assert-eq :normal
   end
@@ -459,7 +459,7 @@ suite do
     p = spawn Cmd.job stage (Cmd.stdio :null :null :null)
     ref = monitor p
     receive do
-      {:down r target value} when (and (eq? r ref) (eq? target p)) -> value
+      {:down r target value} when (and (equal? r ref) (equal? target p)) -> value
       after 500 -> :timeout
     end |> assert-eq :normal
     read! path |> assert-eq "ok"
@@ -509,7 +509,7 @@ suite do
       after 500 -> :timeout
     end |> assert-eq :ok
     reason = receive do
-      {:down r p value} when (and (eq? r ref) (eq? p pid)) -> value
+      {:down r p value} when (and (equal? r ref) (equal? p pid)) -> value
       after 500 -> :timeout
     end
     reason |> assert-eq :normal

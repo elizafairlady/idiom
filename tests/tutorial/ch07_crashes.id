@@ -45,7 +45,7 @@ suite "tutorial/ch07 crashes are values" do
     {pid ref} = spawn-monitor (fn -> receive do x -> 1 + x end)
     send pid :atom
     t = receive do
-      {:down r p reason} when (and (eq? r ref) (eq? p pid)) -> reason
+      {:down r p reason} when (and (equal? r ref) (equal? p pid)) -> reason
       after 500 -> :timeout
     end
     {:error detail _trace} = t
@@ -93,7 +93,7 @@ suite "tutorial/ch07 crashes are values" do
   test "a monitor reports a normal death" do
     {pid ref} = spawn-monitor (fn -> :ok)
     got = receive do
-      {:down r p reason} when (and (eq? r ref) (eq? p pid)) -> {:down-reason reason}
+      {:down r p reason} when (and (equal? r ref) (equal? p pid)) -> {:down-reason reason}
       after 500 -> :timeout
     end
     got |> assert-eq {:down-reason :normal}
@@ -102,7 +102,7 @@ suite "tutorial/ch07 crashes are values" do
   test "a raised value crosses the boundary intact" do
     {pid ref} = spawn-monitor (fn -> error {:boom 42})
     got = receive do
-      {:down r p reason} when (eq? r ref) -> reason
+      {:down r p reason} when (equal? r ref) -> reason
       after 500 -> :timeout
     end
     got |> assert-eq {:error {:boom 42}}
@@ -113,7 +113,7 @@ suite "tutorial/ch07 crashes are values" do
       2 -> :ok
     end)
     got = receive do
-      {:down r p reason} when (and (eq? r ref) (eq? p pid)) -> reason
+      {:down r p reason} when (and (equal? r ref) (equal? p pid)) -> reason
       after 500 -> :timeout
     end
     {:error detail trace} = got
@@ -126,7 +126,7 @@ suite "tutorial/ch07 crashes are values" do
   test "a bare raise crosses without the error wrapper" do
     {pid ref} = spawn-monitor (fn -> raise {:bare :raise})
     got = receive do
-      {:down r p reason} when (eq? r ref) -> reason
+      {:down r p reason} when (equal? r ref) -> reason
       after 500 -> :timeout
     end
     got |> assert-eq {:bare :raise}
@@ -135,7 +135,7 @@ suite "tutorial/ch07 crashes are values" do
   test "exit terminates self with a reason that travels" do
     {pid ref} = spawn-monitor (fn -> exit {:shutdown :because})
     got = receive do
-      {:down r p reason} when (eq? r ref) -> reason
+      {:down r p reason} when (equal? r ref) -> reason
       after 500 -> :timeout
     end
     got |> assert-eq {:shutdown :because}
@@ -177,7 +177,7 @@ suite "tutorial/ch07 crashes are values" do
     end)
     exit pid :kill
     got = receive do
-      {:down r p reason} when (eq? r ref) -> reason
+      {:down r p reason} when (equal? r ref) -> reason
       after 500 -> :timeout
     end
     got |> assert-eq :killed
@@ -194,7 +194,7 @@ suite "tutorial/ch07 crashes are values" do
     end)
     exit victim :kill
     got = receive do
-      {:exit p reason} when (eq? p victim) -> reason
+      {:exit p reason} when (equal? p victim) -> reason
       after 500 -> :timeout
     end
     got |> assert-eq :killed
@@ -203,7 +203,7 @@ suite "tutorial/ch07 crashes are values" do
   test "sending to the dead is quietly fine" do
     {pid ref} = spawn-monitor (fn -> :ok)
     receive do
-      {:down r _ _} when (eq? r ref) -> :ok
+      {:down r _ _} when (equal? r ref) -> :ok
       after 500 -> :timeout
     end
     send pid {:hello :ghost} |> assert-eq {:hello :ghost}

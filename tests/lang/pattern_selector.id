@@ -20,20 +20,20 @@ defn pin-pair do
 end
 
 defn guard-value do
-  {a b} when (eq? a b) -> :guard
+  {a b} when (equal? a b) -> :guard
   {a b} -> {:pair a b}
 end
 
 defn match-guard value do
   match value do
-    {a b} when (eq? a b) -> {:direct a}
+    {a b} when (equal? a b) -> {:direct a}
     {a b} -> {:direct a b}
     _ -> :miss
   end
 end
 
 defn retry-dict-rest do
-  %{:a a . rest} when (eq? a :never) -> {:bad rest}
+  %{:a a . rest} when (equal? a :never) -> {:bad rest}
   %{:a a . rest} -> {:ok a rest}
   _ -> :miss
 end
@@ -100,7 +100,7 @@ suite do
     match-guard {7 7} |> assert-eq {:direct 7}
     match-guard {7 8} |> assert-eq {:direct 7 8}
     closure-guard = fn do
-      {a b} when (eq? a b) -> {:closure a}
+      {a b} when (equal? a b) -> {:closure a}
       {a b} -> {:closure a b}
     end
     closure-guard {9 9} |> assert-eq {:closure 9}

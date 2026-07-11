@@ -51,7 +51,7 @@ suite "init.id configures the bare machine" do
   test "the example init wires ish" do
     env-set "IEM_INIT" "examples/iem-init.id"
     f = load-init (frame-new)
-    neq? (dict-get (commands f) "ish" :nil) :nil |> assert-eq :true
+    not-equal? (dict-get (commands f) "ish" :nil) :nil |> assert-eq :true
   end
 end
 :ok

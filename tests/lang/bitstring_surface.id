@@ -21,7 +21,7 @@ end
 suite do
   test "all-literal segments build a constant bitstring" do
     %<72 101 108> |> inspect |> assert-eq "%<72 101 108>"
-    eq? %<72 101 108> (string-bits "Hel") |> assert
+    equal? %<72 101 108> (string-bits "Hel") |> assert
     %<5:3> |> inspect |> assert-eq "%<5:3>"
     %<> |> inspect |> assert-eq "%<>"
     %<72 3:3> |> inspect |> assert-eq "%<72 3:3>"
@@ -31,10 +31,10 @@ suite do
   test "inspect output reads back as an equal literal" do
     b = string-bits "Hel"
     inspect b |> assert-eq "%<72 101 108>"
-    eq? %<72 101 108> b |> assert
+    equal? %<72 101 108> b |> assert
     part = bits-of-int 5 3 :big
     inspect part |> assert-eq "%<5:3>"
-    eq? %<5:3> part |> assert
+    equal? %<5:3> part |> assert
   end
 
   test "endian and sign options" do
@@ -179,7 +179,7 @@ suite do
   test "a sole bare splice keeps the bitstring type check" do
     x = %<3:8>
     %<x/bits> |> bits? |> assert
-    eq? %<x/bits> x |> assert
+    equal? %<x/bits> x |> assert
     %<. x> |> bits? |> assert
     send (self) 5
     five = receive do

@@ -7,15 +7,15 @@ import std/edit as Edit
 
 defn quit-line? line do
   clean = trim line
-  or (eq? clean ":quit") (eq? clean ":q")
+  or (equal? clean ":quit") (equal? clean ":q")
 end
 
 defn drain-normal pid -> receive do
-  {:exit p _reason} when (eq? p pid) -> :ok
+  {:exit p _reason} when (equal? p pid) -> :ok
 end
 
 defn print-value value ->
-  if (neq? value :nil) do
+  if (not-equal? value :nil) do
     value |> inspect |> println
   else do
     :ok
@@ -42,12 +42,12 @@ defn eval-down reason token do
 end
 
 defn observe pid token -> receive do
-  {:repl-value p value} when (eq? p pid) -> do
+  {:repl-value p value} when (equal? p pid) -> do
     drain-normal pid
     print-value value
     0
   end
-  {:exit p reason} when (and (eq? p pid) (neq? reason :normal)) -> eval-down reason token
+  {:exit p reason} when (and (equal? p pid) (not-equal? reason :normal)) -> eval-down reason token
 end
 
 defn dispatch result -> match result do
@@ -92,7 +92,7 @@ end
 
 export defn main do
   trap-exit :true
-  if (eq? (tty?) :true) do
+  if (equal? (tty?) :true) do
     println "idiom repl"
   else do
     :ok

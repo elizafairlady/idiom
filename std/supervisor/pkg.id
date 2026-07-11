@@ -32,7 +32,7 @@ export defn stop do
   sup timeout-ms -> do
     send sup {:stop (self)}
     receive do
-      {:stopped p result} when (eq? p sup) -> &result
+      {:stopped p result} when (equal? p sup) -> &result
       after timeout-ms -> {:error {:timeout :supervisor-stop sup}}
     end
   end
@@ -44,7 +44,7 @@ export defn count do
   sup timeout-ms -> do
     send sup {:count (self)}
     receive do
-      {:child-count p n} when (eq? p sup) -> n
+      {:child-count p n} when (equal? p sup) -> n
       after timeout-ms -> {:error {:timeout :supervisor-count sup}}
     end
   end
@@ -58,7 +58,7 @@ export defn start-child do
   sup args timeout-ms -> do
     send sup {:start-child (self) args}
     receive do
-      {:started p result} when (eq? p sup) -> &result
+      {:started p result} when (equal? p sup) -> &result
       after timeout-ms -> {:error {:timeout :supervisor-start-child sup}}
     end
   end
@@ -71,7 +71,7 @@ defn norm-spec do
   {id f restart shutdown} -> {id &f restart shutdown}
 end
 
-defn init specs strategy intensity period parent -> if (eq? strategy :simple-one-for-one) do
+defn init specs strategy intensity period parent -> if (equal? strategy :simple-one-for-one) do
   loop {strategy '() '() intensity period parent (norm-spec specs)}
 else do
   loop {strategy (start-all (specs.to-list)) '() intensity period parent :nil}
@@ -122,7 +122,7 @@ defn loop state -> match state do
 end
 
 defn on-start-child state from args -> match state do
-  {strategy children restarts intensity period parent template} -> if (eq? strategy :simple-one-for-one) do
+  {strategy children restarts intensity period parent template} -> if (equal? strategy :simple-one-for-one) do
     child = start-simple template args
     send from {:started (self) {:ok (child-pid child)}}
     loop {strategy (cons child children) restarts intensity period parent template}
@@ -133,7 +133,7 @@ defn on-start-child state from args -> match state do
 end
 
 defn on-exit state from reason -> match state do
-  {_strategy _children _restarts _intensity _period parent _template} -> cond (eq? from parent)
+  {_strategy _children _restarts _intensity _period parent _template} -> cond (equal? from parent)
     (parent-down state reason)
     (child-down state from reason)
 end
@@ -187,13 +187,13 @@ end
 
 defn respawn-one do
   '() _pid -> '()
-  '(child . rest) pid -> cond (eq? (child-pid child) pid)
+  '(child . rest) pid -> cond (equal? (child-pid child) pid)
     (cons (respawn child) (respawn-one rest pid))
     (cons child (respawn-one rest pid))
 end
 
 defn respawn-all children pid -> do
-  terminate-all (children |> List.reject (fn c -> eq? (child-pid c) pid))
+  terminate-all (children |> List.reject (fn c -> equal? (child-pid c) pid))
   children |> List.map &respawn
 end
 
@@ -209,19 +209,19 @@ end
 
 defn split-before do
   '() acc _pid -> {(List.reverse acc) '()}
-  '(child . rest) acc pid -> cond (eq? (child-pid child) pid)
+  '(child . rest) acc pid -> cond (equal? (child-pid child) pid)
     {(List.reverse acc) (cons child rest)}
     (split-before rest (cons child acc) pid)
 end
 
 defn find-child do
   '() _pid -> :nil
-  '(child . rest) pid -> cond (eq? (child-pid child) pid) child (find-child rest pid)
+  '(child . rest) pid -> cond (equal? (child-pid child) pid) child (find-child rest pid)
 end
 
 defn remove-child do
   '() _pid -> '()
-  '(child . rest) pid -> cond (eq? (child-pid child) pid) rest (cons child (remove-child rest pid))
+  '(child . rest) pid -> cond (equal? (child-pid child) pid) rest (cons child (remove-child rest pid))
 end
 
 defn terminate-all children -> children |> List.reverse |> terminate-seq
@@ -235,7 +235,7 @@ defn terminate-seq do
 end
 
 defn terminate-child child -> match child do
-  {_id pid _thunk _restart shutdown} -> if (eq? shutdown :brutal-kill) do
+  {_id pid _thunk _restart shutdown} -> if (equal? shutdown :brutal-kill) do
     exit pid :kill
     wait-exit pid
   else do
@@ -245,14 +245,14 @@ defn terminate-child child -> match child do
 end
 
 defn wait-exit pid -> receive do
-  {:exit p _reason} when (eq? p pid) -> :ok
+  {:exit p _reason} when (equal? p pid) -> :ok
 end
 
-defn wait-graceful pid shutdown -> if (eq? shutdown :infinity) do
+defn wait-graceful pid shutdown -> if (equal? shutdown :infinity) do
   wait-exit pid
 else do
   receive do
-    {:exit p _reason} when (eq? p pid) -> :ok
+    {:exit p _reason} when (equal? p pid) -> :ok
     after shutdown -> do
       exit pid :kill
       wait-exit pid

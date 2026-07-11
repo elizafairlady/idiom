@@ -26,7 +26,7 @@ parsed = receive do
 end
 
 p = spawn Cmd.command (list "cat") (Cmd.stdio :pipe :pipe :null)
-port-write p "ok" |> eq? {:wrote 2}
+port-write p "ok" |> equal? {:wrote 2}
 port-close-input p
 echo = port-read p :stdout 2
 

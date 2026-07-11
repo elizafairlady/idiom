@@ -242,41 +242,35 @@ void idm_bc_destroy(IdmBytecodeModule *module) {
     code_sites_clear(module);
     free(module->functions);
     for (size_t i = 0; i < module->env_closure_count; i++) {
-        free(module->env_closures[i].env_key);
         free(module->env_closures[i].entries);
     }
     free(module->env_closures);
     idm_bc_init(module);
 }
 
-bool idm_bc_note_env_closure(IdmBytecodeModule *module, const char *env_key, uint32_t slot, const uint32_t *entries, uint32_t entry_count) {
+bool idm_bc_note_env_closure(IdmBytecodeModule *module, IdmSymbol *env_key, uint32_t slot, const uint32_t *entries, uint32_t entry_count) {
     if (entry_count == 0) return true;
     if (module->env_closure_count == module->env_closure_cap &&
         !idm_grow((void **)&module->env_closures, &module->env_closure_cap, sizeof(*module->env_closures), 8u, module->env_closure_count + 1u)) {
         return false;
     }
-    char *key_copy = env_key ? idm_strdup(env_key) : NULL;
-    if (env_key && !key_copy) return false;
     uint32_t *copy = malloc(entry_count * sizeof(*copy));
-    if (!copy) {
-        free(key_copy);
-        return false;
-    }
+    if (!copy) return false;
     memcpy(copy, entries, entry_count * sizeof(*copy));
     IdmBcEnvClosure *ec = &module->env_closures[module->env_closure_count++];
-    ec->env_key = key_copy;
+    ec->env_key = env_key;
     ec->slot = slot;
     ec->entries = copy;
     ec->entry_count = entry_count;
     return true;
 }
 
-const IdmBcEnvClosure *idm_bc_env_closure_for_slot(const IdmBytecodeModule *module, const char *env_key, uint32_t slot) {
+const IdmBcEnvClosure *idm_bc_env_closure_for_slot(const IdmBytecodeModule *module, IdmSymbol *env_key, uint32_t slot) {
     if (!module) return NULL;
     for (size_t i = module->env_closure_count; i > 0; i--) {
         const IdmBcEnvClosure *ec = &module->env_closures[i - 1u];
         if (ec->slot != slot) continue;
-        if (!ec->env_key || (env_key && strcmp(ec->env_key, env_key) == 0)) return ec;
+        if (!ec->env_key || ec->env_key == env_key) return ec;
     }
     return NULL;
 }

@@ -7,7 +7,7 @@ activate Test
 suite "explain is a form that reports expansion edges" do
   test "an operator edge carries kind, name, provider, and value context" do
     edges = explain (1 |> add 2)
-    ops = List.filter edges (fn e -> eq? (dict-get e :kind :nil) :operator)
+    ops = List.filter edges (fn e -> equal? (dict-get e :kind :nil) :operator)
     assert-eq (List.length ops) 1
     match ops do
       '(op . _) -> do
@@ -20,7 +20,7 @@ suite "explain is a form that reports expansion edges" do
 
   test "a macro edge carries the rewrite" do
     edges = explain (unless :false :ok)
-    macros = List.filter edges (fn e -> eq? (dict-get e :kind :nil) :macro)
+    macros = List.filter edges (fn e -> equal? (dict-get e :kind :nil) :macro)
     match macros do
       '(m . _) -> do
         assert-eq (dict-get m :name :nil) "unless"

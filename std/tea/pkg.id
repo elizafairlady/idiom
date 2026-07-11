@@ -27,7 +27,7 @@ end
 
 export defn emit msg -> Emit msg
 
-defn command-list commands -> commands |> List.filter (fn cmd -> neq? cmd none)
+defn command-list commands -> commands |> List.filter (fn cmd -> not-equal? cmd none)
 
 defn compact-command commands ctor -> match (command-list commands) do
   '() -> none
@@ -63,6 +63,6 @@ defn command-result-messages do
 end
 
 export defn command-messages do
-  cmd when (eq? cmd none) -> '()
+  cmd when (equal? cmd none) -> '()
   cmd -> command-result-messages (command-result cmd)
 end

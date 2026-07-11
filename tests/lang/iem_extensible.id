@@ -110,7 +110,7 @@ suite "the editor's meaning is tables in the frame" do
     send pid {:type "b"}
     send pid {:snapshot self}
     text = receive do
-      {:snapshot p b} when (eq? p pid) -> B.text-of b
+      {:snapshot p b} when (equal? p pid) -> B.text-of b
       after 2000 -> :nil
     end
     text |> assert-eq "A\nB"

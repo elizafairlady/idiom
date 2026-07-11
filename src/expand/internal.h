@@ -396,7 +396,7 @@ typedef struct ExpandContext {
     size_t dep_count;
     size_t dep_cap;
     const char *unit;
-    char unit_key[65];
+    IdmSymbol *unit_key;
     const char *primitive_home;
     const IdmSyntax **pat_binders;
     size_t pat_binder_count;

@@ -6,7 +6,7 @@ suite "tutorial/ch01 values are just sitting there" do
   test "atoms are their own value" do
     inspect :hello |> assert-eq ":hello"
     inspect :foo/bar? |> assert-eq ":foo/bar?"
-    eq? :hello :hello |> assert-eq :true
+    equal? :hello :hello |> assert-eq :true
   end
 
   test "ints are transparent bignums" do
@@ -26,7 +26,7 @@ suite "tutorial/ch01 values are just sitting there" do
   test "floats mix with ints but never equal them" do
     1.5 + 2 |> assert-eq 3.5
     3.0e2 |> assert-eq 300.0
-    eq? 1 1.0 |> assert-eq :false
+    equal? 1 1.0 |> assert-eq :false
   end
 
   test "precedence is what arithmetic promised" do

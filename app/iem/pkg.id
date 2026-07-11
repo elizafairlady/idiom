@@ -76,7 +76,7 @@ defn line-bounds buf which -> do
     :nil -> byte-len text
     after -> after - 1
   end
-  cond (eq? which 0) start stop
+  cond (equal? which 0) start stop
 end
 
 defn serve-default loop msg -> do
@@ -103,7 +103,7 @@ defn serve-default loop msg -> do
       p = B.point-of buf
       e = line-bounds buf 1
       len = byte-len (B.text-of buf)
-      next = cond (and (eq? p e) (lt? p len)) (B.step buf (B.delete p (p + 1))) (cond (lt? p e) (B.step buf (B.delete p e)) buf)
+      next = cond (and (equal? p e) (lt? p len)) (B.step buf (B.delete p (p + 1))) (cond (lt? p e) (B.step buf (B.delete p e)) buf)
       continue-buffer loop (loop.record-update (buf: next goal: :nil))
     end
     {:del-line} -> do
@@ -145,7 +145,7 @@ defn notify do
 end
 
 defn continue-buffer loop next -> do
-  cond (neq? (B.version-of loop.buf) (B.version-of next.buf)) (notify loop.watcher) :ok
+  cond (not-equal? (B.version-of loop.buf) (B.version-of next.buf)) (notify loop.watcher) :ok
   buffer-serve next
 end
 
@@ -201,27 +201,27 @@ export defmacro defmode do
       '(h . t) acc -> rev t (cons h acc)
     end
     defn params-to do
-      _s i stop acc when (eq? i stop) -> rev acc '()
+      _s i stop acc when (equal? i stop) -> rev acc '()
       s i stop acc -> params-to s (add i 1) stop (cons (syntax-nth s i) acc)
     end
     defn head-at do
-      s i n when (eq? i n) -> syntax-error s "defmode expects 'defmode NAME PARAM* KEYMAP' with an optional do CLAUSES end handler"
-      s i n -> cond (and (syntax-word? (syntax-nth s i)) (eq? (syntax-word-text (syntax-nth s i)) "defmode")) i (head-at s (add i 1) n)
+      s i n when (equal? i n) -> syntax-error s "defmode expects 'defmode NAME PARAM* KEYMAP' with an optional do CLAUSES end handler"
+      s i n -> cond (and (syntax-word? (syntax-nth s i)) (equal? (syntax-word-text (syntax-nth s i)) "defmode")) i (head-at s (add i 1) n)
     end
     defn keymap-at do
-      s i n when (eq? i n) -> syntax-error s "defmode expects a keymap"
+      s i n when (equal? i n) -> syntax-error s "defmode expects a keymap"
       s i n -> cond (syntax-word? (syntax-nth s i)) (keymap-at s (add i 1) n) i
     end
     defn items-from do
-      _b i n acc when (eq? i n) -> acc
+      _b i n acc when (equal? i n) -> acc
       b i n acc -> items-from b (add i 1) n (cons (syntax-nth b (sub n i)) acc)
     end
     n = syntax-length stx
     hd = head-at stx 0 n
-    expkw = cond (and (gt? hd 0) (and (syntax-word? (syntax-nth stx (sub hd 1))) (eq? (syntax-word-text (syntax-nth stx (sub hd 1))) "export")))
+    expkw = cond (and (gt? hd 0) (and (syntax-word? (syntax-nth stx (sub hd 1))) (equal? (syntax-word-text (syntax-nth stx (sub hd 1))) "export")))
       (list (syntax-nth stx (sub hd 1)))
       '()
-    defn expr-group? v -> and (syntax-list? v) (and (gt? (syntax-length v) 0) (and (syntax-word? (syntax-nth v 0)) (eq? (syntax-word-text (syntax-nth v 0)) "%-expr")))
+    defn expr-group? v -> and (syntax-list? v) (and (gt? (syntax-length v) 0) (and (syntax-word? (syntax-nth v 0)) (equal? (syntax-word-text (syntax-nth v 0)) "%-expr")))
     grouped = and (gt? n (add hd 1)) (expr-group? (syntax-nth stx (add hd 1)))
     src = cond grouped (syntax-nth stx (add hd 1)) stx
     lo = cond grouped 1 (add hd 1)
@@ -374,8 +374,8 @@ export defn describe-key frame k -> "#{key-text k} ${describe-entry frame (looku
 
 defn where-scan map want prefix acc -> dict-keys map |> List.foldl acc (fn k acc2 -> do
   entry = dict-get map k :nil
-  label = cond (eq? prefix "") (key-text k) "${prefix} #{key-text k}"
-  cond (eq? entry want) (cons label acc2)
+  label = cond (equal? prefix "") (key-text k) "${prefix} #{key-text k}"
+  cond (equal? entry want) (cons label acc2)
     (cond (dict? entry) (where-scan entry want label acc2) acc2)
 end)
 
@@ -433,7 +433,7 @@ export defn window-paths tree -> List.reverse (window-paths-acc tree '() '())
 
 defn path-index do
   '() _want _i -> 0
-  '(p . rest) want i -> cond (eq? p want) i (path-index rest want (add i 1))
+  '(p . rest) want i -> cond (equal? p want) i (path-index rest want (add i 1))
 end
 
 defn drop-last do
@@ -448,7 +448,7 @@ defn window-next frame -> do
 end
 
 defn window-scrub do
-  tree old new when (win-leaf? tree) -> cond (eq? tree old) new tree
+  tree old new when (win-leaf? tree) -> cond (equal? tree old) new tree
   {:v a b} old new -> {:v (window-scrub a old new) (window-scrub b old new)}
   {:h a b} old new -> {:h (window-scrub a old new) (window-scrub b old new)}
 end
@@ -459,7 +459,7 @@ defn window-first-leaf do
   {:h a _b} prefix -> window-first-leaf a (cons :a prefix)
 end
 
-defn window-visible? frame name -> window-paths frame.windows |> List.any? (fn p -> eq? (window-at frame.windows p) name)
+defn window-visible? frame name -> window-paths frame.windows |> List.any? (fn p -> equal? (window-at frame.windows p) name)
 
 defn focus-window frame path -> do
   name = window-at frame.windows path
@@ -508,77 +508,77 @@ end
 
 defn buf-name do
   '() _pid -> :nil
-  '({name pid _path _mode _saved _snap} . _rest) want when (eq? pid want) -> name
+  '({name pid _path _mode _saved _snap} . _rest) want when (equal? pid want) -> name
   '(_h . rest) want -> buf-name rest want
 end
 
 defn drop-buf do
   '() _pid -> '()
-  '({_name pid _path _mode _saved _snap} . rest) want when (eq? pid want) -> rest
+  '({_name pid _path _mode _saved _snap} . rest) want when (equal? pid want) -> rest
   '(h . rest) want -> cons h (drop-buf rest want)
 end
 
 defn buf-pid do
   '() _name -> :nil
-  '({name pid _path _mode _saved _snap} . _rest) want when (eq? name want) -> pid
+  '({name pid _path _mode _saved _snap} . _rest) want when (equal? name want) -> pid
   '(_h . rest) want -> buf-pid rest want
 end
 
 defn buf-path do
   '() _name -> :nil
-  '({name _pid path _mode _saved _snap} . _rest) want when (eq? name want) -> path
+  '({name _pid path _mode _saved _snap} . _rest) want when (equal? name want) -> path
   '(_h . rest) want -> buf-path rest want
 end
 
 defn buf-mode do
   '() _name -> :nil
-  '({name _pid _path mode _saved _snap} . _rest) want when (eq? name want) -> mode
+  '({name _pid _path mode _saved _snap} . _rest) want when (equal? name want) -> mode
   '(_h . rest) want -> buf-mode rest want
 end
 
 defn buf-saved do
   '() _name -> 0
-  '({name _pid _path _mode saved _snap} . _rest) want when (eq? name want) -> saved
+  '({name _pid _path _mode saved _snap} . _rest) want when (equal? name want) -> saved
   '(_h . rest) want -> buf-saved rest want
 end
 
 defn buf-snap do
   '() _name -> :nil
-  '({name _pid _path _mode _saved snap} . _rest) want when (eq? name want) -> snap
+  '({name _pid _path _mode _saved snap} . _rest) want when (equal? name want) -> snap
   '(_h . rest) want -> buf-snap rest want
 end
 
 defn set-buf-mode do
   '() _name _mode -> '()
-  '({name pid path _old saved snap} . rest) want mode when (eq? name want) -> cons {name pid path mode saved snap} rest
+  '({name pid path _old saved snap} . rest) want mode when (equal? name want) -> cons {name pid path mode saved snap} rest
   '(h . rest) want mode -> cons h (set-buf-mode rest want mode)
 end
 
 defn set-buf-saved do
   '() _pid _v -> '()
-  '({name pid path mode _old snap} . rest) want v when (eq? pid want) -> cons {name pid path mode v snap} rest
+  '({name pid path mode _old snap} . rest) want v when (equal? pid want) -> cons {name pid path mode v snap} rest
   '(h . rest) want v -> cons h (set-buf-saved rest want v)
 end
 
 defn set-buf-snap do
   '() _pid _v -> '()
-  '({name pid path mode saved _old} . rest) want v when (eq? pid want) -> cons {name pid path mode saved v} rest
+  '({name pid path mode saved _old} . rest) want v when (equal? pid want) -> cons {name pid path mode saved v} rest
   '(h . rest) want v -> cons h (set-buf-snap rest want v)
 end
 
-defn mini-name seq -> cond (eq? seq 0) " *mini*" " *mini-#{seq}*"
+defn mini-name seq -> cond (equal? seq 0) " *mini*" " *mini-#{seq}*"
 
-defn mini-seq-normalize frame -> cond (eq? frame.minis '()) (state-put frame :mini-seq 0) frame
+defn mini-seq-normalize frame -> cond (equal? frame.minis '()) (state-put frame :mini-seq 0) frame
 
 defn minis-drop do
   '() _want -> '()
-  '({_p _n pid _t} . rest) want when (eq? pid want) -> rest
+  '({_p _n pid _t} . rest) want when (equal? pid want) -> rest
   '(h . rest) want -> cons h (minis-drop rest want)
 end
 
 defn mini-named? do
   '() _want -> :false
-  '({_p name _pid _t} . rest) want -> cond (eq? name want) :true (mini-named? rest want)
+  '({_p name _pid _t} . rest) want -> cond (equal? name want) :true (mini-named? rest want)
 end
 
 defn focused-name frame -> match frame.minis do
@@ -607,7 +607,7 @@ defn active-pid frame -> buf-pid frame.bufs (focused-name frame)
 
 export defn modified? frame -> match frame.snap do
   :nil -> :false
-  buf -> neq? (B.version-of buf) (buf-saved frame.bufs frame.current)
+  buf -> not-equal? (B.version-of buf) (buf-saved frame.bufs frame.current)
 end
 
 defn record-gesture frame gesture -> match frame.recording do
@@ -639,7 +639,7 @@ defn buffers-enter frame -> match frame.snap do
       after -> after - 1
     end
     name = byte-slice text s e
-    cond (eq? name "") {frame '()} (frame-update frame {:switch name})
+    cond (equal? name "") {frame '()} (frame-update frame {:switch name})
   end
 end
 
@@ -721,8 +721,8 @@ defn default-ops -> %{
     path -> do
       parent = drop-last path
       sibling = match (window-at frame.windows parent) do
-        {:v a b} -> cond (eq? (window-at frame.windows path) a) b a
-        {:h a b} -> cond (eq? (window-at frame.windows path) a) b a
+        {:v a b} -> cond (equal? (window-at frame.windows path) a) b a
+        {:h a b} -> cond (equal? (window-at frame.windows path) a) b a
       end
       pruned = frame.record-update (windows: (window-set frame.windows parent sibling))
       focus-window pruned (append parent (window-first-leaf sibling '()))
@@ -795,9 +795,9 @@ defn default-updates -> %{
   :open (fn frame {:open name text path} -> {frame (list {:spawn name text path})})
   :opened (fn frame {:opened name pid path} -> do
     bufs = cons {name pid path :nil 0 :nil} frame.bufs
-    cur = cond (eq? frame.current :nil) name frame.current
-    wins = cond (eq? frame.current :nil) name frame.windows
-    foc = cond (eq? frame.current :nil) '() frame.focus
+    cur = cond (equal? frame.current :nil) name frame.current
+    wins = cond (equal? frame.current :nil) name frame.windows
+    foc = cond (equal? frame.current :nil) '() frame.focus
     f2 = frame.record-update (bufs: bufs current: cur windows: wins focus: foc)
     match f2.birth-mode do
       :nil -> {f2 (list {:sync pid})}
@@ -814,7 +814,7 @@ defn default-updates -> %{
   end)
   :snapshot (fn frame {:snapshot pid buf} -> do
     stored = frame.record-update (bufs: (set-buf-snap frame.bufs pid buf))
-    match (eq? pid (buf-pid stored.bufs stored.current)) do
+    match (equal? pid (buf-pid stored.bufs stored.current)) do
       :true -> {(stored.record-update (snap: buf)) '()}
       _ -> {stored '()}
     end
@@ -838,7 +838,7 @@ defn default-updates -> %{
       pruned = mini-seq-normalize (cleared.record-update (bufs: (drop-buf cleared.bufs pid) minis: (minis-drop cleared.minis pid) echo: "Buffer ${name} died: #{reason}"))
       cond (mini-named? frame.minis name)
         {pruned '()}
-        (cond (eq? pruned.current name)
+        (cond (equal? pruned.current name)
           (match (first-real pruned.bufs pruned.minis) do
             :nil -> {(pruned.record-update (current: :nil snap: :nil windows: :nil focus: '())) '()}
             next-name -> frame-update (pruned.record-update (snap: :nil windows: (window-scrub pruned.windows name next-name))) {:switch next-name}
@@ -934,9 +934,9 @@ defn modeline-at frame name snap place cols -> do
   {bline wcol} = place
   flag = match snap do
     :nil -> ""
-    buf -> cond (neq? (B.version-of buf) (buf-saved frame.bufs name)) " [+]" ""
+    buf -> cond (not-equal? (B.version-of buf) (buf-saved frame.bufs name)) " [+]" ""
   end
-  rec = cond (eq? name frame.current)
+  rec = cond (equal? name frame.current)
     (match frame.recording do
       {:rec _keys} -> "  [REC]"
       _ -> ""
@@ -998,12 +998,12 @@ defn pick-cursor do
 end
 
 defn leaf-render frame name path x y w h -> do
-  snap = cond (eq? name frame.current) frame.snap (buf-snap frame.bufs name)
+  snap = cond (equal? name frame.current) frame.snap (buf-snap frame.bufs name)
   {lines cline} = view-of snap (h - 1)
   body = List.map (pad-body lines (h - 1)) (fn l -> pad-to l w)
   place = point-place snap
   ml = pad-to (modeline-at frame name snap place w) w
-  cursor = cond (eq? path frame.focus)
+  cursor = cond (equal? path frame.focus)
     (match place do
       {_bline wcol} -> {(y + cline) (x + wcol)}
     end)
@@ -1078,21 +1078,21 @@ export defn dispatch do
     {:sync pid} -> do
       send pid {:snapshot self}
       got = receive do
-        {:snapshot p b} when (eq? p pid) -> {:snapshot p b}
+        {:snapshot p b} when (equal? p pid) -> {:snapshot p b}
         after 2000 -> :nil
       end
-      cond (eq? got :nil) (dispatch rest acc) (dispatch rest (cons got acc))
+      cond (equal? got :nil) (dispatch rest acc) (dispatch rest (cons got acc))
     end
     {:save pid path} -> do
       send pid {:snapshot self}
       saved = receive do
-        {:snapshot p b} when (eq? p pid) -> do
+        {:snapshot p b} when (equal? p pid) -> do
           write! path (B.text-of b)
           {:saved pid (B.version-of b)}
         end
         after 2000 -> :nil
       end
-      cond (eq? saved :nil) (dispatch rest acc) (dispatch rest (cons saved acc))
+      cond (equal? saved :nil) (dispatch rest acc) (dispatch rest (cons saved acc))
     end
     {:mini-open prompt tag} -> dispatch rest (cons {:mini-opened prompt (spawn-buffer "" self) tag} acc)
     {:become-do thunk bname} -> dispatch rest (cons {:set-mode bname (apply '() thunk)} acc)
@@ -1139,7 +1139,7 @@ end
 
 defn diff-rows do
   '() _prev _i acc -> acc
-  '(l . rest) '(p . prest) i acc -> cond (eq? l p) (diff-rows rest prest (i + 1) acc) (diff-rows rest prest (i + 1) "${acc}#{row-patch i l}")
+  '(l . rest) '(p . prest) i acc -> cond (equal? l p) (diff-rows rest prest (i + 1) acc) (diff-rows rest prest (i + 1) "${acc}#{row-patch i l}")
   '(l . rest) '() i acc -> diff-rows rest '() (i + 1) "${acc}#{row-patch i l}"
 end
 
@@ -1147,15 +1147,15 @@ defn paint frame prev -> match tty-size do
   {cols rows} -> do
     {lines crow ccol} = screen frame cols rows
     old = match prev do
-      {pc pr plines} -> cond (and (eq? pc cols) (eq? pr rows)) plines '()
+      {pc pr plines} -> cond (and (equal? pc cols) (equal? pr rows)) plines '()
       _ -> '()
     end
-    wipe = cond (eq? old '()) "#{csi "H"}#{csi "J"}" ""
+    wipe = cond (equal? old '()) "#{csi "H"}#{csi "J"}" ""
     body = diff-rows lines old 1 ""
     place = csi "#{crow + 1};#{ccol + 1}H"
     hide = csi "?25l"
     show = csi "?25h"
-    tty-write (cond (eq? body "") place "${hide}${wipe}${body}${place}${show}")
+    tty-write (cond (equal? body "") place "${hide}${wipe}${body}${place}${show}")
     {cols rows lines}
   end
 end
@@ -1198,13 +1198,13 @@ defn sync-names do
   frame '() -> frame
   frame '({name {w h}} . rest) -> do
     seen = dict-get (state-get frame :win-sizes %{}) name :nil
-    cond (eq? seen {w h}) (sync-names frame rest) (sync-names (drive frame {:window-size name w h}) rest)
+    cond (equal? seen {w h}) (sync-names frame rest) (sync-names (drive frame {:window-size name w h}) rest)
   end
 end
 
 export defn window-sync frame cols rows -> do
   key = {cols rows frame.windows}
-  cond (eq? (state-get frame :win-shape :nil) key) frame
+  cond (equal? (state-get frame :win-shape :nil) key) frame
     (sync-names (state-put frame :win-shape key) (dict-to-list (dedupe-rects (window-rects frame cols (rows - 1)) %{})))
 end
 
@@ -1214,7 +1214,7 @@ defn handle-msg frame msg -> match msg do
   m -> drive frame m
 end
 
-defn note-dirty dirty pid -> cond (List.any? dirty (fn p -> eq? p pid)) dirty (cons pid dirty)
+defn note-dirty dirty pid -> cond (List.any? dirty (fn p -> equal? p pid)) dirty (cons pid dirty)
 
 defn flush-dirty do
   frame '() -> frame

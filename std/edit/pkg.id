@@ -50,16 +50,16 @@ end
 
 defn key-backspace state do
   c = cursor-of state
-  cond (eq? c 0) (edited state) (delete-range state (rune-back (buffer-of state) c) c)
+  cond (equal? c 0) (edited state) (delete-range state (rune-back (buffer-of state) c) c)
 end
 
 defn key-delete state do
   c = cursor-of state
-  cond (eq? c (byte-len (buffer-of state))) (edited state) (delete-range state c (rune-fwd (buffer-of state) c))
+  cond (equal? c (byte-len (buffer-of state))) (edited state) (delete-range state c (rune-fwd (buffer-of state) c))
 end
 
 defn key-eof-or-delete do
-  state when (eq? (byte-len (buffer-of state)) 0) -> {:eof state}
+  state when (equal? (byte-len (buffer-of state)) 0) -> {:eof state}
   state -> key-delete state
 end
 
@@ -67,7 +67,7 @@ defn key-kill-line-end state do
   b = buffer-of state
   c = cursor-of state
   e = line-stop b c
-  cond (and (eq? c e) (lt? c (byte-len b))) (kill-range state c (add c 1)) (kill-range state c e)
+  cond (and (equal? c e) (lt? c (byte-len b))) (kill-range state c (add c 1)) (kill-range state c e)
 end
 
 defn key-kill-line-start state -> kill-range state (line-start (buffer-of state) (cursor-of state)) (cursor-of state)
@@ -80,7 +80,7 @@ end
 
 defn key-yank state do
   k = dict-get state :kill ""
-  cond (eq? k "") (edited state) (insert-text state k)
+  cond (equal? k "") (edited state) (insert-text state k)
 end
 
 defn nth-entry do
@@ -97,7 +97,7 @@ defn key-history-back state do
   p = dict-get state :hist-pos (sub 0 1)
   n = add p 1
   if (lt? n (List.length h)) do
-    st = cond (eq? p (sub 0 1)) (dict-put state :saved (buffer-of state)) state
+    st = cond (equal? p (sub 0 1)) (dict-put state :saved (buffer-of state)) state
     show-history st n (nth-entry h n)
   else do
     edited state
@@ -106,9 +106,9 @@ end
 
 defn key-history-fwd state do
   p = dict-get state :hist-pos (sub 0 1)
-  if (eq? p (sub 0 1)) do
+  if (equal? p (sub 0 1)) do
     edited state
-  else if (eq? p 0) do
+  else if (equal? p 0) do
     show-history state (sub 0 1) (dict-get state :saved "")
   else do
     show-history state (sub p 1) (nth-entry (history-of state) (sub p 1))
@@ -123,7 +123,7 @@ end
 
 defn search-apply state from do
   q = dict-get state :search ""
-  if (eq? q "") do
+  if (equal? q "") do
     edited state
   else do
     match (search-scan (List.drop (history-of state) from) q from) do
@@ -143,7 +143,7 @@ defn search-step state key -> match key do
   :c-r -> search-apply state (add (dict-get state :search-idx (sub 0 1)) 1)
   :backspace -> do
     q = dict-get state :search ""
-    q2 = cond (eq? q "") "" (byte-slice q 0 (sub (byte-len q) 1))
+    q2 = cond (equal? q "") "" (byte-slice q 0 (sub (byte-len q) 1))
     search-apply (state |> dict-put :search q2 |> dict-put :search-idx (sub 0 1)) 0
   end
   :enter -> {:submit (search-exit state)}
@@ -163,7 +163,7 @@ export defn new prompt ->
   %{:buffer "" :cursor 0 :history '() :hist-pos (sub 0 1) :saved "" :kill "" :mode :edit :search "" :search-idx (sub 0 1) :saved-buffer "" :saved-cursor 0 :prompt prompt :cont-prompt "...> " :cols 80 :row 0 :below 0 :dumb :false :keymap %{:c-a &key-home :home &key-home :c-e &key-line-end :end &key-line-end :c-b &key-left :left &key-left :c-f &key-right :right &key-right {:meta {:char "b"}} &key-word-back {:meta {:char "f"}} &key-word-fwd :backspace &key-backspace :delete &key-delete :c-d &key-eof-or-delete :c-k &key-kill-line-end :c-u &key-kill-line-start :c-w &key-kill-word :c-y &key-yank :c-l &key-clear :up &key-history-back :c-p &key-history-back :down &key-history-fwd :c-n &key-history-fwd :c-r &key-search :enter &key-enter :c-c &key-cancel :tab &key-tab}}
 
 export defn step state key ->
-  if (eq? (dict-get state :mode :edit) :search) do
+  if (equal? (dict-get state :mode :edit) :search) do
     search-step state key
   else do
     match (dict-get (dict-get state :keymap %{}) key :nil) do
@@ -186,7 +186,7 @@ end
 export defn push-history do
   state "" -> state
   state line -> match (history-of state) do
-    '(h . _) when (eq? h line) -> dict-put state :hist-pos (sub 0 1)
+    '(h . _) when (equal? h line) -> dict-put state :hist-pos (sub 0 1)
     _ -> state |> dict-put :history (cons line (history-of state)) |> dict-put :hist-pos (sub 0 1)
   end
 end
@@ -198,8 +198,8 @@ defn locate do
 end
 
 defn prompt-for state i do
-  p = cond (eq? (dict-get state :mode :edit) :search) "(reverse-i-search)'#{dict-get state :search ""}': " (dict-get state :prompt "")
-  cond (eq? i 0) p (dict-get state :cont-prompt "")
+  p = cond (equal? (dict-get state :mode :edit) :search) "(reverse-i-search)'#{dict-get state :search ""}': " (dict-get state :prompt "")
+  cond (equal? i 0) p (dict-get state :cont-prompt "")
 end
 
 defn rows-upto do
@@ -228,7 +228,7 @@ export defn render state do
   pw = visible-len (prompt-for state li)
   coff = add pw (width (byte-slice line-li 0 lc))
   cvis = add pw (width line-li)
-  {cr cc} = cond (eq? coff cvis) (end-pos coff cols) {(div coff cols) (mod coff cols)}
+  {cr cc} = cond (equal? coff cvis) (end-pos coff cols) {(div coff cols) (mod coff cols)}
   cursor-row = add (rows-upto state lines 0 cols li 0) cr
   last-index = sub (List.length lines) 1
   {er _ec} = end-pos (add (visible-len (prompt-for state last-index)) (width (nth-entry lines last-index))) cols
@@ -303,15 +303,15 @@ defn cooked-line state -> match tty-read-line do
 end
 
 defn cooked-read state do
-  if (eq? (tty?) :true) do
-    tty-write (cond (eq? (buffer-of state) "") (dict-get state :prompt "") (dict-get state :cont-prompt ""))
+  if (equal? (tty?) :true) do
+    tty-write (cond (equal? (buffer-of state) "") (dict-get state :prompt "") (dict-get state :cont-prompt ""))
   else do
     :ok
   end
   cooked-line state
 end
 
-export defn cooked? state -> or (or (eq? (dict-get state :dumb :false) :true) (eq? (env-get "TERM") "dumb")) (neq? (tty?) :true)
+export defn cooked? state -> or (or (equal? (dict-get state :dumb :false) :true) (equal? (env-get "TERM") "dumb")) (not-equal? (tty?) :true)
 
 defn guarded-raw state -> match (try do {:ok (raw-read state)}; rescue do r -> {:fallback r} end) do
   {:ok result} -> result

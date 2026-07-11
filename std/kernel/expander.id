@@ -22,10 +22,10 @@ export protocol IdiomExpander do
     end
 
     defn check-known-options do
-      stx opts i n when (eq? i n) -> opts
+      stx opts i n when (equal? i n) -> opts
       stx opts i n -> do
         key = option-key-name stx (syntax-nth opts i)
-        if (eq? (known-option-key? key) :false) do
+        if (equal? (known-option-key? key) :false) do
           syntax-error stx "unknown operator keyword '#{key}'"
         end
         check-known-options stx opts (add i 2) n
@@ -33,7 +33,7 @@ export protocol IdiomExpander do
     end
 
     defn known-options stx opts -> do
-      if (eq? (syntax-kind opts) :dict) do
+      if (equal? (syntax-kind opts) :dict) do
         check-known-options stx opts 0 (syntax-length opts)
       else do
         syntax-error stx "operator options must be a keyword dictionary"
@@ -42,10 +42,10 @@ export protocol IdiomExpander do
     end
 
     defn option-get do
-      stx opts key default i n when (eq? i n) -> default
+      stx opts key default i n when (equal? i n) -> default
       stx opts key default i n -> do
         candidate = option-key-name stx (syntax-nth opts i)
-        if (eq? candidate key) do
+        if (equal? candidate key) do
           syntax-nth opts (add i 1)
         else do
           option-get stx opts key default (add i 2) n
@@ -78,7 +78,7 @@ export protocol IdiomExpander do
       end
     end
 
-    defn string-syntax? p -> and (syntax? p) (eq? (syntax-kind p) :string)
+    defn string-syntax? p -> and (syntax? p) (equal? (syntax-kind p) :string)
 
     defn capture-part-text do
       stx v when (syntax-atom? v) -> syntax-atom-text v
@@ -98,8 +98,8 @@ export protocol IdiomExpander do
     defn operator-target stx name -> make-syntax-word stx "__operator_target__#{operator-name-text stx name}"
 
     defn capture-join-syntax do
-      stx v i len "" when (eq? i len) -> ""
-      stx v i len acc when (eq? i len) -> acc
+      stx v i len "" when (equal? i len) -> ""
+      stx v i len acc when (equal? i len) -> acc
       stx v i len "" -> capture-join-syntax stx v (add i 1) len (capture-part-text stx (syntax-nth v i))
       stx v i len acc -> capture-join-syntax stx v (add i 1) len "${acc} #{capture-part-text stx (syntax-nth v i)}"
     end
@@ -107,7 +107,7 @@ export protocol IdiomExpander do
     defn capture-text do
       stx v when (or (head-is? v "%-group") (head-is? v "%-layout-group")) -> capture-text stx (syntax-nth v 1)
       stx v when (and (head-is? v "%-expr") (gt? (syntax-length v) 1)) -> capture-join-syntax stx v 1 (syntax-length v) ""
-      stx v when (eq? (syntax-kind v) :tuple) -> capture-join-syntax stx v 0 (syntax-length v) ""
+      stx v when (equal? (syntax-kind v) :tuple) -> capture-join-syntax stx v 0 (syntax-length v) ""
       stx v -> capture-part-text stx v
     end
 

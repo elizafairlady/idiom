@@ -24,7 +24,7 @@ defn dict-shape do
 end
 
 defn guard-shape do
-  {a b c} when (and (eq? a b) (eq? b c)) -> a
+  {a b c} when (and (equal? a b) (equal? b c)) -> a
   {a b c} -> a + b + c
   _ -> 0
 end

@@ -3,17 +3,17 @@ package string
 use std/enum
 import std/list as List
 
-export defn empty? s -> s |> byte-len |> eq? 0
+export defn empty? s -> s |> byte-len |> equal? 0
 
 export defn starts-with? s prefix -> do
   n = prefix |> byte-len
-  and (n |> lte? (s |> byte-len)) (s |> byte-slice 0 n |> eq? prefix)
+  and (n |> lte? (s |> byte-len)) (s |> byte-slice 0 n |> equal? prefix)
 end
 
 export defn ends-with? s suffix -> do
   n = suffix |> byte-len
   total = s |> byte-len
-  and (n |> lte? total) (s |> byte-slice (total - n) total |> eq? suffix)
+  and (n |> lte? total) (s |> byte-slice (total - n) total |> equal? suffix)
 end
 
 export defn space? do
@@ -25,17 +25,17 @@ export defn space? do
 end
 
 defn scan-left do
-  s i n when (eq? i n) -> i
+  s i n when (equal? i n) -> i
   s i n -> cond (s |> byte i |> space?) (scan-left s (add i 1) n) i
 end
 
 defn scan-right do
-  s i when (eq? i 0) -> 0
+  s i when (equal? i 0) -> 0
   s i -> cond (s |> byte (i - 1) |> space?) (scan-right s (sub i 1)) i
 end
 
 defn blank-from do
-  _ i n when (eq? i n) -> :true
+  _ i n when (equal? i n) -> :true
   s i n -> cond (s |> byte i |> space?) (blank-from s (add i 1) n) :false
 end
 
@@ -56,7 +56,7 @@ defn split-from do
 end
 
 export defn split do
-  s sep when (sep |> byte-len |> eq? 0) -> error {:split :empty-separator}
+  s sep when (sep |> byte-len |> equal? 0) -> error {:split :empty-separator}
   s sep -> List.reverse (split-from s sep 0 '())
 end
 
@@ -98,23 +98,23 @@ end
 export defn pad-left s n ch -> s |> pad n ch :true
 export defn pad-right s n ch -> s |> pad n ch :false
 
-defn flush-span s j i acc -> cond (eq? j i) acc "#{acc}#{byte-slice s j i}"
+defn flush-span s j i acc -> cond (equal? j i) acc "#{acc}#{byte-slice s j i}"
 
 defn sweep do
-  s j i n _f acc when (eq? i n) -> cond (eq? j 0) s (flush-span s j n acc)
+  s j i n _f acc when (equal? i n) -> cond (equal? j 0) s (flush-span s j n acc)
   s j i n f acc -> do
     b = s |> byte i
     m = f b
-    cond (eq? m b) (sweep s j (add i 1) n f acc) (sweep-mapped s (flush-span s j i acc) (add i 1) n f (cons m '()))
+    cond (equal? m b) (sweep s j (add i 1) n f acc) (sweep-mapped s (flush-span s j i acc) (add i 1) n f (cons m '()))
   end
 end
 
 defn sweep-mapped do
-  _s acc i n _f runs when (eq? i n) -> "#{acc}#{from-runes (List.reverse runs)}"
+  _s acc i n _f runs when (equal? i n) -> "#{acc}#{from-runes (List.reverse runs)}"
   s acc i n f runs -> do
     b = s |> byte i
     m = f b
-    cond (eq? m b) (sweep s i (add i 1) n f "#{acc}#{from-runes (List.reverse runs)}") (sweep-mapped s acc (add i 1) n f (cons m runs))
+    cond (equal? m b) (sweep s i (add i 1) n f "#{acc}#{from-runes (List.reverse runs)}") (sweep-mapped s acc (add i 1) n f (cons m runs))
   end
 end
 
@@ -128,7 +128,7 @@ export defn capitalize do
   "" -> ""
   s -> do
     b = s |> byte 0
-    if (and (eq? (upbyte b) b) (eq? (downbyte b) b)) do
+    if (and (equal? (upbyte b) b) (equal? (downbyte b) b)) do
       downcase s
     else do
       "#{byte-str (upbyte b)}#{s |> byte-slice 1 (s |> byte-len) |> downcase}"

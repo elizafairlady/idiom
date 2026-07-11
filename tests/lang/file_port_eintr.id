@@ -8,7 +8,7 @@ activate Test
 defn run-and-wait argv do
   {_port ref} = spawn-monitor (Cmd.command argv (Cmd.stdio :null :null :null))
   receive do
-    {:down r _p reason} when (eq? r ref) -> reason
+    {:down r _p reason} when (equal? r ref) -> reason
     after 4000 -> :timeout
   end
 end
@@ -41,7 +41,7 @@ suite "file port IO survives signals" do
     File.write-port port data |> assert-eq {:wrote 131072}
     File.close port
     receive do
-      {:down r _p reason} when (eq? r ref) -> reason
+      {:down r _p reason} when (equal? r ref) -> reason
       after 4000 -> :timeout
     end |> assert-eq :normal
     File.read! count-file |> trim |> assert-eq "131072"
@@ -61,7 +61,7 @@ suite "file port IO survives signals" do
     File.write-port port "0123456789abcdef" |> assert-eq {:wrote 16}
     File.close port
     receive do
-      {:down r _p reason} when (eq? r ref) -> reason
+      {:down r _p reason} when (equal? r ref) -> reason
       after 4000 -> :timeout
     end |> assert-eq :normal
     File.read! count-file |> trim |> assert-eq "65552"

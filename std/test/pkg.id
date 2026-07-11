@@ -6,7 +6,7 @@ use std/compile with [expand-check]
 use std/file with [append!]
 use std/system with [env-get time-ms time-ns total-allocs total-alloc-bytes]
 
-defn verbose? -> neq? (env-get "IDIOM_TEST_VERBOSE") :nil
+defn verbose? -> not-equal? (env-get "IDIOM_TEST_VERBOSE") :nil
 
 defn events-path -> env-get "IDIOM_TEST_EVENTS"
 
@@ -45,7 +45,7 @@ defn describe-failure do
 end
 
 defn drain-down ref pid -> receive do
-  {:down r p _reason} when (and (eq? r ref) (eq? p pid)) -> :ok
+  {:down r p _reason} when (and (equal? r ref) (equal? p pid)) -> :ok
   after 0 -> :ok
 end
 
@@ -62,12 +62,12 @@ defn run-one do
       send parent {:test-outcome self outcome}
     end)
     outcome = receive do
-      {:test-outcome p o} when (eq? p pid) -> do
+      {:test-outcome p o} when (equal? p pid) -> do
         demonitor ref
         drain-down ref pid
         o
       end
-      {:down r p reason} when (and (eq? r ref) (eq? p pid)) -> {:failed {:test-process-down name reason}}
+      {:down r p reason} when (and (equal? r ref) (equal? p pid)) -> {:failed {:test-process-down name reason}}
       after timeout-ms -> do
         exit pid :kill
         drain-down ref pid
@@ -96,7 +96,7 @@ defn name-match? do
   _name :nil -> :true
   _name "" -> :true
   _name "." -> :true
-  name pat -> neq? (byte-find name pat 0) :nil
+  name pat -> not-equal? (byte-find name pat 0) :nil
 end
 
 defn suite-item-name do
@@ -158,7 +158,7 @@ export defn run-suite-with-timeout tests timeout-ms -> run-test-suite-with-timeo
 
 export defn run-suite tests -> run-suite-with-timeout tests 5000
 
-defn bench-mode? -> eq? (env-get "IDIOM_TEST_MODE") "bench"
+defn bench-mode? -> equal? (env-get "IDIOM_TEST_MODE") "bench"
 
 defn bench-count -> run-count
 
@@ -191,7 +191,7 @@ export defn bench-report suite-name name meta result elapsed allocs bytes do
   allocs-op = cond (gt? total 0) (div allocs total) allocs
   bytes-op = cond (gt? total 0) (div bytes total) bytes
   expected-allocs = dict-get meta :allocs allocs-op
-  if (and (eq? result expected) (eq? allocs-op expected-allocs)) do
+  if (and (equal? result expected) (equal? allocs-op expected-allocs)) do
     emit-event %{:event :bench :suite suite-name :name full-name :n n :ns elapsed :ns-op per-op :allocs-op allocs-op :b-op bytes-op :result (inspect result) :expect (inspect expected)}
     println "bench name=#{full-name} suite=#{suite-name} n=#{n} ns=#{elapsed} ns/op=#{per-op} allocs/op=#{allocs-op} B/op=#{bytes-op}#{bench-throughput meta total elapsed} result=#{inspect result} expect=#{inspect expected}"
     result
@@ -291,17 +291,17 @@ export defn assert do
 end
 
 export defn assert-eq do
-  a b when (eq? a b) -> :ok
+  a b when (equal? a b) -> :ok
   a b -> error {:assert-eq :got a :want b}
 end
 
 export defn assert-neq do
-  a b when (neq? a b) -> :ok
+  a b when (not-equal? a b) -> :ok
   a b -> error {:assert-neq a b}
 end
 
 export defn assert-inspect do
-  v expected when (eq? (inspect v) expected) -> :ok
+  v expected when (equal? (inspect v) expected) -> :ok
   v expected -> error {:assert-inspect :got (inspect v) :want expected}
 end
 

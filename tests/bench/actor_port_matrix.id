@@ -161,7 +161,7 @@ suite "actor-port" do
   bench "monitor/spawn-monitor-down" expect: 1 do
     {_pid ref} = spawn-monitor (fn -> 1)
     receive do
-      {:down r _p :normal} when (eq? r ref) -> 1
+      {:down r _p :normal} when (equal? r ref) -> 1
     end
   end
 
@@ -169,7 +169,7 @@ suite "actor-port" do
     p = spawn printf-ok-graph
     ref = monitor p
     receive do
-      {:down r target :normal} when (and (eq? r ref) (eq? target p)) -> 1
+      {:down r target :normal} when (and (equal? r ref) (equal? target p)) -> 1
     end
   end
 
@@ -177,9 +177,9 @@ suite "actor-port" do
     p = spawn printf-ok-pipe-graph
     ref = monitor p
     receive do
-      {:down r target :normal} when (and (eq? r ref) (eq? target p)) -> :down
+      {:down r target :normal} when (and (equal? r ref) (equal? target p)) -> :down
     end
-    drain-stdout p 0 |> eq? 2
+    drain-stdout p 0 |> equal? 2
   end
 
   bench "port/write-read-live" expect: 1 do

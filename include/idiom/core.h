@@ -68,6 +68,8 @@ typedef enum {
     X(NEG, "neg", 1, 1, "kernel", 1, 0) \
     X(EQ, "eq?", 2, 2, "kernel", 1, 1) \
     X(NEQ, "neq?", 2, 2, "kernel", 1, 1) \
+    X(EQUAL, "equal?", 2, 2, "kernel", 1, 1) \
+    X(NOT_EQUAL, "not-equal?", 2, 2, "kernel", 1, 1) \
     X(LT, "lt?", 2, 2, "kernel", 1, 0) \
     X(GT, "gt?", 2, 2, "kernel", 1, 0) \
     X(LTE, "lte?", 2, 2, "kernel", 1, 0) \

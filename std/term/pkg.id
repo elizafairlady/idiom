@@ -40,13 +40,13 @@ end
 
 export defn line-start do
   _b 0 -> 0
-  b i when (eq? (byte b (sub i 1)) 10) -> i
+  b i when (equal? (byte b (sub i 1)) 10) -> i
   b i -> line-start b (sub i 1)
 end
 
 export defn line-stop do
-  b i when (eq? i (byte-len b)) -> i
-  b i when (eq? (byte b i) 10) -> i
+  b i when (equal? i (byte-len b)) -> i
+  b i when (equal? (byte b i) 10) -> i
   b i -> line-stop b (add i 1)
 end
 
@@ -76,21 +76,21 @@ export defn rune-fwd do
 end
 
 defn skip-csi-bytes do
-  s i when (eq? i (byte-len s)) -> i
+  s i when (equal? i (byte-len s)) -> i
   s i when (and (gte? (byte s i) 64) (lte? (byte s i) 126)) -> add i 1
   s i -> skip-csi-bytes s (add i 1)
 end
 
 export defn strip-csi do
-  s i acc when (eq? i (byte-len s)) -> acc
-  s i acc when (and (eq? (byte s i) 27) (eq? (byte s (add i 1)) 91)) -> strip-csi s (skip-csi-bytes s (add i 2)) acc
+  s i acc when (equal? i (byte-len s)) -> acc
+  s i acc when (and (equal? (byte s i) 27) (equal? (byte s (add i 1)) 91)) -> strip-csi s (skip-csi-bytes s (add i 2)) acc
   s i acc -> strip-csi s (add i 1) "${acc}#{byte-str (byte s i)}"
 end
 
 export defn visible-len s -> width (strip-csi s 0 "")
 
 export defn end-pos off cols ->
-  cond (and (gt? off 0) (eq? (mod off cols) 0)) {(sub (div off cols) 1) cols} {(div off cols) (mod off cols)}
+  cond (and (gt? off 0) (equal? (mod off cols) 0)) {(sub (div off cols) 1) cols} {(div off cols) (mod off cols)}
 
 export defn line-rows len cols -> match (end-pos len cols) do
   {r _} -> add r 1

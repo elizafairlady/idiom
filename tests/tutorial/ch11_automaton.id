@@ -3,7 +3,7 @@ activate Test
 
 defn shape do
   '(h . t) -> {:list h t}
-  {a b} when (eq? a b) -> {:twins a}
+  {a b} when (equal? a b) -> {:twins a}
   %{:k v} -> {:dict v}
   _ -> :miss
 end
@@ -16,24 +16,24 @@ end
 
 defn wait -> receive do
   {:ping from} -> send from :pong
-  {:stop reason} when (eq? reason :now) -> :stopped
+  {:stop reason} when (equal? reason :now) -> :stopped
   after 50 -> :timeout
 end
 
 defn risky do
-  x when (eq? (raise :guard-blew-up) :never) -> :guarded
+  x when (equal? (raise :guard-blew-up) :never) -> :guarded
   x -> {:fell-through x}
 end
 
 defn spin n -> spin (n + 1)
 
 defn patient do
-  x when (eq? (spin 0) :never) -> :guarded
+  x when (equal? (spin 0) :never) -> :guarded
   _ -> :fallback
 end
 
 defn hog do
-  x when (eq? (spin 0) :never) -> :guarded
+  x when (equal? (spin 0) :never) -> :guarded
 end
 
 defn head-guard do

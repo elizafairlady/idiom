@@ -564,7 +564,7 @@ static bool binding_is_current_clause(const ExpandContext *ctx, const IdmBinding
 static bool pin_collect_add(ExpandContext *ctx, const IdmSyntax *target, const char **out_name, IdmError *err) {
     PinCollect *pins = ctx->pin_collect;
     if (!pins) {
-        return idm_error_set(err, target->span, "pin ^%s targets an enclosing binding; that is supported in match clauses and '=' bindings — in a fn, defn, or receive head bind a name and guard: when (eq? x %s)", target->as.text, target->as.text);
+        return idm_error_set(err, target->span, "pin ^%s targets an enclosing binding; that is supported in match clauses and '=' bindings — in a fn, defn, or receive head bind a name and guard: when (equal? x %s)", target->as.text, target->as.text);
     }
     if (pins->count == pins->cap) {
         IdmGrowItem items[3] = {
@@ -1877,7 +1877,7 @@ static bool expand_core_operator_decl(ExpandContext *ctx, const IdmSyntax *form,
         free(target);
         return idm_error_oom(err, target_syntax->span);
     }
-    bool ok = register_operator(ctx, name, capture, (uint8_t)precedence_syntax->as.integer, assoc, IDM_OPERATOR_ACTION_WORD, target, &target_scopes, &decl_scopes, ctx->unit, ctx->unit_key, true, form->span, err);
+    bool ok = register_operator(ctx, name, capture, (uint8_t)precedence_syntax->as.integer, assoc, IDM_OPERATOR_ACTION_WORD, target, &target_scopes, &decl_scopes, ctx->unit, idm_symbol_text(ctx->unit_key), true, form->span, err);
     idm_scope_set_destroy(&decl_scopes);
     idm_scope_set_destroy(&target_scopes);
     free(name);

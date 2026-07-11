@@ -7,7 +7,7 @@ export trait Iter do
 end
 
 defn foldl-indexed do
-  _xs i n acc _f when (eq? i n) -> &acc
+  _xs i n acc _f when (equal? i n) -> &acc
   xs i n acc f -> foldl-indexed xs (add i 1) n (f (seq-nth xs i) &acc) f
 end
 
@@ -53,7 +53,7 @@ export trait Enum do
   method product xs -> xs.foldl 1 &mul
   method any? xs f -> xs.foldl :false (fn x acc -> cond acc :true (f &x))
   method all? xs f -> xs.foldl :true (fn x acc -> cond acc (f &x) :false)
-  method member? xs x -> xs.foldl :false (fn item acc -> cond acc :true (eq? &item &x))
+  method member? xs x -> xs.foldl :false (fn item acc -> cond acc :true (equal? &item &x))
   method frequencies xs -> xs.foldl %{} (fn x acc -> dict-put acc &x (add (dict-get acc &x 0) 1))
   method group-by xs f -> xs.foldl %{} (fn x acc -> do
     key = f &x

@@ -113,7 +113,7 @@ typedef struct {
 } IdmBcFunction;
 
 typedef struct {
-    char *env_key;
+    IdmSymbol *env_key;
     uint32_t slot;
     uint32_t *entries;
     uint32_t entry_count;
@@ -170,8 +170,8 @@ bool idm_bc_prepare_selectors(IdmRuntime *rt, IdmBytecodeModule *module, IdmErro
 IdmPatternSelector *idm_bc_selector_at(const IdmBytecodeModule *module, size_t offset);
 IdmPatternSelector *idm_bc_function_selector_at(const IdmBytecodeModule *module, uint32_t fn);
 bool idm_bc_build_selector_for_entries(IdmRuntime *rt, const IdmBytecodeModule *module, const uint32_t *entries, size_t entry_count, IdmPatternSelector **out, IdmError *err);
-bool idm_bc_note_env_closure(IdmBytecodeModule *module, const char *env_key, uint32_t slot, const uint32_t *entries, uint32_t entry_count);
-const IdmBcEnvClosure *idm_bc_env_closure_for_slot(const IdmBytecodeModule *module, const char *env_key, uint32_t slot);
+bool idm_bc_note_env_closure(IdmBytecodeModule *module, IdmSymbol *env_key, uint32_t slot, const uint32_t *entries, uint32_t entry_count);
+const IdmBcEnvClosure *idm_bc_env_closure_for_slot(const IdmBytecodeModule *module, IdmSymbol *env_key, uint32_t slot);
 bool idm_bc_set_function_patterns_take(IdmBytecodeModule *module, uint32_t function_index, IdmPattern **patterns, uint32_t pattern_count);
 bool idm_bc_set_function_pattern_locals_take(IdmBytecodeModule *module, uint32_t function_index, IdmPatternLocal *locals, uint32_t local_count);
 bool idm_bc_set_function_guard(IdmBytecodeModule *module, uint32_t function_index, uint32_t guard_function);

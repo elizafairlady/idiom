@@ -120,7 +120,7 @@ suite "tutorial/ch04 one fold to rule them" do
   end
 
   test "dict equality ignores insertion order" do
-    eq? %{:a 1 :b 2} (%{} |> dict-put :b 2 |> dict-put :a 1) |> assert-eq :true
+    equal? %{:a 1 :b 2} (%{} |> dict-put :b 2 |> dict-put :a 1) |> assert-eq :true
   end
 
   test "the trie in the basement holds ten thousand keys" do
@@ -145,8 +145,8 @@ suite "tutorial/ch04 one fold to rule them" do
   end
 
   test "a pipeline is a sentence" do
-    [1 2 3 4 5 6] |> filter (fn x -> eq? (x %% 2) 0) |> map &square |> sum |> assert-eq 56
-    Range.inclusive 1 100 |> filter (fn x -> eq? (x %% 15) 0) |> to-list |> assert-eq '(15 30 45 60 75 90)
+    [1 2 3 4 5 6] |> filter (fn x -> equal? (x %% 2) 0) |> map &square |> sum |> assert-eq 56
+    Range.inclusive 1 100 |> filter (fn x -> equal? (x %% 15) 0) |> to-list |> assert-eq '(15 30 45 60 75 90)
     "one,two,three" |> split "," |> map upcase |> join "+" |> assert-eq "ONE+TWO+THREE"
   end
 
