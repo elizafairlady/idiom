@@ -215,15 +215,15 @@ static bool type_from_literal(GenCtx *g, IdmValue value, IdmTypeTerm *out, IdmEr
     return type_con_term(g, name, out, err, span);
 }
 
-static IdmInstanceResult ctx_instance_oracle(void *user, IdmSymbol *trait_symbol, const IdmTypeTerm *ty) {
+static IdmInstanceResult ctx_instance_oracle(void *user, const IdmConstraint *constraint, const IdmTypeTerm *ty) {
     ExpandContext *ctx = user;
-    const char *trait = idm_symbol_text(trait_symbol);
     const char *type = idm_type_term_text(ty);
     if (ty && ty->kind == IDM_TYPE_CON && type && strcmp(type, "Any") == 0) return IDM_INST_YES;
-    if (trait && trait[0] == '_' && trait[1] == '.') {
-        if (!ty || ty->kind != IDM_TYPE_CON || !type) return IDM_INST_UNKNOWN;
-        return type_satisfies_structural_head(ctx, trait, type) ? IDM_INST_YES : IDM_INST_NO;
+    if (constraint->kind == IDM_CONSTR_STRUCTURAL) {
+        if (!ty || ty->kind != IDM_TYPE_CON || !ty->symbol) return IDM_INST_UNKNOWN;
+        return type_satisfies_structural(ctx, &constraint->structural, ty->symbol) ? IDM_INST_YES : IDM_INST_NO;
     }
+    const char *trait = idm_symbol_text(constraint->trait);
     const TraitDef *td = trait_by_constraint_name(ctx, trait);
     if (!td) return IDM_INST_UNKNOWN;
     return trait_impl_satisfies_term(ctx, td, ty) ? IDM_INST_YES : IDM_INST_NO;
@@ -343,10 +343,15 @@ static bool inst_contract(GenCtx *g, const IdmCallableContract *c, size_t argc_w
     if (ok && sig->has_result) ok = inst_term(g, c, &seen, &repl, &sig->result, out_result);
     for (size_t i = 0; ok && i < c->context_count; i++) {
         const IdmConstraint *ctr = &c->context[i];
-        if (ctr->kind != IDM_CONSTR_CLASS) continue;
+        if (ctr->kind != IDM_CONSTR_CLASS && ctr->kind != IDM_CONSTR_STRUCTURAL) continue;
         IdmTypeTerm lhs;
         ok = inst_term(g, c, &seen, &repl, &ctr->lhs, &lhs);
-        if (ok) { ok = idm_constraint_set_add_class(&g->wanted, canonical_trait(g, ctr->trait), &lhs); idm_type_term_destroy(&lhs); }
+        if (ok) {
+            ok = ctr->kind == IDM_CONSTR_CLASS
+                ? idm_constraint_set_add_class(&g->wanted, canonical_trait(g, ctr->trait), &lhs)
+                : idm_constraint_set_add_structural(&g->wanted, &ctr->structural, &lhs);
+            idm_type_term_destroy(&lhs);
+        }
     }
     free(seen.items);
     free(repl.items);
@@ -463,7 +468,7 @@ static bool number_classed_var(GenCtx *g, const IdmTypeTerm *v) {
     if (!v || v->kind != IDM_TYPE_VAR || v->rigid) return false;
     for (size_t i = 0; i < g->wanted.count; i++) {
         const IdmConstraint *c = &g->wanted.items[i];
-        if (c->kind != IDM_CONSTR_CLASS) continue;
+        if (c->kind != IDM_CONSTR_CLASS && c->kind != IDM_CONSTR_STRUCTURAL) continue;
         if (c->lhs.kind != IDM_TYPE_VAR || c->lhs.var_id != v->var_id) continue;
         if (typeclass_same_trait(g->ctx, idm_symbol_text(c->trait), "Number")) return true;
     }
@@ -1745,8 +1750,13 @@ static bool reject_residual(GenCtx *g, const IdmConstraintSet *residual, IdmErro
         IdmBuffer tb;
         idm_buf_init(&tb);
         bool w = idm_type_term_write(&tb, &ty);
+        IdmBuffer hb;
+        idm_buf_init(&hb);
+        bool hw = c->kind == IDM_CONSTR_STRUCTURAL && idm_structural_head_write(&hb, &c->structural);
         const char *tr = c->trait ? idm_symbol_text(c->trait) : "?";
-        idm_error_set(err, span, "unsolved typeclass '%s' for %s", tr, w && tb.data ? tb.data : "?");
+        if (c->kind == IDM_CONSTR_STRUCTURAL) idm_error_set(err, span, "unsolved structural constraint '%s' for %s", hw && hb.data ? hb.data : "?", w && tb.data ? tb.data : "?");
+        else idm_error_set(err, span, "unsolved typeclass '%s' for %s", tr, w && tb.data ? tb.data : "?");
+        idm_buf_destroy(&hb);
         idm_buf_destroy(&tb);
         idm_type_term_destroy(&ty);
         return false;
@@ -1913,7 +1923,7 @@ static bool generalize_contract_sigs(GenCtx *g, const GenSigInput *inputs, size_
         size_t cc = 0;
         for (size_t i = 0; ok && i < residual->count; i++) {
             const IdmConstraint *c = &residual->items[i];
-            if (c->kind != IDM_CONSTR_CLASS) continue;
+            if (c->kind != IDM_CONSTR_CLASS && c->kind != IDM_CONSTR_STRUCTURAL) continue;
             IdmTypeTerm applied;
             if (!idm_subst_apply(&g->subst, &c->lhs, &applied)) { ok = idm_error_oom(err, idm_span_unknown(NULL)); break; }
             size_t idx = 0;
@@ -1922,13 +1932,16 @@ static bool generalize_contract_sigs(GenCtx *g, const GenSigInput *inputs, size_
             if (!member_var) continue;
             bool dup = false;
             for (size_t j = 0; j < cc; j++) {
-                if (ctxc[j].lhs.var_id == (uint32_t)(idx + 1u) && ctxc[j].trait == c->trait) { dup = true; break; }
+                if (ctxc[j].lhs.var_id != (uint32_t)(idx + 1u) || ctxc[j].kind != c->kind) continue;
+                if ((c->kind == IDM_CONSTR_CLASS && ctxc[j].trait == c->trait) ||
+                    (c->kind == IDM_CONSTR_STRUCTURAL && idm_structural_head_equal(&ctxc[j].structural, &c->structural))) { dup = true; break; }
             }
             if (dup) continue;
             memset(&ctxc[cc], 0, sizeof(ctxc[cc]));
-            ctxc[cc].kind = IDM_CONSTR_CLASS;
+            ctxc[cc].kind = c->kind;
             if (!idm_type_var(g->ctx->rt, &ctxc[cc].lhs, qm.names[idx], (uint32_t)(idx + 1u), false)) { ok = idm_error_oom(err, idm_span_unknown(NULL)); break; }
-            ctxc[cc].trait = c->trait;
+            if (c->kind == IDM_CONSTR_CLASS) ctxc[cc].trait = c->trait;
+            else if (!idm_structural_head_copy(&ctxc[cc].structural, &c->structural)) { ok = idm_error_oom(err, idm_span_unknown(NULL)); break; }
             cc++;
         }
         if (ok && cc) { out->context = ctxc; out->context_count = cc; }
@@ -1963,10 +1976,15 @@ static bool check_clause(ExpandContext *ctx, const IdmFnClause *clause, const Id
     }
     for (size_t i = 0; ok && contract && i < contract->context_count; i++) {
         const IdmConstraint *c = &contract->context[i];
-        if (c->kind != IDM_CONSTR_CLASS) continue;
+        if (c->kind != IDM_CONSTR_CLASS && c->kind != IDM_CONSTR_STRUCTURAL) continue;
         IdmTypeTerm rl;
         ok = rigidify_term(contract, &c->lhs, &rl);
-        if (ok) { ok = idm_constraint_set_add_class(&g.given, canonical_trait(&g, c->trait), &rl); idm_type_term_destroy(&rl); }
+        if (ok) {
+            ok = c->kind == IDM_CONSTR_CLASS
+                ? idm_constraint_set_add_class(&g.given, canonical_trait(&g, c->trait), &rl)
+                : idm_constraint_set_add_structural(&g.given, &c->structural, &rl);
+            idm_type_term_destroy(&rl);
+        }
     }
     IdmTypeTerm *ptypes = clause->arity ? calloc(clause->arity, sizeof(*ptypes)) : NULL;
     if (clause->arity && !ptypes) ok = idm_error_oom(err, idm_span_unknown(NULL));

@@ -64,9 +64,9 @@ static bool try_unify(IdmTypeTerm a, IdmTypeTerm b) {
     return ok;
 }
 
-static IdmInstanceResult oracle(void *user, IdmSymbol *trait_symbol, const IdmTypeTerm *ty) {
+static IdmInstanceResult oracle(void *user, const IdmConstraint *constraint, const IdmTypeTerm *ty) {
     (void)user;
-    const char *trait = idm_symbol_text(trait_symbol);
+    const char *trait = idm_symbol_text(constraint->trait);
     if (strcmp(trait, "Show") == 0) {
         if (ty->kind == IDM_TYPE_CON && strcmp(idm_type_term_text(ty), "int") == 0) return IDM_INST_YES;
         if (ty->kind == IDM_TYPE_CON && strcmp(idm_type_term_text(ty), "string") == 0) return IDM_INST_YES;

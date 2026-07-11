@@ -112,6 +112,28 @@ int idm_unit_type_term(void) {
     idm_callable_contract_destroy(&ct);
     idm_callable_contract_destroy(&ct2);
 
+    IdmConstraint structural;
+    memset(&structural, 0, sizeof(structural));
+    structural.kind = IDM_CONSTR_STRUCTURAL;
+    structural.structural.field = idm_intern(&rt.intern, IDM_SYMBOL_ATOM, "size");
+    structural.structural.has_type = true;
+    idm_type_con(&rt, &structural.structural.type, "int");
+    idm_type_var(&rt, &structural.lhs, "a", 1u, false);
+    IdmConstraint structural_copy;
+    check(idm_constraint_copy(&structural_copy, &structural), "copy structural constraint");
+    check(idm_structural_head_equal(&structural.structural, &structural_copy.structural), "structural head copy equal");
+    idm_buf_init(&wire);
+    check(idm_constraint_serialize(&wire, &structural, &err), "serialize structural constraint");
+    idm_byte_reader_init(&reader, (const unsigned char *)(wire.data ? wire.data : ""), wire.len);
+    IdmConstraint structural_wire;
+    check(idm_constraint_deserialize(&rt, &reader, &structural_wire, &err), "deserialize structural constraint");
+    check(structural_wire.kind == IDM_CONSTR_STRUCTURAL && idm_structural_head_equal(&structural.structural, &structural_wire.structural), "structural constraint survives wire");
+    idm_constraint_destroy(&structural_wire);
+    idm_buf_destroy(&wire);
+    idm_error_clear(&err);
+    idm_constraint_destroy(&structural_copy);
+    idm_constraint_destroy(&structural);
+
     IdmValue one = idm_fixnum(1);
     IdmValue atom = idm_atom(&rt, "x");
     IdmTypeTerm any;

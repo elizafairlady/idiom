@@ -798,7 +798,59 @@ void idm_constraint_destroy(IdmConstraint *c) {
     if (!c) return;
     idm_type_term_destroy(&c->lhs);
     idm_type_term_destroy(&c->rhs);
+    idm_structural_head_destroy(&c->structural);
     memset(c, 0, sizeof(*c));
+}
+
+void idm_structural_head_destroy(IdmStructuralHead *head) {
+    if (!head) return;
+    idm_type_term_destroy(&head->type);
+    memset(head, 0, sizeof(*head));
+}
+
+bool idm_structural_head_copy(IdmStructuralHead *dst, const IdmStructuralHead *src) {
+    memset(dst, 0, sizeof(*dst));
+    if (!src) return true;
+    dst->field = src->field;
+    dst->has_type = src->has_type;
+    return !src->has_type || idm_type_term_copy(&dst->type, &src->type);
+}
+
+bool idm_structural_head_equal(const IdmStructuralHead *a, const IdmStructuralHead *b) {
+    return a && b && a->field == b->field && a->has_type == b->has_type &&
+           (!a->has_type || idm_type_term_equal(&a->type, &b->type));
+}
+
+bool idm_structural_head_write(IdmBuffer *out, const IdmStructuralHead *head) {
+    if (!out || !head || !head->field || !idm_buf_append(out, "_.") || !idm_buf_append(out, idm_symbol_text(head->field))) return false;
+    return !head->has_type || (idm_buf_append(out, "::") && idm_type_term_write(out, &head->type));
+}
+
+bool idm_structural_head_serialize(IdmBuffer *out, const IdmStructuralHead *head, IdmError *err) {
+    if (!head || !head->field) return idm_error_set(err, idm_span_unknown(NULL), "structural constraint requires a field");
+    if (!idm_buf_put_str(out, idm_symbol_text(head->field), strlen(idm_symbol_text(head->field))) ||
+        !idm_buf_put_u8(out, head->has_type ? 1u : 0u)) return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
+    return !head->has_type || idm_type_term_serialize(out, &head->type, err);
+}
+
+bool idm_structural_head_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmStructuralHead *head, IdmError *err) {
+    memset(head, 0, sizeof(*head));
+    char *field = idm_rd_string(r, NULL);
+    if (!field) return r->ok ? (err ? idm_error_oom(err, idm_span_unknown(NULL)) : false)
+                              : idm_error_set(err, idm_span_unknown(NULL), "truncated structural constraint field");
+    head->field = idm_intern(&rt->intern, IDM_SYMBOL_ATOM, field);
+    free(field);
+    uint8_t has_type = idm_rd_u8(r);
+    if (!head->field || !r->ok || has_type > 1u) {
+        idm_structural_head_destroy(head);
+        return idm_error_set(err, idm_span_unknown(NULL), "invalid structural constraint");
+    }
+    head->has_type = has_type != 0u;
+    if (head->has_type && !idm_type_term_deserialize(rt, r, &head->type, err)) {
+        idm_structural_head_destroy(head);
+        return false;
+    }
+    return true;
 }
 
 void idm_arg_mask_destroy(IdmArgMask *mask) {
@@ -879,12 +931,13 @@ bool idm_constraint_copy(IdmConstraint *dst, const IdmConstraint *src) {
     if (!idm_type_term_copy(&dst->lhs, &src->lhs)) return false;
     if (!idm_type_term_copy(&dst->rhs, &src->rhs)) { idm_constraint_destroy(dst); return false; }
     dst->trait = src->trait;
+    if (!idm_structural_head_copy(&dst->structural, &src->structural)) { idm_constraint_destroy(dst); return false; }
     return true;
 }
 
 bool idm_constraint_serialize(IdmBuffer *out, const IdmConstraint *constraint, IdmError *err) {
     if (!constraint) return idm_error_set(err, idm_span_unknown(NULL), "cannot serialize null constraint");
-    if (constraint->kind > IDM_CONSTR_CLASS) return idm_error_set(err, idm_span_unknown(NULL), "invalid constraint kind");
+    if (constraint->kind > IDM_CONSTR_STRUCTURAL) return idm_error_set(err, idm_span_unknown(NULL), "invalid constraint kind");
     const char *trait = constraint->trait ? idm_symbol_text(constraint->trait) : NULL;
     if (!idm_buf_put_u8(out, (uint8_t)constraint->kind) ||
         !idm_buf_put_opt_str(out, trait) ||
@@ -893,15 +946,16 @@ bool idm_constraint_serialize(IdmBuffer *out, const IdmConstraint *constraint, I
          !idm_buf_append_n(out, (const char *)idm_symbol_identity_hash(constraint->trait), 32u))) {
         return err ? idm_error_oom(err, idm_span_unknown(NULL)) : false;
     }
-    return idm_type_term_serialize(out, &constraint->lhs, err) &&
-           idm_type_term_serialize(out, &constraint->rhs, err);
+    if (!idm_type_term_serialize(out, &constraint->lhs, err) ||
+        !idm_type_term_serialize(out, &constraint->rhs, err)) return false;
+    return constraint->kind != IDM_CONSTR_STRUCTURAL || idm_structural_head_serialize(out, &constraint->structural, err);
 }
 
 bool idm_constraint_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmConstraint *constraint, IdmError *err) {
     memset(constraint, 0, sizeof(*constraint));
     uint8_t kind = idm_rd_u8(r);
     if (!r->ok) return idm_error_set(err, idm_span_unknown(NULL), "truncated constraint");
-    if (kind > (uint8_t)IDM_CONSTR_CLASS) {
+    if (kind > (uint8_t)IDM_CONSTR_STRUCTURAL) {
         r->ok = false;
         return idm_error_set(err, idm_span_unknown(NULL), "invalid constraint kind");
     }
@@ -931,6 +985,11 @@ bool idm_constraint_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmConstraint 
         !idm_type_term_deserialize(rt, r, &constraint->rhs, err)) {
         idm_constraint_destroy(constraint);
         return false;
+    }
+    if (constraint->kind == IDM_CONSTR_STRUCTURAL &&
+        !idm_structural_head_deserialize(rt, r, &constraint->structural, err)) {
+            idm_constraint_destroy(constraint);
+            return false;
     }
     return true;
 }

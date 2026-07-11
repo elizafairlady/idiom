@@ -23,7 +23,7 @@ bool idm_subst_widen(IdmSubst *s, const IdmTypeTerm *var, const IdmTypeTerm *wid
 bool idm_unify(IdmSubst *s, const IdmTypeTerm *a, const IdmTypeTerm *b, IdmError *err, IdmSpan span);
 
 typedef enum { IDM_INST_YES, IDM_INST_NO, IDM_INST_UNKNOWN } IdmInstanceResult;
-typedef IdmInstanceResult (*IdmInstanceOracle)(void *user, IdmSymbol *trait, const IdmTypeTerm *ty);
+typedef IdmInstanceResult (*IdmInstanceOracle)(void *user, const IdmConstraint *constraint, const IdmTypeTerm *ty);
 typedef bool (*IdmGivenOracle)(void *user, const IdmConstraint *given, IdmSymbol *trait, const IdmTypeTerm *ty);
 
 typedef struct {
@@ -37,6 +37,7 @@ void idm_constraint_set_destroy(IdmConstraintSet *cs);
 bool idm_constraint_set_add(IdmConstraintSet *cs, const IdmConstraint *c);
 bool idm_constraint_set_add_eq(IdmConstraintSet *cs, const IdmTypeTerm *a, const IdmTypeTerm *b);
 bool idm_constraint_set_add_class(IdmConstraintSet *cs, IdmSymbol *trait, const IdmTypeTerm *ty);
+bool idm_constraint_set_add_structural(IdmConstraintSet *cs, const IdmStructuralHead *head, const IdmTypeTerm *ty);
 
 bool idm_solve(IdmSubst *s,
                const IdmConstraintSet *given,

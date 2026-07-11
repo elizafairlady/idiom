@@ -220,12 +220,26 @@ bool idm_constraint_set_add_class(IdmConstraintSet *cs, IdmSymbol *trait, const 
     return ok;
 }
 
-static bool given_discharges(const IdmSubst *s, const IdmConstraintSet *given, IdmSymbol *trait, const IdmTypeTerm *ty, IdmGivenOracle oracle, void *oracle_user) {
+bool idm_constraint_set_add_structural(IdmConstraintSet *cs, const IdmStructuralHead *head, const IdmTypeTerm *ty) {
+    IdmConstraint c;
+    memset(&c, 0, sizeof(c));
+    c.kind = IDM_CONSTR_STRUCTURAL;
+    if (!head || !head->field || !idm_structural_head_copy(&c.structural, head) || !idm_type_term_copy(&c.lhs, ty)) {
+        idm_constraint_destroy(&c);
+        return false;
+    }
+    bool ok = idm_constraint_set_add(cs, &c);
+    idm_constraint_destroy(&c);
+    return ok;
+}
+
+static bool given_discharges(const IdmSubst *s, const IdmConstraintSet *given, const IdmConstraint *wanted, const IdmTypeTerm *ty, IdmGivenOracle oracle, void *oracle_user) {
     for (size_t i = 0; i < given->count; i++) {
         const IdmConstraint *g = &given->items[i];
-        if (g->kind != IDM_CONSTR_CLASS) continue;
-        if (oracle && oracle(oracle_user, g, trait, ty)) return true;
-        if (g->trait != trait) continue;
+        if (g->kind != wanted->kind) continue;
+        if (wanted->kind == IDM_CONSTR_CLASS && oracle && oracle(oracle_user, g, wanted->trait, ty)) return true;
+        if (wanted->kind == IDM_CONSTR_CLASS && g->trait != wanted->trait) continue;
+        if (wanted->kind == IDM_CONSTR_STRUCTURAL && !idm_structural_head_equal(&g->structural, &wanted->structural)) continue;
         IdmTypeTerm gt;
         if (!idm_subst_apply(s, &g->lhs, &gt)) return false;
         bool same = idm_type_term_equal(&gt, ty);
@@ -235,21 +249,24 @@ static bool given_discharges(const IdmSubst *s, const IdmConstraintSet *given, I
     return false;
 }
 
-static bool solve_class(IdmSubst *s, const IdmConstraintSet *given,
-                        IdmSymbol *trait, const IdmTypeTerm *ty,
+static bool solve_instance(IdmSubst *s, const IdmConstraintSet *given,
+                        const IdmConstraint *constraint, const IdmTypeTerm *ty,
                         IdmGivenOracle given_oracle,
                         IdmInstanceOracle oracle, void *oracle_user,
                         IdmConstraintSet *residual, IdmError *err, IdmSpan span) {
-    if (given && given_discharges(s, given, trait, ty, given_oracle, oracle_user)) return true;
+    if (given && given_discharges(s, given, constraint, ty, given_oracle, oracle_user)) return true;
     if (ty->kind == IDM_TYPE_VAR) {
-        if (residual && !idm_constraint_set_add_class(residual, trait, ty)) return idm_error_oom(err, span);
+        bool added = !residual || (constraint->kind == IDM_CONSTR_CLASS
+            ? idm_constraint_set_add_class(residual, constraint->trait, ty)
+            : idm_constraint_set_add_structural(residual, &constraint->structural, ty));
+        if (!added) return idm_error_oom(err, span);
         return true;
     }
     if (ty->kind == IDM_TYPE_UNION) {
         for (size_t i = 0; i < ty->arg_count; i++) {
             IdmError probe;
             idm_error_init(&probe);
-            if (solve_class(s, given, trait, &ty->args[i], given_oracle, oracle, oracle_user, residual, &probe, span)) {
+            if (solve_instance(s, given, constraint, &ty->args[i], given_oracle, oracle, oracle_user, residual, &probe, span)) {
                 idm_error_clear(&probe);
                 return true;
             }
@@ -257,15 +274,19 @@ static bool solve_class(IdmSubst *s, const IdmConstraintSet *given,
         }
     }
     IdmInstanceResult r = ty->kind == IDM_TYPE_UNION ? IDM_INST_NO
-                        : oracle ? oracle(oracle_user, trait, ty) : IDM_INST_UNKNOWN;
+                        : oracle ? oracle(oracle_user, constraint, ty) : IDM_INST_UNKNOWN;
     if (r == IDM_INST_NO) {
         IdmBuffer tb;
         idm_buf_init(&tb);
         bool w = idm_type_term_write(&tb, ty);
-        const char *tr = trait ? idm_symbol_text(trait) : "?";
-        bool set = tr[0] == '_' && tr[1] == '.'
-            ? idm_error_set(err, span, "structural constraint '%s' is not satisfied by %s", tr, w && tb.data ? tb.data : "?")
+        IdmBuffer hb;
+        idm_buf_init(&hb);
+        bool hw = constraint->kind == IDM_CONSTR_STRUCTURAL && idm_structural_head_write(&hb, &constraint->structural);
+        const char *tr = constraint->trait ? idm_symbol_text(constraint->trait) : "?";
+        bool set = constraint->kind == IDM_CONSTR_STRUCTURAL
+            ? idm_error_set(err, span, "structural constraint '%s' is not satisfied by %s", hw && hb.data ? hb.data : "?", w && tb.data ? tb.data : "?")
             : idm_error_set(err, span, "typeclass '%s' is not implemented for %s", tr, w && tb.data ? tb.data : "?");
+        idm_buf_destroy(&hb);
         idm_buf_destroy(&tb);
         return set;
     }
@@ -286,10 +307,10 @@ bool idm_solve(IdmSubst *s,
     }
     for (size_t i = 0; i < wanted->count; i++) {
         const IdmConstraint *c = &wanted->items[i];
-        if (c->kind != IDM_CONSTR_CLASS) continue;
+        if (c->kind != IDM_CONSTR_CLASS && c->kind != IDM_CONSTR_STRUCTURAL) continue;
         IdmTypeTerm ty;
         if (!idm_subst_apply(s, &c->lhs, &ty)) return idm_error_oom(err, span);
-        bool ok = solve_class(s, given, c->trait, &ty, given_oracle, oracle, oracle_user, residual, err, span);
+        bool ok = solve_instance(s, given, c, &ty, given_oracle, oracle, oracle_user, residual, err, span);
         idm_type_term_destroy(&ty);
         if (!ok) return false;
     }

@@ -83,13 +83,20 @@ typedef struct IdmTypeTerm {
     size_t arg_count;
 } IdmTypeTerm;
 
-typedef enum { IDM_CONSTR_EQ, IDM_CONSTR_CLASS } IdmConstraintKind;
+typedef struct {
+    IdmSymbol *field;
+    bool has_type;
+    IdmTypeTerm type;
+} IdmStructuralHead;
+
+typedef enum { IDM_CONSTR_EQ, IDM_CONSTR_CLASS, IDM_CONSTR_STRUCTURAL } IdmConstraintKind;
 
 typedef struct {
     IdmConstraintKind kind;
     IdmTypeTerm lhs;
     IdmTypeTerm rhs;
     IdmSymbol *trait;
+    IdmStructuralHead structural;
 } IdmConstraint;
 
 typedef struct {
@@ -147,6 +154,14 @@ bool idm_type_term_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmTypeTerm *ou
 
 void idm_constraint_destroy(IdmConstraint *c);
 bool idm_constraint_copy(IdmConstraint *dst, const IdmConstraint *src);
+bool idm_constraint_serialize(IdmBuffer *out, const IdmConstraint *constraint, IdmError *err);
+bool idm_constraint_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmConstraint *constraint, IdmError *err);
+void idm_structural_head_destroy(IdmStructuralHead *head);
+bool idm_structural_head_copy(IdmStructuralHead *dst, const IdmStructuralHead *src);
+bool idm_structural_head_equal(const IdmStructuralHead *a, const IdmStructuralHead *b);
+bool idm_structural_head_write(IdmBuffer *out, const IdmStructuralHead *head);
+bool idm_structural_head_serialize(IdmBuffer *out, const IdmStructuralHead *head, IdmError *err);
+bool idm_structural_head_deserialize(IdmRuntime *rt, IdmByteReader *r, IdmStructuralHead *head, IdmError *err);
 
 void idm_arg_mask_destroy(IdmArgMask *mask);
 bool idm_arg_mask_copy(IdmArgMask *dst, const IdmArgMask *src);

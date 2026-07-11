@@ -1328,6 +1328,26 @@ static size_t contract_arg_field_end(IdmSyntax *const *items, size_t start, size
     return pos;
 }
 
+static bool parse_structural_constraint_head(ExpandContext *ctx, const char *text, IdmSyntax *const *items, size_t end, size_t *pos, IdmCallableContract *owner, IdmStructuralHead *out, IdmError *err, IdmSpan span) {
+    memset(out, 0, sizeof(*out));
+    if (!text || text[0] != '_' || text[1] != '.' || text[2] == '\0') return idm_error_set(err, span, "structural constraint expects a field");
+    out->field = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, text + 2u);
+    if (!out->field) return idm_error_oom(err, span);
+    if (*pos + 1u < end && syntax_text_is(items[*pos], "::")) {
+        if (!parse_type_term_range(ctx, items, *pos + 1u, *pos + 2u, owner, &out->type, err)) {
+            idm_structural_head_destroy(out);
+            return false;
+        }
+        if (out->type.kind != IDM_TYPE_CON) {
+            idm_structural_head_destroy(out);
+            return idm_error_set(err, span, "structural field type expects a type name");
+        }
+        out->has_type = true;
+        *pos += 2u;
+    }
+    return true;
+}
+
 static bool parse_contract_arg_fields(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmCallableContract *out, IdmError *err) {
     size_t pos = start;
     while (pos < end) {
@@ -1356,20 +1376,19 @@ static bool parse_contract_context(ExpandContext *ctx, IdmSyntax *const *items, 
         if (!trait) return idm_error_set(err, items[pos]->span, "typeclass constraint expects a trait name");
         if (trait->as.text[0] == '_' && trait->as.text[1] == '.') {
             IdmSpan span = trait->span;
-            char *head_text = structural_head_join(trait->as.text, items, end, &trait_end);
+            IdmStructuralHead head;
+            bool head_ok = parse_structural_constraint_head(ctx, trait->as.text, items, end, &trait_end, out, &head, err, span);
             idm_syn_free(trait);
-            if (!head_text) return idm_error_oom(err, span);
+            if (!head_ok) return false;
             size_t arg_end = trait_end < end ? contract_arg_field_end(items, trait_end, end) : trait_end;
             if (arg_end == trait_end) {
-                free(head_text);
+                idm_structural_head_destroy(&head);
                 return idm_error_set(err, span, "structural constraint expects an argument type");
             }
             IdmConstraint constraint;
             memset(&constraint, 0, sizeof(constraint));
-            constraint.kind = IDM_CONSTR_CLASS;
-            constraint.trait = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, head_text);
-            free(head_text);
-            if (!constraint.trait) return idm_error_oom(err, span);
+            constraint.kind = IDM_CONSTR_STRUCTURAL;
+            constraint.structural = head;
             bool sok = parse_type_term_range(ctx, items, trait_end, arg_end, out, &constraint.lhs, err) &&
                        callable_contract_add_constraint(out, &constraint, err, span);
             idm_constraint_destroy(&constraint);
@@ -1667,19 +1686,19 @@ bool structural_head_parse(const char *head, const char **out_field, size_t *out
     return *out_field_len != 0;
 }
 
-static bool field_term_satisfies_name(const ExpandContext *ctx, const char *expected, const IdmTypeTerm *t) {
+static bool field_term_satisfies_symbol(const ExpandContext *ctx, IdmSymbol *expected, const IdmTypeTerm *t) {
     if (!expected) return true;
     if (!t) return false;
     if (t->kind == IDM_TYPE_UNION) {
         for (size_t i = 0; i < t->arg_count; i++) {
-            if (!field_term_satisfies_name(ctx, expected, &t->args[i])) return false;
+            if (!field_term_satisfies_symbol(ctx, expected, &t->args[i])) return false;
         }
         return t->arg_count != 0;
     }
     const char *name = idm_type_term_text(t);
     if (t->kind != IDM_TYPE_CON || !name) return false;
-    if (type_name_same(ctx, expected, name)) return true;
-    const TypeDef *td = typed_type_by_identity_or_name(ctx, expected);
+    if (t->symbol == expected || type_name_same(ctx, idm_symbol_text(expected), name)) return true;
+    const TypeDef *td = typed_type_by_identity_or_name(ctx, idm_symbol_text(expected));
     if (td) {
         for (size_t i = 0; i < td->member_count; i++) {
             const IdmTypeTerm *m = &td->members[i].term;
@@ -1690,32 +1709,57 @@ static bool field_term_satisfies_name(const ExpandContext *ctx, const char *expe
     return false;
 }
 
-bool type_satisfies_structural_head(const ExpandContext *ctx, const char *head, const char *type_name) {
-    const char *field = NULL;
-    size_t flen = 0;
-    const char *ftype = NULL;
-    if (!structural_head_parse(head, &field, &flen, &ftype)) return false;
-    const TypeDef *td = typed_type_by_identity_or_name(ctx, type_name);
+bool type_satisfies_structural(const ExpandContext *ctx, const IdmStructuralHead *head, IdmSymbol *type) {
+    if (!head || !head->field || !type) return false;
+    const TypeDef *td = NULL;
+    for (size_t i = 0; i < ctx->typed.entity_count; i++) {
+        const TypedEntity *entity = &ctx->typed.entities[i];
+        if (entity->kind == IDM_TYPED_ENTITY_TYPE && entity->as.type.identity == type) {
+            td = &entity->as.type;
+            break;
+        }
+    }
+    if (!td) td = typed_type_by_identity_or_name(ctx, idm_symbol_text(type));
     if (!td) return false;
     if (td->field_count) {
         for (size_t i = 0; i < td->field_count; i++) {
             const char *fname = td->fields[i].name ? idm_symbol_text(td->fields[i].name) : NULL;
-            if (!fname || strncmp(fname, field, flen) != 0 || fname[flen] != '\0') continue;
-            if (!ftype) return true;
-            return td->fields[i].has_contract && field_term_satisfies_name(ctx, ftype, &td->fields[i].contract);
+            if (!fname || td->fields[i].name != head->field) continue;
+            if (!head->has_type) return true;
+            return td->fields[i].has_contract && field_term_satisfies_symbol(ctx, head->type.symbol, &td->fields[i].contract);
         }
         return false;
     }
     if (td->member_count) {
         for (size_t i = 0; i < td->member_count; i++) {
             const IdmTypeTerm *m = &td->members[i].term;
-            const char *member = idm_type_term_text(m);
-            if (m->kind != IDM_TYPE_CON || !member) return false;
-            if (!type_satisfies_structural_head(ctx, head, member)) return false;
+            if (m->kind != IDM_TYPE_CON || !m->symbol) return false;
+            if (!type_satisfies_structural(ctx, head, m->symbol)) return false;
         }
         return true;
     }
     return false;
+}
+
+bool type_satisfies_structural_head(const ExpandContext *ctx, const char *encoded, const char *type_name) {
+    const char *field = NULL;
+    size_t field_len = 0;
+    const char *field_type = NULL;
+    if (!structural_head_parse(encoded, &field, &field_len, &field_type)) return false;
+    char *field_text = idm_strndup(field, field_len);
+    if (!field_text) return false;
+    IdmStructuralHead head;
+    memset(&head, 0, sizeof(head));
+    head.field = idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, field_text);
+    free(field_text);
+    if (field_type) {
+        const TypeDef *td = typed_type_by_identity_or_name(ctx, field_type);
+        head.type.symbol = td ? td->identity : idm_intern(&ctx->rt->intern, IDM_SYMBOL_ATOM, field_type);
+        head.type.kind = IDM_TYPE_CON;
+        head.has_type = head.type.symbol != NULL;
+    }
+    const TypeDef *type = typed_type_by_identity_or_name(ctx, type_name);
+    return type_satisfies_structural(ctx, &head, type ? type->identity : idm_intern_lookup(&ctx->rt->intern, IDM_SYMBOL_ATOM, type_name));
 }
 
 FieldSelectorDef *field_selector_lookup(ExpandContext *ctx, const char *name) {

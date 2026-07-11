@@ -609,6 +609,7 @@ bool method_impl_matches_type(const ExpandContext *ctx, const MethodImplDef *imp
 char *structural_head_join(const char *head, IdmSyntax *const *items, size_t count, size_t *inout_pos);
 bool structural_head_parse(const char *head, const char **out_field, size_t *out_field_len, const char **out_type);
 bool type_satisfies_structural_head(const ExpandContext *ctx, const char *head, const char *type_name);
+bool type_satisfies_structural(const ExpandContext *ctx, const IdmStructuralHead *head, IdmSymbol *type);
 FieldSelectorDef *field_selector_lookup(ExpandContext *ctx, const char *name);
 FieldSelectorDef *field_selector_ensure(ExpandContext *ctx, const char *name, IdmError *err);
 IdmCore *build_field_selector_core(ExpandContext *ctx, const char *name, IdmSpan span, IdmError *err);
