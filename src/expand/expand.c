@@ -2417,7 +2417,7 @@ static bool build_syntax_capture_payload(ExpandContext *ctx, uint8_t kind, uint3
             if (expand_unit_open_at(ctx, op_token->span)) idm_error_reason(ctx->rt, err, "incomplete", 0);
             return false;
         }
-        return syntax_payload_add(out, syntax_use_from_parts(ctx, items, cursor, end, err), op_token->span, err);
+        return syntax_payload_add(out, syntax_use_from_parts(items, cursor, end, err), op_token->span, err);
     }
     if (kind != IDM_OPERATOR_CAPTURE_SENTINEL) return idm_error_set(err, op_token->span, "operator '%s' has unsupported capture '%s'", op->name, op->capture ? op->capture : "");
     if (cursor >= end) return idm_error_set(err, op_token->span, "operator '%s' sentinel capture requires a sentinel token", op->name);
@@ -2466,7 +2466,7 @@ static IdmCore *expand_syntax_capture_macro(ExpandContext *ctx, const IdmOperato
     }
     if (op->capture_left) {
         if (left_start == left_end) MACRO_CAPTURE_FAIL(op_token->span, "operator '%s' requires a left operand", op->name);
-        IdmSyntax *left = syntax_use_from_parts(ctx, items, left_start, left_end, err);
+        IdmSyntax *left = syntax_use_from_parts(items, left_start, left_end, err);
         if (!append_syntax_or_oom(use, left, op_token->span, err)) goto fail;
     } else if (left_start != left_end) {
         MACRO_CAPTURE_FAIL(op_token->span, "operator '%s' does not accept a left operand", op->name);

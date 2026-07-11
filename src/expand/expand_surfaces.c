@@ -185,10 +185,6 @@ static bool invoke_scoped_syntax_surface_to_syntax(ExpandContext *ctx, const Idm
     if (!idm_syn_scope_add_tree(use_copy, 0, use_scope)) {
         idm_syn_free(use_copy); return idm_error_oom(err, use_syntax->span);
     }
-    if ((!idm_syn_property_set(use_copy, "value-context", ctx->value_context ? "true" : "false") ||
-         !idm_syn_property_set(use_copy, "command-sub", ctx->command_sub_context ? "true" : "false"))) {
-        idm_syn_free(use_copy); return idm_error_oom(err, use_syntax->span);
-    }
     IdmSyntax *expanded_syntax = NULL;
     bool old_intro_active = ctx->rt->macro_intro_active;
     IdmScopeId old_intro_scope = ctx->rt->macro_intro_scope;
@@ -309,6 +305,11 @@ bool identifier_bound_callback(void *user, IdmRuntime *rt, const IdmSyntax *word
     return true;
 }
 
+const char *syntax_local_context_callback(void *user) {
+    const ExpandContext *ctx = user;
+    return ctx->value_context ? "expression" : "body";
+}
+
 bool free_identifier_eq_callback(void *user, IdmRuntime *rt, const IdmSyntax *a, const IdmSyntax *b, bool *out_equal, IdmError *err) {
     (void)rt;
     ExpandContext *ctx = user;
@@ -354,7 +355,7 @@ static bool phase_syntax_callable_arity_one(const IdmCore *fn) {
     return true;
 }
 
-IdmSyntax *syntax_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
+IdmSyntax *syntax_use_from_parts(IdmSyntax *const *items, size_t start, size_t end, IdmError *err) {
     IdmSyntax *use = idm_syn_list(items[start]->span);
     if (!use || !idm_syn_append(use, idm_syn_word("%-expr", items[start]->span))) {
         idm_syn_free(use); idm_error_oom(err, items[start]->span); return NULL;
@@ -373,15 +374,11 @@ IdmSyntax *syntax_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, si
             idm_syn_free(item); idm_syn_free(use); idm_error_oom(err, items[i]->span); return NULL;
         }
     }
-    if (!idm_syn_property_set(use, "value-context", ctx->value_context ? "true" : "false") ||
-        !idm_syn_property_set(use, "command-sub", ctx->command_sub_context ? "true" : "false")) {
-        idm_syn_free(use); idm_error_oom(err, items[start]->span); return NULL;
-    }
     return use;
 }
 
 IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, uint32_t payload, IdmError *err) {
-    IdmSyntax *use = syntax_use_from_parts(ctx, items, start, end, err);
+    IdmSyntax *use = syntax_use_from_parts(items, start, end, err);
     if (!use) return NULL;
     IdmCore *core = expand_macro_use(ctx, use, use->as.seq.items[1], payload, err);
     idm_syn_free(use);
@@ -390,7 +387,7 @@ IdmCore *expand_macro_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items
 
 IdmCore *expand_core_form_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, const PhaseSyntaxFn *fn, IdmError *err) {
     if (fn->native) return fn->native(ctx, items, start, end, err);
-    IdmSyntax *use = syntax_use_from_parts(ctx, items, start, end, err);
+    IdmSyntax *use = syntax_use_from_parts(items, start, end, err);
     if (!use) return NULL;
     IdmSyntax *expanded_syntax = NULL;
     if (!invoke_core_form_to_syntax(ctx, use, use->as.seq.items[1], fn, &expanded_syntax, err)) {

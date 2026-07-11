@@ -77,11 +77,12 @@ bool expand_solved_type_set(ExpandContext *ctx, const IdmCore *core, IdmTypeTerm
     }
     ctx->solved_nodes[i].term = *term;
     memset(term, 0, sizeof(*term));
+    ((IdmCore *)core)->solved_generation = ctx->solved_generation;
     return true;
 }
 
 const IdmTypeTerm *expand_solved_type_lookup(const ExpandContext *ctx, const IdmCore *core) {
-    if (!core || ctx->solved_node_count == 0) return NULL;
+    if (!core || core->solved_generation != ctx->solved_generation || ctx->solved_node_count == 0) return NULL;
     size_t i = solved_type_slot(ctx->solved_nodes, ctx->solved_node_cap, core);
     return ctx->solved_nodes[i].core ? &ctx->solved_nodes[i].term : NULL;
 }
@@ -93,6 +94,7 @@ void expand_solved_types_clear(ExpandContext *ctx) {
         ctx->solved_nodes[i].core = NULL;
     }
     ctx->solved_node_count = 0;
+    ctx->solved_generation++;
 }
 
 static bool gen_harvest_flush(GenCtx *g, IdmError *err) {
@@ -2206,7 +2208,6 @@ static bool infer_scheme(ExpandContext *ctx, const IdmCore *value, const char *n
     if (!value_distinct_arities(value, &arities, &arity_count)) return idm_error_oom(err, value->span);
     GenCtx g;
     gen_ctx_init(&g, ctx, name);
-    g.harvest_on = true;
     bool ok = true;
     GenSigInput *inputs = calloc(arity_count, sizeof(*inputs));
     IdmTypeTerm **accs = calloc(arity_count, sizeof(*accs));
@@ -2318,6 +2319,7 @@ static bool check_fn(ExpandContext *ctx, const IdmCore *value, const IdmCallable
 
 bool expand_typecheck_statement(ExpandContext *ctx, IdmCore **core, IdmError *err) {
     if (!core || !*core) return true;
+    expand_solved_types_clear(ctx);
     if (!check_fn(ctx, *core, NULL, NULL, false, err)) return false;
     return expand_lower_root(ctx, core, err);
 }
@@ -2359,6 +2361,7 @@ static bool contract_set_invoked(IdmCallableContract *contract, const IdmArgMask
 
 bool expand_typecheck_value(ExpandContext *ctx, const char *name, IdmCore **value, IdmCallableContract *contract, bool *has_contract, bool declared, IdmError *err) {
     if (!value || !*value || !has_contract) return true;
+    expand_solved_types_clear(ctx);
     if (*has_contract) {
         if (!check_fn(ctx, *value, contract, name, declared, err)) return false;
         if (!expand_lower_root(ctx, value, err)) return false;
@@ -2377,6 +2380,7 @@ bool expand_typecheck_value(ExpandContext *ctx, const char *name, IdmCore **valu
         if (!check_fn(ctx, *value, NULL, name, false, err)) return false;
         return expand_lower_root(ctx, value, err);
     }
+    if (!check_fn(ctx, *value, contract, name, false, err)) return false;
     if (!expand_lower_root(ctx, value, err)) return false;
     IdmArgMask invoked;
     uint8_t purity;
@@ -2997,6 +3001,7 @@ static void purity_fx_destroy(PurityFx *purity, size_t count) {
 }
 
 bool expand_typecheck_defn_groups(ExpandContext *ctx, const DefnGroup *groups, IdmCore **values, size_t count, IdmError *err) {
+    expand_solved_types_clear(ctx);
     PurityFx *purity = count ? calloc(count, sizeof(*purity)) : NULL;
     if (count && !purity) return idm_error_oom(err, idm_span_unknown(NULL));
     for (size_t i = 0; i < count; i++) {

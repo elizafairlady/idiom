@@ -90,6 +90,8 @@ void hooks_install(IdmRuntime *rt, ExpandContext *ctx, SavedHooks *saved) {
         saved->free_identifier_eq = rt->free_identifier_eq;
         saved->identifier_bound_user = rt->identifier_bound_user;
         saved->identifier_bound = rt->identifier_bound;
+        saved->syntax_local_context_user = rt->syntax_local_context_user;
+        saved->syntax_local_context = rt->syntax_local_context;
     }
     rt->local_expand_user = ctx;
     rt->local_expand = local_expand_callback;
@@ -97,6 +99,8 @@ void hooks_install(IdmRuntime *rt, ExpandContext *ctx, SavedHooks *saved) {
     rt->free_identifier_eq = free_identifier_eq_callback;
     rt->identifier_bound_user = ctx;
     rt->identifier_bound = identifier_bound_callback;
+    rt->syntax_local_context_user = ctx;
+    rt->syntax_local_context = syntax_local_context_callback;
 }
 
 void hooks_restore(IdmRuntime *rt, const SavedHooks *saved) {
@@ -106,6 +110,8 @@ void hooks_restore(IdmRuntime *rt, const SavedHooks *saved) {
     rt->free_identifier_eq = saved->free_identifier_eq;
     rt->identifier_bound_user = saved->identifier_bound_user;
     rt->identifier_bound = saved->identifier_bound;
+    rt->syntax_local_context_user = saved->syntax_local_context_user;
+    rt->syntax_local_context = saved->syntax_local_context;
 }
 
 static void capture_bindings_destroy(CaptureBinding *captures, size_t count) {
@@ -351,7 +357,6 @@ void expand_edge_record(ExpandContext *ctx, const char *kind, const char *name, 
     edge->provider = provider ? idm_strdup(provider) : NULL;
     edge->phase = ctx->phase;
     edge->value_context = ctx->value_context;
-    edge->command_sub = ctx->command_sub_context;
     edge->span = span;
     edge->before = edge_pretty(before);
     edge->after = edge_pretty(after);
@@ -386,8 +391,6 @@ bool expand_edge_value(ExpandContext *ctx, IdmRuntime *rt, const ExpandEdge *edg
     entries[count++].value = idm_int(edge->phase);
     entries[count].key = idm_atom(rt, "value-context");
     entries[count++].value = idm_bool(rt, edge->value_context);
-    entries[count].key = idm_atom(rt, "command-sub");
-    entries[count++].value = idm_bool(rt, edge->command_sub);
     if (edge->span.file) {
         entries[count].key = idm_atom(rt, "file");
         entries[count++].value = idm_string(rt, edge->span.file, err);

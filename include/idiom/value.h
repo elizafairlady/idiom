@@ -22,6 +22,7 @@ typedef struct IdmEnv IdmEnv;
 typedef bool (*IdmLocalExpandFn)(void *user, IdmRuntime *rt, const IdmSyntax *syntax, IdmSyntax **out_syntax, IdmError *err);
 typedef bool (*IdmFreeIdentifierEqFn)(void *user, IdmRuntime *rt, const IdmSyntax *a, const IdmSyntax *b, bool *out_equal, IdmError *err);
 typedef bool (*IdmIdentifierBoundFn)(void *user, IdmRuntime *rt, const IdmSyntax *word, bool *out_bound, IdmError *err);
+typedef const char *(*IdmSyntaxLocalContextFn)(void *user);
 
 typedef enum {
     IDM_SYMBOL_WORD,
@@ -211,6 +212,8 @@ struct IdmRuntime {
     IdmFreeIdentifierEqFn free_identifier_eq;
     void *identifier_bound_user;
     IdmIdentifierBoundFn identifier_bound;
+    void *syntax_local_context_user;
+    IdmSyntaxLocalContextFn syntax_local_context;
     char **cli_args;
     size_t cli_arg_count;
     IdmScopeId scope_next;

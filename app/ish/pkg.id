@@ -315,9 +315,9 @@ export protocol Shell do
     '(h . t) -> cons (word-arg h) (arg-list t)
   end
 
-  defn value-ctx? u -> equal? (syntax-property u "value-context") "true"
+  defn value-ctx? -> equal? (syntax-local-context) :expression
 
-  defn finish u ge -> cond (value-ctx? u) ge %`(shell-run %,ge)
+  defn finish u ge -> cond (value-ctx?) ge %`(shell-run %,ge)
 
   defn emit u ge bg text ->
     cond bg %`(shell-bg %,ge %,text) (finish u ge)

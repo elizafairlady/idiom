@@ -117,6 +117,7 @@ typedef enum {
     X(MAKE_SYNTAX_GROUP, "make-syntax-group", 2, 2, "kernel", 1, 0) \
     X(SYNTAX_ERROR, "syntax-error", 2, 2, "kernel", 0, 0) \
     X(LOCAL_EXPAND, "local-expand", 1, 1, "kernel", 0, 0) \
+    X(SYNTAX_LOCAL_CONTEXT, "syntax-local-context", 0, 0, "kernel", 0, 1) \
     X(FREE_IDENTIFIER_EQ, "free-identifier=?", 2, 2, "kernel", 1, 0) \
     X(IDENTIFIER_BOUND, "identifier-bound?", 1, 1, "kernel", 0, 0) \
     X(BOUND_IDENTIFIER_EQ, "bound-identifier=?", 2, 2, "kernel", 1, 0) \
@@ -408,6 +409,7 @@ struct IdmCore {
     IdmSpan span;
     bool local_celled;
     bool lowered;
+    uint64_t solved_generation;
     union {
         IdmValue literal;
         IdmCoreSlot slot_ref;

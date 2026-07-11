@@ -21,7 +21,18 @@ defmacro my-or do
   end)
 end
 
+defmacro current-expansion-context stx -> make-syntax-atom stx (str (syntax-local-context))
+
+defmacro require-body-context stx ->
+  cond (equal? (syntax-local-context) :body) %`:nil (syntax-error stx "expected body expansion context")
+
+require-body-context
+
 suite do
+  test "transformers read expansion context from expander state" do
+    current-expansion-context |> assert-eq :expression
+  end
+
   test "body-macro-splices-expanded-body" do
     do
       body-splice

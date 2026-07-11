@@ -225,7 +225,6 @@ typedef struct {
     char *provider;
     int phase;
     bool value_context;
-    bool command_sub;
     IdmSpan span;
     char *before;
     char *after;
@@ -251,6 +250,8 @@ typedef struct {
     IdmFreeIdentifierEqFn free_identifier_eq;
     void *identifier_bound_user;
     IdmIdentifierBoundFn identifier_bound;
+    void *syntax_local_context_user;
+    IdmSyntaxLocalContextFn syntax_local_context;
 } SavedHooks;
 typedef struct {
     const void *art;
@@ -336,7 +337,6 @@ typedef struct ExpandContext {
     int phase;
     int surface_phase;
     bool value_context;
-    bool command_sub_context;
     bool suppress_method_impl_surface_refresh;
     IdmSymbol *trait_identity;
     struct BodyDefCtx *def_ctx;
@@ -425,6 +425,7 @@ typedef struct ExpandContext {
     SolvedNodeType *solved_nodes;
     size_t solved_node_count;
     size_t solved_node_cap;
+    uint64_t solved_generation;
 } ExpandContext;
 typedef struct BodyDefCtx {
     struct BodyDefCtx *prev;
@@ -584,6 +585,7 @@ IdmCore *expand_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmError *err);
 IdmCore *expand_use(ExpandContext *ctx, const char *path, const char *qualifier, UseSelection *selection, const IdmSyntax *form, IdmSpan span, IdmError *err);
 bool free_identifier_eq_callback(void *user, IdmRuntime *rt, const IdmSyntax *a, const IdmSyntax *b, bool *out_equal, IdmError *err);
 bool identifier_bound_callback(void *user, IdmRuntime *rt, const IdmSyntax *word, bool *out_bound, IdmError *err);
+const char *syntax_local_context_callback(void *user);
 bool env_push_def_binder(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, uint32_t *out_id);
 bool env_push_def_binder_with_arity(ExpandContext *ctx, const char *name, const IdmSyntax *name_syntax, IdmArity arity, const IdmCallableContract *contract, uint32_t *out_id);
 bool package_slot_ref_add(ExpandContext *ctx, const char *env_key, uint32_t slot, uint32_t *out_id);
@@ -753,7 +755,7 @@ bool run_phase_core(ExpandContext *ctx, IdmCore *core, IdmError *err);
 void surface_checkpoint(ExpandContext *ctx, SurfaceCheckpoint *checkpoint);
 void surface_rollback(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint);
 void surface_discard(ExpandContext *ctx, const SurfaceCheckpoint *checkpoint);
-IdmSyntax *syntax_use_from_parts(ExpandContext *ctx, IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
+IdmSyntax *syntax_use_from_parts(IdmSyntax *const *items, size_t start, size_t end, IdmError *err);
 bool syn_is_word(const IdmSyntax *syn, const char *word);
 bool syntax_scopes_copy(IdmScopeSet *dst, const IdmSyntax *syn);
 bool value_from_literal_syntax(ExpandContext *ctx, const IdmSyntax *syn, IdmValue *out, IdmError *err);

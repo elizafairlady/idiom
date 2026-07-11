@@ -1902,6 +1902,12 @@ static bool prim_local_expand(IdmRuntime *rt, const IdmValue *args, IdmValue *ou
     return ok;
 }
 
+static bool prim_syntax_local_context(IdmRuntime *rt, IdmValue *out, IdmError *err) {
+    if (!rt->syntax_local_context) return idm_error_set(err, idm_span_unknown(NULL), "syntax-local-context is only available during macro expansion");
+    *out = idm_atom(rt, rt->syntax_local_context(rt->syntax_local_context_user));
+    return true;
+}
+
 static bool prim_identifier_bound(IdmRuntime *rt, const IdmValue *args, IdmValue *out, IdmError *err) {
     IdmSyntax *syn = require_syntax(args[0], err);
     if (!syn) return false;
@@ -2545,6 +2551,7 @@ bool idm_prim_invoke(IdmRuntime *rt, IdmPrimitive prim, const IdmValue *args, ui
         case IDM_PRIM_MAKE_SYNTAX_GROUP: return idm_syntax_build(rt, IDM_SYNTAX_BUILD_GROUP, args[0], args[1], out, err);
         case IDM_PRIM_SYNTAX_ERROR: return prim_syntax_error(rt, args, out, err);
         case IDM_PRIM_LOCAL_EXPAND: return prim_local_expand(rt, args, out, err);
+        case IDM_PRIM_SYNTAX_LOCAL_CONTEXT: return prim_syntax_local_context(rt, out, err);
         case IDM_PRIM_IDENTIFIER_BOUND: return prim_identifier_bound(rt, args, out, err);
         case IDM_PRIM_FREE_IDENTIFIER_EQ: return prim_free_identifier_eq(rt, args, out, err);
         case IDM_PRIM_BOUND_IDENTIFIER_EQ: return prim_bound_identifier_eq(rt, args, out, err);

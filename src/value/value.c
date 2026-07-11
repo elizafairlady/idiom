@@ -518,6 +518,10 @@ void idm_runtime_init(IdmRuntime *rt) {
     rt->local_expand = NULL;
     rt->free_identifier_eq_user = NULL;
     rt->free_identifier_eq = NULL;
+    rt->identifier_bound_user = NULL;
+    rt->identifier_bound = NULL;
+    rt->syntax_local_context_user = NULL;
+    rt->syntax_local_context = NULL;
     rt->cli_args = NULL;
     rt->cli_arg_count = 0;
 

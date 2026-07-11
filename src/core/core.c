@@ -2020,6 +2020,9 @@ bool idm_primitive_contract(IdmRuntime *rt, IdmPrimitive primitive, size_t argc,
             ok = primitive_contract_arg_con(rt, out, 0u, "syntax", err, span) &&
                  primitive_contract_result_con(rt, out, "syntax", err, span);
             break;
+        case IDM_PRIM_SYNTAX_LOCAL_CONTEXT:
+            ok = primitive_contract_result_con(rt, out, "atom", err, span);
+            break;
         case IDM_PRIM_FREE_IDENTIFIER_EQ:
         case IDM_PRIM_BOUND_IDENTIFIER_EQ:
         case IDM_PRIM_IDENTIFIER_BOUND:
